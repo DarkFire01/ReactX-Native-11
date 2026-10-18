@@ -1,0 +1,4 @@
+LIBRARY d3d12core.dll
+EXPORTS
+    D3D12GetInterface @1
+    D3D12SDKVersion @2 DATA

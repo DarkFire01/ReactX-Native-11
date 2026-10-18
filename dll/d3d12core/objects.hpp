@@ -1,0 +1,447 @@
+/*
+ * PROJECT:     ReactX Direct3D 12 runtime
+ * LICENSE:     MIT (https://spdx.org/licenses/MIT)
+ * PURPOSE:     Device children: queues, allocators, command lists, fences, descriptor heaps, resources
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
+ */
+
+#pragma once
+
+#include "device.hpp"
+
+class RxCommandAllocator;
+class RxResource;
+
+/* Kernel contexts and hardware queues one API queue can own */
+constexpr UINT RxMaxQueueEngines12 = 8;
+
+class RxCommandQueue final : public RxDeviceChild12<ID3D12CommandQueue>
+{
+public:
+    static constexpr GUID PrivateId = {0x9d3c1f62, 0x47a8, 0x4e0b, {0x8b, 0x15, 0x6e, 0x2a, 0x90, 0x4c, 0xd7, 0x31}};
+
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_COMMAND_QUEUE_DESC& Desc,
+        _Outptr_ RxCommandQueue** Queue);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+#include "queue.inl"
+
+    /* What the driver asks of the runtime while the queue is being made */
+    static
+    HRESULT
+    APIENTRY
+    CreateContextCb(
+        _In_ D3D12DDI_HRTCOMMANDQUEUE hRTCommandQueue,
+        _Inout_ D3DDDICB_CREATECONTEXT* Args);
+
+    static
+    HRESULT
+    APIENTRY
+    CreateContextVirtualCb(
+        _In_ D3D12DDI_HRTCOMMANDQUEUE hRTCommandQueue,
+        _Inout_ D3DDDICB_CREATECONTEXTVIRTUAL* Args);
+
+    static
+    HRESULT
+    APIENTRY
+    DestroyContextCb(
+        _In_ D3D12DDI_HRTCOMMANDQUEUE hRTCommandQueue,
+        _In_ const D3DDDICB_DESTROYCONTEXT* Args);
+
+    static
+    HRESULT
+    APIENTRY
+    CreateHwQueueCb(
+        _In_ D3D12DDI_HRTCOMMANDQUEUE hRTCommandQueue,
+        _Inout_ D3DDDICB_CREATEHWQUEUE* Args);
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxCommandQueue() override;
+
+    HRESULT
+    Initialize(
+        _In_ const D3D12_COMMAND_QUEUE_DESC& QueueDesc);
+
+    BOOLEAN
+    OwnsContext(
+        _In_ D3DKMT_HANDLE Context) const;
+
+    D3D12_COMMAND_QUEUE_DESC Desc = {};
+    RxDriverMemory12 Memory;
+    D3D12DDI_HCOMMANDQUEUE DriverQueue = {};
+    BOOLEAN IsDriverQueueCreated = FALSE;
+    DWORD CreatingThread = 0;
+    D3DKMT_HANDLE Contexts[RxMaxQueueEngines12] = {};
+    UINT ContextCount = 0;
+    D3DKMT_HANDLE HwQueues[RxMaxQueueEngines12] = {};
+    UINT HwQueueCount = 0;
+    SRWLOCK Lock = SRWLOCK_INIT;
+};
+
+class RxCommandAllocator final : public RxDeviceChild12<ID3D12CommandAllocator>
+{
+public:
+    static constexpr GUID PrivateId = {0x2f7d0a91, 0x63c4, 0x4d58, {0xa2, 0x0e, 0x51, 0x8b, 0x3f, 0xc6, 0x94, 0x07}};
+
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ D3D12_COMMAND_LIST_TYPE Type,
+        _Outptr_ RxCommandAllocator** Allocator);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+#include "allocator.inl"
+
+    D3D12_COMMAND_LIST_TYPE
+    GetType() const
+    {
+        return Type;
+    }
+
+    D3D12DDI_HCOMMANDRECORDER_0040
+    GetRecorder() const
+    {
+        return Recorder;
+    }
+
+    /* A recording list holds its allocator; only one may at a time */
+    BOOLEAN
+    Acquire()
+    {
+        return InterlockedCompareExchange(&IsHeld, 1, 0) == 0;
+    }
+
+    VOID
+    Unhold()
+    {
+        InterlockedExchange(&IsHeld, 0);
+    }
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxCommandAllocator() override;
+
+    HRESULT
+    Initialize(
+        _In_ D3D12_COMMAND_LIST_TYPE ListType);
+
+    D3D12_COMMAND_LIST_TYPE Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    RxDriverMemory12 PoolMemory;
+    RxDriverMemory12 RecorderMemory;
+    D3D12DDI_HCOMMANDPOOL_0040 Pool = {};
+    D3D12DDI_HCOMMANDRECORDER_0040 Recorder = {};
+    BOOLEAN IsPoolCreated = FALSE;
+    BOOLEAN IsRecorderCreated = FALSE;
+    volatile LONG IsHeld = 0;
+};
+
+class RxCommandList final : public RxDeviceChild12<ID3D12GraphicsCommandList10>
+{
+public:
+    static constexpr GUID PrivateId = {0x7b41e5c3, 0x0d9f, 0x4a26, {0x93, 0x7c, 0x12, 0xe8, 0x5a, 0x06, 0xbf, 0x4d}};
+
+    /* An open list records into the allocator; a closed one waits for Reset */
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ D3D12_COMMAND_LIST_TYPE Type,
+        _In_opt_ RxCommandAllocator* Allocator,
+        _In_opt_ ID3D12PipelineState* InitialState,
+        _Outptr_ RxCommandList** List);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+#include "commandlist.inl"
+
+    D3D12DDI_HCOMMANDLIST
+    GetDriverHandle() const
+    {
+        return DriverList;
+    }
+
+    BOOLEAN
+    IsRecording() const
+    {
+        return State == RxListState::Recording;
+    }
+
+    HRESULT
+    GetError() const
+    {
+        return Error;
+    }
+
+    static
+    VOID
+    APIENTRY
+    SetCommandListErrorCb(
+        _In_ D3D12DDI_HRTCOMMANDLIST hRTCommandList,
+        _In_ HRESULT hr);
+
+    static
+    VOID
+    APIENTRY
+    SetCommandListDdiTableCb(
+        _In_ D3D12DDI_HRTCOMMANDLIST hRTCommandList,
+        _In_ D3D12DDI_HRTTABLE hRTTable);
+
+private:
+    enum class RxListState
+    {
+        Closed,
+        Recording,
+    };
+
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxCommandList() override;
+
+    HRESULT
+    Initialize(
+        _In_ D3D12_COMMAND_LIST_TYPE ListType);
+
+    HRESULT
+    Begin(
+        _In_ RxCommandAllocator* Allocator,
+        _In_opt_ ID3D12PipelineState* InitialState);
+
+    VOID
+    ResetState();
+
+    /* Newer list entries take an application handle the driver finds its own object through */
+    D3D12DDI_API_HCOMMANDLIST
+    Api()
+    {
+        D3D12DDI_API_HCOMMANDLIST Handle;
+
+        Handle.pDrvPrivate = &Bypass;
+        return Handle;
+    }
+
+    D3D12_COMMAND_LIST_TYPE Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    RxDriverMemory12 Memory;
+    D3D12DDI_HCOMMANDLIST DriverList = {};
+    D3D12DDI_RUNTIME_BYPASS_HEADER Bypass = {};
+    BOOLEAN IsDriverListCreated = FALSE;
+    const D3D12DDI_COMMAND_LIST_FUNCS_3D_0114* DriverTable = nullptr;
+    RxListState State = RxListState::Closed;
+    RxCommandAllocator* Allocator = nullptr;
+    HRESULT Error = S_OK;
+};
+
+class RxFence final : public RxDeviceChild12<ID3D12Fence1>
+{
+public:
+    static constexpr GUID PrivateId = {0xc85e2b47, 0x1fa6, 0x4c39, {0xb0, 0x7d, 0x94, 0x3e, 0x21, 0x6a, 0x58, 0xcf}};
+
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ UINT64 InitialValue,
+        _In_ D3D12_FENCE_FLAGS Flags,
+        _Outptr_ RxFence** Fence);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+#include "fence.inl"
+
+    D3DKMT_HANDLE
+    GetSyncObject() const
+    {
+        return SyncObject;
+    }
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxFence() override;
+
+    HRESULT
+    Initialize(
+        _In_ UINT64 InitialValue,
+        _In_ D3D12_FENCE_FLAGS FenceFlags);
+
+    D3D12_FENCE_FLAGS Flags = D3D12_FENCE_FLAG_NONE;
+    D3DKMT_HANDLE SyncObject = 0;
+    volatile UINT64* CompletedValue = nullptr;
+    RxDriverMemory12 Memory;
+    D3D12DDI_HFENCE DriverFence = {};
+    BOOLEAN IsDriverFenceCreated = FALSE;
+};
+
+/* One render target view slot as applications see it; the driver's own descriptor sits inside */
+struct RxRtvEntry
+{
+    RxResource* Resource;
+    VOID* Reserved;
+    SIZE_T DriverHandle;
+    SIZE_T Spare;
+};
+static_assert(sizeof(RxRtvEntry) == 4 * sizeof(VOID*));
+
+class RxDescriptorHeap final : public RxDeviceChild12<ID3D12DescriptorHeap>
+{
+public:
+    static constexpr GUID PrivateId = {0x4ea6930d, 0x8c12, 0x4f7a, {0x96, 0x2b, 0xd3, 0x5f, 0x08, 0x7e, 0xa1, 0x64}};
+
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_DESCRIPTOR_HEAP_DESC& Desc,
+        _Outptr_ RxDescriptorHeap** Heap);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+#include "descriptorheap.inl"
+
+    D3D12DDI_HDESCRIPTORHEAP
+    GetDriverHandle() const
+    {
+        return DriverHeap;
+    }
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxDescriptorHeap() override;
+
+    HRESULT
+    Initialize(
+        _In_ const D3D12_DESCRIPTOR_HEAP_DESC& HeapDesc);
+
+    D3D12_DESCRIPTOR_HEAP_DESC Desc = {};
+    RxDriverMemory12 Memory;
+    D3D12DDI_HDESCRIPTORHEAP DriverHeap = {};
+    BOOLEAN IsDriverHeapCreated = FALSE;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE CpuStart = {};
+    D3D12DDI_GPU_DESCRIPTOR_HANDLE GpuStart = {};
+    RxRtvEntry* RtvEntries = nullptr;
+};
+
+/* A committed resource: one driver heap with one resource placed at its start */
+class RxResource final : public RxDeviceChild12<ID3D12Resource2>
+{
+public:
+    static constexpr GUID PrivateId = {0x61f03c8e, 0xb52d, 0x4e94, {0x8a, 0x47, 0x0c, 0x9b, 0xe3, 0x71, 0x2d, 0x5a}};
+
+    static
+    HRESULT
+    CreateCommitted(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
+        _In_ D3D12_HEAP_FLAGS HeapFlags,
+        _In_ const D3D12_RESOURCE_DESC1& Desc,
+        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
+        _Outptr_ RxResource** Resource);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+#include "resource.inl"
+
+    D3D12DDI_HRESOURCE
+    GetDriverHandle() const
+    {
+        return DriverResource;
+    }
+
+    const D3D12_RESOURCE_DESC1&
+    GetApiDesc() const
+    {
+        return Desc;
+    }
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxResource() override;
+
+    HRESULT
+    Initialize(
+        _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
+        _In_ D3D12_HEAP_FLAGS HeapFlags,
+        _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
+        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_opt_ const D3D12_CLEAR_VALUE* ClearValue);
+
+    UINT
+    SubresourceCount() const;
+
+    D3D12_RESOURCE_DESC1 Desc = {};
+    D3D12_HEAP_PROPERTIES Properties = {};
+    D3D12_HEAP_FLAGS Flags = D3D12_HEAP_FLAG_NONE;
+    RxRuntimeResource12 Runtime = {};
+    RxDriverMemory12 HeapMemory;
+    RxDriverMemory12 ResourceMemory;
+    D3D12DDI_HHEAP DriverHeap = {};
+    D3D12DDI_HRESOURCE DriverResource = {};
+    BOOLEAN IsDriverResourceCreated = FALSE;
+    D3D12_GPU_VIRTUAL_ADDRESS GpuAddress = 0;
+    SRWLOCK MapLock = SRWLOCK_INIT;
+    UINT MapCount = 0;
+    BYTE* MappedBase = nullptr;
+};
+
+/* Descriptor and footprint helpers shared by the device and command lists */
+
+/* A desc with defaults filled the way the runtime stores it; FALSE when the desc can not exist */
+BOOLEAN
+RxNormalizeResourceDesc(
+    _Inout_ D3D12_RESOURCE_DESC1& Desc);
+
+/* The driver form of an API resource desc */
+VOID
+RxToDdiResource(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _Out_ D3D12DDIARG_CREATERESOURCE_0111& Ddi);
+
+/* GetCopyableFootprints for one desc; FALSE when the desc or range is invalid */
+BOOLEAN
+RxCopyableFootprints(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ UINT FirstSubresource,
+    _In_ UINT NumSubresources,
+    _In_ UINT64 BaseOffset,
+    _Out_writes_opt_(NumSubresources) D3D12_PLACED_SUBRESOURCE_FOOTPRINT* Layouts,
+    _Out_writes_opt_(NumSubresources) UINT* NumRows,
+    _Out_writes_opt_(NumSubresources) UINT64* RowSizeInBytes,
+    _Out_opt_ UINT64* TotalBytes);
+
+/* The block a format is stored in: texels across and down, and bytes per block; FALSE when unknown */
+BOOLEAN
+RxFormatBlock(
+    _In_ DXGI_FORMAT Format,
+    _Out_ UINT* BlockWidth,
+    _Out_ UINT* BlockHeight,
+    _Out_ UINT* BlockBytes);
