@@ -25,6 +25,10 @@ function Get-ReactXArch([string] $Path) {
 # True when a file is the same as the ReactX copy of it
 function Test-ReactXFile([string] $Path, [string] $RuntimeDir) {
     $Ours = Join-Path $RuntimeDir (Split-Path -Leaf $Path)
-    if (-not (Test-Path $Ours)) { return $false }
-    return (Get-FileHash $Path).Hash -eq (Get-FileHash $Ours).Hash
+    if ((Test-Path $Ours) -and (Get-FileHash $Path).Hash -eq (Get-FileHash $Ours).Hash) { return $true }
+
+    # Older ReactX builds: the DLLs read reactx.ini, the PDBs name the ReactX sources
+    $Bytes = [IO.File]::ReadAllBytes($Path)
+    return [Text.Encoding]::Unicode.GetString($Bytes).Contains('reactx.ini') -or
+           [Text.Encoding]::ASCII.GetString($Bytes).Contains('\ReactX')
 }

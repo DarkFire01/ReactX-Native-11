@@ -549,6 +549,56 @@ RxDxgiFactory::IsWindowedStereoEnabled(VOID)
     return FALSE;
 }
 
+/*
+ * Devices ReactX can not present for, such as a Direct3D 12 queue from the system runtime,
+ * get their swapchains from the system DXGI, loaded by full path beside this one.
+ */
+_Ret_maybenull_
+static
+IDXGIFactory2*
+RxGetSystemFactory(VOID)
+{
+    static IDXGIFactory2* const Factory = []()
+    {
+        WCHAR Path[MAX_PATH];
+        HMODULE System;
+        decltype(&CreateDXGIFactory2) Create;
+        IDXGIFactory2* Created = nullptr;
+        UINT Length;
+
+        Length = GetSystemDirectoryW(Path, _countof(Path));
+        if (Length == 0 || Length >= _countof(Path) || wcscat_s(Path, L"\\dxgi.dll") != 0)
+            return (IDXGIFactory2*)nullptr;
+
+        System = LoadLibraryExW(Path, NULL, 0);
+        if (System == NULL)
+            return (IDXGIFactory2*)nullptr;
+
+        Create = reinterpret_cast<decltype(&CreateDXGIFactory2)>(GetProcAddress(System, "CreateDXGIFactory2"));
+        if (Create == nullptr || FAILED(Create(0, IID_PPV_ARGS(&Created))))
+            return (IDXGIFactory2*)nullptr;
+
+        RX_TRACE(L"system DXGI loaded for swapchains of devices from other runtimes");
+        return Created;
+    }();
+
+    return Factory;
+}
+
+static
+BOOLEAN
+RxIsReactXDevice(
+    _In_ IUnknown* Device)
+{
+    IRxPresentDevice* Present;
+
+    if (FAILED(Device->QueryInterface(IID_PPV_ARGS(&Present))))
+        return FALSE;
+
+    Present->Release();
+    return TRUE;
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDxgiFactory::CreateSwapChainForHwnd(
@@ -570,6 +620,18 @@ RxDxgiFactory::CreateSwapChainForHwnd(
     *ppSwapChain = nullptr;
     if (pDevice == nullptr || pDesc == nullptr || !IsWindow(hWnd))
         return DXGI_ERROR_INVALID_CALL;
+
+    if (!RxIsReactXDevice(pDevice))
+    {
+        IDXGIFactory2* System = RxGetSystemFactory();
+
+        RX_TRACE(L"swapchain for a device from another runtime goes to the system DXGI");
+        if (System == nullptr)
+            return DXGI_ERROR_INVALID_CALL;
+
+        /* Outputs from this factory mean nothing to that one */
+        return System->CreateSwapChainForHwnd(pDevice, hWnd, pDesc, pFullscreenDesc, nullptr, ppSwapChain);
+    }
 
     if (pFullscreenDesc != nullptr && !pFullscreenDesc->Windowed)
         return DXGI_ERROR_UNSUPPORTED;
@@ -897,6 +959,16 @@ RxDxgiFactory::CreateSwapChainForComposition(
     IRxPresentDevice* Device;
     RxSwapChain* SwapChain;
     HRESULT hr;
+
+    if (!RxIsReactXDevice(pDevice))
+    {
+        IDXGIFactory2* System = RxGetSystemFactory();
+
+        RX_TRACE(L"composition swapchain for a device from another runtime goes to the system DXGI");
+        if (System == nullptr)
+            return DXGI_ERROR_INVALID_CALL;
+        return System->CreateSwapChainForComposition(pDevice, pDesc, nullptr, ppSwapChain);
+    }
 
     /* Only a ReactX device can back a swapchain made here */
     if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&Device))))

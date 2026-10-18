@@ -573,6 +573,15 @@ public:
         _In_reads_(Count) IUnknown* const* Buffers,
         _In_ UINT Count) override;
 
+    HRESULT
+    STDMETHODCALLTYPE
+    CopyBufferRegions(
+        _In_ IUnknown* Destination,
+        _In_ IUnknown* Source,
+        _In_reads_(Count) const RECT* Rects,
+        _In_ UINT Count,
+        _In_ POINT Offset) override;
+
     ~RxPresentBridge();
 
 private:
@@ -637,7 +646,7 @@ public:
     const D3DWDDM1_3DDI_DEVICEFUNCS&
     GetDeviceFuncs() const
     {
-        return DeviceFuncs;
+        return reinterpret_cast<const D3DWDDM1_3DDI_DEVICEFUNCS&>(DeviceFuncs);
     }
 
     const DXGI1_6_1_DDI_BASE_FUNCTIONS&
@@ -837,7 +846,8 @@ private:
     D3D10DDI_HDEVICE DriverDevice = {};
     BOOLEAN IsDriverDeviceCreated = FALSE;
 
-    D3DWDDM1_3DDI_DEVICEFUNCS DeviceFuncs = {};
+    /* Filled as the WDDM 2.0 table; everything but the 2.0 additions reads it as the 1.3 one */
+    D3DWDDM2_0DDI_DEVICEFUNCS DeviceFuncs = {};
     DXGI1_6_1_DDI_BASE_FUNCTIONS DxgiFuncs = {};
     PFND3D10DDI_RETRIEVESUBOBJECT RetrieveSubObject = nullptr;
 
@@ -893,7 +903,7 @@ RxApiResult(
 const D3DDDI_DEVICECALLBACKS*
 RxGetKernelCallbacks(VOID);
 
-const D3D11DDI_CORELAYER_DEVICECALLBACKS*
+const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS*
 RxGetCoreLayerCallbacks(VOID);
 
 DXGI_DDI_BASE_CALLBACKS*

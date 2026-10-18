@@ -363,6 +363,19 @@ RxGetDdiResource(
     return Found;
 }
 
+_Ret_maybenull_
+RxChildLifetime*
+RxGetLifetime(
+    _In_opt_ ID3D11Resource* Resource)
+{
+    RxChildLifetime* Found = nullptr;
+
+    if (Resource == nullptr || FAILED(Resource->QueryInterface(IID_RxChildLifetime, reinterpret_cast<void**>(&Found))))
+        return nullptr;
+
+    return Found;
+}
+
 HRESULT
 RxGetTexture2DDesc(
     _In_ ID3D11Resource* Resource,
@@ -418,6 +431,12 @@ RxBuffer::QueryInterface(
     if (riid == IID_RxDdiResource)
     {
         *ppvObject = &Resource;
+        return S_OK;
+    }
+
+    if (riid == IID_RxChildLifetime)
+    {
+        *ppvObject = static_cast<RxChildLifetime*>(this);
         return S_OK;
     }
 

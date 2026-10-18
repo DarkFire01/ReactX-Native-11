@@ -683,8 +683,9 @@ RxView<Traits>::~RxView()
     if (IsCreated)
         (this->Device.GetDeviceFuncs().*Traits::Destroy)(this->Device.GetDriverDevice(), Handle);
 
+    /* Views keep their resource alive internally, so app references alone decide when it can go */
     if (Resource != nullptr)
-        Resource->Release();
+        RxGetLifetime(Resource)->ReleaseInternalRef();
 }
 
 template <typename Traits>
@@ -724,7 +725,7 @@ RxView<Traits>::Create(
     if (NewView == nullptr)
         return E_OUTOFMEMORY;
 
-    Resource->AddRef();
+    RxGetLifetime(Resource)->AddInternalRef();
     NewView->Resource = Resource;
     NewView->Backing = RxGetDdiResource(Resource);
     NewView->Desc = Resolved;

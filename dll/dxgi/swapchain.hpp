@@ -195,6 +195,19 @@ private:
     VOID
     ReleaseBuffers();
 
+    VOID
+    LeaveFullscreen();
+
+    VOID
+    KeepPreviousFrame(
+        _In_ const DXGI_PRESENT_PARAMETERS& Parameters);
+
+    VOID
+    CopyRegion(
+        _In_ IUnknown* Source,
+        _In_ HRGN Region,
+        _In_ POINT Offset);
+
     BOOLEAN
     AreBuffersReleased();
 
@@ -253,6 +266,12 @@ private:
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC FullscreenDesc = {};
     std::vector<IUnknown*> Buffers;
 
+    /* Fullscreen covers the target output with the window; its windowed look is kept to put back */
+    IDXGIOutput* FullscreenTarget = nullptr;
+    LONG_PTR WindowedStyle = 0;
+    LONG_PTR WindowedExStyle = 0;
+    RECT WindowedRect = {};
+
     HANDLE SharedSurface = NULL;
     IUnknown* RedirectionSurface = nullptr;
 
@@ -286,6 +305,9 @@ private:
     DXGI_COLOR_SPACE_TYPE CurrentColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     DXGI_HDR_METADATA_TYPE MetadataType = DXGI_HDR_METADATA_TYPE_NONE;
     BOOLEAN IsMetadataChanged = FALSE;
+
+    /* The last presented buffer still holds a whole frame, so partial presents can build on it */
+    BOOLEAN IsPreviousFrameValid = FALSE;
     BYTE Metadata[sizeof(DXGI_HDR_METADATA_HDR10PLUS)] = {};
     DXGI_MODE_ROTATION Rotation = DXGI_MODE_ROTATION_IDENTITY;
     RxPrivateDataStore PrivateData;

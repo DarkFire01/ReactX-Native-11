@@ -344,6 +344,7 @@ RxSwapChain::PresentFlip(
     }
 
     PresentCount++;
+    IsPreviousFrameValid = TRUE;
     IsMetadataChanged = FALSE;
     if (!IsSequenced)
         return hr;

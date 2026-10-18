@@ -192,12 +192,12 @@ RxDevice::Initialize(
     Args.Interface = Calc.Interface;
     Args.Version = Calc.Version;
     Args.pKTCallbacks = RxGetKernelCallbacks();
-    Args.pWDDM1_3DeviceFuncs = &DeviceFuncs;
+    Args.pWDDM2_0DeviceFuncs = &DeviceFuncs;
     Args.hDrvDevice.pDrvPrivate = DriverMemory;
     Args.DXGIBaseDDI.pDXGIBaseCallbacks = RxGetDxgiCallbacks();
     Args.DXGIBaseDDI.pDXGIDDIBaseFunctions6_1 = &DxgiFuncs;
     Args.hRTCoreLayer.handle = this;
-    Args.p11UMCallbacks = RxGetCoreLayerCallbacks();
+    Args.pWDDM2_0UMCallbacks = RxGetCoreLayerCallbacks();
     Args.Flags = Flags;
     Args.ppfnRetrieveSubObject = &RetrieveSubObject;
 

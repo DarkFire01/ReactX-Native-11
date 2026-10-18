@@ -450,3 +450,42 @@ RxPresentBridge::RotateBuffers(
     Resources[Count - 1]->GetRuntimeResource()->KmResource = First;
     return S_OK;
 }
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::CopyBufferRegions(
+    _In_ IUnknown* Destination,
+    _In_ IUnknown* Source,
+    _In_reads_(Count) const RECT* Rects,
+    _In_ UINT Count,
+    _In_ POINT Offset)
+{
+    ID3D11Resource* To;
+    ID3D11Resource* From;
+    D3D11_BOX Box;
+    UINT Index;
+
+    if (FAILED(Destination->QueryInterface(IID_PPV_ARGS(&To))))
+        return DXGI_ERROR_INVALID_CALL;
+    if (FAILED(Source->QueryInterface(IID_PPV_ARGS(&From))))
+    {
+        To->Release();
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        Box.left = (UINT)Rects[Index].left;
+        Box.top = (UINT)Rects[Index].top;
+        Box.right = (UINT)Rects[Index].right;
+        Box.bottom = (UINT)Rects[Index].bottom;
+        Box.front = 0;
+        Box.back = 1;
+        Device.GetContext().CopySubresourceRegion(To, 0, (UINT)(Rects[Index].left + Offset.x),
+                                                  (UINT)(Rects[Index].top + Offset.y), 0, From, 0, &Box);
+    }
+
+    From->Release();
+    To->Release();
+    return S_OK;
+}

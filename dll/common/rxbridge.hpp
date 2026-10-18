@@ -111,4 +111,15 @@ struct __declspec(uuid("3c8a5e71-94d2-4f06-b1e8-6d27a0c45f93")) IRxPresentDevice
         _In_ IUnknown* Buffer,
         _In_opt_ IUnknown* Target,
         _In_ RxPresentContext* Context) = 0;
+
+    /* Copies rectangles of Source into Destination, each moved by Offset */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    CopyBufferRegions(
+        _In_ IUnknown* Destination,
+        _In_ IUnknown* Source,
+        _In_reads_(Count) const RECT* Rects,
+        _In_ UINT Count,
+        _In_ POINT Offset) = 0;
 };

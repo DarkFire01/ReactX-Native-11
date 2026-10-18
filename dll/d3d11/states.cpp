@@ -332,11 +332,11 @@ RxRasterizerTraits::Normalize(
     return Desc;
 }
 
-D3D11_1_DDI_RASTERIZER_DESC
+RxRasterizerDdiDesc
 RxRasterizerTraits::ToDdi(
     _In_ const D3D11_RASTERIZER_DESC1& Desc)
 {
-    D3D11_1_DDI_RASTERIZER_DESC Ddi = {};
+    RxRasterizerDdiDesc Ddi = {};
 
     Ddi.FillMode = (D3D10_DDI_FILL_MODE)Desc.FillMode;
     Ddi.CullMode = (D3D10_DDI_CULL_MODE)Desc.CullMode;

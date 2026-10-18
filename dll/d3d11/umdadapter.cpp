@@ -11,12 +11,16 @@
 
 static const PCWSTR AdapterCallbacksName = L"D3DDDI_ADAPTERCALLBACKS";
 
-/* WDDM 2.x revisions join this list once the GPU VA device callbacks exist */
+/*
+ * Tried in order. WDDM 2.0 comes last so drivers that also speak 1.3 stay on it;
+ * drivers that start at 2.0, such as WARP, get it.
+ */
 static constexpr DdiRevision RuntimeRevisions[] =
 {
     { D3DWDDM1_3_DDI_INTERFACE_VERSION, D3DWDDM1_3_DDI_BUILD_VERSION, 0x0603, L"WDDM 1.3" },
     { D3D11_1_DDI_INTERFACE_VERSION, D3D11_1_DDI_BUILD_VERSION, 0x0602, L"D3D11.1" },
     { D3D11_1_DDI_INTERFACE_VERSION_RC, D3D11_1_DDI_BUILD_VERSION_RC, 0x0602, L"D3D11.1 RC" },
+    { D3DWDDM2_0_DDI_INTERFACE_VERSION, D3DWDDM2_0_DDI_BUILD_VERSION, 0x0A00, L"WDDM 2.0" },
 };
 
 static

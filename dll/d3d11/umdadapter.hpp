@@ -7,7 +7,7 @@
 
 #pragma once
 
-/* One DDI revision this runtime can drive, ordered newest first in umdadapter.cpp */
+/* One DDI revision this runtime can drive, in the order umdadapter.cpp tries them */
 struct DdiRevision
 {
     UINT Interface;

@@ -13,6 +13,9 @@
 /* Private interface id: QueryInterface with it yields the DdiResource behind an API resource */
 DEFINE_GUID(IID_RxDdiResource, 0xf5c24dbd, 0x0949, 0x4fd0, 0xac, 0xb7, 0x7e, 0xb9, 0x9b, 0xd9, 0xbc, 0x22);
 
+/* Private interface id: yields the lifetime of a resource made here, without a reference */
+DEFINE_GUID(IID_RxChildLifetime, 0x3a6d81c4, 0x5e27, 0x4b90, 0x9f, 0x13, 0xc8, 0x42, 0x0d, 0x7b, 0xe5, 0x6a);
+
 /* What the driver needs to know to create any texture */
 struct RxTextureShape
 {
@@ -153,6 +156,12 @@ private:
     BOOLEAN IsCreated = FALSE;
     UINT64 WriteCount = 0;
 };
+
+/* Finds the lifetime of an API resource created by this runtime */
+_Ret_maybenull_
+RxChildLifetime*
+RxGetLifetime(
+    _In_opt_ ID3D11Resource* Resource);
 
 /* Finds the DdiResource behind an API resource created by this runtime */
 _Ret_maybenull_

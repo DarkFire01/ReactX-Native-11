@@ -67,14 +67,67 @@ RxFindFeatureLevel(
     return nullptr;
 }
 
+/* WARP is the user mode driver of the kernel's software adapter, Microsoft Basic Render */
+static
+HRESULT
+RxFindSoftwareAdapter(
+    _Out_ LUID* Luid)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_ADAPTERINFO Adapters[16];
+    D3DKMT_ENUMADAPTERS2 Enum = {};
+    D3DKMT_QUERYADAPTERINFO Query = {};
+    D3DKMT_ADAPTERTYPE Type;
+    D3DKMT_CLOSEADAPTER Close;
+    BOOLEAN IsFound = FALSE;
+    UINT Index;
+
+    if (Kmt == nullptr || Kmt->EnumAdapters2 == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Enum.NumAdapters = _countof(Adapters);
+    Enum.pAdapters = Adapters;
+    if (!NT_SUCCESS(Kmt->EnumAdapters2(&Enum)))
+        return DXGI_ERROR_UNSUPPORTED;
+
+    for (Index = 0; Index < Enum.NumAdapters; Index++)
+    {
+        Type = {};
+        Query.hAdapter = Adapters[Index].hAdapter;
+        Query.Type = KMTQAITYPE_ADAPTERTYPE;
+        Query.pPrivateDriverData = &Type;
+        Query.PrivateDriverDataSize = sizeof(Type);
+        if (!IsFound && NT_SUCCESS(Kmt->QueryAdapterInfo(&Query)) && Type.SoftwareDevice && Type.RenderSupported)
+        {
+            *Luid = Adapters[Index].AdapterLuid;
+            IsFound = TRUE;
+        }
+
+        Close.hAdapter = Adapters[Index].hAdapter;
+        Kmt->CloseAdapter(&Close);
+    }
+
+    return IsFound ? S_OK : DXGI_ERROR_UNSUPPORTED;
+}
+
 static
 HRESULT
 RxOpenAdapter(
     _In_opt_ IDXGIAdapter* Adapter,
+    _In_ D3D_DRIVER_TYPE DriverType,
     _Inout_ UmdAdapter& Umd)
 {
     DXGI_ADAPTER_DESC Desc;
+    LUID Software;
     HRESULT hr;
+
+    if (DriverType == D3D_DRIVER_TYPE_WARP)
+    {
+        hr = RxFindSoftwareAdapter(&Software);
+        if (FAILED(hr))
+            return hr;
+        return Umd.Open(&Software);
+    }
 
     if (Adapter == nullptr)
         return Umd.Open(nullptr);
@@ -125,8 +178,11 @@ D3D11CreateDevice(
         return E_INVALIDARG;
     if (DriverType == D3D_DRIVER_TYPE_SOFTWARE && Software == NULL)
         return E_INVALIDARG;
-    if (DriverType != D3D_DRIVER_TYPE_UNKNOWN && DriverType != D3D_DRIVER_TYPE_HARDWARE)
+    if (DriverType != D3D_DRIVER_TYPE_UNKNOWN && DriverType != D3D_DRIVER_TYPE_HARDWARE &&
+        DriverType != D3D_DRIVER_TYPE_WARP)
+    {
         return DXGI_ERROR_UNSUPPORTED;
+    }
 
     if (pFeatureLevels == nullptr)
     {
@@ -148,7 +204,7 @@ D3D11CreateDevice(
     if (Umd == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = RxOpenAdapter(pAdapter, *Umd);
+    hr = RxOpenAdapter(pAdapter, DriverType, *Umd);
     if (FAILED(hr))
         goto Cleanup;
 

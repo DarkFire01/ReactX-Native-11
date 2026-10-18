@@ -154,6 +154,12 @@ RxTexture<Traits>::QueryInterface(
         return S_OK;
     }
 
+    if (riid == IID_RxChildLifetime)
+    {
+        *ppvObject = static_cast<RxChildLifetime*>(this);
+        return S_OK;
+    }
+
     if (riid == PrivateId)
     {
         *ppvObject = this;

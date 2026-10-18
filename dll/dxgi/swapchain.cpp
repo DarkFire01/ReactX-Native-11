@@ -125,6 +125,7 @@ RxSwapChain::RxSwapChain(
 
 RxSwapChain::~RxSwapChain()
 {
+    LeaveFullscreen();
     ReleaseBuffers();
     if (CompositionSurface != NULL)
         CloseHandle(CompositionSurface);
@@ -235,6 +236,9 @@ RxSwapChain::AllocateBuffers()
     IUnknown* Buffer;
     UINT Index;
     HRESULT hr;
+
+    /* New buffers hold nothing a partial present could build on */
+    IsPreviousFrameValid = FALSE;
 
     for (Index = 0; Index < Desc.BufferCount; Index++)
     {
@@ -629,10 +633,70 @@ RxSwapChain::SetFullscreenState(
     _In_ BOOL Fullscreen,
     _In_opt_ IDXGIOutput* pTarget)
 {
-    UNREFERENCED_PARAMETER(pTarget);
+    IDXGIOutput* Target = pTarget;
+    DXGI_OUTPUT_DESC OutputDesc;
+    RECT Area;
+    HRESULT hr;
 
-    /* Exclusive fullscreen needs outputs, which this DXGI does not have yet */
-    return Fullscreen ? DXGI_ERROR_NOT_CURRENTLY_AVAILABLE : S_OK;
+    if (Window == NULL)
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (!Fullscreen)
+    {
+        LeaveFullscreen();
+        return S_OK;
+    }
+
+    /* The output shown on is the one asked for, else the one holding most of the window */
+    if (Target != nullptr)
+        Target->AddRef();
+    else if (FAILED(GetContainingOutput(&Target)))
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    hr = Target->GetDesc(&OutputDesc);
+    if (FAILED(hr))
+    {
+        Target->Release();
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+    }
+
+    if (FullscreenTarget == nullptr)
+    {
+        WindowedStyle = GetWindowLongPtrW(Window, GWL_STYLE);
+        WindowedExStyle = GetWindowLongPtrW(Window, GWL_EXSTYLE);
+        GetWindowRect(Window, &WindowedRect);
+    }
+    else
+    {
+        FullscreenTarget->Release();
+    }
+
+    FullscreenTarget = Target;
+    FullscreenDesc.Windowed = FALSE;
+
+    Area = OutputDesc.DesktopCoordinates;
+    SetWindowLongPtrW(Window, GWL_STYLE, (WindowedStyle & ~(WS_OVERLAPPEDWINDOW | WS_DLGFRAME)) | WS_POPUP);
+    SetWindowLongPtrW(Window, GWL_EXSTYLE, WindowedExStyle | WS_EX_TOPMOST);
+    SetWindowPos(Window, HWND_TOPMOST, Area.left, Area.top, Area.right - Area.left, Area.bottom - Area.top,
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    return S_OK;
+}
+
+VOID
+RxSwapChain::LeaveFullscreen()
+{
+    if (FullscreenTarget == nullptr)
+        return;
+
+    FullscreenTarget->Release();
+    FullscreenTarget = nullptr;
+    FullscreenDesc.Windowed = TRUE;
+
+    SetWindowLongPtrW(Window, GWL_STYLE, WindowedStyle);
+    SetWindowLongPtrW(Window, GWL_EXSTYLE, WindowedExStyle);
+    SetWindowPos(Window, (WindowedExStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_NOTOPMOST, WindowedRect.left,
+                 WindowedRect.top, WindowedRect.right - WindowedRect.left, WindowedRect.bottom - WindowedRect.top,
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 }
 
 HRESULT
@@ -642,9 +706,13 @@ RxSwapChain::GetFullscreenState(
     _COM_Outptr_opt_result_maybenull_ IDXGIOutput** ppTarget)
 {
     if (pFullscreen != nullptr)
-        *pFullscreen = FALSE;
+        *pFullscreen = FullscreenTarget != nullptr;
     if (ppTarget != nullptr)
-        *ppTarget = nullptr;
+    {
+        *ppTarget = FullscreenTarget;
+        if (FullscreenTarget != nullptr)
+            FullscreenTarget->AddRef();
+    }
     return S_OK;
 }
 
@@ -831,10 +899,99 @@ RxSwapChain::Present1(
     _In_ UINT PresentFlags,
     _In_ const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
-    /* Dirty and scroll rects are hints; the whole buffer is presented */
-    UNREFERENCED_PARAMETER(pPresentParameters);
+    /*
+     * A sequential flip swapchain only redraws what the rects name; the rest of the frame
+     * comes from the buffer presented last, like on Windows.
+     */
+    if (pPresentParameters != nullptr && Desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL &&
+        (PresentFlags & DXGI_PRESENT_TEST) == 0 && IsPreviousFrameValid && Buffers.size() > 1 &&
+        (pPresentParameters->DirtyRectsCount != 0 || pPresentParameters->pScrollRect != nullptr))
+    {
+        KeepPreviousFrame(*pPresentParameters);
+    }
 
     return Present(SyncInterval, PresentFlags);
+}
+
+/* Copies the parts of the last frame the application did not redraw into the back buffer */
+VOID
+RxSwapChain::KeepPreviousFrame(
+    _In_ const DXGI_PRESENT_PARAMETERS& Parameters)
+{
+    IUnknown* Previous = Buffers[Buffers.size() - 1];
+    HRGN Kept = CreateRectRgn(0, 0, (int)Desc.Width, (int)Desc.Height);
+    HRGN Redrawn = CreateRectRgn(0, 0, 0, 0);
+    HRGN Scrolled = CreateRectRgn(0, 0, 0, 0);
+    HRGN Piece;
+    POINT Offset = { 0, 0 };
+    UINT Index;
+
+    if (Kept == NULL || Redrawn == NULL || Scrolled == NULL)
+        goto Done;
+
+    for (Index = 0; Parameters.pDirtyRects != nullptr && Index < Parameters.DirtyRectsCount; Index++)
+    {
+        Piece = CreateRectRgnIndirect(&Parameters.pDirtyRects[Index]);
+        if (Piece != NULL)
+        {
+            CombineRgn(Redrawn, Redrawn, Piece, RGN_OR);
+            DeleteObject(Piece);
+        }
+    }
+
+    /* The scrolled area lands where the offset moves it, under whatever was redrawn there */
+    if (Parameters.pScrollRect != nullptr)
+    {
+        if (Parameters.pScrollOffset != nullptr)
+            Offset = *Parameters.pScrollOffset;
+
+        SetRectRgn(Scrolled, Parameters.pScrollRect->left + Offset.x, Parameters.pScrollRect->top + Offset.y,
+                   Parameters.pScrollRect->right + Offset.x, Parameters.pScrollRect->bottom + Offset.y);
+        CombineRgn(Scrolled, Scrolled, Kept, RGN_AND);
+        CombineRgn(Scrolled, Scrolled, Redrawn, RGN_DIFF);
+        OffsetRgn(Scrolled, -Offset.x, -Offset.y);
+        CopyRegion(Previous, Scrolled, Offset);
+        OffsetRgn(Scrolled, Offset.x, Offset.y);
+        CombineRgn(Kept, Kept, Scrolled, RGN_DIFF);
+    }
+
+    CombineRgn(Kept, Kept, Redrawn, RGN_DIFF);
+    CopyRegion(Previous, Kept, { 0, 0 });
+
+Done:
+    if (Kept != NULL)
+        DeleteObject(Kept);
+    if (Redrawn != NULL)
+        DeleteObject(Redrawn);
+    if (Scrolled != NULL)
+        DeleteObject(Scrolled);
+}
+
+/* Copies a region of the given buffer into the back buffer, moved by Offset */
+VOID
+RxSwapChain::CopyRegion(
+    _In_ IUnknown* Source,
+    _In_ HRGN Region,
+    _In_ POINT Offset)
+{
+    std::vector<BYTE> Data;
+    const RGNDATA* Rects;
+    DWORD Size;
+
+    Size = GetRegionData(Region, 0, nullptr);
+    if (Size == 0)
+        return;
+
+    Data.resize(Size);
+    if (GetRegionData(Region, Size, reinterpret_cast<RGNDATA*>(Data.data())) == 0)
+        return;
+
+    Rects = reinterpret_cast<const RGNDATA*>(Data.data());
+    if (Rects->rdh.nCount != 0)
+    {
+        Device->CopyBufferRegions(Buffers[0], Source, reinterpret_cast<const RECT*>(Rects->Buffer), Rects->rdh.nCount,
+                                  Offset);
+    }
 }
 
 BOOL

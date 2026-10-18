@@ -85,13 +85,20 @@ struct RxDepthStencilTraits
         _In_ const ApiDesc& Desc);
 };
 
+/* The WDDM 2.0 rasterizer desc: the 1.1 one plus a conservative mode, which older drivers never read */
+struct RxRasterizerDdiDesc : D3D11_1_DDI_RASTERIZER_DESC
+{
+    D3DWDDM2_0DDI_CONSERVATIVE_RASTERIZATION_MODE ConservativeRasterizationMode;
+};
+static_assert(sizeof(RxRasterizerDdiDesc) == sizeof(D3DWDDM2_0DDI_RASTERIZER_DESC));
+
 struct RxRasterizerTraits
 {
     using Interface = ID3D11RasterizerState1;
     using BaseInterface = ID3D11RasterizerState;
     using ApiDesc = D3D11_RASTERIZER_DESC1;
     using BaseDesc = D3D11_RASTERIZER_DESC;
-    using DdiDesc = D3D11_1_DDI_RASTERIZER_DESC;
+    using DdiDesc = RxRasterizerDdiDesc;
     using Handle = D3D10DDI_HRASTERIZERSTATE;
     using RuntimeHandle = D3D10DDI_HRTRASTERIZERSTATE;
     static constexpr GUID PrivateId = { 0x94d1c63b, 0x08f2, 0x4a7d, { 0xbe, 0x55, 0x3c, 0x6e, 0x81, 0x2a, 0xf9, 0x04 } };

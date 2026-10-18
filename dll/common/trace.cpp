@@ -39,6 +39,38 @@ RxModuleDirectory(
     return TRUE;
 }
 
+/* Names the build of this module once, so a log from another machine says what it ran */
+static
+VOID
+RxTraceBuild(VOID)
+{
+    HMODULE Self;
+    const IMAGE_DOS_HEADER* Dos;
+    const IMAGE_NT_HEADERS* Nt;
+    ULARGE_INTEGER Time;
+    FILETIME FileTime;
+    SYSTEMTIME Linked;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&RxTraceBuild), &Self))
+    {
+        return;
+    }
+
+    Dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(Self);
+    Nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const BYTE*>(Self) + Dos->e_lfanew);
+
+    /* The link time counts seconds from 1970, a FILETIME 100 ns ticks from 1601 */
+    Time.QuadPart = (ULONGLONG)Nt->FileHeader.TimeDateStamp * 10000000ull + 116444736000000000ull;
+    FileTime.dwLowDateTime = Time.LowPart;
+    FileTime.dwHighDateTime = Time.HighPart;
+    if (!FileTimeToSystemTime(&FileTime, &Linked))
+        return;
+
+    RxTrace(L"ReactX %s built %04u-%02u-%02u %02u:%02u UTC", RxTraceModule, Linked.wYear, Linked.wMonth, Linked.wDay,
+            Linked.wHour, Linked.wMinute);
+}
+
 /*
  * Logging is on when REACTX_LOG is set, or when reactx.ini beside the module says log=1.
  * REACTX_LOG_FILE, or logfile= in the ini, sends it to a file; games have no console.
@@ -84,6 +116,7 @@ RxInitializeTrace(
 
     TraceFile = CreateFileW(LogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    RxTraceBuild();
     return TRUE;
 }
 

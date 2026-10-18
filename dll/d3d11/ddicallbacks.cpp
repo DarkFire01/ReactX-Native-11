@@ -453,7 +453,60 @@ RxStateNothingCb(
     UNREFERENCED_PARAMETER(CoreLayer);
 }
 
-static const D3D11DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
+/* WDDM 2.0 drivers make their contexts through the core layer; the kernel side is the same */
+static
+HRESULT
+APIENTRY
+RxCreateContextCb2_0(
+    _In_ D3D10DDI_HRTCORELAYER hDevice,
+    _Inout_ D3DWDDM2_0DDICB_CREATECONTEXT* Args)
+{
+    D3DDDICB_CREATECONTEXT Create = {};
+    HRESULT hr;
+
+    Create.NodeOrdinal = Args->NodeOrdinal;
+    Create.EngineAffinity = Args->EngineAffinity;
+    Create.Flags = Args->Flags;
+    Create.pPrivateDriverData = Args->pPrivateDriverData;
+    Create.PrivateDriverDataSize = Args->PrivateDriverDataSize;
+
+    hr = RxCreateContextCb(hDevice.handle, &Create);
+    if (FAILED(hr))
+        return hr;
+
+    Args->hContext = Create.hContext;
+    Args->pCommandBuffer = Create.pCommandBuffer;
+    Args->CommandBufferSize = Create.CommandBufferSize;
+    Args->pAllocationList = Create.pAllocationList;
+    Args->AllocationListSize = Create.AllocationListSize;
+    Args->pPatchLocationList = Create.pPatchLocationList;
+    Args->PatchLocationListSize = Create.PatchLocationListSize;
+    return S_OK;
+}
+
+static
+HRESULT
+APIENTRY
+RxCreateContextVirtualCb2_0(
+    _In_ D3D10DDI_HRTCORELAYER hDevice,
+    _Inout_ D3DWDDM2_0DDICB_CREATECONTEXTVIRTUAL* Args)
+{
+    D3DDDICB_CREATECONTEXTVIRTUAL Create = {};
+    HRESULT hr;
+
+    Create.NodeOrdinal = Args->NodeOrdinal;
+    Create.EngineAffinity = Args->EngineAffinity;
+    Create.Flags = Args->Flags;
+    Create.pPrivateDriverData = Args->pPrivateDriverData;
+    Create.PrivateDriverDataSize = Args->PrivateDriverDataSize;
+
+    hr = RxCreateContextVirtualCb(hDevice.handle, &Create);
+    if (SUCCEEDED(hr))
+        Args->hContext = Create.hContext;
+    return hr;
+}
+
+static const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
 {
     .pfnSetErrorCb = RxSetErrorCb,
     .pfnStateVsConstBufCb = RxStateConstantBuffersCb<RxStage::Vertex>,
@@ -495,6 +548,8 @@ static const D3D11DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
     .pfnStateCsShaderCb = RxStateShaderCb<RxStage::Compute>,
     .pfnStateCsSamplerCb = RxStateSamplersCb<RxStage::Compute>,
     .pfnStateCsConstBufCb = RxStateConstantBuffersCb<RxStage::Compute>,
+    .pfnCreateContextCb = RxCreateContextCb2_0,
+    .pfnCreateContextVirtualCb = RxCreateContextVirtualCb2_0,
 };
 
 static
@@ -621,7 +676,7 @@ RxGetKernelCallbacks(VOID)
     return &Callbacks;
 }
 
-const D3D11DDI_CORELAYER_DEVICECALLBACKS*
+const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS*
 RxGetCoreLayerCallbacks(VOID)
 {
     return &CoreLayerCallbacks;
