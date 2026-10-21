@@ -65,10 +65,11 @@ public:
         _In_ UINT ExtraDdiBindFlags = 0,
         _In_ UINT ExtraDdiMiscFlags = 0);
 
-    /* Makes the next texture a swapchain buffer the compositor opens by NT handle */
+    /* Makes the next texture shared, with the record an opener rebuilds it from */
     VOID
     SetSharedRecord(
-        _In_ const RxSharedTextureRecord& Record)
+        _In_ const RxSharedTextureRecord& Record,
+        _In_ RxShareKind Kind)
     {
         if (Runtime == nullptr)
             return;
@@ -76,6 +77,35 @@ public:
         Runtime->Shared = Record;
         Runtime->SharedRecord = &Runtime->Shared;
         Runtime->SharedRecordSize = sizeof(Runtime->Shared);
+        Runtime->ShareKind = Kind;
+    }
+
+    RxShareKind
+    GetShareKind() const
+    {
+        return Runtime ? Runtime->ShareKind : RxShareKind::None;
+    }
+
+    /* The global share handle of a texture shared or opened without NT security, else 0 */
+    D3DKMT_HANDLE
+    GetGlobalShare() const
+    {
+        return Runtime ? Runtime->GlobalShare : 0;
+    }
+
+    /* Makes the next texture a primary the display can scan out from */
+    VOID
+    SetPrimaryDesc(
+        _In_ const DXGI_DDI_PRIMARY_DESC& Desc)
+    {
+        PrimaryDesc = Desc;
+        IsPrimary = TRUE;
+    }
+
+    BOOLEAN
+    GetIsPrimary() const
+    {
+        return IsPrimary;
     }
 
     /* The kernel resource behind the driver's allocations, 0 before the first one */
@@ -95,7 +125,14 @@ public:
     /* Opens a resource another process shared through a global share handle */
     HRESULT
     OpenShared(
-        _In_ D3DKMT_HANDLE GlobalShare);
+        _In_ D3DKMT_HANDLE GlobalShare,
+        _Out_opt_ RxSharedTextureRecord* Record = nullptr);
+
+    /* Opens a resource another process shared through an NT handle */
+    HRESULT
+    OpenSharedNt(
+        _In_ HANDLE NtHandle,
+        _Out_opt_ RxSharedTextureRecord* Record);
 
     HRESULT
     CreateBuffer(
@@ -149,12 +186,19 @@ private:
     Create(
         _In_ const D3D11DDIARG_CREATERESOURCE& Args);
 
+    /* Hands a kernel resource this device just opened to the UMD */
+    HRESULT
+    OpenDriverResource(
+        _In_ const D3D10DDIARG_OPENRESOURCE& Args);
+
     RxDevice& Device;
     RxRuntimeResource* Runtime;
     PVOID Memory = nullptr;
     D3D10DDI_HRESOURCE Handle = {};
     BOOLEAN IsCreated = FALSE;
     UINT64 WriteCount = 0;
+    DXGI_DDI_PRIMARY_DESC PrimaryDesc = {};
+    BOOLEAN IsPrimary = FALSE;
 };
 
 /* Finds the lifetime of an API resource created by this runtime */

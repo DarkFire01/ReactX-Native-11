@@ -36,7 +36,7 @@ $Classes = @(
             'CreateHullShader', 'CreateDomainShader', 'CreateComputeShader', 'CheckFormatSupport',
             'CreateQuery', 'CreatePredicate', 'CheckFeatureSupport', 'GetImmediateContext1', 'CreateBlendState1',
             'CreateRasterizerState1', 'GetImmediateContext2', 'GetResourceTiling', 'CheckMultisampleQualityLevels1',
-            'CreateDeviceContextState'
+            'CreateDeviceContextState', 'OpenSharedResource', 'OpenSharedResource1'
         )
     },
     @{

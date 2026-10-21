@@ -38,17 +38,6 @@ RxDevice::CreateDeferredContext(
     return E_NOTIMPL;
 }
 
-HRESULT
-STDMETHODCALLTYPE
-RxDevice::OpenSharedResource(
-    _In_ HANDLE hResource,
-    _In_ REFIID ReturnedInterface,
-    _COM_Outptr_opt_ void** ppResource)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
 VOID
 STDMETHODCALLTYPE
 RxDevice::CheckCounterInfo(
@@ -79,17 +68,6 @@ STDMETHODCALLTYPE
 RxDevice::CreateDeferredContext1(
     UINT ContextFlags,
     _COM_Outptr_opt_ ID3D11DeviceContext1** ppDeferredContext)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxDevice::OpenSharedResource1(
-    _In_ HANDLE hResource,
-    _In_ REFIID returnedInterface,
-    _COM_Outptr_ void** ppResource)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

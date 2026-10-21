@@ -7,6 +7,7 @@
 
 #include "dxgiobjects.hpp"
 #include "swapchain.hpp"
+#include "dwmswapchain.hpp"
 
 #include <algorithm>
 
@@ -112,14 +113,21 @@ RxCollectOutputs(
         return;
     }
 
+    /* Systems that export the calls without implementing them still answer through GDI */
     if (Config->GetBufferSizes(QDC_ONLY_ACTIVE_PATHS, &PathCount, &ModeCount) != ERROR_SUCCESS)
+    {
+        RX_TRACE(L"no display configuration, finding outputs through GDI");
+        RxCollectOutputsFromGdi(Adapters, OwnsPrimary);
         return;
+    }
 
     Paths.resize(PathCount);
     Modes.resize(ModeCount);
     if (Config->Query(QDC_ONLY_ACTIVE_PATHS, &PathCount, Paths.data(), &ModeCount, Modes.data(), nullptr) !=
         ERROR_SUCCESS)
     {
+        RX_TRACE(L"no display configuration, finding outputs through GDI");
+        RxCollectOutputsFromGdi(Adapters, OwnsPrimary);
         return;
     }
     Paths.resize(PathCount);
@@ -309,8 +317,57 @@ RxDxgiFactory::QueryInterface(
         return S_OK;
     }
 
+    if (riid == __uuidof(IDXGIFactoryDWM))
+    {
+        *ppvObject = static_cast<IDXGIFactoryDWM*>(this);
+        AddRef();
+        return S_OK;
+    }
+
     *ppvObject = nullptr;
     return E_NOINTERFACE;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDxgiFactory::CreateSwapChain(
+    _In_ IUnknown* pDevice,
+    _In_ DXGI_SWAP_CHAIN_DESC* pDesc,
+    _In_ IDXGIOutput* pOutput,
+    _COM_Outptr_ IDXGISwapChainDWM1** ppSwapChain)
+{
+    IRxPresentDevice* Device;
+    IDXGIOutputDWM* Dwm;
+    RxDxgiOutput* Output;
+    RxDwmSwapChain* SwapChain;
+    HRESULT hr;
+
+    if (ppSwapChain == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+    *ppSwapChain = nullptr;
+    if (pDevice == nullptr || pDesc == nullptr || pOutput == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* Only outputs from this runtime know their video present source */
+    if (FAILED(pOutput->QueryInterface(IID_PPV_ARGS(&Dwm))))
+        return DXGI_ERROR_INVALID_CALL;
+    Output = static_cast<RxDxgiOutput*>(pOutput);
+    hr = (Dwm == static_cast<IDXGIOutputDWM*>(Output)) ? S_OK : DXGI_ERROR_INVALID_CALL;
+    Dwm->Release();
+    if (FAILED(hr))
+        return hr;
+
+    hr = pDevice->QueryInterface(IID_PPV_ARGS(&Device));
+    if (FAILED(hr))
+        return DXGI_ERROR_INVALID_CALL;
+
+    hr = RxDwmSwapChain::Create(*this, Device, Output, *pDesc, &SwapChain);
+    Device->Release();
+    if (FAILED(hr))
+        return hr;
+
+    *ppSwapChain = SwapChain;
+    return S_OK;
 }
 
 ULONG

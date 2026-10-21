@@ -51,6 +51,9 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTEscape", Kmt.Escape);
     RxResolve(Gdi32, "D3DKMTGetDisplayModeList", Kmt.GetDisplayModeList);
     RxResolve(Gdi32, "D3DKMTWaitForVerticalBlankEvent", Kmt.WaitForVerticalBlankEvent);
+    RxResolve(Gdi32, "D3DKMTSetDisplayMode", Kmt.SetDisplayMode);
+    RxResolve(Gdi32, "D3DKMTSetVidPnSourceOwner", Kmt.SetVidPnSourceOwner);
+    RxResolve(Gdi32, "D3DKMTSetVidPnSourceOwner1", Kmt.SetVidPnSourceOwner1);
     RxResolve(Gdi32, "D3DKMTQueryVideoMemoryInfo", Kmt.QueryVideoMemoryInfo);
     RxResolve(Gdi32, "D3DKMTChangeVideoMemoryReservation", Kmt.ChangeVideoMemoryReservation);
     RxResolve(Gdi32, "D3DKMTGetSharedResourceAdapterLuid", Kmt.GetSharedResourceAdapterLuid);
@@ -69,6 +72,9 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTDestroyAllocation", Kmt.DestroyAllocation);
     RxResolve(Gdi32, "D3DKMTQueryResourceInfo", Kmt.QueryResourceInfo);
     RxResolve(Gdi32, "D3DKMTOpenResource", Kmt.OpenResource);
+    RxResolve(Gdi32, "D3DKMTQueryResourceInfoFromNtHandle", Kmt.QueryResourceInfoFromNtHandle);
+    RxResolve(Gdi32, "D3DKMTOpenResourceFromNtHandle", Kmt.OpenResourceFromNtHandle);
+    RxResolve(Gdi32, "D3DKMTDestroyKeyedMutex", Kmt.DestroyKeyedMutex);
     RxResolve(Gdi32, "D3DKMTPresent", Kmt.Present);
     RxResolve(Gdi32, "D3DKMTLock", Kmt.Lock);
     RxResolve(Gdi32, "D3DKMTUnlock", Kmt.Unlock);

@@ -412,6 +412,11 @@ RxCheckTextureRequestWorker(
     }
     if ((Misc & D3D11_RESOURCE_MISC_SHARED) && (Misc & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX))
         return E_INVALIDARG;
+    if ((Misc & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) &&
+        !(Misc & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)))
+    {
+        return E_INVALIDARG;
+    }
 
     /* The format must exist here, and the exact format decides mips and video binds */
     if (FAILED(Device.GetFormatSupport(Request.Format, &Support)) || Request.Format == DXGI_FORMAT_UNKNOWN)

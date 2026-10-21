@@ -10,6 +10,8 @@ nt_add_usermode_dll(dxgi
         gdipresent.cpp
         outputcolor.cpp
         dxgimain.cpp
+        dwmoutput.cpp
+        dwmswapchain.cpp
         dxgioutput.cpp
         dxgioutput_stubs.cpp
         swapchain.cpp

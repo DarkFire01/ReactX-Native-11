@@ -304,6 +304,13 @@ RxDxgiOutput::QueryInterface(
         return S_OK;
     }
 
+    if (riid == __uuidof(IDXGIOutputDWM))
+    {
+        *ppvObject = static_cast<IDXGIOutputDWM*>(this);
+        AddRef();
+        return S_OK;
+    }
+
     *ppvObject = nullptr;
     return E_NOINTERFACE;
 }

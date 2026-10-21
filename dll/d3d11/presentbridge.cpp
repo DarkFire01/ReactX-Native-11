@@ -87,10 +87,8 @@ private:
     std::unique_ptr<DdiResource> Resource;
 };
 
-/* The record's header as Windows writes it for a single sample swapchain buffer */
-constexpr UINT RxSharedRecordVersion = 4;
+/* The record's constants as Windows writes them for a single sample swapchain buffer */
 constexpr UINT RxSharedRecordConstants[9] = { 1, 0, 0, 0, 0, 1, 1, 0, 1 };
-constexpr UINT RxSharedRecordArraySizeIndex = 0;
 
 /* Initial and largest count of the device's present limit semaphore */
 constexpr UINT RxPresentLimitMaximum = 16;
@@ -274,6 +272,102 @@ RxPresentBridge::SubmitPresent(
         hr = Device.TakeDriverError();
     if (FAILED(hr))
         RX_TRACE(L"UMD Present failed 0x%08lX", hr);
+
+    return RxApiResult(hr);
+}
+
+D3DKMT_HANDLE
+STDMETHODCALLTYPE
+RxPresentBridge::GetKernelDevice()
+{
+    return Device.GetKmDevice();
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::CreatePrimaryBuffer(
+    _In_ const DXGI_SWAP_CHAIN_DESC1* Desc,
+    _In_ const DXGI_DDI_PRIMARY_DESC* PrimaryDesc,
+    _In_ IUnknown* Parent,
+    _COM_Outptr_ IUnknown** Buffer)
+{
+    D3D11_TEXTURE2D_DESC TextureDesc = {};
+    RxTexture2D* Texture;
+    HRESULT hr;
+
+    *Buffer = nullptr;
+
+    TextureDesc.Width = Desc->Width;
+    TextureDesc.Height = Desc->Height;
+    TextureDesc.MipLevels = 1;
+    TextureDesc.ArraySize = Desc->Stereo ? 2 : 1;
+    TextureDesc.Format = Desc->Format;
+    TextureDesc.SampleDesc = Desc->SampleDesc;
+    TextureDesc.Usage = D3D11_USAGE_DEFAULT;
+    TextureDesc.BindFlags = RxBindFlagsForUsage(Desc->BufferUsage);
+
+    hr = RxTexture2D::Create(Device, TextureDesc, nullptr, &Texture, D3D10_DDI_BIND_PRESENT, 0, nullptr, PrimaryDesc);
+    if (FAILED(hr))
+        return hr;
+
+    Texture->GetDxgiSurface().SetUsage(Desc->BufferUsage | DXGI_USAGE_BACK_BUFFER);
+    Texture->GetDxgiSurface().SetParent(Parent);
+    *Buffer = static_cast<ID3D11Texture2D*>(Texture);
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::SetDisplaySurface(
+    _In_ IUnknown* Buffer)
+{
+    RxTexture2D* Primary = RxUnwrap<RxTexture2D>(Buffer);
+    DXGI_DDI_ARG_SETDISPLAYMODE Args = {};
+    HRESULT hr;
+
+    if (Primary == nullptr || !Primary->GetDdiResource().GetIsPrimary())
+        return DXGI_ERROR_INVALID_CALL;
+
+    Args.hDevice = (DXGI_DDI_HDEVICE)Device.GetDriverDevice().pDrvPrivate;
+    Args.hResource = (DXGI_DDI_HRESOURCE)Primary->GetDdiResource().GetHandle().pDrvPrivate;
+    Args.SubResourceIndex = 0;
+
+    hr = Device.GetDxgiFuncs().pfnSetDisplayMode(&Args);
+    if (SUCCEEDED(hr))
+        hr = Device.TakeDriverError();
+    if (FAILED(hr))
+        RX_TRACE(L"UMD SetDisplayMode failed 0x%08lX", hr);
+
+    return RxApiResult(hr);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::PresentPrimary(
+    _In_ IUnknown* Buffer,
+    _In_ UINT FlipInterval,
+    _In_ RxPresentContext* Context)
+{
+    RxTexture2D* Source = RxUnwrap<RxTexture2D>(Buffer);
+    DXGI_DDI_ARG_PRESENT Args = {};
+    HRESULT hr;
+
+    if (Source == nullptr || !Source->GetDdiResource().GetIsPrimary() || FlipInterval > DXGI_DDI_FLIP_INTERVAL_FOUR)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* The source itself is scanned out, so there is no destination */
+    Args.hDevice = (DXGI_DDI_HDEVICE)Device.GetDriverDevice().pDrvPrivate;
+    Args.hSurfaceToPresent = (DXGI_DDI_HRESOURCE)Source->GetDdiResource().GetHandle().pDrvPrivate;
+    Args.SrcSubResourceIndex = 0;
+    Args.pDXGIContext = Context;
+    Args.Flags.Flip = 1;
+    Args.FlipInterval = (DXGI_DDI_FLIP_INTERVAL_TYPE)FlipInterval;
+
+    hr = Device.GetDxgiFuncs().pfnPresent(&Args);
+    if (SUCCEEDED(hr))
+        hr = Device.TakeDriverError();
+    if (FAILED(hr))
+        RX_TRACE(L"UMD flip Present failed 0x%08lX", hr);
 
     return RxApiResult(hr);
 }

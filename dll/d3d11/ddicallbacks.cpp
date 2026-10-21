@@ -62,14 +62,18 @@ RxAllocateCb(
             Create.hResource = Resource->KmResource;
     }
 
-    /* Flip model buffers are shared by NT handle with the compositor, and say what they are */
+    /* Shared textures carry their record; flip model buffers also say what they are */
     if (Resource != nullptr && Resource->SharedRecord != nullptr && Create.Flags.CreateResource)
     {
         Create.Flags.CreateShared = TRUE;
-        Create.Flags.NonSecure = TRUE;
-        Create.Flags.RestrictSharedAccess = TRUE;
-        Create.Flags.NtSecuritySharing = TRUE;
-        Create.Flags.SwapChainBackBuffer = TRUE;
+        if (Resource->ShareKind == RxShareKind::SwapChain)
+        {
+            Create.Flags.NonSecure = TRUE;
+            Create.Flags.RestrictSharedAccess = TRUE;
+            Create.Flags.SwapChainBackBuffer = TRUE;
+        }
+        if (Resource->ShareKind != RxShareKind::GlobalHandle)
+            Create.Flags.NtSecuritySharing = TRUE;
         Create.pPrivateRuntimeData = Resource->SharedRecord;
         Create.PrivateRuntimeDataSize = Resource->SharedRecordSize;
     }
@@ -86,7 +90,10 @@ RxAllocateCb(
     }
 
     if (Resource != nullptr && Create.Flags.CreateResource)
+    {
         Resource->KmResource = Create.hResource;
+        Resource->GlobalShare = Create.hGlobalShare;
+    }
 
     Args->hKMResource = Create.hResource;
     return S_OK;
@@ -154,8 +161,7 @@ RxEscapeCb(
     return RxHresultFromStatus(RxGetKmtThunks()->Escape(&Escape));
 }
 
-/* Presentation and display mode changes arrive with the ReactX dxgi.dll */
-
+/* Scans a primary out; the device has to own the source first */
 static
 HRESULT
 APIENTRY
@@ -163,8 +169,26 @@ RxSetDisplayModeCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDICB_SETDISPLAYMODE* Args)
 {
-    RX_TRACE(L"SetDisplayModeCb not implemented");
-    return E_NOTIMPL;
+    RxDevice& Device = RxDeviceFromHandle(hDevice);
+    D3DKMT_SETDISPLAYMODE Mode = {};
+    NTSTATUS Status;
+
+    if (RxGetKmtThunks()->SetDisplayMode == nullptr)
+        return E_NOTIMPL;
+
+    Mode.hDevice = Device.GetKmDevice();
+    Mode.hPrimaryAllocation = Args->hPrimaryAllocation;
+    Mode.ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
+    Mode.DisplayOrientation = D3DDDI_ROTATION_IDENTITY;
+    Status = RxGetKmtThunks()->SetDisplayMode(&Mode);
+    if (!NT_SUCCESS(Status))
+    {
+        RX_TRACE(L"D3DKMTSetDisplayMode failed 0x%08lX", Status);
+        return RxHresultFromStatus(Status);
+    }
+
+    Args->PrivateDriverFormatAttribute = Mode.PrivateDriverFormatAttribute;
+    return S_OK;
 }
 
 static
@@ -584,6 +608,9 @@ RxDxgiPresentCb(
         Present.BroadcastContext[Index] = RxKmContext(Args->BroadcastContext[Index]);
 
     Context->KernelStatus = RxGetKmtThunks()->Present(&Present);
+    if (!NT_SUCCESS(Context->KernelStatus))
+        RX_TRACE(L"D3DKMTPresent failed 0x%08lX (flags %08X source %u)", Context->KernelStatus, Present.Flags.Value,
+                 Present.VidPnSourceId);
     return RxHresultFromStatus(Context->KernelStatus);
 }
 

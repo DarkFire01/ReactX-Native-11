@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <dxgiddi.h>
+
 /*
  * Everything else the two modules share goes through public DXGI and D3D11 calls.
  * Swapchains are the exception: they need driver resources and the driver's present.
@@ -110,6 +112,38 @@ struct __declspec(uuid("3c8a5e71-94d2-4f06-b1e8-6d27a0c45f93")) IRxPresentDevice
     SubmitPresent(
         _In_ IUnknown* Buffer,
         _In_opt_ IUnknown* Target,
+        _In_ RxPresentContext* Context) = 0;
+
+    /* The kernel device, which is what owns a video present source */
+    virtual
+    D3DKMT_HANDLE
+    STDMETHODCALLTYPE
+    GetKernelDevice() = 0;
+
+    /* One primary buffer the display can scan out from on VidPnSourceId */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    CreatePrimaryBuffer(
+        _In_ const DXGI_SWAP_CHAIN_DESC1* Desc,
+        _In_ const DXGI_DDI_PRIMARY_DESC* PrimaryDesc,
+        _In_ IUnknown* Parent,
+        _COM_Outptr_ IUnknown** Buffer) = 0;
+
+    /* Makes a primary buffer the one the display scans out */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    SetDisplaySurface(
+        _In_ IUnknown* Buffer) = 0;
+
+    /* Flips a primary buffer onto the display at the next interval */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    PresentPrimary(
+        _In_ IUnknown* Buffer,
+        _In_ UINT FlipInterval,
         _In_ RxPresentContext* Context) = 0;
 
     /* Copies rectangles of Source into Destination, each moved by Offset */

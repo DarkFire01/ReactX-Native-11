@@ -104,13 +104,17 @@ STDMETHODCALLTYPE
 RxDxgiSurface::GetSharedHandle(
     _Out_ HANDLE* pSharedHandle)
 {
-    /* Swapchain buffers can never be shared; other resources just have no handle yet */
+    DdiResource* Resource = RxGetDdiResource(Owner);
+
+    /* Swapchain buffers and NT handle textures have no global share handle; unshared ones get NULL */
     if (HasUsageOverride)
         return E_INVALIDARG;
     if (pSharedHandle == nullptr)
         return E_INVALIDARG;
+    if (Resource != nullptr && Resource->GetShareKind() == RxShareKind::NtHandle)
+        return E_INVALIDARG;
 
-    *pSharedHandle = NULL;
+    *pSharedHandle = Resource ? (HANDLE)(ULONG_PTR)Resource->GetGlobalShare() : NULL;
     return S_OK;
 }
 
@@ -191,14 +195,40 @@ RxDxgiSurface::CreateSharedHandle(
     _In_opt_ LPCWSTR lpName,
     _Out_ HANDLE* pHandle)
 {
-    UNREFERENCED_PARAMETER(pAttributes);
-    UNREFERENCED_PARAMETER(dwAccess);
-    UNREFERENCED_PARAMETER(lpName);
+    DdiResource* Resource = RxGetDdiResource(Owner);
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    OBJECT_ATTRIBUTES Attributes;
+    D3DKMT_HANDLE KmResource;
+    NTSTATUS Status;
 
-    /* Only resources created shared have NT handles to hand out */
-    if (pHandle != nullptr)
-        *pHandle = NULL;
-    return E_INVALIDARG;
+    if (pHandle == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+    *pHandle = NULL;
+
+    /* Only textures created or opened for NT handle sharing have NT handles to hand out */
+    if (Resource == nullptr || Resource->GetShareKind() != RxShareKind::NtHandle || Resource->GetKmResource() == 0)
+        return E_INVALIDARG;
+    if (Kmt->ShareObjects == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    /* Named handles need the session's named object directory, which this runtime does not look up */
+    if (lpName != nullptr)
+    {
+        RX_UNIMPLEMENTED();
+        return E_NOTIMPL;
+    }
+
+    InitializeObjectAttributes(&Attributes, nullptr, (pAttributes && pAttributes->bInheritHandle) ? OBJ_INHERIT : 0,
+                               nullptr, pAttributes ? pAttributes->lpSecurityDescriptor : nullptr);
+    KmResource = Resource->GetKmResource();
+    Status = Kmt->ShareObjects(1, &KmResource, &Attributes, dwAccess, pHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        RX_TRACE(L"D3DKMTShareObjects failed 0x%08lX", Status);
+        return RxHresultFromStatus(Status);
+    }
+
+    return S_OK;
 }
 
 HRESULT

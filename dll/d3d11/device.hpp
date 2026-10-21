@@ -35,6 +35,24 @@ struct RxSharedTextureRecord
 
 static_assert(sizeof(RxSharedTextureRecord) == 0x68);
 
+/* The only record version this runtime writes and reads */
+constexpr UINT RxSharedRecordVersion = 4;
+
+/* Record constants: the array size, then flags for NT handle sharing and displayable textures */
+constexpr UINT RxSharedRecordArraySizeIndex = 0;
+constexpr UINT RxSharedRecordNtHandleIndex = 5;
+constexpr UINT RxSharedRecordDisplayableIndex = 6;
+constexpr UINT RxSharedRecordDisplayableAgainIndex = 8;
+
+/* How a resource is shared, which picks the flags its kernel resource is created with */
+enum class RxShareKind : UCHAR
+{
+    None,
+    GlobalHandle,
+    NtHandle,
+    SwapChain
+};
+
 /*
  * The hRTResource a UMD gets for each resource. Drivers may deallocate after the resource
  * is destroyed, even as late as device teardown, so this outlives the D3D object until
@@ -44,10 +62,14 @@ struct RxRuntimeResource
 {
     D3DKMT_HANDLE KmResource = 0;
 
-    /* Set for swapchain buffers shared with the compositor; written with the kernel resource */
+    /* Set for shared textures and swapchain buffers; written with the kernel resource */
     const VOID* SharedRecord = nullptr;
     UINT SharedRecordSize = 0;
     RxSharedTextureRecord Shared = {};
+    RxShareKind ShareKind = RxShareKind::None;
+
+    /* What GetSharedHandle hands out for a resource shared without NT security */
+    D3DKMT_HANDLE GlobalShare = 0;
 
     /* Opened resources are never deallocated by the driver; the runtime closes them itself */
     BOOLEAN IsOpened = FALSE;
@@ -581,6 +603,30 @@ public:
         _In_reads_(Count) const RECT* Rects,
         _In_ UINT Count,
         _In_ POINT Offset) override;
+
+    D3DKMT_HANDLE
+    STDMETHODCALLTYPE
+    GetKernelDevice() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    CreatePrimaryBuffer(
+        _In_ const DXGI_SWAP_CHAIN_DESC1* Desc,
+        _In_ const DXGI_DDI_PRIMARY_DESC* PrimaryDesc,
+        _In_ IUnknown* Parent,
+        _COM_Outptr_ IUnknown** Buffer) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    SetDisplaySurface(
+        _In_ IUnknown* Buffer) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    PresentPrimary(
+        _In_ IUnknown* Buffer,
+        _In_ UINT FlipInterval,
+        _In_ RxPresentContext* Context) override;
 
     ~RxPresentBridge();
 

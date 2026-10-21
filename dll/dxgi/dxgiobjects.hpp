@@ -101,7 +101,7 @@ private:
 };
 
 /* One display an adapter drives; the adapter that enumerated it is its parent */
-class RxDxgiOutput final : public IDXGIOutput6
+class RxDxgiOutput final : public IDXGIOutput6, public IDXGIOutputDWM
 {
 public:
     static
@@ -134,6 +134,62 @@ public:
         return Info.VidPnSourceId;
     }
 
+    const LUID&
+    GetAdapterLuid() const;
+
+    /* What the desktop window manager asks an output; see dwmoutput.cpp */
+    BOOL
+    STDMETHODCALLTYPE
+    HasDDAClient() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetDesc(
+        _Out_ DXGI_OUTPUT_DWM_DESC* pDesc) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    FindClosestMatchingModeFromDesktop(
+        _In_ const DXGI_MODE_DESC1* pModeToMatch,
+        _Out_ DXGI_MODE_DESC1* pClosestMatch,
+        _In_opt_ IUnknown* pConcernedDevice) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    WaitForVBlankOrObjects(
+        _In_ UINT Count,
+        _In_reads_(Count) const HANDLE* pHandles) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    SetSyncRefreshCountWaitTarget(
+        _In_ UINT Target) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetFrameStatisticsDWM(
+        _Out_ DXGI_FRAME_STATISTICS_DWM* pStats) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetVBlankEvent(
+        _Out_ HANDLE* pEvent) override;
+
+    BOOL
+    STDMETHODCALLTYPE
+    IsIndependentFlipSupported() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetMultiplaneOverlayCaps(
+        _In_ IUnknown* pDevice,
+        _Out_ DXGI_MULTIPLANE_OVERLAY_CAPS* pCaps) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetStereoCaps(
+        _Out_ UINT* pCaps) override;
+
 private:
     explicit RxDxgiOutput(
         _In_ RxDxgiAdapter* Adapter);
@@ -152,7 +208,7 @@ private:
     RxPrivateDataStore PrivateData;
 };
 
-class RxDxgiFactory final : public IDXGIFactory7
+class RxDxgiFactory final : public IDXGIFactory7, public IDXGIFactoryDWM
 {
 public:
     /* Creation flag for factories made by CreateDXGIFactory; GetCreationFlags reports it as Windows does */
@@ -189,6 +245,15 @@ public:
     VOID
     UntrackSwapChain(
         _In_ RxSwapChain* SwapChain);
+
+    /* The desktop window manager's fullscreen swapchain for one output */
+    HRESULT
+    STDMETHODCALLTYPE
+    CreateSwapChain(
+        _In_ IUnknown* pDevice,
+        _In_ DXGI_SWAP_CHAIN_DESC* pDesc,
+        _In_ IDXGIOutput* pOutput,
+        _COM_Outptr_ IDXGISwapChainDWM1** ppSwapChain) override;
 
 private:
     RxDxgiFactory() = default;

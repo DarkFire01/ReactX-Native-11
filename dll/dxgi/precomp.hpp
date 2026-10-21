@@ -9,6 +9,7 @@
 
 #include "rxcommon.hpp"
 #include "rxbridge.hpp"
+#include "dxgidwm.hpp"
 #include "privatedata.hpp"
 
 #include <vector>

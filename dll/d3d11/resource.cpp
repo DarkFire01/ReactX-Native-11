@@ -48,9 +48,15 @@ UINT
 RxDdiMiscFlags(
     _In_ UINT MiscFlags)
 {
-    return MiscFlags & (D3D11_RESOURCE_MISC_GENERATE_MIPS | D3D11_RESOURCE_MISC_SHARED |
-                        D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS |
-                        D3D11_RESOURCE_MISC_BUFFER_STRUCTURED | D3D11_RESOURCE_MISC_RESOURCE_CLAMP);
+    UINT Ddi = MiscFlags & (D3D11_RESOURCE_MISC_GENERATE_MIPS | D3D11_RESOURCE_MISC_SHARED |
+                            D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS |
+                            D3D11_RESOURCE_MISC_BUFFER_STRUCTURED | D3D11_RESOURCE_MISC_RESOURCE_CLAMP);
+
+    /* The driver only knows one kind of sharing */
+    if (MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)
+        Ddi |= D3D10_DDI_RESOURCE_MISC_SHARED;
+
+    return Ddi;
 }
 
 HRESULT
@@ -170,28 +176,44 @@ DdiResource::CreateTexture(
     Args.ArraySize = Shape.ArraySize;
     Args.DecoderBufferType = D3D11_1DDI_VIDEO_DECODER_BUFFER_UNKNOWN;
     Args.TextureLayout = D3DWDDM2_0DDI_TL_UNDEFINED;
+    if (IsPrimary)
+        Args.pPrimaryDesc = &PrimaryDesc;
 
     return Create(Args);
 }
 
+/* Copies what the creator stored with a shared resource; whatever it did not write stays zero */
+static
+VOID
+RxCopySharedRecord(
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ UINT Size,
+    _Out_opt_ RxSharedTextureRecord* Record)
+{
+    if (Record == nullptr)
+        return;
+
+    ZeroMemory(Record, sizeof(*Record));
+    memcpy(Record, Data, std::min<SIZE_T>(Size, sizeof(*Record)));
+}
+
 HRESULT
 DdiResource::OpenShared(
-    _In_ D3DKMT_HANDLE GlobalShare)
+    _In_ D3DKMT_HANDLE GlobalShare,
+    _Out_opt_ RxSharedTextureRecord* Record)
 {
-    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
     const KmtThunks* Kmt = RxGetKmtThunks();
     D3DKMT_QUERYRESOURCEINFO Query = {};
     D3DKMT_OPENRESOURCE Open = {};
     D3D10DDIARG_OPENRESOURCE Args = {};
-    D3D10DDI_HRTRESOURCE RuntimeHandle;
     std::vector<D3DDDI_OPENALLOCATIONINFO> Allocations;
     std::vector<BYTE> RuntimeData;
     std::vector<BYTE> ResourceData;
     std::vector<BYTE> AllocationData;
     NTSTATUS Status;
-    SIZE_T Size;
-    HRESULT hr;
 
+    if (Runtime == nullptr)
+        return E_OUTOFMEMORY;
     if (Kmt->QueryResourceInfo == nullptr || Kmt->OpenResource == nullptr)
         return DXGI_ERROR_UNSUPPORTED;
 
@@ -223,14 +245,118 @@ DdiResource::OpenShared(
 
     Runtime->KmResource = Open.hResource;
     Runtime->IsOpened = TRUE;
+    Runtime->ShareKind = RxShareKind::GlobalHandle;
+    Runtime->GlobalShare = GlobalShare;
+    RxCopySharedRecord(RuntimeData.data(), Query.PrivateRuntimeDataSize, Record);
 
-    /* The runtime data belongs to whoever created the surface; the UMD only needs its own */
     Args.NumAllocations = Open.NumAllocations;
     Args.pOpenAllocationInfo = Allocations.data();
     Args.hKMResource.handle = Open.hResource;
     Args.pPrivateDriverData = ResourceData.data();
     Args.PrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
+    return OpenDriverResource(Args);
+}
 
+HRESULT
+DdiResource::OpenSharedNt(
+    _In_ HANDLE NtHandle,
+    _Out_opt_ RxSharedTextureRecord* Record)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE Query = {};
+    D3DKMT_OPENRESOURCEFROMNTHANDLE Open = {};
+    D3DKMT_DESTROYKEYEDMUTEX DestroyMutex = {};
+    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT DestroySync = {};
+    D3D10DDIARG_OPENRESOURCE Args = {};
+    std::vector<D3DDDI_OPENALLOCATIONINFO2> Opened;
+    std::vector<D3DDDI_OPENALLOCATIONINFO> Allocations;
+    std::vector<BYTE> RuntimeData;
+    std::vector<BYTE> ResourceData;
+    std::vector<BYTE> AllocationData;
+    NTSTATUS Status;
+    UINT Index;
+
+    if (Runtime == nullptr)
+        return E_OUTOFMEMORY;
+    if (Kmt->QueryResourceInfoFromNtHandle == nullptr || Kmt->OpenResourceFromNtHandle == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Query.hDevice = Device.GetKmDevice();
+    Query.hNtHandle = NtHandle;
+    Status = Kmt->QueryResourceInfoFromNtHandle(&Query);
+    if (!NT_SUCCESS(Status))
+        return RxHresultFromStatus(Status);
+
+    Opened.resize(Query.NumAllocations);
+    RuntimeData.resize(std::max(Query.PrivateRuntimeDataSize, 1u));
+    ResourceData.resize(std::max(Query.ResourcePrivateDriverDataSize, 1u));
+    AllocationData.resize(std::max(Query.TotalPrivateDriverDataSize, 1u));
+
+    Open.hDevice = Device.GetKmDevice();
+    Open.hNtHandle = NtHandle;
+    Open.NumAllocations = Query.NumAllocations;
+    Open.pOpenAllocationInfo2 = Opened.data();
+    Open.pPrivateRuntimeData = RuntimeData.data();
+    Open.PrivateRuntimeDataSize = Query.PrivateRuntimeDataSize;
+    Open.pResourcePrivateDriverData = ResourceData.data();
+    Open.ResourcePrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
+    Open.pTotalPrivateDriverDataBuffer = AllocationData.data();
+    Open.TotalPrivateDriverDataBufferSize = Query.TotalPrivateDriverDataSize;
+    Status = Kmt->OpenResourceFromNtHandle(&Open);
+    if (!NT_SUCCESS(Status))
+        return RxHresultFromStatus(Status);
+
+    Runtime->KmResource = Open.hResource;
+    Runtime->IsOpened = TRUE;
+    Runtime->ShareKind = RxShareKind::NtHandle;
+    RxCopySharedRecord(RuntimeData.data(), Query.PrivateRuntimeDataSize, Record);
+
+    /* Keyed mutexes are not supported, so whatever came along with the resource is closed */
+    if (Open.hKeyedMutex != 0 && Kmt->DestroyKeyedMutex != nullptr)
+    {
+        DestroyMutex.hKeyedMutex = Open.hKeyedMutex;
+        Kmt->DestroyKeyedMutex(&DestroyMutex);
+    }
+    if (Open.hSyncObject != 0)
+    {
+        DestroySync.hSyncObject = Open.hSyncObject;
+        Kmt->DestroySynchronizationObject(&DestroySync);
+    }
+
+    /* Before WDDM 2.0 the UMD takes the older allocation list, whose fields lead the newer one */
+    Args.NumAllocations = Open.NumAllocations;
+    if (Device.GetAdapter().GetRevision()->Interface >= D3DWDDM2_0_DDI_INTERFACE_VERSION)
+    {
+        Args.pOpenAllocationInfo2 = Opened.data();
+    }
+    else
+    {
+        Allocations.resize(Open.NumAllocations);
+        for (Index = 0; Index < Open.NumAllocations; Index++)
+        {
+            Allocations[Index].hAllocation = Opened[Index].hAllocation;
+            Allocations[Index].pPrivateDriverData = Opened[Index].pPrivateDriverData;
+            Allocations[Index].PrivateDriverDataSize = Opened[Index].PrivateDriverDataSize;
+        }
+        Args.pOpenAllocationInfo = Allocations.data();
+    }
+
+    Args.hKMResource.handle = Open.hResource;
+    Args.pPrivateDriverData = ResourceData.data();
+    Args.PrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
+    return OpenDriverResource(Args);
+}
+
+HRESULT
+DdiResource::OpenDriverResource(
+    _In_ const D3D10DDIARG_OPENRESOURCE& Args)
+{
+    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
+    D3D10DDI_HRTRESOURCE RuntimeHandle;
+    SIZE_T Size;
+    HRESULT hr;
+
+    /* The runtime data belongs to whoever created the surface; the UMD only needs its own */
     Size = Funcs.pfnCalcPrivateOpenedResourceSize(Device.GetDriverDevice(), &Args);
     Memory = _aligned_malloc(Size ? Size : 1, 16);
     if (Memory == nullptr)

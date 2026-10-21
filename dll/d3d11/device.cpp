@@ -487,6 +487,55 @@ RxDevice::CreateTexture2D(
     return S_OK;
 }
 
+/* Opens a shared texture and hands out the interface asked for; every failure to open is E_INVALIDARG */
+static
+HRESULT
+RxOpenSharedTexture(
+    _In_ RxDevice& Device,
+    _In_ HANDLE SharedHandle,
+    _In_ BOOLEAN IsNtHandle,
+    _In_ REFIID riid,
+    _Outptr_result_maybenull_ void** ppResource)
+{
+    RxTexture2D* Texture;
+    HRESULT hr;
+
+    if (ppResource == nullptr || SharedHandle == NULL)
+        return E_INVALIDARG;
+
+    *ppResource = nullptr;
+    hr = RxTexture2D::Open(Device, SharedHandle, IsNtHandle, &Texture);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"OpenSharedResource%s failed 0x%08lX", IsNtHandle ? L"1" : L"", hr);
+        return (hr == E_OUTOFMEMORY) ? hr : E_INVALIDARG;
+    }
+
+    hr = Texture->QueryInterface(riid, ppResource);
+    Texture->Release();
+    return hr;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice::OpenSharedResource(
+    _In_ HANDLE hResource,
+    _In_ REFIID ReturnedInterface,
+    _COM_Outptr_opt_ void** ppResource)
+{
+    return RxOpenSharedTexture(*this, hResource, FALSE, ReturnedInterface, ppResource);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice::OpenSharedResource1(
+    _In_ HANDLE hResource,
+    _In_ REFIID returnedInterface,
+    _COM_Outptr_ void** ppResource)
+{
+    return RxOpenSharedTexture(*this, hResource, TRUE, returnedInterface, ppResource);
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDevice::GetPrivateData(

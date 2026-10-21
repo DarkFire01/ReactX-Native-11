@@ -146,7 +146,17 @@ public:
         _Outptr_ RxTexture** Texture,
         _In_ UINT ExtraDdiBindFlags = 0,
         _In_ UINT ExtraDdiMiscFlags = 0,
-        _In_opt_ const RxSharedTextureRecord* SharedRecord = nullptr);
+        _In_opt_ const RxSharedTextureRecord* SharedRecord = nullptr,
+        _In_opt_ const DXGI_DDI_PRIMARY_DESC* PrimaryDesc = nullptr);
+
+    /* Opens a texture another device shared; only 2D textures can be opened */
+    static
+    HRESULT
+    Open(
+        _In_ RxDevice& Device,
+        _In_ HANDLE SharedHandle,
+        _In_ BOOLEAN IsNtHandle,
+        _Outptr_ RxTexture** Texture);
 
     HRESULT
     STDMETHODCALLTYPE
