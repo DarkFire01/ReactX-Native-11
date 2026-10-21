@@ -19,6 +19,14 @@ typedef HRESULT (WINAPI* PFN_RX_GET_WINDOW_SHARED_SURFACE)(
     _Out_ HANDLE* SharedSurface,
     _Out_opt_ UINT64* UpdateId);
 
+/* dwmapi shows what a presenter drew into that surface */
+typedef HRESULT (WINAPI* PFN_RX_UPDATE_WINDOW_SHARED_SURFACE)(
+    _In_ HWND Window,
+    _In_ UINT64 UpdateId,
+    _In_ DWORD Flags,
+    _In_opt_ HMONITOR Monitor,
+    _In_opt_ const RECT* Update);
+
 /* Flags for the call above: always set, and set when the present waits for a DWM frame */
 constexpr DWORD RxSharedSurfaceDefault = 0x10;
 constexpr DWORD RxSharedSurfaceSyncToDwm = 0x01;
@@ -43,6 +51,21 @@ RxGetSharedSurfaceRoutine(VOID)
         HMODULE Dwm = LoadLibraryExW(L"dwmapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
         return Dwm ? reinterpret_cast<PFN_RX_GET_WINDOW_SHARED_SURFACE>(GetProcAddress(Dwm, "DwmpDxGetWindowSharedSurface"))
+                   : nullptr;
+    }();
+
+    return Routine;
+}
+
+static
+PFN_RX_UPDATE_WINDOW_SHARED_SURFACE
+RxUpdateSharedSurfaceRoutine(VOID)
+{
+    static PFN_RX_UPDATE_WINDOW_SHARED_SURFACE Routine = []()
+    {
+        HMODULE Dwm = LoadLibraryExW(L"dwmapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+        return Dwm ? reinterpret_cast<PFN_RX_UPDATE_WINDOW_SHARED_SURFACE>(GetProcAddress(Dwm, "DwmpDxUpdateWindowSharedSurface"))
                    : nullptr;
     }();
 
@@ -470,6 +493,15 @@ RxSwapChain::PresentByCopy(
     /* The kernel copied nothing because nothing of the window shows */
     if (SUCCEEDED(hr) && Context->KernelStatus == STATUS_GRAPHICS_PRESENT_OCCLUDED)
         hr = DXGI_STATUS_OCCLUDED;
+
+    /* DWM keeps showing the window's GDI contents until it hears the frame is in its surface */
+    if (hr == S_OK && Kind == Redirection::Surface && RxUpdateSharedSurfaceRoutine() != nullptr)
+    {
+        HRESULT UpdateHr = RxUpdateSharedSurfaceRoutine()(Window, UpdateId, 0, NULL, &Context->SourceRect);
+
+        if (FAILED(UpdateHr))
+            RX_TRACE(L"DWM did not take update %llu for window %p (0x%08lX)", UpdateId, Window, UpdateHr);
+    }
 
     /* The copy is queued behind the frame's rendering, so the frame slot is free again */
     if (SUCCEEDED(hr) && LatencySemaphore != NULL)

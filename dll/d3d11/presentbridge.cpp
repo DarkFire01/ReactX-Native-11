@@ -74,6 +74,9 @@ public:
         return Resource.get();
     }
 
+    /* What the opener of the surface described it as */
+    RxSharedTextureRecord Record = {};
+
 private:
     ~RxPresentTarget()
     {
@@ -231,7 +234,7 @@ RxPresentBridge::OpenPresentTarget(
     if (Opened == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Opened->GetResource() ? Opened->GetResource()->OpenShared((D3DKMT_HANDLE)(ULONG_PTR)SharedHandle)
+    hr = Opened->GetResource() ? Opened->GetResource()->OpenShared((D3DKMT_HANDLE)(ULONG_PTR)SharedHandle, &Opened->Record)
                                : E_OUTOFMEMORY;
     if (FAILED(hr))
     {
@@ -257,6 +260,22 @@ RxPresentBridge::SubmitPresent(
 
     if (Source == nullptr || (Target != nullptr && Destination == nullptr))
         return DXGI_ERROR_INVALID_CALL;
+
+    /* Not every KMD's present blt writes a destination that is not a primary, so a copy the
+       shape allows is done first and the present only tells the kernel about the frame */
+    if (Destination != nullptr && Destination->GetResource() != nullptr)
+    {
+        D3D11_TEXTURE2D_DESC SourceDesc;
+
+        Source->GetDesc(&SourceDesc);
+        if (SourceDesc.Width == Destination->Record.Width && SourceDesc.Height == Destination->Record.Height &&
+            SourceDesc.Format == Destination->Record.Format && SourceDesc.SampleDesc.Count == 1)
+        {
+            Device.GetDeviceFuncs().pfnResourceCopy(Device.GetDriverDevice(), Destination->GetResource()->GetHandle(),
+                                                    Source->GetDdiResource().GetHandle());
+            Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+        }
+    }
 
     Args.hDevice = (DXGI_DDI_HDEVICE)Device.GetDriverDevice().pDrvPrivate;
     Args.hSurfaceToPresent = (DXGI_DDI_HRESOURCE)Source->GetDdiResource().GetHandle().pDrvPrivate;
