@@ -28,6 +28,7 @@ struct TdOptions
     std::wstring Runtime = L"system";
     std::wstring Capture;
     UINT Frames = 60;
+    BOOLEAN Blt = FALSE;
 };
 
 static
@@ -71,6 +72,8 @@ TdParseOptions(
             Options.Frames = (UINT)std::max(0, _wtoi(argv[++Index]));
         else if (_wcsicmp(argv[Index], L"-capture") == 0 && Index + 1 < argc)
             Options.Capture = argv[++Index];
+        else if (_wcsicmp(argv[Index], L"-blt") == 0)
+            Options.Blt = TRUE;
         else if (argv[Index][0] != L'-' && Options.Scene == nullptr)
             Options.Scene = TdFindScene(argv[Index]);
         else
@@ -125,6 +128,7 @@ HRESULT
 TdCreateSwapChain(
     _In_ ID3D11Device* Device,
     _In_ HWND Window,
+    _In_ BOOLEAN Blt,
     _Outptr_ IDXGISwapChain1** SwapChain)
 {
     DXGI_SWAP_CHAIN_DESC1 Desc = {};
@@ -145,7 +149,7 @@ TdCreateSwapChain(
     Desc.SampleDesc.Count = 1;
     Desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     Desc.BufferCount = 2;
-    Desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    Desc.SwapEffect = Blt ? DXGI_SWAP_EFFECT_DISCARD : DXGI_SWAP_EFFECT_FLIP_DISCARD;
     return TdCheck(Factory->CreateSwapChainForHwnd(Device, Window, &Desc, nullptr, nullptr, SwapChain),
                    "CreateSwapChainForHwnd");
 }
@@ -292,7 +296,7 @@ wmain(
 
     if (!TdParseOptions(argc, argv, Options))
     {
-        fwprintf(stderr, L"usage: tinyd3d <scene> [-runtime system|reactx|<path>] [-frames N] [-capture out.bmp]\n");
+        fwprintf(stderr, L"usage: tinyd3d <scene> [-runtime system|reactx|<path>] [-frames N] [-capture out.bmp] [-blt]\n");
         fwprintf(stderr, L"       tinyd3d -list\n");
         return 2;
     }
@@ -315,7 +319,7 @@ wmain(
         return 1;
 
     Window = TdCreateWindow(Options.Scene->Name);
-    if (Window == NULL || FAILED(TdCreateSwapChain(Device.Get(), Window, &SwapChain)))
+    if (Window == NULL || FAILED(TdCreateSwapChain(Device.Get(), Window, Options.Blt, &SwapChain)))
         return 1;
 
     if (FAILED(TdCheck(SwapChain->GetBuffer(0, IID_PPV_ARGS(&BackBuffer)), "GetBuffer")) ||
