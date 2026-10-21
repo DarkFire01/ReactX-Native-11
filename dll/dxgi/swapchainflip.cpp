@@ -165,9 +165,14 @@ RxSwapChain::BindBuffers()
     NTSTATUS Status;
     HRESULT hr;
 
+    /* Drivers before monitored fences have none to give; presents then go without one */
     hr = Device->CreateFlipFence(&FlipFence, &FlipFenceHandle);
     if (FAILED(hr))
-        return hr;
+    {
+        RX_TRACE(L"no flip fence (0x%08lX), presenting without one", hr);
+        FlipFence = 0;
+        FlipFenceHandle = NULL;
+    }
 
     /* Each buffer goes to the compositor as an NT handle to its kernel resource */
     for (Index = 0; Index < Buffers.size(); Index++)
@@ -175,6 +180,7 @@ RxSwapChain::BindBuffers()
         hr = Device->ShareBuffer(Buffers[Index], &Shared);
         if (FAILED(hr))
         {
+            RX_TRACE(L"buffer %u could not be shared 0x%08lX", Index, hr);
             UnbindBuffers();
             return hr;
         }
@@ -278,8 +284,9 @@ RxSwapChain::PresentFlip(
     Token->Model = D3DKMT_PM_REDIRECTED_FLIP;
     Token->CompositionBindingId = BindingId;
     Flip = &Token->Token.Flip;
-    /* An unsequenced present shows the last buffer again without moving the chain */
-    Flip->FenceValue = IsSequenced ? FenceValue + 1 : FenceValue;
+    /* An unsequenced present shows the last buffer again without moving the chain; without a fence there is nothing to wait for */
+    if (FlipFenceHandle != NULL)
+        Flip->FenceValue = IsSequenced ? FenceValue + 1 : FenceValue;
     Flip->hLogicalSurface = (ULONG64)(ULONG_PTR)CompositionSurface;
     Flip->SwapChainIndex = IsSequenced ? CurrentIndex : PresentedIndex;
     Flip->PresentLimitSemaphoreId = 1;

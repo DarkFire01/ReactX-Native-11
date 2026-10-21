@@ -245,6 +245,7 @@ RxSwapChain::AllocateBuffers()
         hr = Device->CreatePresentBuffer(&Desc, static_cast<IDXGISwapChain4*>(this), &Buffer);
         if (FAILED(hr))
         {
+            RX_TRACE(L"buffer %u could not be created 0x%08lX", Index, hr);
             ReleaseBuffers();
             return hr;
         }
