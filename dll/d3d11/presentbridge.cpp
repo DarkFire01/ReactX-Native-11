@@ -478,8 +478,26 @@ RxPresentBridge::PresentFlip(
     DXGI_DDI_ARG_PRESENTSURFACE Surface = {};
     HRESULT hr;
 
-    if (Source == nullptr || Device.GetDxgiFuncs().pfnPresent1 == nullptr)
+    if (Source == nullptr)
         return DXGI_ERROR_INVALID_CALL;
+
+    /* Drivers before the DXGI 1.2 DDI only have Present, which can also present with no destination */
+    if (Device.GetDxgiFuncs().pfnPresent1 == nullptr)
+    {
+        DXGI_DDI_ARG_PRESENT Legacy = {};
+
+        Legacy.hDevice = (DXGI_DDI_HDEVICE)Device.GetDriverDevice().pDrvPrivate;
+        Legacy.hSurfaceToPresent = (DXGI_DDI_HRESOURCE)Source->GetDdiResource().GetHandle().pDrvPrivate;
+        Legacy.pDXGIContext = Context;
+        Legacy.Flags.Blt = 1;
+        Legacy.FlipInterval = DXGI_DDI_FLIP_INTERVAL_IMMEDIATE;
+        hr = Device.GetDxgiFuncs().pfnPresent(&Legacy);
+        if (SUCCEEDED(hr))
+            hr = Device.TakeDriverError();
+        if (FAILED(hr))
+            RX_TRACE(L"UMD Present failed 0x%08lX", hr);
+        return RxApiResult(hr);
+    }
 
     /* No destination: the kernel flip takes the buffer itself to the compositor */
     Surface.hSurface = (DXGI_DDI_HRESOURCE)Source->GetDdiResource().GetHandle().pDrvPrivate;
