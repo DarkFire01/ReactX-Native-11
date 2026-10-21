@@ -116,6 +116,24 @@ RxGetCompositionRoutines(VOID)
     return &Routines;
 }
 
+/* A window's flip buffers only show while DWM composes the desktop */
+static
+BOOLEAN
+RxIsDesktopComposed(VOID)
+{
+    typedef HRESULT (WINAPI* PFN_RX_IS_COMPOSITION_ENABLED)(_Out_ BOOL* Enabled);
+    static PFN_RX_IS_COMPOSITION_ENABLED Routine = []()
+    {
+        HMODULE Dwm = LoadLibraryExW(L"dwmapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+        return Dwm ? reinterpret_cast<PFN_RX_IS_COMPOSITION_ENABLED>(GetProcAddress(Dwm, "DwmIsCompositionEnabled"))
+                   : nullptr;
+    }();
+    BOOL Enabled = FALSE;
+
+    return Routine != nullptr && SUCCEEDED(Routine(&Enabled)) && Enabled;
+}
+
 template <typename Value>
 static
 VOID
@@ -145,7 +163,14 @@ RxSwapChain::OpenCompositionSurface()
         return S_FALSE;
     }
 
-    return Routines->CreateSurfaceHandle(RxSurfaceAllAccess, nullptr, &CompositionSurface);
+    /* Nothing would show the buffers, so the window is presented to directly */
+    if (Window != NULL && !RxIsDesktopComposed())
+        return S_FALSE;
+
+    HRESULT hr = Routines->CreateSurfaceHandle(RxSurfaceAllAccess, nullptr, &CompositionSurface);
+    if (FAILED(hr))
+        RX_TRACE(L"composition surface could not be created 0x%08lX", hr);
+    return hr;
 }
 
 HRESULT

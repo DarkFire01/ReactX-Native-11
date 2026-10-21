@@ -278,6 +278,15 @@ RxSwapChain::AllocateBuffers()
     if (UsesFlipPresent())
     {
         hr = BindBuffers();
+
+        /* A window DWM would not take the buffers for still gets them copied into its surface */
+        if (FAILED(hr) && Window != NULL)
+        {
+            RX_TRACE(L"window %p takes no flip buffers (0x%08lX), copying instead", Window, hr);
+            CloseHandle(CompositionSurface);
+            CompositionSurface = NULL;
+            hr = S_OK;
+        }
         if (FAILED(hr))
         {
             ReleaseBuffers();
