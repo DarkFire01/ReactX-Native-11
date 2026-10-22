@@ -612,6 +612,7 @@ RxCreateHwQueueCb(
     }
 
     RX_TRACE(L"hardware queue 0x%X on context 0x%X", Create.hHwQueue, Create.hHwContext);
+    RxKernelDeviceFromHandle(hDevice).NoteKernelQueue(Create.hHwContext, Create.hHwQueue);
 
     Args->hHwQueue = (HANDLE)(ULONG_PTR)Create.hHwQueue;
     Args->hHwQueueProgressFence = Create.hHwQueueProgressFence;
@@ -627,11 +628,16 @@ RxDestroyHwQueueCb(
     _In_ const D3DDDICB_DESTROYHWQUEUE* Args)
 {
     D3DKMT_DESTROYHWQUEUE Destroy;
+    NTSTATUS Status;
 
     RX_REQUIRE_THUNK(DestroyHwQueue);
 
     Destroy.hHwQueue = RxKmQueue(Args->hHwQueue);
-    return RxHresultFromStatus(RxGetKmtThunks()->DestroyHwQueue(&Destroy));
+    Status = RxGetKmtThunks()->DestroyHwQueue(&Destroy);
+    if (NT_SUCCESS(Status))
+        RxKernelDeviceFromHandle(hDevice).ForgetKernelQueue(Destroy.hHwQueue);
+
+    return RxHresultFromStatus(Status);
 }
 
 HRESULT

@@ -87,8 +87,8 @@ DdiResource::~DdiResource()
     if (Runtime == nullptr)
         return;
 
-    /* An opened resource has no allocations of ours, so the runtime closes it */
-    if (Runtime->IsOpened && Runtime->KmResource != 0)
+    /* The driver deallocates what it opened, maybe later on a thread of its own; one it never took is ours to close */
+    if (Runtime->IsOpened && !IsCreated && Runtime->KmResource != 0)
     {
         Destroy.hDevice = Device.GetKmDevice();
         Destroy.hResource = Runtime->KmResource;
@@ -96,7 +96,7 @@ DdiResource::~DdiResource()
         Runtime->KmResource = 0;
     }
 
-    /* Created ones may still be deallocated by the driver later; the device keeps the record until then */
+    /* The driver may still deallocate later, so the device keeps the record until then */
     Device.RetireRuntimeResource(Runtime);
 }
 
@@ -182,6 +182,115 @@ DdiResource::CreateTexture(
     return Create(Args);
 }
 
+NTSTATUS
+RxCreateKeyedMutex(
+    _In_ RxDevice& Device,
+    _Inout_ RxRuntimeResource& Resource)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_CREATEKEYEDMUTEX2 Mutex = {};
+    D3DKMT_CREATESYNCHRONIZATIONOBJECT2 Sync = {};
+    D3DKMT_DESTROYKEYEDMUTEX DestroyMutex = {};
+    BOOLEAN IsNtShared = Resource.ShareKind != RxShareKind::GlobalHandle;
+    UINT PrivateData = 0;
+    NTSTATUS Status;
+
+    if (Kmt->CreateKeyedMutex2 == nullptr || Kmt->CreateSynchronizationObject2 == nullptr)
+        return STATUS_NOT_SUPPORTED;
+
+    /* The first acquirer asks for key 0 */
+    Mutex.InitialValue = 0;
+    Mutex.pPrivateRuntimeData = &PrivateData;
+    Mutex.PrivateRuntimeDataSize = sizeof(PrivateData);
+    Mutex.Flags.NtSecuritySharing = IsNtShared;
+    Status = Kmt->CreateKeyedMutex2(&Mutex);
+    if (!NT_SUCCESS(Status))
+    {
+        RX_TRACE(L"D3DKMTCreateKeyedMutex2 failed 0x%08lX", Status);
+        return Status;
+    }
+
+    Sync.hDevice = Device.GetKmDevice();
+    Sync.Info.Type = D3DDDI_FENCE;
+    Sync.Info.Flags.Shared = TRUE;
+    Sync.Info.Flags.NtSecuritySharing = IsNtShared;
+    Status = Kmt->CreateSynchronizationObject2(&Sync);
+    if (!NT_SUCCESS(Status))
+    {
+        RX_TRACE(L"D3DKMTCreateSynchronizationObject2 for a keyed mutex failed 0x%08lX", Status);
+        DestroyMutex.hKeyedMutex = Mutex.hKeyedMutex;
+        Kmt->DestroyKeyedMutex(&DestroyMutex);
+        return Status;
+    }
+
+    /* Openers find both through the record; NT handle sharing has no global handles to write */
+    Resource.KeyedMutex = Mutex.hKeyedMutex;
+    Resource.SyncObject = Sync.hSyncObject;
+    Resource.Shared.Constants[RxSharedRecordKeyedMutexShareIndex] = Mutex.hSharedHandle;
+    Resource.Shared.Constants[RxSharedRecordSyncObjectShareIndex] = Sync.Info.SharedHandle;
+    return STATUS_SUCCESS;
+}
+
+VOID
+RxCloseKeyedMutex(
+    _Inout_ RxRuntimeResource& Resource)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT DestroySync = {};
+    D3DKMT_DESTROYKEYEDMUTEX DestroyMutex = {};
+
+    if (Resource.SyncObject != 0)
+    {
+        DestroySync.hSyncObject = Resource.SyncObject;
+        Kmt->DestroySynchronizationObject(&DestroySync);
+        Resource.SyncObject = 0;
+    }
+
+    if (Resource.KeyedMutex != 0 && Kmt->DestroyKeyedMutex != nullptr)
+    {
+        DestroyMutex.hKeyedMutex = Resource.KeyedMutex;
+        Kmt->DestroyKeyedMutex(&DestroyMutex);
+    }
+    Resource.KeyedMutex = 0;
+}
+
+/* Opens the creator's keyed mutex and fence by the global handles in its record; without both the texture has none */
+static
+VOID
+RxOpenKeyedMutex(
+    _Inout_ RxRuntimeResource& Resource,
+    _In_ const RxSharedTextureRecord& Record)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_OPENKEYEDMUTEX2 Mutex = {};
+    D3DKMT_OPENSYNCHRONIZATIONOBJECT Sync = {};
+    D3DKMT_DESTROYKEYEDMUTEX DestroyMutex = {};
+    UINT PrivateData = 0;
+
+    if (Record.Constants[RxSharedRecordKeyedMutexIndex] == 0 || Kmt->OpenKeyedMutex2 == nullptr ||
+        Kmt->OpenSynchronizationObject == nullptr)
+    {
+        return;
+    }
+
+    Mutex.hSharedHandle = Record.Constants[RxSharedRecordKeyedMutexShareIndex];
+    Mutex.pPrivateRuntimeData = &PrivateData;
+    Mutex.PrivateRuntimeDataSize = sizeof(PrivateData);
+    if (!NT_SUCCESS(Kmt->OpenKeyedMutex2(&Mutex)))
+        return;
+
+    Sync.hSharedHandle = Record.Constants[RxSharedRecordSyncObjectShareIndex];
+    if (!NT_SUCCESS(Kmt->OpenSynchronizationObject(&Sync)))
+    {
+        DestroyMutex.hKeyedMutex = Mutex.hKeyedMutex;
+        Kmt->DestroyKeyedMutex(&DestroyMutex);
+        return;
+    }
+
+    Resource.KeyedMutex = Mutex.hKeyedMutex;
+    Resource.SyncObject = Sync.hSyncObject;
+}
+
 /* Copies what the creator stored with a shared resource; whatever it did not write stays zero */
 static
 VOID
@@ -206,6 +315,7 @@ DdiResource::OpenShared(
     D3DKMT_QUERYRESOURCEINFO Query = {};
     D3DKMT_OPENRESOURCE Open = {};
     D3D10DDIARG_OPENRESOURCE Args = {};
+    RxSharedTextureRecord Opened;
     std::vector<D3DDDI_OPENALLOCATIONINFO> Allocations;
     std::vector<BYTE> RuntimeData;
     std::vector<BYTE> ResourceData;
@@ -247,7 +357,10 @@ DdiResource::OpenShared(
     Runtime->IsOpened = TRUE;
     Runtime->ShareKind = RxShareKind::GlobalHandle;
     Runtime->GlobalShare = GlobalShare;
-    RxCopySharedRecord(RuntimeData.data(), Query.PrivateRuntimeDataSize, Record);
+    RxCopySharedRecord(RuntimeData.data(), Query.PrivateRuntimeDataSize, &Opened);
+    RxOpenKeyedMutex(*Runtime, Opened);
+    if (Record != nullptr)
+        *Record = Opened;
 
     Args.NumAllocations = Open.NumAllocations;
     Args.pOpenAllocationInfo = Allocations.data();
@@ -265,9 +378,8 @@ DdiResource::OpenSharedNt(
     const KmtThunks* Kmt = RxGetKmtThunks();
     D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE Query = {};
     D3DKMT_OPENRESOURCEFROMNTHANDLE Open = {};
-    D3DKMT_DESTROYKEYEDMUTEX DestroyMutex = {};
-    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT DestroySync = {};
     D3D10DDIARG_OPENRESOURCE Args = {};
+    UINT MutexPrivateData = 0;
     std::vector<D3DDDI_OPENALLOCATIONINFO2> Opened;
     std::vector<D3DDDI_OPENALLOCATIONINFO> Allocations;
     std::vector<BYTE> RuntimeData;
@@ -302,26 +414,19 @@ DdiResource::OpenSharedNt(
     Open.ResourcePrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
     Open.pTotalPrivateDriverDataBuffer = AllocationData.data();
     Open.TotalPrivateDriverDataBufferSize = Query.TotalPrivateDriverDataSize;
+    Open.pKeyedMutexPrivateRuntimeData = &MutexPrivateData;
+    Open.KeyedMutexPrivateRuntimeDataSize = sizeof(MutexPrivateData);
     Status = Kmt->OpenResourceFromNtHandle(&Open);
     if (!NT_SUCCESS(Status))
         return RxHresultFromStatus(Status);
 
+    /* A keyed mutex and its fence travel in the same NT handle as the resource */
     Runtime->KmResource = Open.hResource;
     Runtime->IsOpened = TRUE;
     Runtime->ShareKind = RxShareKind::NtHandle;
+    Runtime->KeyedMutex = Open.hKeyedMutex;
+    Runtime->SyncObject = Open.hSyncObject;
     RxCopySharedRecord(RuntimeData.data(), Query.PrivateRuntimeDataSize, Record);
-
-    /* Keyed mutexes are not supported, so whatever came along with the resource is closed */
-    if (Open.hKeyedMutex != 0 && Kmt->DestroyKeyedMutex != nullptr)
-    {
-        DestroyMutex.hKeyedMutex = Open.hKeyedMutex;
-        Kmt->DestroyKeyedMutex(&DestroyMutex);
-    }
-    if (Open.hSyncObject != 0)
-    {
-        DestroySync.hSyncObject = Open.hSyncObject;
-        Kmt->DestroySynchronizationObject(&DestroySync);
-    }
 
     /* Before WDDM 2.0 the UMD takes the older allocation list, whose fields lead the newer one */
     Args.NumAllocations = Open.NumAllocations;
@@ -473,6 +578,110 @@ DdiResource::Unmap(
     _In_ UINT Subresource)
 {
     Device.GetDeviceFuncs().pfnResourceUnmap(Device.GetDriverDevice(), Handle, Subresource);
+}
+
+HRESULT
+DdiResource::AcquireSync(
+    _In_ UINT64 Key,
+    _In_ DWORD Milliseconds)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_ACQUIREKEYEDMUTEX2 Acquire = {};
+    LARGE_INTEGER Timeout;
+    UINT PrivateData = 0;
+    NTSTATUS Status;
+    HRESULT hr;
+
+    if (!HasKeyedMutex() || IsSyncAcquired || Kmt->AcquireKeyedMutex2 == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* Work recorded before the acquire goes out first, so it does not end up behind the GPU wait */
+    Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+
+    Acquire.hKeyedMutex = Runtime->KeyedMutex;
+    Acquire.Key = Key;
+    if (Milliseconds != INFINITE)
+    {
+        Timeout.QuadPart = -10000LL * Milliseconds;
+        Acquire.pTimeout = &Timeout;
+    }
+    Acquire.pPrivateRuntimeData = &PrivateData;
+    Acquire.PrivateRuntimeDataSize = sizeof(PrivateData);
+    Status = Kmt->AcquireKeyedMutex2(&Acquire);
+
+    /* A timeout or an abandoned mutex is reported as it is, without taking ownership */
+    if (Status != STATUS_SUCCESS)
+        return RxHresultFromStatus(Status);
+
+    IsSyncAcquired = TRUE;
+    SyncFenceValue = Acquire.FenceValue;
+
+    /* Our GPU work starts after the last owner's has finished; a lost device leaves the contents abandoned */
+    if (SyncFenceValue != 0 && Runtime->SyncObject != 0)
+    {
+        hr = Device.WaitForFenceOnGpu(Runtime->SyncObject, SyncFenceValue);
+        if (hr == D3DDDIERR_DEVICEREMOVED)
+            return (HRESULT)WAIT_ABANDONED;
+        if (FAILED(hr))
+            return hr;
+    }
+
+    return S_OK;
+}
+
+HRESULT
+DdiResource::ReleaseSync(
+    _In_ UINT64 Key)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    const DXGI1_6_1_DDI_BASE_FUNCTIONS& DxgiFuncs = Device.GetDxgiFuncs();
+    DXGI_DDI_ARG_RESOLVESHAREDRESOURCE Resolve;
+    D3DKMT_RELEASEKEYEDMUTEX2 Release = {};
+    UINT PrivateData = 0;
+    NTSTATUS Status;
+    HRESULT hr;
+
+    if (!HasKeyedMutex() || !IsSyncAcquired || Kmt->ReleaseKeyedMutex2 == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* The driver finishes anything it keeps private to this device, such as compression, first */
+    if (DxgiFuncs.pfnResolveSharedResource != nullptr)
+    {
+        Resolve.hDevice = (DXGI_DDI_HDEVICE)Device.GetDriverDevice().pDrvPrivate;
+        Resolve.hResource = (DXGI_DDI_HRESOURCE)Handle.pDrvPrivate;
+        hr = DxgiFuncs.pfnResolveSharedResource(&Resolve);
+        if (FAILED(hr))
+            RX_TRACE(L"UMD ResolveSharedResource failed 0x%08lX", hr);
+    }
+
+    /* The next owner waits for the fence value signaled after all of our work */
+    Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+    Release.FenceValue = 0;
+    if (Runtime->SyncObject != 0)
+    {
+        hr = Device.SignalFenceOnGpu(Runtime->SyncObject, SyncFenceValue + 1);
+        if (FAILED(hr))
+            return hr;
+        if (hr == S_OK)
+        {
+            SyncFenceValue++;
+            Release.FenceValue = SyncFenceValue;
+        }
+    }
+
+    Release.hKeyedMutex = Runtime->KeyedMutex;
+    Release.Key = Key;
+    Release.pPrivateRuntimeData = &PrivateData;
+    Release.PrivateRuntimeDataSize = sizeof(PrivateData);
+    Status = Kmt->ReleaseKeyedMutex2(&Release);
+    if (!NT_SUCCESS(Status))
+    {
+        RX_TRACE(L"D3DKMTReleaseKeyedMutex2 failed 0x%08lX", Status);
+        return RxHresultFromStatus(Status);
+    }
+
+    IsSyncAcquired = FALSE;
+    return S_OK;
 }
 
 _Ret_maybenull_
@@ -635,6 +844,13 @@ RxQueryDxgiSurface(
         Surface.IsSurface())
     {
         *ppvObject = static_cast<IDXGISurface2*>(&Surface);
+        Surface.AddRef();
+        return TRUE;
+    }
+
+    if (riid == __uuidof(IDXGIKeyedMutex) && Surface.HasKeyedMutex())
+    {
+        *ppvObject = static_cast<IDXGIKeyedMutex*>(&Surface);
         Surface.AddRef();
         return TRUE;
     }

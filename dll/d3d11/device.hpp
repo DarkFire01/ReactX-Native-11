@@ -38,8 +38,11 @@ static_assert(sizeof(RxSharedTextureRecord) == 0x68);
 /* The only record version this runtime writes and reads */
 constexpr UINT RxSharedRecordVersion = 4;
 
-/* Record constants: the array size, then flags for NT handle sharing and displayable textures */
+/* Record constants: the array size, the keyed mutex with its fence, then NT handle and displayable flags */
 constexpr UINT RxSharedRecordArraySizeIndex = 0;
+constexpr UINT RxSharedRecordKeyedMutexIndex = 2;
+constexpr UINT RxSharedRecordKeyedMutexShareIndex = 3;
+constexpr UINT RxSharedRecordSyncObjectShareIndex = 4;
 constexpr UINT RxSharedRecordNtHandleIndex = 5;
 constexpr UINT RxSharedRecordDisplayableIndex = 6;
 constexpr UINT RxSharedRecordDisplayableAgainIndex = 8;
@@ -71,7 +74,11 @@ struct RxRuntimeResource
     /* What GetSharedHandle hands out for a resource shared without NT security */
     D3DKMT_HANDLE GlobalShare = 0;
 
-    /* Opened resources are never deallocated by the driver; the runtime closes them itself */
+    /* Keyed mutex textures: the mutex and the fence its owners order their GPU work with, closed with the record */
+    D3DKMT_HANDLE KeyedMutex = 0;
+    D3DKMT_HANDLE SyncObject = 0;
+
+    /* Opened from a shared handle; the runtime closes it only when the driver never opened it */
     BOOLEAN IsOpened = FALSE;
 
     /* The D3D object is gone and the driver still holds the kernel resource */
@@ -796,6 +803,27 @@ public:
         UntrackContext(Context);
     }
 
+    VOID
+    NoteKernelQueue(
+        _In_ D3DKMT_HANDLE KmContext,
+        _In_ D3DKMT_HANDLE KmQueue) override;
+
+    VOID
+    ForgetKernelQueue(
+        _In_ D3DKMT_HANDLE KmQueue) override;
+
+    /* Makes every context of this device wait on the GPU until a fence reaches FenceValue */
+    HRESULT
+    WaitForFenceOnGpu(
+        _In_ D3DKMT_HANDLE SyncObject,
+        _In_ UINT64 FenceValue);
+
+    /* Signals a fence from every context once the work already submitted there is done; S_FALSE without contexts */
+    HRESULT
+    SignalFenceOnGpu(
+        _In_ D3DKMT_HANDLE SyncObject,
+        _In_ UINT64 FenceValue);
+
     D3DKMT_CLIENTHINT
     KernelClientHint() const override
     {
@@ -882,8 +910,16 @@ private:
     SRWLOCK RuntimeResourceLock = SRWLOCK_INIT;
     std::vector<RxRuntimeResource*> OrphanedResources;
 
+    /* Hardware queues belong to a context, and GPU waits go to them instead of to it */
+    struct KernelQueue
+    {
+        D3DKMT_HANDLE Context;
+        D3DKMT_HANDLE Queue;
+    };
+
     SRWLOCK ContextLock = SRWLOCK_INIT;
     std::vector<D3DKMT_HANDLE> KmContexts;
+    std::vector<KernelQueue> KmQueues;
 
     DefaultStates Defaults;
 

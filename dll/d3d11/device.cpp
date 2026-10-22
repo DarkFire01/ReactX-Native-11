@@ -70,6 +70,7 @@ RxDevice::~RxDevice()
             DestroyResource.hResource = Resource->KmResource;
             RxGetKmtThunks()->DestroyAllocation(&DestroyResource);
         }
+        RxCloseKeyedMutex(*Resource);
         delete Resource;
     }
     OrphanedResources.clear();
@@ -93,6 +94,7 @@ RxDevice::RetireRuntimeResource(
     AcquireSRWLockExclusive(&RuntimeResourceLock);
     if (Resource->KmResource == 0)
     {
+        RxCloseKeyedMutex(*Resource);
         delete Resource;
     }
     else
@@ -112,6 +114,7 @@ RxDevice::ReleaseRuntimeResource(
     if (Resource->IsOrphaned)
     {
         std::erase(OrphanedResources, Resource);
+        RxCloseKeyedMutex(*Resource);
         delete Resource;
     }
     ReleaseSRWLockExclusive(&RuntimeResourceLock);

@@ -40,6 +40,26 @@ public:
         UNREFERENCED_PARAMETER(Context);
     }
 
+    /* A hardware queue the UMD made on one of its contexts */
+    virtual
+    VOID
+    NoteKernelQueue(
+        _In_ D3DKMT_HANDLE Context,
+        _In_ D3DKMT_HANDLE Queue)
+    {
+        UNREFERENCED_PARAMETER(Context);
+        UNREFERENCED_PARAMETER(Queue);
+    }
+
+    /* The UMD destroyed a hardware queue it made */
+    virtual
+    VOID
+    ForgetKernelQueue(
+        _In_ D3DKMT_HANDLE Queue)
+    {
+        UNREFERENCED_PARAMETER(Queue);
+    }
+
     /* Which API the kernel is told the contexts are for */
     virtual
     D3DKMT_CLIENTHINT

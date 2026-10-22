@@ -122,6 +122,23 @@ public:
         return Runtime;
     }
 
+    /* Created with a keyed mutex, or opened along with the creator's */
+    BOOLEAN
+    HasKeyedMutex() const
+    {
+        return Runtime != nullptr && Runtime->KeyedMutex != 0;
+    }
+
+    /* IDXGIKeyedMutex::AcquireSync: WAIT_TIMEOUT and WAIT_ABANDONED come back as they are */
+    HRESULT
+    AcquireSync(
+        _In_ UINT64 Key,
+        _In_ DWORD Milliseconds);
+
+    HRESULT
+    ReleaseSync(
+        _In_ UINT64 Key);
+
     /* Opens a resource another process shared through a global share handle */
     HRESULT
     OpenShared(
@@ -199,7 +216,22 @@ private:
     UINT64 WriteCount = 0;
     DXGI_DDI_PRIMARY_DESC PrimaryDesc = {};
     BOOLEAN IsPrimary = FALSE;
+
+    /* This device holds the keyed mutex; the fence value is what the GPU waited for or signals next */
+    BOOLEAN IsSyncAcquired = FALSE;
+    UINT64 SyncFenceValue = 0;
 };
+
+/* Creates the keyed mutex and fence of a texture whose record asks for one, before its allocations */
+NTSTATUS
+RxCreateKeyedMutex(
+    _In_ RxDevice& Device,
+    _Inout_ RxRuntimeResource& Resource);
+
+/* Closes whatever keyed mutex and fence a resource created or opened */
+VOID
+RxCloseKeyedMutex(
+    _Inout_ RxRuntimeResource& Resource);
 
 /* Finds the lifetime of an API resource created by this runtime */
 _Ret_maybenull_

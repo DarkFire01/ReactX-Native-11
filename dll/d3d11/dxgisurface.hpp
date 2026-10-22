@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactX Direct3D 11 runtime
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     The DXGI face of buffers and textures: IDXGIResource and IDXGISurface
+ * PURPOSE:     The DXGI face of buffers and textures: IDXGIResource, IDXGISurface and IDXGIKeyedMutex
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
@@ -13,7 +13,7 @@ class RxDevice;
  * Lives inside the resource it describes and shares its lifetime and identity:
  * reference counting and QueryInterface go to the D3D11 object.
  */
-class RxDxgiSurface final : public IDXGISurface2, public IDXGIResource1
+class RxDxgiSurface final : public IDXGISurface2, public IDXGIResource1, public IDXGIKeyedMutex
 {
 public:
     RxDxgiSurface(
@@ -27,6 +27,10 @@ public:
     /* Buffers and single subresource textures can be used as surfaces */
     BOOLEAN
     IsSurface();
+
+    /* Textures made or opened with a keyed mutex answer IDXGIKeyedMutex */
+    BOOLEAN
+    HasKeyedMutex();
 
     /* Swapchain buffers report the usage the swapchain was made with */
     VOID
@@ -157,6 +161,17 @@ public:
         _In_ REFIID riid,
         _COM_Outptr_ void** ppParentResource,
         _Out_ UINT* pSubresourceIndex) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    AcquireSync(
+        _In_ UINT64 Key,
+        _In_ DWORD dwMilliseconds) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    ReleaseSync(
+        _In_ UINT64 Key) override;
 
 private:
     ID3D11Resource* Owner;

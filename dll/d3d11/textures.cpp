@@ -159,6 +159,9 @@ RxMakeSharedRecord(
         Record.Constants[RxSharedRecordArraySizeIndex] = Desc.ArraySize;
     }
 
+    /* The mutex and fence handles are filled in when the allocation callback creates them */
+    if (Desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)
+        Record.Constants[RxSharedRecordKeyedMutexIndex] = 1;
     if (Desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
         Record.Constants[RxSharedRecordNtHandleIndex] = 1;
     if (Desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE)

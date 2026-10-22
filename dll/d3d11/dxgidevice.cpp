@@ -138,7 +138,110 @@ RxDevice::UntrackContext(
 {
     AcquireSRWLockExclusive(&ContextLock);
     std::erase(KmContexts, KmContext);
+    std::erase_if(KmQueues, [KmContext](const KernelQueue& Each) { return Each.Context == KmContext; });
     ReleaseSRWLockExclusive(&ContextLock);
+}
+
+VOID
+RxDevice::NoteKernelQueue(
+    _In_ D3DKMT_HANDLE KmContext,
+    _In_ D3DKMT_HANDLE KmQueue)
+{
+    AcquireSRWLockExclusive(&ContextLock);
+    KmQueues.push_back({ KmContext, KmQueue });
+    ReleaseSRWLockExclusive(&ContextLock);
+}
+
+VOID
+RxDevice::ForgetKernelQueue(
+    _In_ D3DKMT_HANDLE KmQueue)
+{
+    AcquireSRWLockExclusive(&ContextLock);
+    std::erase_if(KmQueues, [KmQueue](const KernelQueue& Each) { return Each.Queue == KmQueue; });
+    ReleaseSRWLockExclusive(&ContextLock);
+}
+
+HRESULT
+RxDevice::WaitForFenceOnGpu(
+    _In_ D3DKMT_HANDLE SyncObject,
+    _In_ UINT64 FenceValue)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU Wait = {};
+    D3DKMT_SUBMITWAITFORSYNCOBJECTSTOHWQUEUE QueueWait = {};
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN HasQueues;
+
+    if (Kmt->WaitForSynchronizationObjectFromGpu == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Wait.ObjectCount = 1;
+    Wait.ObjectHandleArray = &SyncObject;
+    Wait.FenceValue = FenceValue;
+    QueueWait.ObjectCount = 1;
+    QueueWait.ObjectHandleArray = &SyncObject;
+    QueueWait.FenceValueArray = &FenceValue;
+
+    AcquireSRWLockShared(&ContextLock);
+    for (D3DKMT_HANDLE KmContext : KmContexts)
+    {
+        HasQueues = FALSE;
+        for (const KernelQueue& Each : KmQueues)
+        {
+            if (Each.Context != KmContext || !NT_SUCCESS(Status))
+                continue;
+
+            HasQueues = TRUE;
+            QueueWait.hHwQueue = Each.Queue;
+            Status = Kmt->SubmitWaitForSyncObjectsToHwQueue(&QueueWait);
+        }
+
+        if (!HasQueues && NT_SUCCESS(Status))
+        {
+            Wait.hContext = KmContext;
+            Status = Kmt->WaitForSynchronizationObjectFromGpu(&Wait);
+        }
+
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+    ReleaseSRWLockShared(&ContextLock);
+
+    if (!NT_SUCCESS(Status))
+        RX_TRACE(L"GPU wait for fence 0x%X value %llu failed 0x%08lX", SyncObject, FenceValue, Status);
+    return RxHresultFromStatus(Status);
+}
+
+HRESULT
+RxDevice::SignalFenceOnGpu(
+    _In_ D3DKMT_HANDLE SyncObject,
+    _In_ UINT64 FenceValue)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 Signal = {};
+    NTSTATUS Status;
+
+    if (Kmt->SignalSynchronizationObjectFromGpu2 == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    AcquireSRWLockShared(&ContextLock);
+    if (KmContexts.empty())
+    {
+        ReleaseSRWLockShared(&ContextLock);
+        return S_FALSE;
+    }
+
+    Signal.ObjectCount = 1;
+    Signal.ObjectHandleArray = &SyncObject;
+    Signal.BroadcastContextCount = (ULONG)KmContexts.size();
+    Signal.BroadcastContextArray = KmContexts.data();
+    Signal.FenceValue = FenceValue;
+    Status = Kmt->SignalSynchronizationObjectFromGpu2(&Signal);
+    ReleaseSRWLockShared(&ContextLock);
+
+    if (!NT_SUCCESS(Status))
+        RX_TRACE(L"GPU signal of fence 0x%X value %llu failed 0x%08lX", SyncObject, FenceValue, Status);
+    return RxHresultFromStatus(Status);
 }
 
 NTSTATUS

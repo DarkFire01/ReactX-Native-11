@@ -9,6 +9,7 @@
 #include "calltrap.hpp"
 #include "ddicallbacks.hpp"
 #include "device.hpp"
+#include "resource.hpp"
 
 #include <intrin.h>
 
@@ -76,6 +77,14 @@ RxAllocateCb(
             Create.Flags.NtSecuritySharing = TRUE;
         Create.pPrivateRuntimeData = Resource->SharedRecord;
         Create.PrivateRuntimeDataSize = Resource->SharedRecordSize;
+
+        /* The record carries the keyed mutex's handles, so the mutex exists before the record is written */
+        if (Resource->Shared.Constants[RxSharedRecordKeyedMutexIndex] != 0 && Resource->KeyedMutex == 0)
+        {
+            Status = RxCreateKeyedMutex(Device, *Resource);
+            if (!NT_SUCCESS(Status))
+                return RxHresultFromStatus(Status);
+        }
     }
 
     if (Kmt->CreateAllocation2 != nullptr)
@@ -86,6 +95,8 @@ RxAllocateCb(
     if (!NT_SUCCESS(Status))
     {
         RX_TRACE(L"D3DKMTCreateAllocation failed 0x%08lX", Status);
+        if (Resource != nullptr && Create.Flags.CreateResource)
+            RxCloseKeyedMutex(*Resource);
         return RxHresultFromStatus(Status);
     }
 

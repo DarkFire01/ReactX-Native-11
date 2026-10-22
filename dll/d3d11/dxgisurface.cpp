@@ -26,6 +26,14 @@ RxDxgiSurface::IsSurface()
     }
 }
 
+BOOLEAN
+RxDxgiSurface::HasKeyedMutex()
+{
+    DdiResource* Resource = RxGetDdiResource(Owner);
+
+    return Resource != nullptr && Resource->HasKeyedMutex();
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDxgiSurface::QueryInterface(
@@ -198,7 +206,8 @@ RxDxgiSurface::CreateSharedHandle(
     DdiResource* Resource = RxGetDdiResource(Owner);
     const KmtThunks* Kmt = RxGetKmtThunks();
     OBJECT_ATTRIBUTES Attributes;
-    D3DKMT_HANDLE KmResource;
+    D3DKMT_HANDLE Objects[3];
+    UINT ObjectCount = 1;
     NTSTATUS Status;
 
     if (pHandle == nullptr)
@@ -220,8 +229,16 @@ RxDxgiSurface::CreateSharedHandle(
 
     InitializeObjectAttributes(&Attributes, nullptr, (pAttributes && pAttributes->bInheritHandle) ? OBJ_INHERIT : 0,
                                nullptr, pAttributes ? pAttributes->lpSecurityDescriptor : nullptr);
-    KmResource = Resource->GetKmResource();
-    Status = Kmt->ShareObjects(1, &KmResource, &Attributes, dwAccess, pHandle);
+    /* The keyed mutex and its fence go into the same handle, after the resource */
+    Objects[0] = Resource->GetKmResource();
+    if (Resource->HasKeyedMutex())
+    {
+        Objects[1] = Resource->GetRuntimeResource()->KeyedMutex;
+        Objects[2] = Resource->GetRuntimeResource()->SyncObject;
+        ObjectCount = 3;
+    }
+
+    Status = Kmt->ShareObjects(ObjectCount, Objects, &Attributes, dwAccess, pHandle);
     if (!NT_SUCCESS(Status))
     {
         RX_TRACE(L"D3DKMTShareObjects failed 0x%08lX", Status);
@@ -344,4 +361,29 @@ RxDxgiSurface::GetResource(
     if (SUCCEEDED(hr) && pSubresourceIndex != nullptr)
         *pSubresourceIndex = 0;
     return hr;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDxgiSurface::AcquireSync(
+    _In_ UINT64 Key,
+    _In_ DWORD dwMilliseconds)
+{
+    DdiResource* Resource = RxGetDdiResource(Owner);
+
+    if (Resource == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+    return Resource->AcquireSync(Key, dwMilliseconds);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDxgiSurface::ReleaseSync(
+    _In_ UINT64 Key)
+{
+    DdiResource* Resource = RxGetDdiResource(Owner);
+
+    if (Resource == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+    return Resource->ReleaseSync(Key);
 }

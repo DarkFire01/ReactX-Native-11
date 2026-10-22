@@ -74,7 +74,11 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTOpenResource", Kmt.OpenResource);
     RxResolve(Gdi32, "D3DKMTQueryResourceInfoFromNtHandle", Kmt.QueryResourceInfoFromNtHandle);
     RxResolve(Gdi32, "D3DKMTOpenResourceFromNtHandle", Kmt.OpenResourceFromNtHandle);
+    RxResolve(Gdi32, "D3DKMTCreateKeyedMutex2", Kmt.CreateKeyedMutex2);
+    RxResolve(Gdi32, "D3DKMTOpenKeyedMutex2", Kmt.OpenKeyedMutex2);
     RxResolve(Gdi32, "D3DKMTDestroyKeyedMutex", Kmt.DestroyKeyedMutex);
+    RxResolve(Gdi32, "D3DKMTAcquireKeyedMutex2", Kmt.AcquireKeyedMutex2);
+    RxResolve(Gdi32, "D3DKMTReleaseKeyedMutex2", Kmt.ReleaseKeyedMutex2);
     RxResolve(Gdi32, "D3DKMTPresent", Kmt.Present);
     RxResolve(Gdi32, "D3DKMTLock", Kmt.Lock);
     RxResolve(Gdi32, "D3DKMTUnlock", Kmt.Unlock);
@@ -85,6 +89,7 @@ RxLoadKmtThunks(
 
     RxResolve(Gdi32, "D3DKMTCreateSynchronizationObject", Kmt.CreateSynchronizationObject);
     RxResolve(Gdi32, "D3DKMTCreateSynchronizationObject2", Kmt.CreateSynchronizationObject2);
+    RxResolve(Gdi32, "D3DKMTOpenSynchronizationObject", Kmt.OpenSynchronizationObject);
     RxResolve(Gdi32, "D3DKMTDestroySynchronizationObject", Kmt.DestroySynchronizationObject);
     RxResolve(Gdi32, "D3DKMTWaitForSynchronizationObject", Kmt.WaitForSynchronizationObject);
     RxResolve(Gdi32, "D3DKMTWaitForSynchronizationObject2", Kmt.WaitForSynchronizationObject2);
