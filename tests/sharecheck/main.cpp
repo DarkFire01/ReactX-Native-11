@@ -6,7 +6,8 @@
  *
  * sharecheck [-runtime system|reactx|<dir>] [check ...]
  * sharecheck -list
- * sharecheck [-runtime ...] -child kmt|nt <handle>     opens a handle from the parent and reports its pixels
+ * sharecheck [-runtime ...] -child kmt|nt|km|kmnt <handle>   opens a handle from the parent and reports its pixels;
+ *                                                         km and kmnt take key 2 of its keyed mutex first
  */
 
 #include <windows.h>
@@ -36,6 +37,9 @@ constexpr UINT ScPatchLeft = 8;
 constexpr UINT ScPatchTop = 8;
 constexpr UINT ScPatchSide = 16;
 constexpr NTSTATUS ScStatusNotSupported = (NTSTATUS)0xC00000BB;
+
+/* Where a keyed mutex texture's record keeps the global handles of its mutex and fence */
+constexpr UINT ScRecordMutexHandles = 32;
 
 /* What the creator clears to and what an opener clears to when it writes back */
 static const FLOAT ScClearColor[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
@@ -447,7 +451,7 @@ ScOpenKernelResource(
         Allocations2.resize(QueryNt.NumAllocations);
         ResourceData.resize(QueryNt.ResourcePrivateDriverDataSize + 1);
         AllocationData.resize(QueryNt.TotalPrivateDriverDataSize + 1);
-        MutexData.resize(1);
+        MutexData.resize(sizeof(UINT));
         OpenNt.hDevice = KmDevice;
         OpenNt.hNtHandle = Handle;
         OpenNt.NumAllocations = QueryNt.NumAllocations;
@@ -459,6 +463,7 @@ ScOpenKernelResource(
         OpenNt.TotalPrivateDriverDataBufferSize = QueryNt.TotalPrivateDriverDataSize;
         OpenNt.pTotalPrivateDriverDataBuffer = AllocationData.data();
         OpenNt.pKeyedMutexPrivateRuntimeData = MutexData.data();
+        OpenNt.KeyedMutexPrivateRuntimeDataSize = (UINT)MutexData.size();
         Status = OpenResourceNt(&OpenNt);
         *KmResource = OpenNt.hResource;
         return Status;
@@ -495,7 +500,8 @@ std::string
 ScRuntimeRecord(
     _In_ ID3D11Device* Device,
     _In_ HANDLE Handle,
-    _In_ BOOLEAN IsNt)
+    _In_ BOOLEAN IsNt,
+    _In_ BOOLEAN HideMutexHandles = FALSE)
 {
     HMODULE Gdi32 = GetModuleHandleW(L"gdi32.dll");
     auto OpenAdapter =
@@ -517,6 +523,7 @@ ScRuntimeRecord(
     std::vector<BYTE> Record;
     std::string Text;
     NTSTATUS Status;
+    SIZE_T Index;
 
     if (OpenAdapter == nullptr || CreateKmDevice == nullptr || DestroyAllocation == nullptr ||
         FAILED(Device->QueryInterface(IID_PPV_ARGS(&DxgiDevice))) || FAILED(DxgiDevice->GetAdapter(&Adapter)) ||
@@ -544,8 +551,18 @@ ScRuntimeRecord(
     else
         Text = ScKey("size 0x%X:", (UINT)Record.size());
 
-    for (BYTE Byte : Record)
-        Text += ScKey(" %02X", Byte);
+    /* Mutex and fence handles change every run, so only whether they are there is compared */
+    for (Index = 0; Index < Record.size(); Index++)
+    {
+        if (HideMutexHandles && Index >= ScRecordMutexHandles && Index < ScRecordMutexHandles + 8)
+        {
+            if ((Index - ScRecordMutexHandles) % 4 == 0)
+                Text += (Index + 4 <= Record.size() && *reinterpret_cast<UINT32*>(&Record[Index]) != 0) ? " set" : " 0";
+            continue;
+        }
+
+        Text += ScKey(" %02X", Record[Index]);
+    }
 
     if (KmResource != 0)
     {
@@ -559,6 +576,24 @@ ScRuntimeRecord(
     Close.hAdapter = Open.hAdapter;
     CloseAdapter(&Close);
     return Text;
+}
+
+/* Children open NT handles for these kinds; the others get a global share handle */
+static
+BOOLEAN
+ScIsNtKind(
+    _In_z_ PCWSTR Kind)
+{
+    return wcscmp(Kind, L"nt") == 0 || wcscmp(Kind, L"kmnt") == 0;
+}
+
+/* Children of these kinds go through the texture's keyed mutex */
+static
+BOOLEAN
+ScIsMutexKind(
+    _In_z_ PCWSTR Kind)
+{
+    return wcscmp(Kind, L"km") == 0 || wcscmp(Kind, L"kmnt") == 0;
 }
 
 /* Runs this exe on another runtime to open Handle there; returns what it read */
@@ -587,7 +622,7 @@ ScRunChild(
     SetHandleInformation(ReadPipe, HANDLE_FLAG_INHERIT, 0);
 
     /* An NT handle travels by inheritance; a global share handle is just a number */
-    if (wcscmp(Kind, L"nt") == 0)
+    if (ScIsNtKind(Kind))
         SetHandleInformation(Handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
 
     GetModuleFileNameW(NULL, Module, _countof(Module));
@@ -613,7 +648,7 @@ ScRunChild(
     CloseHandle(Process.hProcess);
     CloseHandle(Process.hThread);
     CloseHandle(ReadPipe);
-    if (wcscmp(Kind, L"nt") == 0)
+    if (ScIsNtKind(Kind))
         SetHandleInformation(Handle, HANDLE_FLAG_INHERIT, 0);
 
     Found = Output.find("child = ");
@@ -1011,27 +1046,196 @@ ScCheckShapes(
     }
 }
 
-/* keyedmutex: what a MISC_SHARED_KEYEDMUTEX texture offers */
+/* keyedmutex: MISC_SHARED_KEYEDMUTEX, IDXGIKeyedMutex and the mutex following the shared handle */
+
+/* The texture OBS makes for its NV12 output: acquire, release, then a key nobody released to */
+static
+VOID
+ScCheckMutexBasics(
+    _In_ ShareCheck& Check,
+    _In_ ID3D11Device* Device)
+{
+    ComPtr<ID3D11Texture2D> Texture;
+    ComPtr<ID3D11Texture2D> Plain;
+    ComPtr<IDXGIKeyedMutex> Mutex;
+    ComPtr<IDXGIResource> Resource;
+    ComPtr<ID3D11Device> Owner;
+    ComPtr<IUnknown> FromTexture;
+    ComPtr<IUnknown> FromMutex;
+    D3D11_TEXTURE2D_DESC Desc = {};
+    HANDLE Handle = NULL;
+    ULONG Held;
+    ULONG Alone;
+    HRESULT hr;
+
+    Check.ReportResult("create_with_shared",
+                       ScCreateShared(Device, D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+                                      &Plain));
+    Plain.Reset();
+    if (SUCCEEDED(ScCreateShared(Device, D3D11_RESOURCE_MISC_SHARED, &Plain)))
+        Check.ReportResult("query_on_shared", Plain.As(&Mutex));
+    Plain.Reset();
+    if (SUCCEEDED(ScCreateShared(Device, 0, &Plain)))
+        Check.ReportResult("query_on_unshared", Plain.As(&Mutex));
+
+    Desc.Width = 1024;
+    Desc.Height = 768;
+    Desc.MipLevels = 1;
+    Desc.ArraySize = 1;
+    Desc.Format = DXGI_FORMAT_NV12;
+    Desc.SampleDesc.Count = 1;
+    Desc.Usage = D3D11_USAGE_DEFAULT;
+    Desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    Desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+    hr = Device->CreateTexture2D(&Desc, nullptr, &Texture);
+    Check.ReportResult("nv12_create", hr);
+    if (FAILED(hr))
+        return;
+
+    hr = Texture.As(&Mutex);
+    Check.ReportResult("nv12_query_mutex", hr);
+    if (FAILED(hr))
+        return;
+
+    Check.ReportResult("nv12_acquire_0", Mutex->AcquireSync(0, INFINITE));
+    Check.ReportResult("nv12_acquire_twice", Mutex->AcquireSync(0, 0));
+    Check.ReportResult("nv12_release_0", Mutex->ReleaseSync(0));
+    Check.ReportResult("nv12_release_unowned", Mutex->ReleaseSync(0));
+    Check.ReportResult("nv12_acquire_1", Mutex->AcquireSync(1, 0));
+    Check.ReportResult("nv12_acquire_0_again", Mutex->AcquireSync(0, 0));
+    Check.ReportResult("nv12_release_0_again", Mutex->ReleaseSync(0));
+
+    /* The mutex is another face of the texture: same identity, same reference count, same device */
+    Texture.As(&FromTexture);
+    Mutex.As(&FromMutex);
+    Check.Report("nv12_identity", "%s", FromTexture.Get() == FromMutex.Get() ? "same" : "different");
+    Held = Texture->AddRef();
+    Texture->Release();
+    Mutex.Reset();
+    Alone = Texture->AddRef();
+    Texture->Release();
+    Check.Report("nv12_shares_refcount", "%s", Held == Alone + 1 ? "yes" : "no");
+    Texture.As(&Mutex);
+    hr = Mutex->GetDevice(IID_PPV_ARGS(&Owner));
+    Check.ReportResult("nv12_get_device", hr);
+    Check.Report("nv12_device", "%s", Owner.Get() == Device ? "same" : "other");
+
+    Texture.As(&Resource);
+    hr = Resource->GetSharedHandle(&Handle);
+    Check.ReportResult("nv12_get_shared_handle", hr);
+    Check.Report("nv12_handle", "%s", Handle ? "set" : "null");
+}
+
+/*
+ * The creator writes under key 0 and hands over key 1, a second device reads and hands over key 2,
+ * children on both runtimes take key 2 and give it back, and the creator reads the opener's writes.
+ */
+static
+VOID
+ScCheckMutexHandOff(
+    _In_ ShareCheck& Check,
+    _In_ ID3D11Device* Creator,
+    _In_ ID3D11Device* Opener,
+    _In_ BOOLEAN IsNt)
+{
+    ComPtr<ID3D11Device1> Opener1;
+    ComPtr<ID3D11Texture2D> Texture;
+    ComPtr<ID3D11Texture2D> Opened;
+    ComPtr<IDXGIKeyedMutex> Mutex;
+    ComPtr<IDXGIKeyedMutex> OpenedMutex;
+    ComPtr<IDXGIResource> Resource;
+    ComPtr<IDXGIResource1> Resource1;
+    std::vector<UINT32> Pixels;
+    PCWSTR Kind = IsNt ? L"kmnt" : L"km";
+    HANDLE Handle = NULL;
+    HRESULT hr;
+
+    hr = ScCreateShared(Creator,
+                        D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX | (IsNt ? D3D11_RESOURCE_MISC_SHARED_NTHANDLE : 0),
+                        &Texture);
+    Check.ReportResult("create", hr);
+    if (FAILED(hr))
+        return;
+
+    Check.ReportResult("query_mutex", Texture.As(&Mutex));
+    if (Mutex == nullptr)
+        return;
+
+    Texture.As(&Resource);
+    Texture.As(&Resource1);
+    if (IsNt)
+        hr = Resource1->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr,
+                                           &Handle);
+    else
+        hr = Resource->GetSharedHandle(&Handle);
+    Check.ReportResult("handle", hr);
+    if (FAILED(hr))
+        return;
+
+    Check.Report("record", "%s", ScRuntimeRecord(Creator, Handle, IsNt, TRUE).c_str());
+
+    Check.ReportResult("creator_acquire", Mutex->AcquireSync(0, INFINITE));
+    Check.Expect(SUCCEEDED(ScFill(Creator, Texture.Get(), ScClearColor)), "creator fill");
+    Check.ReportResult("creator_release", Mutex->ReleaseSync(1));
+
+    if (IsNt)
+    {
+        hr = Opener->QueryInterface(IID_PPV_ARGS(&Opener1));
+        if (SUCCEEDED(hr))
+            hr = Opener1->OpenSharedResource1(Handle, IID_PPV_ARGS(&Opened));
+    }
+    else
+    {
+        hr = Opener->OpenSharedResource(Handle, IID_PPV_ARGS(&Opened));
+    }
+    Check.ReportResult("open", hr);
+    if (SUCCEEDED(hr))
+        Check.ReportResult("opened_query_mutex", Opened.As(&OpenedMutex));
+
+    if (OpenedMutex != nullptr)
+    {
+        Check.ReportResult("opener_acquire_0", OpenedMutex->AcquireSync(0, 0));
+        Check.ReportResult("opener_acquire_1", OpenedMutex->AcquireSync(1, 5000));
+        hr = ScRead(Opener, Opened.Get(), Pixels);
+        ScReportPixels(Check, "opener_pixels", hr, Pixels);
+        Check.Expect(SUCCEEDED(ScFill(Opener, Opened.Get(), ScOpenerColor)), "opener fill");
+        Check.ReportResult("opener_release", OpenedMutex->ReleaseSync(2));
+    }
+
+    Check.Report("child_system", "%s", ScRunChild(L"system", Kind, Handle).c_str());
+    Check.Report("child_reactx", "%s", ScRunChild(L"reactx", Kind, Handle).c_str());
+
+    Check.ReportResult("creator_acquire_2", Mutex->AcquireSync(2, 5000));
+    hr = ScRead(Creator, Texture.Get(), Pixels);
+    ScReportPixels(Check, "written_back", hr, Pixels);
+    Check.ReportResult("creator_release_0", Mutex->ReleaseSync(0));
+
+    if (IsNt)
+        CloseHandle(Handle);
+}
 
 static
 VOID
 ScCheckKeyedMutex(
     _In_ ShareCheck& Check)
 {
-    ComPtr<ID3D11Device> Device;
-    ComPtr<ID3D11Texture2D> Texture;
-    ComPtr<IDXGIKeyedMutex> Mutex;
-    HRESULT hr;
+    ComPtr<ID3D11Device> Creator;
+    ComPtr<ID3D11Device> Opener;
+    PCSTR Name = Check.CheckName;
 
-    if (!Check.Expect(SUCCEEDED(Check.MakeDevice(&Device)), "device"))
+    if (!Check.Expect(SUCCEEDED(Check.MakeDevice(&Creator)), "creator device") ||
+        !Check.Expect(SUCCEEDED(Check.MakeDevice(&Opener)), "opener device"))
+    {
         return;
+    }
 
-    hr = ScCreateShared(Device.Get(), D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, &Texture);
-    Check.ReportResult("create", hr);
-    if (FAILED(hr))
-        return;
+    ScCheckMutexBasics(Check, Creator.Get());
 
-    Check.ReportResult("query_mutex", Texture.As(&Mutex));
+    Check.CheckName = "keyedmutex.kmt";
+    ScCheckMutexHandOff(Check, Creator.Get(), Opener.Get(), FALSE);
+    Check.CheckName = "keyedmutex.nt";
+    ScCheckMutexHandOff(Check, Creator.Get(), Opener.Get(), TRUE);
+    Check.CheckName = Name;
 }
 
 static const CheckInfo Checks[] =
@@ -1079,11 +1283,13 @@ ScChild(
     ComPtr<ID3D11Device> Device;
     ComPtr<ID3D11Device1> Device1;
     ComPtr<ID3D11Texture2D> Opened;
+    ComPtr<IDXGIKeyedMutex> Mutex;
     std::vector<UINT32> Pixels;
+    HRESULT Released;
     HRESULT hr;
 
     hr = Check.MakeDevice(&Device);
-    if (SUCCEEDED(hr) && wcscmp(Kind, L"nt") == 0)
+    if (SUCCEEDED(hr) && ScIsNtKind(Kind))
     {
         hr = Device.As(&Device1);
         if (SUCCEEDED(hr))
@@ -1094,8 +1300,29 @@ ScChild(
         hr = Device->OpenSharedResource(Handle, IID_PPV_ARGS(&Opened));
     }
 
+    /* Keyed mutex children wait for key 2, read, and hand key 2 back */
+    if (SUCCEEDED(hr) && ScIsMutexKind(Kind))
+    {
+        hr = Opened.As(&Mutex);
+        if (SUCCEEDED(hr))
+            hr = Mutex->AcquireSync(2, 5000);
+        if (hr != S_OK)
+        {
+            printf("child = acquire 0x%08lX\n", hr);
+            return 1;
+        }
+    }
+
     if (SUCCEEDED(hr))
         hr = ScRead(Device.Get(), Opened.Get(), Pixels);
+
+    if (Mutex != nullptr)
+    {
+        Released = Mutex->ReleaseSync(2);
+        printf("child = %s release 0x%08lX\n", SUCCEEDED(hr) ? ScSummary(Pixels).c_str() : "error", Released);
+        return (SUCCEEDED(hr) && SUCCEEDED(Released)) ? 0 : 1;
+    }
+
     if (SUCCEEDED(hr))
         printf("child = %s\n", ScSummary(Pixels).c_str());
     else
