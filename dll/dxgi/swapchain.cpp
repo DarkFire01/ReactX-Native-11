@@ -156,6 +156,8 @@ RxSwapChain::~RxSwapChain()
         RedirectionSurface->Release();
     if (LatencySemaphore != NULL)
         CloseHandle(LatencySemaphore);
+    if (CoreWindow != nullptr)
+        CoreWindow->Release();
     Device->Release();
     Factory.UntrackSwapChain(this);
     Factory.Release();
@@ -680,7 +682,7 @@ RxSwapChain::SetFullscreenState(
     RECT Area;
     HRESULT hr;
 
-    if (Window == NULL)
+    if (Window == NULL || CoreWindow != nullptr)
         return DXGI_ERROR_INVALID_CALL;
 
     if (!Fullscreen)
@@ -902,7 +904,7 @@ STDMETHODCALLTYPE
 RxSwapChain::GetFullscreenDesc(
     _Out_ DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc)
 {
-    if (pDesc == nullptr)
+    if (pDesc == nullptr || CoreWindow != nullptr)
         return DXGI_ERROR_INVALID_CALL;
 
     *pDesc = FullscreenDesc;
@@ -917,8 +919,9 @@ RxSwapChain::GetHwnd(
     if (pHwnd == nullptr)
         return DXGI_ERROR_INVALID_CALL;
 
-    *pHwnd = Window;
-    return (Window != NULL) ? S_OK : DXGI_ERROR_INVALID_CALL;
+    /* The HWND behind a CoreWindow is not handed out */
+    *pHwnd = (CoreWindow == nullptr) ? Window : NULL;
+    return (*pHwnd != NULL) ? S_OK : DXGI_ERROR_INVALID_CALL;
 }
 
 HRESULT
@@ -927,11 +930,14 @@ RxSwapChain::GetCoreWindow(
     _In_ REFIID refiid,
     _COM_Outptr_ void** ppUnk)
 {
-    UNREFERENCED_PARAMETER(refiid);
+    if (ppUnk == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
 
-    if (ppUnk != nullptr)
-        *ppUnk = nullptr;
-    return DXGI_ERROR_INVALID_CALL;
+    *ppUnk = nullptr;
+    if (CoreWindow == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+
+    return CoreWindow->QueryInterface(refiid, ppUnk);
 }
 
 HRESULT

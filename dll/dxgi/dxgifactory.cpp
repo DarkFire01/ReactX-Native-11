@@ -9,6 +9,7 @@
 #include "swapchain.hpp"
 #include "dwmswapchain.hpp"
 
+#include <corewindow.h>
 #include <algorithm>
 
 /* An adapter's place in the factory's list; lower comes first and ties keep kernel order */
@@ -693,6 +694,10 @@ RxDxgiFactory::CreateSwapChainForHwnd(
     if (pFullscreenDesc != nullptr && !pFullscreenDesc->Windowed)
         return DXGI_ERROR_UNSUPPORTED;
 
+    /* Aspect ratio stretching is only for CoreWindow and composition swapchains */
+    if (pDesc->Scaling == DXGI_SCALING_ASPECT_RATIO_STRETCH)
+        return DXGI_ERROR_INVALID_CALL;
+
     RX_TRACE(L"swapchain for window %p (%s): %ux%u format %u effect %u buffers %u usage %X flags %X alpha %u",
              hWnd, (GetWindowLongW(hWnd, GWL_STYLE) & WS_CHILD) ? L"child" : L"top level", pDesc->Width,
              pDesc->Height, pDesc->Format, pDesc->SwapEffect, pDesc->BufferCount, pDesc->BufferUsage, pDesc->Flags,
@@ -1049,10 +1054,13 @@ RxDxgiFactory::CreateSwapChainForCoreWindow(
     _In_opt_ IDXGIOutput* pRestrictToOutput,
     _COM_Outptr_ IDXGISwapChain1** ppSwapChain)
 {
-    /* ICoreWindowInterop, which every CoreWindow answers */
-    static constexpr GUID CoreWindowInterop =
-        { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f } };
-    IUnknown* Interop;
+    ICoreWindowInterop* Interop;
+    IRxPresentDevice* Device;
+    IUnknown* Identity;
+    RxSwapChain* SwapChain = nullptr;
+    BOOLEAN IsTaken = FALSE;
+    HWND Window = NULL;
+    HRESULT hr;
 
     UNREFERENCED_PARAMETER(pRestrictToOutput);
 
@@ -1062,13 +1070,48 @@ RxDxgiFactory::CreateSwapChainForCoreWindow(
     if (pDevice == nullptr || pDesc == nullptr || pWindow == nullptr)
         return DXGI_ERROR_INVALID_CALL;
 
-    if (FAILED(pWindow->QueryInterface(CoreWindowInterop, reinterpret_cast<void**>(&Interop))))
+    if (FAILED(pWindow->QueryInterface(IID_PPV_ARGS(&Interop))))
         return DXGI_ERROR_INVALID_CALL;
+    hr = Interop->get_WindowHandle(&Window);
     Interop->Release();
+    if (FAILED(hr) || !IsWindow(Window))
+        return DXGI_ERROR_INVALID_CALL;
 
     if (pDesc->SwapEffect != DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL && pDesc->SwapEffect != DXGI_SWAP_EFFECT_FLIP_DISCARD)
         return DXGI_ERROR_INVALID_CALL;
 
-    /* CoreWindow hosting needs the composition swapchains this runtime does not have yet */
-    return DXGI_ERROR_UNSUPPORTED;
+    if (!RxIsReactXDevice(pDevice))
+    {
+        IDXGIFactory2* System = RxGetSystemFactory();
+
+        RX_TRACE(L"CoreWindow swapchain for a device from another runtime goes to the system DXGI");
+        if (System == nullptr)
+            return DXGI_ERROR_INVALID_CALL;
+        return System->CreateSwapChainForCoreWindow(pDevice, pWindow, pDesc, nullptr, ppSwapChain);
+    }
+
+    if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&Device))))
+        return DXGI_ERROR_INVALID_CALL;
+    pWindow->QueryInterface(IID_PPV_ARGS(&Identity));
+
+    /* A CoreWindow takes one swapchain at a time */
+    AcquireSRWLockShared(&SwapChainLock);
+    for (RxSwapChain* Each : SwapChains)
+        IsTaken = IsTaken || Each->GetCoreWindowIdentity() == Identity;
+    ReleaseSRWLockShared(&SwapChainLock);
+
+    RX_TRACE(L"swapchain for CoreWindow %p (window %p): %ux%u format %u effect %u buffers %u scaling %u", Identity, Window,
+             pDesc->Width, pDesc->Height, pDesc->Format, pDesc->SwapEffect, pDesc->BufferCount, pDesc->Scaling);
+
+    /* ReactOS has no CoreWindow visual, so the buffers flip into the window behind it */
+    hr = IsTaken ? E_ACCESSDENIED : RxSwapChain::Create(*this, Device, Window, *pDesc, nullptr, &SwapChain);
+    Device->Release();
+    if (SUCCEEDED(hr))
+    {
+        SwapChain->AttachCoreWindow(Identity);
+        *ppSwapChain = SwapChain;
+    }
+
+    Identity->Release();
+    return hr;
 }

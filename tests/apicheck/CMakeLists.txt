@@ -27,7 +27,7 @@ foreach(_shader SimpleVS:vs_4_0 SimplePS:ps_4_0 SquaresCS:cs_5_0 AppendCS:cs_5_0
     list(APPEND _shader_headers "${_header}")
 endforeach()
 
-nt_add_console_exe(apicheck main.cpp checks_state.cpp checks_compute.cpp checks_formats.cpp checks_interfaces.cpp ${_shader_headers})
+nt_add_console_exe(apicheck main.cpp checks_state.cpp checks_compute.cpp checks_formats.cpp checks_interfaces.cpp checks_interop.cpp ${_shader_headers})
 target_include_directories(apicheck PRIVATE "${_shader_dir}")
-target_link_libraries(apicheck PRIVATE dxguid)
+target_link_libraries(apicheck PRIVATE dxguid ole32 runtimeobject)
 add_dependencies(apicheck d3d11)

@@ -91,6 +91,8 @@ AcAllChecks(VOID)
     All.insert(All.end(), Table, Table + Count);
     Table = AcInterfaceChecks(&Count);
     All.insert(All.end(), Table, Table + Count);
+    Table = AcInteropChecks(&Count);
+    All.insert(All.end(), Table, Table + Count);
     return All;
 }
 
@@ -163,6 +165,7 @@ wmain(
         Check = {};
         Check.Device = Device.Get();
         Check.Context = Context.Get();
+        Check.Runtime = Module;
         Check.CheckName = Info.Name;
         Info.Run(Check);
         Failures += Check.Failures;

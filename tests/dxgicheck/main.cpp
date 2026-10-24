@@ -12,6 +12,8 @@
 #include <d3d11.h>
 #include <dxgi1_6.h>
 #include <dxgidebug.h>
+#include <windows.ui.core.h>
+#include <corewindow.h>
 #include <wrl/client.h>
 
 #include <cstdarg>
@@ -488,7 +490,7 @@ DcReportSwapChain(
 {
     DXGI_SWAP_CHAIN_DESC1 Desc1;
     DXGI_SWAP_CHAIN_DESC Desc;
-    DXGI_SWAP_CHAIN_FULLSCREEN_DESC Fullscreen;
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC Fullscreen = {};
 
     SwapChain->GetDesc1(&Desc1);
     Check.Report(DcKey("%s.desc1", Prefix).c_str(), "%ux%u fmt %d stereo %d samples %u/%u usage %X buffers %u scaling %d effect %d alpha %d flags %X",
@@ -1155,6 +1157,137 @@ DcCheckLegacySwapChain(
     DestroyWindow(Window);
 }
 
+/* corewindow: swapchains on a CoreWindow made through the Windows.UI creation export (ordinal 1500) */
+
+typedef HRESULT (WINAPI* PFN_DC_CREATE_CORE_WINDOW)(INT32 Type, PCWSTR Title, INT32 X, INT32 Y, UINT32 Width, UINT32 Height,
+                                                    DWORD Attributes, HWND Owner, REFIID riid, void** ppWindow);
+
+static
+VOID
+DcCheckCoreWindow(
+    _In_ DxgiCheck& Check)
+{
+    HMODULE WindowsUi = LoadLibraryW(L"Windows.UI.dll");
+    PFN_DC_CREATE_CORE_WINDOW CreateCoreWindow;
+    ComPtr<ABI::Windows::UI::Core::ICoreWindow> Window;
+    ComPtr<ICoreWindowInterop> Interop;
+    ComPtr<ID3D11Device> Device;
+    ComPtr<IDXGIDevice> DxgiDevice;
+    ComPtr<IDXGIAdapter> Adapter;
+    ComPtr<IDXGIFactory2> Factory;
+    ComPtr<IDXGISwapChain1> SwapChain;
+    ComPtr<IDXGISwapChain1> Rejected;
+    ComPtr<IUnknown> Returned;
+    DXGI_SWAP_CHAIN_DESC1 Desc = {};
+    HWND Handle = NULL;
+    HWND Hwnd = (HWND)1;
+    RECT Client = {};
+    BOOL IsFullscreen = TRUE;
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC FullscreenDesc;
+    HRESULT hr;
+
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    CreateCoreWindow = WindowsUi ? reinterpret_cast<PFN_DC_CREATE_CORE_WINDOW>(GetProcAddress(WindowsUi, MAKEINTRESOURCEA(1500))) : nullptr;
+    if (!Check.Expect(CreateCoreWindow != nullptr, "Windows.UI creation export") ||
+        !Check.Expect(SUCCEEDED(CreateCoreWindow(6, L"dxgicheck", 40, 40, 320, 200, 0, NULL,
+                                                 __uuidof(ABI::Windows::UI::Core::ICoreWindow),
+                                                 reinterpret_cast<void**>(Window.GetAddressOf()))), "CoreWindow") ||
+        !Check.Expect(SUCCEEDED(Window.As(&Interop)) && SUCCEEDED(Interop->get_WindowHandle(&Handle)), "window handle") ||
+        !Check.Expect(SUCCEEDED(Check.MakeDevice(nullptr, &Device)), "device") ||
+        !Check.Expect(SUCCEEDED(Device.As(&DxgiDevice)), "IDXGIDevice") ||
+        !Check.Expect(SUCCEEDED(DxgiDevice->GetAdapter(&Adapter)), "GetAdapter") ||
+        !Check.Expect(SUCCEEDED(Adapter->GetParent(IID_PPV_ARGS(&Factory))), "factory"))
+    {
+        Interop.Reset();
+        Window.Reset();
+        CoUninitialize();
+        return;
+    }
+
+    Desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    Desc.SampleDesc.Count = 1;
+    Desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    Desc.BufferCount = 2;
+    Desc.Scaling = DXGI_SCALING_STRETCH;
+
+    /* Creation rules */
+    Desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    Check.ReportResult("blt_discard", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &Rejected));
+    Desc.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
+    Check.ReportResult("blt_sequential", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &Rejected));
+    Desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    Check.ReportResult("null_window", Factory->CreateSwapChainForCoreWindow(Device.Get(), nullptr, &Desc, nullptr, &Rejected));
+    Check.ReportResult("null_device", Factory->CreateSwapChainForCoreWindow(nullptr, Window.Get(), &Desc, nullptr, &Rejected));
+    Check.ReportResult("null_desc", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), nullptr, nullptr, &Rejected));
+    Desc.BufferCount = 1;
+    Check.ReportResult("one_buffer", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &Rejected));
+    Desc.BufferCount = 2;
+
+    /* Scaling modes, each released before the next */
+    Desc.Scaling = DXGI_SCALING_NONE;
+    Check.ReportResult("scaling_none", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &Rejected));
+    Rejected.Reset();
+    Desc.Scaling = DXGI_SCALING_ASPECT_RATIO_STRETCH;
+    Check.ReportResult("scaling_aspect", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &Rejected));
+    Rejected.Reset();
+    Check.ReportResult("hwnd_aspect", Factory->CreateSwapChainForHwnd(Device.Get(), Handle, &Desc, nullptr, nullptr, &Rejected));
+    Rejected.Reset();
+    Desc.Scaling = DXGI_SCALING_STRETCH;
+
+    /* A zero size takes the window's */
+    GetClientRect(Handle, &Client);
+    Check.Report("client", "%ldx%ld", Client.right - Client.left, Client.bottom - Client.top);
+    Desc.Width = 0;
+    Desc.Height = 0;
+    hr = Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &SwapChain);
+    Check.ReportResult("create", hr);
+    if (FAILED(hr))
+    {
+        Interop.Reset();
+        Window.Reset();
+        CoUninitialize();
+        return;
+    }
+
+    DcReportSwapChain(Check, "valid", SwapChain.Get());
+    Check.ReportResult("get_fullscreen_desc", SwapChain->GetFullscreenDesc(&FullscreenDesc));
+    Check.ReportResult("get_hwnd", SwapChain->GetHwnd(&Hwnd));
+    Check.Report("get_hwnd_value", "%s", Hwnd == Handle ? "window" : (Hwnd ? "other" : "null"));
+    hr = SwapChain->GetCoreWindow(__uuidof(ABI::Windows::UI::Core::ICoreWindow), reinterpret_cast<void**>(Returned.GetAddressOf()));
+    Check.Report("get_core_window", "0x%08lX %s", hr, DcSameObject(Returned.Get(), Window.Get()) ? "same" : "other");
+    Returned.Reset();
+    hr = SwapChain->GetCoreWindow(IID_PPV_ARGS(&Returned));
+    Check.Report("get_core_window_unknown", "0x%08lX %s", hr, DcSameObject(Returned.Get(), Window.Get()) ? "same" : "other");
+    Returned.Reset();
+    Check.ReportResult("get_core_window_device", SwapChain->GetCoreWindow(__uuidof(ID3D11Device), reinterpret_cast<void**>(Returned.GetAddressOf())));
+    Returned.Reset();
+    Check.ReportResult("get_core_window_null", SwapChain->GetCoreWindow(__uuidof(IUnknown), nullptr));
+
+    /* One swapchain per window */
+    Check.ReportResult("second", Factory->CreateSwapChainForCoreWindow(Device.Get(), Window.Get(), &Desc, nullptr, &Rejected));
+    Rejected.Reset();
+    Check.ReportResult("second_hwnd", Factory->CreateSwapChainForHwnd(Device.Get(), Handle, &Desc, nullptr, nullptr, &Rejected));
+    Rejected.Reset();
+
+    Check.ReportResult("set_fullscreen", SwapChain->SetFullscreenState(TRUE, nullptr));
+    Check.ReportResult("get_fullscreen", SwapChain->GetFullscreenState(&IsFullscreen, nullptr));
+    Check.Report("fullscreen", "%d", IsFullscreen);
+    Check.ReportResult("present", SwapChain->Present(0, 0));
+    Check.ReportResult("resize", SwapChain->ResizeBuffers(0, 128, 96, DXGI_FORMAT_UNKNOWN, 0));
+    DcReportSwapChain(Check, "sized", SwapChain.Get());
+    Check.ReportResult("resize_zero", SwapChain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
+    DcReportSwapChain(Check, "resized", SwapChain.Get());
+
+    SwapChain.Reset();
+    Check.ReportResult("after_release", Factory->CreateSwapChainForHwnd(Device.Get(), Handle, &Desc, nullptr, nullptr, &Rejected));
+    Rejected.Reset();
+
+    Interop.Reset();
+    Window->Close();
+    Window.Reset();
+    CoUninitialize();
+}
+
 /* association: MakeWindowAssociation and what GetWindowAssociation reports back */
 
 static
@@ -1197,6 +1330,7 @@ static const CheckInfo Checks[] =
     { "methods", DcCheckMethods },
     { "reservation", DcCheckReservation },
     { "flipflags", DcCheckFlipFlags },
+    { "corewindow", DcCheckCoreWindow },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */

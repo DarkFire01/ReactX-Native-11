@@ -22,6 +22,7 @@ class CheckContext
 public:
     ID3D11Device* Device = nullptr;
     ID3D11DeviceContext* Context = nullptr;
+    HMODULE Runtime = NULL;
     PCSTR CheckName = "";
     UINT Failures = 0;
 
@@ -58,6 +59,10 @@ AcFormatChecks(
 
 const CheckInfo*
 AcInterfaceChecks(
+    _Out_ UINT* Count);
+
+const CheckInfo*
+AcInteropChecks(
     _Out_ UINT* Count);
 
 /* Reference count of a COM object, read without changing it */

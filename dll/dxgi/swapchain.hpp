@@ -162,6 +162,21 @@ public:
         return Window;
     }
 
+    /* A CoreWindow swapchain renders to the window's HWND but answers for the CoreWindow */
+    VOID
+    AttachCoreWindow(
+        _In_ IUnknown* Owner)
+    {
+        Owner->AddRef();
+        CoreWindow = Owner;
+    }
+
+    IUnknown*
+    GetCoreWindowIdentity() const
+    {
+        return CoreWindow;
+    }
+
     /* DXGI_MWA flags from the factory; they only matter once fullscreen exists */
     VOID
     SetWindowAssociation(
@@ -261,6 +276,8 @@ private:
     BOOLEAN IsCrossAdapter = FALSE;
     /* NULL for a swapchain made for composition: DirectComposition shows its surface instead */
     HWND Window;
+    /* IUnknown identity of the CoreWindow this swapchain was made for, if any */
+    IUnknown* CoreWindow = nullptr;
     DXGI_SWAP_CHAIN_DESC1 Desc = {};
     RxSwapChainComposition Composition;
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC FullscreenDesc = {};
