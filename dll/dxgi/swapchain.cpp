@@ -157,7 +157,12 @@ RxSwapChain::~RxSwapChain()
     if (LatencySemaphore != NULL)
         CloseHandle(LatencySemaphore);
     if (CoreWindow != nullptr)
+    {
+        /* Give the CoreWindow back to composition unless someone else claimed it since */
+        if (GetPropW(Window, RxCoreWindowRootProperty) == RxCoreWindowRootSwapChain)
+            RemovePropW(Window, RxCoreWindowRootProperty);
         CoreWindow->Release();
+    }
     Device->Release();
     Factory.UntrackSwapChain(this);
     Factory.Release();

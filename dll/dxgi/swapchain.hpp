@@ -14,6 +14,10 @@
 struct ID3D11Texture2D;
 class RxSwapChain;
 
+/* Window property naming who owns a CoreWindow's root: 1 for a composition target, 2 for a swapchain */
+inline constexpr WCHAR RxCoreWindowRootProperty[] = L"DCompCoreWindowRoot";
+inline const HANDLE RxCoreWindowRootSwapChain = (HANDLE)2;
+
 /*
  * DirectComposition asks a swapchain handed to SetContent for this and reads the composition
  * surface its buffers are bound to from slot 11. The slots before it follow the same table.
@@ -169,6 +173,7 @@ public:
     {
         Owner->AddRef();
         CoreWindow = Owner;
+        SetPropW(Window, RxCoreWindowRootProperty, RxCoreWindowRootSwapChain);
     }
 
     IUnknown*

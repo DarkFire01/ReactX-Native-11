@@ -1100,6 +1100,10 @@ RxDxgiFactory::CreateSwapChainForCoreWindow(
         IsTaken = IsTaken || Each->GetCoreWindowIdentity() == Identity;
     ReleaseSRWLockShared(&SwapChainLock);
 
+    /* A Windows.UI.Composition target already owns the window's root */
+    if (GetPropW(Window, RxCoreWindowRootProperty) != NULL)
+        IsTaken = TRUE;
+
     RX_TRACE(L"swapchain for CoreWindow %p (window %p): %ux%u format %u effect %u buffers %u scaling %u", Identity, Window,
              pDesc->Width, pDesc->Height, pDesc->Format, pDesc->SwapEffect, pDesc->BufferCount, pDesc->Scaling);
 
