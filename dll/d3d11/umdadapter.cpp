@@ -60,6 +60,7 @@ HRESULT
 UmdAdapter::Open(
     _In_opt_ const LUID* AdapterLuid)
 {
+    D3DKMT_ADAPTERTYPE Type = {};
     HRESULT hr;
 
     Kmt = RxGetKmtThunks();
@@ -74,6 +75,9 @@ UmdAdapter::Open(
     hr = OpenKernelAdapter(AdapterLuid);
     if (FAILED(hr))
         return hr;
+
+    if (SUCCEEDED(QueryKernel(KMTQAITYPE_ADAPTERTYPE, &Type, sizeof(Type))))
+        IsSoftwareAdapter = Type.SoftwareDevice != 0;
 
     hr = LoadDriver();
     if (FAILED(hr))
@@ -313,6 +317,12 @@ UmdAdapter::NegotiateRevision()
                  (UINT)(Supported[Index] >> 48),
                  (UINT)((Supported[Index] >> 32) & 0xFFFF),
                  (UINT)((Supported[Index] >> 16) & 0xFFFF));
+
+        if ((UINT)(Supported[Index] >> 48) == D3D11_DDI_MAJOR_VERSION &&
+            (UINT)(Supported[Index] >> 32) > NewestDriverInterface)
+        {
+            NewestDriverInterface = (UINT)(Supported[Index] >> 32);
+        }
     }
 
     /* Pick our newest revision whose interface the driver lists at a build we cover */
