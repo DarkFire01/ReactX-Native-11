@@ -129,6 +129,11 @@ struct RxGlyphOutline
     }
 };
 
+/* Mac Roman to UTF-16 */
+WCHAR
+RxMacRomanChar(
+    _In_ BYTE Byte);
+
 /* One face of a file, read once and shared */
 class RxFaceTables
 {

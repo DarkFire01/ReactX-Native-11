@@ -8,6 +8,7 @@
 #pragma once
 
 #include "glyphrun.hpp"
+#include "collection.hpp"
 
 class RxWriteFactory final : public IDWriteFactory7
 {
@@ -28,9 +29,15 @@ public:
         return Type == DWRITE_FACTORY_TYPE_SHARED;
     }
 
+    /* Built on first use and kept for the factory's life; the caller gets a reference */
+    HRESULT
+    SystemCollection(
+        _Outptr_ RxFontCollection** Collection);
+
 private:
     explicit RxWriteFactory(
         _In_ DWRITE_FACTORY_TYPE FactoryType);
+    ~RxWriteFactory();
 
     BOOLEAN
     IsFileLoaderRegistered(
@@ -41,4 +48,5 @@ private:
     SRWLOCK Lock;
     std::vector<RxComPtr<IDWriteFontFileLoader>> FileLoaders;
     std::vector<RxComPtr<IDWriteFontCollectionLoader>> CollectionLoaders;
+    RxFontCollection* System;
 };

@@ -11,16 +11,6 @@
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::GetSystemFontCollection(
-    _COM_Outptr_ IDWriteFontCollection** fontCollection,
-    BOOL checkForUpdates)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateCustomFontCollection(
     _In_ IDWriteFontCollectionLoader* collectionLoader,
     _In_reads_bytes_(collectionKeySize) void const* collectionKey,
@@ -226,17 +216,6 @@ RxWriteFactory::CreateFontCollectionFromFontSet(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::GetSystemFontCollection(
-    BOOL includeDownloadableFonts,
-    _COM_Outptr_ IDWriteFontCollection1** fontCollection,
-    BOOL checkForUpdates)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::GetFontDownloadQueue(
     _COM_Outptr_ IDWriteFontDownloadQueue** fontDownloadQueue)
 {
@@ -372,17 +351,6 @@ RxWriteFactory::GetSystemFontSet(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::GetSystemFontCollection(
-    BOOL includeDownloadableFonts,
-    DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
-    _COM_Outptr_ IDWriteFontCollection2** fontCollection)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateFontCollectionFromFontSet(
     IDWriteFontSet* fontSet,
     DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
@@ -421,17 +389,6 @@ STDMETHODCALLTYPE
 RxWriteFactory::GetSystemFontSet(
     BOOL includeDownloadableFonts,
     _COM_Outptr_ IDWriteFontSet2** fontSet)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::GetSystemFontCollection(
-    BOOL includeDownloadableFonts,
-    DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
-    _COM_Outptr_ IDWriteFontCollection3** fontCollection)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

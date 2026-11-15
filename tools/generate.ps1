@@ -402,7 +402,8 @@ $Classes = @(
         Implemented = @(
             'CreateFontFileReference', 'CreateCustomFontFileReference', 'RegisterFontFileLoader',
             'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader', 'CreateFontFace', 'CreateRenderingParams',
-            'CreateMonitorRenderingParams', 'CreateCustomRenderingParams', 'CreateGlyphRunAnalysis'
+            'CreateMonitorRenderingParams', 'CreateCustomRenderingParams', 'CreateGlyphRunAnalysis',
+            'GetSystemFontCollection'
         )
     },
     @{
@@ -436,6 +437,38 @@ $Classes = @(
             'GetGamma', 'GetEnhancedContrast', 'GetClearTypeLevel', 'GetPixelGeometry', 'GetRenderingMode',
             'GetGrayscaleEnhancedContrast', 'GetGridFitMode', 'GetRenderingMode1'
         )
+    },
+    @{
+        Class       = 'RxFontCollection'
+        Interfaces  = @('IDWriteFontCollection')
+        Headers     = @('um\dwrite.h')
+        Include     = 'collection.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'collection'
+        Purpose     = 'IDWriteFontCollection methods'
+        Implemented = @('GetFontFamilyCount', 'GetFontFamily', 'FindFamilyName', 'GetFontFromFontFace')
+    },
+    @{
+        Class       = 'RxFontFamily'
+        Interfaces  = @('IDWriteFontList', 'IDWriteFontFamily')
+        Headers     = @('um\dwrite.h')
+        Include     = 'collection.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'family'
+        Purpose     = 'IDWriteFontFamily methods'
+        Implemented = @('GetFontCollection', 'GetFontCount', 'GetFont', 'GetFamilyNames', 'GetFirstMatchingFont',
+                        'GetMatchingFonts')
+    },
+    @{
+        Class       = 'RxFont'
+        Interfaces  = @('IDWriteFont')
+        Headers     = @('um\dwrite.h')
+        Include     = 'collection.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'font'
+        Purpose     = 'IDWriteFont methods'
+        Implemented = @('GetFontFamily', 'GetWeight', 'GetStretch', 'GetStyle', 'IsSymbolFont', 'GetFaceNames',
+                        'GetInformationalStrings', 'GetSimulations', 'GetMetrics', 'HasCharacter', 'CreateFontFace')
     }
 )
 

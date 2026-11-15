@@ -18,9 +18,104 @@ RxWriteFactory::Create(
 }
 
 RxWriteFactory::RxWriteFactory(
-    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType)
+    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System(nullptr)
 {
     InitializeSRWLock(&Lock);
+}
+
+RxWriteFactory::~RxWriteFactory()
+{
+    if (System != nullptr)
+        System->Release();
+}
+
+/* Font collections */
+
+HRESULT
+RxWriteFactory::SystemCollection(
+    _Outptr_ RxFontCollection** Collection)
+{
+    HRESULT hr = S_OK;
+
+    *Collection = nullptr;
+    AcquireSRWLockExclusive(&Lock);
+    if (System == nullptr)
+    {
+        RxFontSetData* Data;
+
+        hr = RxFontSetData::CreateSystem(&Data);
+        if (SUCCEEDED(hr))
+        {
+            hr = RxFontCollection::Create(Data, &System);
+            Data->Release();
+        }
+    }
+    if (SUCCEEDED(hr))
+    {
+        System->AddRef();
+        *Collection = System;
+    }
+    ReleaseSRWLockExclusive(&Lock);
+    return hr;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::GetSystemFontCollection(
+    _COM_Outptr_ IDWriteFontCollection** fontCollection,
+    BOOL checkForUpdates)
+{
+    RxFontCollection* Collection;
+    HRESULT hr;
+
+    if (fontCollection == nullptr)
+        return E_INVALIDARG;
+    *fontCollection = nullptr;
+
+    hr = SystemCollection(&Collection);
+    if (FAILED(hr))
+        return hr;
+    *fontCollection = Collection;
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::GetSystemFontCollection(
+    BOOL includeDownloadableFonts,
+    _COM_Outptr_ IDWriteFontCollection1** fontCollection,
+    BOOL checkForUpdates)
+{
+    RX_UNIMPLEMENTED();
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+    return E_NOTIMPL;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::GetSystemFontCollection(
+    BOOL includeDownloadableFonts,
+    DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
+    _COM_Outptr_ IDWriteFontCollection2** fontCollection)
+{
+    RX_UNIMPLEMENTED();
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+    return E_NOTIMPL;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::GetSystemFontCollection(
+    BOOL includeDownloadableFonts,
+    DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
+    _COM_Outptr_ IDWriteFontCollection3** fontCollection)
+{
+    RX_UNIMPLEMENTED();
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+    return E_NOTIMPL;
 }
 
 HRESULT

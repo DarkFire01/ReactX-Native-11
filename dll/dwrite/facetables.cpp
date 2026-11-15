@@ -578,23 +578,23 @@ RxFaceTables::LoadOutlineAt(
     _In_ ULONG Depth,
     _Inout_ RxGlyphOutline& Outline) const
 {
-    RxSpan Data = GlyphData(Glyph);
+    RxSpan Record = GlyphData(Glyph);
     SHORT ContourCount;
     UINT32 Offset;
     USHORT Flags;
 
-    if (Data.IsEmpty())
+    if (Record.IsEmpty())
         return S_OK;
-    if (!Data.Has(0, 10))
+    if (!Record.Has(0, 10))
         return DWRITE_E_FILEFORMAT;
 
-    ContourCount = Data.S16(0);
+    ContourCount = Record.S16(0);
     if (Depth == 0)
     {
-        Outline.XMin = Data.S16(2);
-        Outline.YMin = Data.S16(4);
-        Outline.XMax = Data.S16(6);
-        Outline.YMax = Data.S16(8);
+        Outline.XMin = Record.S16(2);
+        Outline.YMin = Record.S16(4);
+        Outline.XMax = Record.S16(6);
+        Outline.YMax = Record.S16(8);
     }
 
     if (ContourCount >= 0)
@@ -605,7 +605,7 @@ RxFaceTables::LoadOutlineAt(
             return S_OK;
         if (Depth != 0)
             Instructions = Outline.Instructions;
-        if (!RxReadSimpleGlyph(Data, ContourCount, Outline))
+        if (!RxReadSimpleGlyph(Record, ContourCount, Outline))
             return DWRITE_E_FILEFORMAT;
         /* Only the top level glyph's program is kept */
         if (Depth != 0)
@@ -634,42 +634,42 @@ RxFaceTables::LoadOutlineAt(
         double Dy;
         HRESULT hr;
 
-        if (!Data.Has(Offset, 4))
+        if (!Record.Has(Offset, 4))
             return DWRITE_E_FILEFORMAT;
-        Flags = Data.U16(Offset);
-        ComponentGlyph = Data.U16(Offset + 2);
+        Flags = Record.U16(Offset);
+        ComponentGlyph = Record.U16(Offset + 2);
         Offset += 4;
 
         if (Flags & RxComponentWordArgs)
         {
-            Arg1 = (Flags & RxComponentXyValues) ? Data.S16(Offset) : Data.U16(Offset);
-            Arg2 = (Flags & RxComponentXyValues) ? Data.S16(Offset + 2) : Data.U16(Offset + 2);
+            Arg1 = (Flags & RxComponentXyValues) ? Record.S16(Offset) : Record.U16(Offset);
+            Arg2 = (Flags & RxComponentXyValues) ? Record.S16(Offset + 2) : Record.U16(Offset + 2);
             Offset += 4;
         }
         else
         {
-            Arg1 = (Flags & RxComponentXyValues) ? static_cast<CHAR>(Data.U8(Offset)) : Data.U8(Offset);
-            Arg2 = (Flags & RxComponentXyValues) ? static_cast<CHAR>(Data.U8(Offset + 1)) : Data.U8(Offset + 1);
+            Arg1 = (Flags & RxComponentXyValues) ? static_cast<CHAR>(Record.U8(Offset)) : Record.U8(Offset);
+            Arg2 = (Flags & RxComponentXyValues) ? static_cast<CHAR>(Record.U8(Offset + 1)) : Record.U8(Offset + 1);
             Offset += 2;
         }
 
         if (Flags & RxComponentScale)
         {
-            Xx = Yy = RxF2Dot14(Data.S16(Offset));
+            Xx = Yy = RxF2Dot14(Record.S16(Offset));
             Offset += 2;
         }
         else if (Flags & RxComponentXyScale)
         {
-            Xx = RxF2Dot14(Data.S16(Offset));
-            Yy = RxF2Dot14(Data.S16(Offset + 2));
+            Xx = RxF2Dot14(Record.S16(Offset));
+            Yy = RxF2Dot14(Record.S16(Offset + 2));
             Offset += 4;
         }
         else if (Flags & RxComponentTwoByTwo)
         {
-            Xx = RxF2Dot14(Data.S16(Offset));
-            Xy = RxF2Dot14(Data.S16(Offset + 2));
-            Yx = RxF2Dot14(Data.S16(Offset + 4));
-            Yy = RxF2Dot14(Data.S16(Offset + 6));
+            Xx = RxF2Dot14(Record.S16(Offset));
+            Xy = RxF2Dot14(Record.S16(Offset + 2));
+            Yx = RxF2Dot14(Record.S16(Offset + 4));
+            Yy = RxF2Dot14(Record.S16(Offset + 6));
             Offset += 8;
         }
 
@@ -722,10 +722,10 @@ RxFaceTables::LoadOutlineAt(
 
     if (Depth == 0 && (Flags & RxComponentInstructions))
     {
-        USHORT Length = Data.U16(Offset);
+        USHORT Length = Record.U16(Offset);
 
-        if (Data.Has(Offset + 2, Length))
-            Outline.Instructions = Data.Sub(Offset + 2, Length);
+        if (Record.Has(Offset + 2, Length))
+            Outline.Instructions = Record.Sub(Offset + 2, Length);
     }
     else if (Depth == 0)
     {
@@ -758,6 +758,13 @@ static const WCHAR RxMacRomanHigh[128] =
     0x2021, 0x00B7, 0x201A, 0x201E, 0x2030, 0x00C2, 0x00CA, 0x00C1, 0x00CB, 0x00C8, 0x00CD, 0x00CE, 0x00CF, 0x00CC, 0x00D3, 0x00D4,
     0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC, 0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7,
 };
+
+WCHAR
+RxMacRomanChar(
+    _In_ BYTE Byte)
+{
+    return Byte < 0x80 ? static_cast<WCHAR>(Byte) : RxMacRomanHigh[Byte - 0x80];
+}
 
 BOOLEAN
 RxFaceTables::FindName(

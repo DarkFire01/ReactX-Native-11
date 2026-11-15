@@ -393,6 +393,135 @@ TcCompareRaster(
     }
 }
 
+static
+std::wstring
+TcName(
+    _In_ IDWriteLocalizedStrings* Names)
+{
+    UINT32 Index = 0;
+    BOOL Exists = FALSE;
+    UINT32 Length = 0;
+    std::wstring Text;
+
+    if (Names == nullptr || Names->GetCount() == 0)
+        return L"";
+    Names->FindLocaleName(L"en-us", &Index, &Exists);
+    if (!Exists)
+        Index = 0;
+    Names->GetStringLength(Index, &Length);
+    Text.resize(Length + 1);
+    Names->GetString(Index, &Text[0], Length + 1);
+    Text.resize(Length);
+    return Text;
+}
+
+static
+std::wstring
+TcDescribeFont(
+    _In_ IDWriteFont* Font)
+{
+    ComPtr<IDWriteLocalizedStrings> Faces;
+    WCHAR Line[256];
+
+    Font->GetFaceNames(&Faces);
+    swprintf_s(Line, L"%s w%d s%d st%d sim%d", TcName(Faces.Get()).c_str(), Font->GetWeight(), Font->GetStretch(),
+               Font->GetStyle(), Font->GetSimulations());
+    return Line;
+}
+
+static
+VOID
+TcCompareCollections(
+    _In_ TcSide& Want,
+    _In_ TcSide& Got)
+{
+    ComPtr<IDWriteFontCollection> WantCollection;
+    ComPtr<IDWriteFontCollection> GotCollection;
+    ULONG Shown = 0;
+    static const struct
+    {
+        DWRITE_FONT_WEIGHT Weight;
+        DWRITE_FONT_STRETCH Stretch;
+        DWRITE_FONT_STYLE Style;
+    } Requests[] =
+    {
+        { DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL },
+        { DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL },
+        { DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL },
+        { DWRITE_FONT_WEIGHT_LIGHT, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC },
+        { DWRITE_FONT_WEIGHT_BLACK, DWRITE_FONT_STRETCH_CONDENSED, DWRITE_FONT_STYLE_OBLIQUE },
+    };
+
+    printf("system collection\n");
+    if (FAILED(Want.Factory->GetSystemFontCollection(&WantCollection)))
+        return;
+    if (FAILED(Got.Factory->GetSystemFontCollection(&GotCollection)))
+    {
+        TcCheck(FALSE, "GetSystemFontCollection failed");
+        return;
+    }
+
+    TcCheck(WantCollection->GetFontFamilyCount() == GotCollection->GetFontFamilyCount(), "family count want %u got %u",
+            WantCollection->GetFontFamilyCount(), GotCollection->GetFontFamilyCount());
+
+    for (UINT32 Family = 0; Family < WantCollection->GetFontFamilyCount(); Family++)
+    {
+        ComPtr<IDWriteFontFamily> WantFamily;
+        ComPtr<IDWriteFontFamily> GotFamily;
+        ComPtr<IDWriteLocalizedStrings> WantNames;
+        ComPtr<IDWriteLocalizedStrings> GotNames;
+        std::wstring Name;
+        UINT32 Index;
+        BOOL Exists;
+
+        WantCollection->GetFontFamily(Family, &WantFamily);
+        WantFamily->GetFamilyNames(&WantNames);
+        Name = TcName(WantNames.Get());
+
+        GotCollection->FindFamilyName(Name.c_str(), &Index, &Exists);
+        TcCheck(Exists != FALSE, "family %ls missing", Name.c_str());
+        if (!Exists)
+            continue;
+        if (Index != Family && Shown++ < 5)
+            printf("  family %ls at %u, want %u\n", Name.c_str(), Index, Family);
+
+        GotCollection->GetFontFamily(Index, &GotFamily);
+        TcCheck(WantFamily->GetFontCount() == GotFamily->GetFontCount(), "%ls font count want %u got %u",
+                Name.c_str(), WantFamily->GetFontCount(), GotFamily->GetFontCount());
+
+        for (UINT32 Font = 0; Font < std::min(WantFamily->GetFontCount(), GotFamily->GetFontCount()); Font++)
+        {
+            ComPtr<IDWriteFont> A;
+            ComPtr<IDWriteFont> B;
+
+            WantFamily->GetFont(Font, &A);
+            GotFamily->GetFont(Font, &B);
+            std::wstring Expected = TcDescribeFont(A.Get());
+            std::wstring Actual = TcDescribeFont(B.Get());
+            TcCheck(Expected == Actual, "%ls font %u want [%ls] got [%ls]", Name.c_str(), Font, Expected.c_str(),
+                    Actual.c_str());
+        }
+
+        for (const auto& Request : Requests)
+        {
+            ComPtr<IDWriteFont> A;
+            ComPtr<IDWriteFont> B;
+
+            if (FAILED(WantFamily->GetFirstMatchingFont(Request.Weight, Request.Stretch, Request.Style, &A)))
+                continue;
+            if (FAILED(GotFamily->GetFirstMatchingFont(Request.Weight, Request.Stretch, Request.Style, &B)))
+            {
+                TcCheck(FALSE, "%ls GetFirstMatchingFont failed", Name.c_str());
+                continue;
+            }
+            std::wstring Expected = TcDescribeFont(A.Get());
+            std::wstring Actual = TcDescribeFont(B.Get());
+            TcCheck(Expected == Actual, "%ls match %d/%d/%d want [%ls] got [%ls]", Name.c_str(), Request.Weight,
+                    Request.Stretch, Request.Style, Expected.c_str(), Actual.c_str());
+        }
+    }
+}
+
 int
 __cdecl
 wmain(
@@ -427,6 +556,11 @@ wmain(
     wcscat_s(SystemPath, L"\\dwrite.dll");
     if (!TcLoad(System, SystemPath) || !TcLoad(ReactX, argv[1]))
         return 1;
+
+    if (Only == nullptr || _wcsicmp(Only, L"collection") == 0)
+        TcCompareCollections(System, ReactX);
+    if (Only != nullptr && _wcsicmp(Only, L"collection") == 0)
+        Only = L"";
 
     for (PCWSTR Font : TcFonts)
     {
