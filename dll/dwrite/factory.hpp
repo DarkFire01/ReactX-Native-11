@@ -9,6 +9,7 @@
 
 #include "glyphrun.hpp"
 #include "collection.hpp"
+#include "textlayout.hpp"
 
 class RxWriteFactory final : public IDWriteFactory7
 {

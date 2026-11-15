@@ -522,6 +522,209 @@ TcCompareCollections(
     }
 }
 
+/* Records what a layout draws */
+class TcRecorder final : public IDWriteTextRenderer
+{
+public:
+    std::vector<std::wstring> Calls;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override
+    {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWritePixelSnapping) || riid == __uuidof(IDWriteTextRenderer))
+        {
+            *ppvObject = this;
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 2; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+    HRESULT STDMETHODCALLTYPE IsPixelSnappingDisabled(void*, BOOL* isDisabled) override
+    {
+        *isDisabled = FALSE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetCurrentTransform(void*, DWRITE_MATRIX* transform) override
+    {
+        *transform = { 1, 0, 0, 1, 0, 0 };
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetPixelsPerDip(void*, FLOAT* pixelsPerDip) override
+    {
+        *pixelsPerDip = 1.0f;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DrawGlyphRun(void*, FLOAT x, FLOAT y, DWRITE_MEASURING_MODE, const DWRITE_GLYPH_RUN* run,
+                                           const DWRITE_GLYPH_RUN_DESCRIPTION* description, IUnknown*) override
+    {
+        WCHAR Line[160];
+        FLOAT Width = 0.0f;
+
+        for (UINT32 Index = 0; Index < run->glyphCount; Index++)
+            Width += run->glyphAdvances[Index];
+        swprintf_s(Line, L"run %.2f,%.2f size %.1f glyphs %u width %.2f text %u+%u", x, y, run->fontEmSize,
+                   run->glyphCount, Width, description->textPosition, description->stringLength);
+        Calls.push_back(Line);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawUnderline(void*, FLOAT x, FLOAT y, const DWRITE_UNDERLINE* underline, IUnknown*) override
+    {
+        WCHAR Line[160];
+
+        swprintf_s(Line, L"underline %.2f,%.2f width %.2f thick %.2f offset %.2f", x, y, underline->width,
+                   underline->thickness, underline->offset);
+        Calls.push_back(Line);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawStrikethrough(void*, FLOAT x, FLOAT y, const DWRITE_STRIKETHROUGH* strike, IUnknown*) override
+    {
+        WCHAR Line[160];
+
+        swprintf_s(Line, L"strike %.2f,%.2f width %.2f", x, y, strike->width);
+        Calls.push_back(Line);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DrawInlineObject(void* context, FLOAT x, FLOAT y, IDWriteInlineObject* object, BOOL, BOOL,
+                                               IUnknown*) override
+    {
+        WCHAR Line[160];
+
+        swprintf_s(Line, L"inline %.2f,%.2f", x, y);
+        Calls.push_back(Line);
+        return object->Draw(context, this, x, y, FALSE, FALSE, nullptr);
+    }
+};
+
+static
+std::vector<std::wstring>
+TcDescribeLayout(
+    _In_ TcSide& Side,
+    _In_z_ PCWSTR Text,
+    _In_z_ PCWSTR Family,
+    _In_ FLOAT Size,
+    _In_ FLOAT Width,
+    _In_ FLOAT Height,
+    _In_ INT Variant)
+{
+    std::vector<std::wstring> Lines;
+    ComPtr<IDWriteTextFormat> Format;
+    ComPtr<IDWriteTextLayout> Layout;
+    ComPtr<IDWriteInlineObject> Sign;
+    DWRITE_TEXT_METRICS Metrics;
+    DWRITE_LINE_METRICS LineMetrics[64];
+    UINT32 Count = 0;
+    TcRecorder Recorder;
+    WCHAR Line[256];
+
+    if (FAILED(Side.Factory->CreateTextFormat(Family, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                              DWRITE_FONT_STRETCH_NORMAL, Size, L"en-us", &Format)))
+    {
+        Lines.push_back(L"CreateTextFormat failed");
+        return Lines;
+    }
+
+    if (Variant & 1)
+        Format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (Variant & 2)
+    {
+        DWRITE_TRIMMING Trimming = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+
+        Side.Factory->CreateEllipsisTrimmingSign(Format.Get(), &Sign);
+        Format->SetTrimming(&Trimming, Sign.Get());
+    }
+    if (Variant & 4)
+        Format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    if (Variant & 8)
+        Format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    if (FAILED(Side.Factory->CreateTextLayout(Text, (UINT32)wcslen(Text), Format.Get(), Width, Height, &Layout)))
+    {
+        Lines.push_back(L"CreateTextLayout failed");
+        return Lines;
+    }
+    if (Variant & 16)
+    {
+        DWRITE_TEXT_RANGE Range = { 2, 5 };
+
+        Layout->SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, Range);
+        Layout->SetUnderline(TRUE, Range);
+    }
+
+    Layout->GetMetrics(&Metrics);
+    swprintf_s(Line, L"metrics left %.2f top %.2f width %.2f wws %.2f height %.2f lines %u", Metrics.left, Metrics.top,
+               Metrics.width, Metrics.widthIncludingTrailingWhitespace, Metrics.height, Metrics.lineCount);
+    Lines.push_back(Line);
+
+    Layout->GetLineMetrics(LineMetrics, 64, &Count);
+    for (UINT32 Index = 0; Index < Count && Index < 64; Index++)
+    {
+        swprintf_s(Line, L"line %u len %u trail %u nl %u height %.2f base %.2f trim %d", Index, LineMetrics[Index].length,
+                   LineMetrics[Index].trailingWhitespaceLength, LineMetrics[Index].newlineLength,
+                   LineMetrics[Index].height, LineMetrics[Index].baseline, LineMetrics[Index].isTrimmed);
+        Lines.push_back(Line);
+    }
+
+    Layout->Draw(nullptr, &Recorder, 10.0f, 20.0f);
+    Lines.insert(Lines.end(), Recorder.Calls.begin(), Recorder.Calls.end());
+    return Lines;
+}
+
+static
+VOID
+TcCompareLayouts(
+    _In_ TcSide& Want,
+    _In_ TcSide& Got)
+{
+    static const struct
+    {
+        PCWSTR Text;
+        PCWSTR Family;
+        FLOAT Size;
+        FLOAT Width;
+        FLOAT Height;
+        INT Variant;
+    } Cases[] =
+    {
+        { L"Settings", L"Segoe UI", 12.0f, 200.0f, 50.0f, 0 },
+        { L"The quick brown fox jumps over the lazy dog", L"Segoe UI", 13.0f, 120.0f, 400.0f, 0 },
+        { L"Line one\r\nLine two\nthree", L"Tahoma", 11.0f, 300.0f, 300.0f, 0 },
+        { L"Trimmed text that will not fit in the box", L"Segoe UI", 14.0f, 100.0f, 30.0f, 3 },
+        { L"Centered", L"Segoe UI", 16.0f, 150.0f, 60.0f, 12 },
+        { L"Bold underline range test", L"Segoe UI", 12.0f, 400.0f, 40.0f, 16 },
+        { L"Tabs\tand\tspaces   ", L"Segoe UI", 12.0f, 400.0f, 40.0f, 0 },
+        { L"", L"Segoe UI", 12.0f, 100.0f, 40.0f, 0 },
+        { L"Unknown family falls back", L"No Such Font", 12.0f, 400.0f, 40.0f, 0 },
+        { L"Symbols ←→ ☺ and CJK 中文", L"Segoe UI", 12.0f, 400.0f, 40.0f, 0 },
+    };
+
+    printf("text layout\n");
+    for (const auto& Case : Cases)
+    {
+        std::vector<std::wstring> Expected = TcDescribeLayout(Want, Case.Text, Case.Family, Case.Size, Case.Width,
+                                                              Case.Height, Case.Variant);
+        std::vector<std::wstring> Actual = TcDescribeLayout(Got, Case.Text, Case.Family, Case.Size, Case.Width,
+                                                            Case.Height, Case.Variant);
+        BOOLEAN Same = Expected == Actual;
+
+        TcCheck(Same, "layout \"%ls\"", Case.Text);
+        if (!Same)
+        {
+            for (SIZE_T Index = 0; Index < std::max(Expected.size(), Actual.size()); Index++)
+            {
+                PCWSTR A = Index < Expected.size() ? Expected[Index].c_str() : L"(none)";
+                PCWSTR B = Index < Actual.size() ? Actual[Index].c_str() : L"(none)";
+
+                printf("    %s want %ls\n", wcscmp(A, B) == 0 ? "  " : "!=", A);
+                if (wcscmp(A, B) != 0)
+                    printf("         got  %ls\n", B);
+            }
+        }
+    }
+}
+
 int
 __cdecl
 wmain(
@@ -559,6 +762,10 @@ wmain(
 
     if (Only == nullptr || _wcsicmp(Only, L"collection") == 0)
         TcCompareCollections(System, ReactX);
+    if (Only == nullptr || _wcsicmp(Only, L"layout") == 0)
+        TcCompareLayouts(System, ReactX);
+    if (Only != nullptr && _wcsicmp(Only, L"layout") == 0)
+        Only = L"";
     if (Only != nullptr && _wcsicmp(Only, L"collection") == 0)
         Only = L"";
 

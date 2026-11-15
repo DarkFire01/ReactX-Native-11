@@ -85,6 +85,20 @@ RxCreateRasterizer(
     return *Context != nullptr;
 }
 
+const RxKerning&
+RxFontFace::Kerning(VOID)
+{
+    PVOID Context;
+    BOOL Pending = FALSE;
+
+    if (InitOnceBeginInitialize(&PairsOnce, 0, &Pending, &Context) && Pending)
+    {
+        Pairs.Load(Data, RxTag('l', 'a', 't', 'n'));
+        InitOnceComplete(&PairsOnce, 0, nullptr);
+    }
+    return Pairs;
+}
+
 RxGlyphRasterizer*
 RxFontFace::Rasterizer(VOID)
 {

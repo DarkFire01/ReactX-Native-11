@@ -8,6 +8,7 @@
 #pragma once
 
 #include "facetables.hpp"
+#include "gpos.hpp"
 
 class RxGlyphRasterizer;
 
@@ -36,6 +37,10 @@ public:
     RxGlyphRasterizer*
     Rasterizer(VOID);
 
+    /* Latin kern feature pairs, read on first use */
+    const RxKerning&
+    Kerning(VOID);
+
     /* Our own faces carry their tables; anything else is not one of ours */
     static
     RxFontFace*
@@ -56,6 +61,8 @@ private:
     DWRITE_FONT_METRICS1 Metrics;
     RxGlyphRasterizer* GlyphRasterizer;
     INIT_ONCE RasterizerOnce;
+    RxKerning Pairs;
+    INIT_ONCE PairsOnce = INIT_ONCE_STATIC_INIT;
 };
 
 /* Glyph box in font units from the glyf header; FALSE for a glyph without outline */

@@ -403,7 +403,8 @@ $Classes = @(
             'CreateFontFileReference', 'CreateCustomFontFileReference', 'RegisterFontFileLoader',
             'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader', 'CreateFontFace', 'CreateRenderingParams',
             'CreateMonitorRenderingParams', 'CreateCustomRenderingParams', 'CreateGlyphRunAnalysis',
-            'GetSystemFontCollection'
+            'GetSystemFontCollection', 'CreateTextFormat',
+            'CreateTextLayout', 'CreateGdiCompatibleTextLayout', 'CreateEllipsisTrimmingSign', 'CreateTypography'
         )
     },
     @{
@@ -469,6 +470,48 @@ $Classes = @(
         Purpose     = 'IDWriteFont methods'
         Implemented = @('GetFontFamily', 'GetWeight', 'GetStretch', 'GetStyle', 'IsSymbolFont', 'GetFaceNames',
                         'GetInformationalStrings', 'GetSimulations', 'GetMetrics', 'HasCharacter', 'CreateFontFace')
+    },
+    @{
+        Class       = 'RxTextFormat'
+        Interfaces  = @('IDWriteTextFormat', 'IDWriteTextFormat1')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h')
+        Include     = 'textformat.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'textformat'
+        Purpose     = 'IDWriteTextFormat methods'
+        Implemented = @(
+            'SetTextAlignment', 'SetParagraphAlignment', 'SetWordWrapping', 'SetReadingDirection', 'SetFlowDirection',
+            'SetIncrementalTabStop', 'SetTrimming', 'SetLineSpacing', 'GetTextAlignment', 'GetParagraphAlignment',
+            'GetWordWrapping', 'GetReadingDirection', 'GetFlowDirection', 'GetIncrementalTabStop', 'GetTrimming',
+            'GetLineSpacing', 'GetFontCollection', 'GetFontFamilyNameLength', 'GetFontFamilyName', 'GetFontWeight',
+            'GetFontStyle', 'GetFontStretch', 'GetFontSize', 'GetLocaleNameLength', 'GetLocaleName',
+            'SetVerticalGlyphOrientation', 'GetVerticalGlyphOrientation', 'SetLastLineWrapping', 'GetLastLineWrapping',
+            'SetOpticalAlignment', 'GetOpticalAlignment', 'SetFontFallback', 'GetFontFallback'
+        )
+    },
+    @{
+        Class       = 'RxTextLayout'
+        Interfaces  = @('IDWriteTextFormat', 'IDWriteTextLayout', 'IDWriteTextLayout1', 'IDWriteTextLayout2')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h')
+        Include     = 'textlayout.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'textlayout'
+        Purpose     = 'IDWriteTextLayout methods'
+        Implemented = @(
+            'SetTextAlignment', 'SetParagraphAlignment', 'SetWordWrapping', 'SetReadingDirection', 'SetFlowDirection',
+            'SetIncrementalTabStop', 'SetTrimming', 'SetLineSpacing', 'GetTextAlignment', 'GetParagraphAlignment',
+            'GetWordWrapping', 'GetReadingDirection', 'GetFlowDirection', 'GetIncrementalTabStop', 'GetTrimming',
+            'GetLineSpacing', 'GetFontCollection', 'GetFontFamilyNameLength', 'GetFontFamilyName', 'GetFontWeight',
+            'GetFontStyle', 'GetFontStretch', 'GetFontSize', 'GetLocaleNameLength', 'GetLocaleName',
+            'SetVerticalGlyphOrientation', 'GetVerticalGlyphOrientation', 'SetLastLineWrapping', 'GetLastLineWrapping',
+            'SetOpticalAlignment', 'GetOpticalAlignment', 'SetFontFallback', 'GetFontFallback',
+            'SetMaxWidth', 'SetMaxHeight', 'SetFontCollection', 'SetFontFamilyName', 'SetFontWeight', 'SetFontStyle',
+            'SetFontStretch', 'SetFontSize', 'SetUnderline', 'SetStrikethrough', 'SetDrawingEffect', 'SetInlineObject',
+            'SetTypography', 'SetLocaleName', 'GetMaxWidth', 'GetMaxHeight', 'GetUnderline', 'GetStrikethrough',
+            'GetDrawingEffect', 'GetInlineObject', 'GetTypography', 'Draw', 'GetLineMetrics', 'GetMetrics',
+            'GetOverhangMetrics', 'GetClusterMetrics', 'DetermineMinWidth', 'HitTestPoint', 'HitTestTextPosition',
+            'HitTestTextRange', 'SetPairKerning', 'GetPairKerning', 'SetCharacterSpacing', 'GetCharacterSpacing'
+        )
     }
 )
 

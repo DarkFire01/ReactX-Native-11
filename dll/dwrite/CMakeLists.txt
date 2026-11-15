@@ -10,13 +10,18 @@ nt_add_usermode_dll(dwrite
         fontfile.cpp
         glyphraster.cpp
         glyphrun.cpp
+        gpos.cpp
         collection.cpp
         hinter.cpp
+        layoutengine.cpp
+        linebreak.cpp
         names.cpp
         params.cpp
         params_stubs.cpp
         scan.cpp
-        sfnt.cpp)
+        sfnt.cpp
+        textformat.cpp
+        textlayout.cpp)
 
 target_link_libraries(dwrite PRIVATE rxcommon user32 advapi32 dxguid)
 

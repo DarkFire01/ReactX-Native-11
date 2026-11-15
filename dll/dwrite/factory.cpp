@@ -626,3 +626,220 @@ RxWriteFactory::CreateGlyphRunAnalysis(
                      measuringMode, gridFitMode, antialiasMode, TRUE, baselineOriginX, baselineOriginY,
                      glyphRunAnalysis);
 }
+
+/* Text */
+
+/* The OpenType features a layout range asks for */
+class RxTypography final : public IDWriteTypography
+{
+public:
+    RxTypography() : RefCount(1) {}
+
+    RX_DECLARE_IUNKNOWN
+
+    HRESULT
+    STDMETHODCALLTYPE
+    AddFontFeature(
+        DWRITE_FONT_FEATURE fontFeature) override
+    {
+        Features.push_back(fontFeature);
+        return S_OK;
+    }
+
+    UINT32
+    STDMETHODCALLTYPE
+    GetFontFeatureCount(VOID) override
+    {
+        return static_cast<UINT32>(Features.size());
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetFontFeature(
+        UINT32 fontFeatureIndex,
+        _Out_ DWRITE_FONT_FEATURE* fontFeature) override
+    {
+        if (fontFeatureIndex >= Features.size())
+            return E_INVALIDARG;
+        *fontFeature = Features[fontFeatureIndex];
+        return S_OK;
+    }
+
+private:
+    LONG RefCount;
+    std::vector<DWRITE_FONT_FEATURE> Features;
+};
+
+HRESULT
+STDMETHODCALLTYPE
+RxTypography::QueryInterface(
+    _In_ REFIID riid,
+    _COM_Outptr_ void** ppvObject)
+{
+    if (ppvObject == nullptr)
+        return E_POINTER;
+
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteTypography))
+    {
+        *ppvObject = static_cast<IDWriteTypography*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    *ppvObject = nullptr;
+    return E_NOINTERFACE;
+}
+
+RX_IMPLEMENT_REFCOUNT(RxTypography)
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::CreateTypography(
+    _COM_Outptr_ IDWriteTypography** typography)
+{
+    if (typography == nullptr)
+        return E_INVALIDARG;
+    *typography = new (std::nothrow) RxTypography();
+    return *typography != nullptr ? S_OK : E_OUTOFMEMORY;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::CreateTextFormat(
+    _In_z_ WCHAR const* fontFamilyName,
+    _In_opt_ IDWriteFontCollection* fontCollection,
+    DWRITE_FONT_WEIGHT fontWeight,
+    DWRITE_FONT_STYLE fontStyle,
+    DWRITE_FONT_STRETCH fontStretch,
+    FLOAT fontSize,
+    _In_z_ WCHAR const* localeName,
+    _COM_Outptr_ IDWriteTextFormat** textFormat)
+{
+    RxTextProperties Properties = {};
+    RxTextFormat* Format;
+    HRESULT hr;
+
+    if (textFormat == nullptr)
+        return E_INVALIDARG;
+    *textFormat = nullptr;
+
+    if (fontFamilyName == nullptr || localeName == nullptr || !RxValidFont(fontWeight, fontStyle, fontStretch) ||
+        !(fontSize > 0.0f))
+        return E_INVALIDARG;
+
+    if (fontCollection != nullptr)
+    {
+        Properties.Collection = RxComPtr<IDWriteFontCollection>(fontCollection);
+    }
+    else
+    {
+        RxFontCollection* Installed;
+
+        hr = SystemCollection(&Installed);
+        if (FAILED(hr))
+            return hr;
+        Properties.Collection.Attach(Installed);
+    }
+
+    Properties.Family = fontFamilyName;
+    Properties.Weight = fontWeight;
+    Properties.Style = fontStyle;
+    Properties.Stretch = fontStretch;
+    Properties.Size = fontSize;
+    Properties.Locale = localeName;
+    Properties.IncrementalTabStop = 4.0f * fontSize;
+    Properties.LastLineWrapping = TRUE;
+
+    hr = RxTextFormat::Create(Properties, &Format);
+    if (FAILED(hr))
+        return hr;
+    *textFormat = Format;
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::CreateTextLayout(
+    _In_reads_(stringLength) WCHAR const* string,
+    UINT32 stringLength,
+    _In_ IDWriteTextFormat* textFormat,
+    FLOAT maxWidth,
+    FLOAT maxHeight,
+    _COM_Outptr_ IDWriteTextLayout** textLayout)
+{
+    RxTextLayout* Layout;
+    HRESULT hr;
+
+    if (textLayout == nullptr)
+        return E_INVALIDARG;
+    *textLayout = nullptr;
+    if (string == nullptr || textFormat == nullptr || !(maxWidth >= 0.0f) || !(maxHeight >= 0.0f))
+        return E_INVALIDARG;
+
+    hr = RxTextLayout::Create(this, string, stringLength, textFormat, maxWidth, maxHeight,
+                              DWRITE_MEASURING_MODE_NATURAL, 1.0f, nullptr, &Layout);
+    if (FAILED(hr))
+        return hr;
+    *textLayout = Layout;
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::CreateGdiCompatibleTextLayout(
+    _In_reads_(stringLength) WCHAR const* string,
+    UINT32 stringLength,
+    _In_ IDWriteTextFormat* textFormat,
+    FLOAT layoutWidth,
+    FLOAT layoutHeight,
+    FLOAT pixelsPerDip,
+    _In_opt_ DWRITE_MATRIX const* transform,
+    BOOL useGdiNatural,
+    _COM_Outptr_ IDWriteTextLayout** textLayout)
+{
+    RxTextLayout* Layout;
+    HRESULT hr;
+
+    if (textLayout == nullptr)
+        return E_INVALIDARG;
+    *textLayout = nullptr;
+    if (string == nullptr || textFormat == nullptr || !(layoutWidth >= 0.0f) || !(layoutHeight >= 0.0f) ||
+        !(pixelsPerDip > 0.0f))
+        return E_INVALIDARG;
+
+    hr = RxTextLayout::Create(this, string, stringLength, textFormat, layoutWidth, layoutHeight,
+                              useGdiNatural ? DWRITE_MEASURING_MODE_GDI_NATURAL : DWRITE_MEASURING_MODE_GDI_CLASSIC,
+                              pixelsPerDip, transform, &Layout);
+    if (FAILED(hr))
+        return hr;
+    *textLayout = Layout;
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::CreateEllipsisTrimmingSign(
+    _In_ IDWriteTextFormat* textFormat,
+    _COM_Outptr_ IDWriteInlineObject** trimmingSign)
+{
+    if (trimmingSign == nullptr)
+        return E_INVALIDARG;
+    return RxEllipsisSign::Create(this, textFormat, trimmingSign);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::CreateTextFormat(
+    _In_z_ WCHAR const* fontFamilyName,
+    _In_opt_ IDWriteFontCollection* fontCollection,
+    _In_reads_(fontAxisValueCount) DWRITE_FONT_AXIS_VALUE const* fontAxisValues,
+    UINT32 fontAxisValueCount,
+    FLOAT fontSize,
+    _In_z_ WCHAR const* localeName,
+    _COM_Outptr_ IDWriteTextFormat3** textFormat)
+{
+    RX_UNIMPLEMENTED();
+    if (textFormat != nullptr)
+        *textFormat = nullptr;
+    return E_NOTIMPL;
+}

@@ -23,74 +23,8 @@ RxWriteFactory::CreateCustomFontCollection(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::CreateTextFormat(
-    _In_z_ WCHAR const* fontFamilyName,
-    _In_opt_ IDWriteFontCollection* fontCollection,
-    DWRITE_FONT_WEIGHT fontWeight,
-    DWRITE_FONT_STYLE fontStyle,
-    DWRITE_FONT_STRETCH fontStretch,
-    FLOAT fontSize,
-    _In_z_ WCHAR const* localeName,
-    _COM_Outptr_ IDWriteTextFormat** textFormat)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateTypography(
-    _COM_Outptr_ IDWriteTypography** typography)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::GetGdiInterop(
     _COM_Outptr_ IDWriteGdiInterop** gdiInterop)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateTextLayout(
-    _In_reads_(stringLength) WCHAR const* string,
-    UINT32 stringLength,
-    _In_ IDWriteTextFormat* textFormat,
-    FLOAT maxWidth,
-    FLOAT maxHeight,
-    _COM_Outptr_ IDWriteTextLayout** textLayout)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateGdiCompatibleTextLayout(
-    _In_reads_(stringLength) WCHAR const* string,
-    UINT32 stringLength,
-    _In_ IDWriteTextFormat* textFormat,
-    FLOAT layoutWidth,
-    FLOAT layoutHeight,
-    FLOAT pixelsPerDip,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    BOOL useGdiNatural,
-    _COM_Outptr_ IDWriteTextLayout** textLayout)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateEllipsisTrimmingSign(
-    _In_ IDWriteTextFormat* textFormat,
-    _COM_Outptr_ IDWriteInlineObject** trimmingSign)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
@@ -364,21 +298,6 @@ HRESULT
 STDMETHODCALLTYPE
 RxWriteFactory::CreateFontSetBuilder(
     _COM_Outptr_ IDWriteFontSetBuilder2** fontSetBuilder)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateTextFormat(
-    _In_z_ WCHAR const* fontFamilyName,
-    _In_opt_ IDWriteFontCollection* fontCollection,
-    _In_reads_(fontAxisValueCount) DWRITE_FONT_AXIS_VALUE const* fontAxisValues,
-    UINT32 fontAxisValueCount,
-    FLOAT fontSize,
-    _In_z_ WCHAR const* localeName,
-    _COM_Outptr_ IDWriteTextFormat3** textFormat)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
