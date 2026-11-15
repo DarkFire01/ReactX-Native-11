@@ -101,6 +101,21 @@ RxGaspBehavior(
     return Gasp.U16(4 + (Count - 1) * 4 + 2);
 }
 
+BOOLEAN
+RxGaspGridFits(
+    _In_ const RxFaceTables* Face,
+    _In_ UINT32 Ppem)
+{
+    RxSpan Gasp = Face->Sfnt().Table(RxTag('g', 'a', 's', 'p'));
+    UINT32 Behavior;
+
+    /* Version 0 tables predate the symmetric bit, and grid fitting is then always on */
+    if (Gasp.IsEmpty() || Gasp.U16(0) == 0)
+        return TRUE;
+    Behavior = RxGaspBehavior(Face, Ppem);
+    return Behavior == MAXUINT32 || (Behavior & 0x4) != 0;
+}
+
 /* Blend parameters */
 
 static
@@ -273,10 +288,8 @@ RxGlyphRunAnalysis::Create(
         }
         else
         {
-            UINT32 Behavior = RxGaspBehavior(Face->Tables(), std::min<UINT32>(std::max<UINT32>(Ppem, 1), 65535));
-
-            GridFit = (Behavior == MAXUINT32 || (Behavior & 0x1)) ? DWRITE_GRID_FIT_MODE_ENABLED :
-                                                                   DWRITE_GRID_FIT_MODE_DISABLED;
+            GridFit = RxGaspGridFits(Face->Tables(), std::min<UINT32>(std::max<UINT32>(Ppem, 1), 65535)) ?
+                          DWRITE_GRID_FIT_MODE_ENABLED : DWRITE_GRID_FIT_MODE_DISABLED;
         }
     }
     Hint = GridFit == DWRITE_GRID_FIT_MODE_ENABLED;

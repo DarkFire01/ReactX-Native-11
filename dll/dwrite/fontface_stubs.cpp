@@ -27,19 +27,6 @@ RxFontFace::GetGlyphRunOutline(
 
 HRESULT
 STDMETHODCALLTYPE
-RxFontFace::GetRecommendedRenderingMode(
-    FLOAT emSize,
-    FLOAT pixelsPerDip,
-    DWRITE_MEASURING_MODE measuringMode,
-    IDWriteRenderingParams* renderingParams,
-    _Out_ DWRITE_RENDERING_MODE* renderingMode)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxFontFace::GetGdiCompatibleMetrics(
     FLOAT emSize,
     FLOAT pixelsPerDip,
@@ -107,22 +94,6 @@ RxFontFace::GetGdiCompatibleGlyphAdvances(
 
 HRESULT
 STDMETHODCALLTYPE
-RxFontFace::GetRecommendedRenderingMode(
-    FLOAT fontEmSize,
-    FLOAT dpiX,
-    FLOAT dpiY,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    BOOL isSideways,
-    DWRITE_OUTLINE_THRESHOLD outlineThreshold,
-    DWRITE_MEASURING_MODE measuringMode,
-    _Out_ DWRITE_RENDERING_MODE* renderingMode)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxFontFace::GetVerticalGlyphVariants(
     UINT32 glyphCount,
     _In_reads_(glyphCount) UINT16 const* nominalGlyphIndices,
@@ -147,24 +118,6 @@ RxFontFace::GetPaletteEntries(
     UINT32 firstEntryIndex,
     UINT32 entryCount,
     _Out_writes_(entryCount) DWRITE_COLOR_F* paletteEntries)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetRecommendedRenderingMode(
-    FLOAT fontEmSize,
-    FLOAT dpiX,
-    FLOAT dpiY,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    BOOL isSideways,
-    DWRITE_OUTLINE_THRESHOLD outlineThreshold,
-    DWRITE_MEASURING_MODE measuringMode,
-    _In_opt_ IDWriteRenderingParams* renderingParams,
-    _Out_ DWRITE_RENDERING_MODE* renderingMode,
-    _Out_ DWRITE_GRID_FIT_MODE* gridFitMode)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
@@ -203,24 +156,6 @@ RxFontFace::GetInformationalStrings(
     DWRITE_INFORMATIONAL_STRING_ID informationalStringID,
     _COM_Outptr_result_maybenull_ IDWriteLocalizedStrings** informationalStrings,
     _Out_ BOOL* exists)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetRecommendedRenderingMode(
-    FLOAT fontEmSize,
-    FLOAT dpiX,
-    FLOAT dpiY,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    BOOL isSideways,
-    DWRITE_OUTLINE_THRESHOLD outlineThreshold,
-    DWRITE_MEASURING_MODE measuringMode,
-    _In_opt_ IDWriteRenderingParams* renderingParams,
-    _Out_ DWRITE_RENDERING_MODE1* renderingMode,
-    _Out_ DWRITE_GRID_FIT_MODE* gridFitMode)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

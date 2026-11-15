@@ -422,7 +422,7 @@ $Classes = @(
             'GetDesignGlyphAdvances', 'GetCaretMetrics', 'HasKerningPairs', 'GetKerningPairAdjustments',
             'IsColorFont', 'GetColorPaletteCount', 'GetPaletteEntryCount', 'GetWeight', 'GetStretch', 'GetStyle',
             'GetPanose', 'IsCharacterLocal', 'HasCharacter', 'GetGlyphImageFormats', 'IsGlyphLocal', 'AreGlyphsLocal',
-            'AreCharactersLocal', 'GetFontAxisValueCount', 'HasVariations', 'Equals'
+            'AreCharactersLocal', 'GetFontAxisValueCount', 'HasVariations', 'Equals', 'GetRecommendedRenderingMode'
         )
     },
     @{

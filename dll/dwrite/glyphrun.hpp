@@ -45,6 +45,12 @@ RxGaspBehavior(
     _In_ const RxFaceTables* Face,
     _In_ UINT32 Ppem);
 
+/* Whether the gasp table asks for grid fitting at a ppem */
+BOOLEAN
+RxGaspGridFits(
+    _In_ const RxFaceTables* Face,
+    _In_ UINT32 Ppem);
+
 class RxGlyphRunAnalysis final : public IDWriteGlyphRunAnalysis
 {
 public:

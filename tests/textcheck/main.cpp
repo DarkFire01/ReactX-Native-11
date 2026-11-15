@@ -226,6 +226,46 @@ TcCompareFace(
                    GotMetrics[Index].advanceHeight, GotMetrics[Index].topSideBearing, GotMetrics[Index].bottomSideBearing);
     }
     TcCheck(Mismatches == 0, "%ls GetDesignGlyphMetrics, %lu mismatches", Name, Mismatches);
+
+    /* Recommended rendering and grid fit modes */
+    {
+        ComPtr<IDWriteFontFace3> Want3;
+        ComPtr<IDWriteFontFace3> Got3;
+        static const FLOAT Sizes[] = { 6.0f, 8.0f, 9.0f, 11.0f, 13.0f, 16.0f, 20.0f, 21.0f, 24.0f, 48.0f, 99.0f, 100.0f, 400.0f };
+        static const FLOAT Dpis[] = { 96.0f, 144.0f, 192.0f };
+
+        Mismatches = 0;
+        if (SUCCEEDED(Expected->QueryInterface(IID_PPV_ARGS(&Want3))) && SUCCEEDED(Actual->QueryInterface(IID_PPV_ARGS(&Got3))))
+        {
+            for (FLOAT Size : Sizes)
+            {
+                for (FLOAT Dpi : Dpis)
+                {
+                    for (UINT32 Measuring = 0; Measuring < 3; Measuring++)
+                    {
+                        for (UINT32 Threshold = 0; Threshold < 2; Threshold++)
+                        {
+                            DWRITE_RENDERING_MODE1 WantMode = DWRITE_RENDERING_MODE1_DEFAULT;
+                            DWRITE_RENDERING_MODE1 GotMode = DWRITE_RENDERING_MODE1_DEFAULT;
+                            DWRITE_GRID_FIT_MODE WantFit = DWRITE_GRID_FIT_MODE_DEFAULT;
+                            DWRITE_GRID_FIT_MODE GotFit = DWRITE_GRID_FIT_MODE_DEFAULT;
+
+                            Want3->GetRecommendedRenderingMode(Size, Dpi, Dpi, nullptr, FALSE,
+                                                               (DWRITE_OUTLINE_THRESHOLD)Threshold,
+                                                               (DWRITE_MEASURING_MODE)Measuring, nullptr, &WantMode, &WantFit);
+                            Got3->GetRecommendedRenderingMode(Size, Dpi, Dpi, nullptr, FALSE,
+                                                              (DWRITE_OUTLINE_THRESHOLD)Threshold,
+                                                              (DWRITE_MEASURING_MODE)Measuring, nullptr, &GotMode, &GotFit);
+                            if ((WantMode != GotMode || WantFit != GotFit) && Mismatches++ < 4)
+                                printf("  mode size %.0f dpi %.0f measuring %u threshold %u want %d/%d got %d/%d\n", Size, Dpi,
+                                       Measuring, Threshold, WantMode, WantFit, GotMode, GotFit);
+                        }
+                    }
+                }
+            }
+        }
+        TcCheck(Mismatches == 0, "%ls GetRecommendedRenderingMode, %lu mismatches", Name, Mismatches);
+    }
 }
 
 /* Writes an alpha texture as a PGM, three bytes per pixel becoming three columns */
