@@ -8,7 +8,10 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $SdkVersion = '10.0.28000.0'
+    [string] $SdkVersion = '10.0.28000.0',
+
+    # Regenerate only the entries whose Dir is listed, such as dll\dwrite
+    [string[]] $Only
 )
 
 $ErrorActionPreference = 'Stop'
@@ -386,10 +389,25 @@ $Classes = @(
             'SetSourceSize', 'GetSourceSize', 'SetMatrixTransform', 'GetMatrixTransform', 'CheckColorSpaceSupport',
             'SetColorSpace1', 'ResizeBuffers1', 'SetHDRMetaData'
         )
+    },
+    @{
+        Class       = 'RxWriteFactory'
+        Interfaces  = @('IDWriteFactory', 'IDWriteFactory1', 'IDWriteFactory2', 'IDWriteFactory3', 'IDWriteFactory4',
+                        'IDWriteFactory5', 'IDWriteFactory6', 'IDWriteFactory7')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h', 'um\dwrite_3.h')
+        Include     = 'factory.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'factory'
+        Purpose     = 'IDWriteFactory methods'
+        Implemented = @(
+            'CreateFontFileReference', 'CreateCustomFontFileReference', 'RegisterFontFileLoader',
+            'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader'
+        )
     }
 )
 
 foreach ($Entry in $Classes) {
+    if ($Only -and $Only -notcontains $Entry.Dir) { continue }
     $Headers = if ($Entry.Headers) { $Entry.Headers } else { @('um\d3d11.h') }
     $Include = if ($Entry.Include) { $Entry.Include } else { 'device.hpp' }
     $Out = Join-Path $Root $(if ($Entry.Dir) { $Entry.Dir } else { $DefaultDir })
@@ -400,7 +418,7 @@ foreach ($Entry in $Classes) {
         '--stubs', (Join-Path $Out "$($Entry.Name)_stubs.cpp"),
         '--include', $Include,
         '--purpose', $Entry.Purpose,
-        '--project', $(switch ($Entry.Dir) { 'dll\dxgi' { 'ReactX DXGI runtime' } 'dll\d3d12core' { 'ReactX Direct3D 12 runtime' } default { 'ReactX Direct3D 11 runtime' } })
+        '--project', $(switch ($Entry.Dir) { 'dll\dxgi' { 'ReactX DXGI runtime' } 'dll\d3d12core' { 'ReactX Direct3D 12 runtime' } 'dll\dwrite' { 'ReactX DirectWrite' } 'dll\d2d1' { 'ReactX Direct2D' } default { 'ReactX Direct3D 11 runtime' } })
     )
     if ($Entry.Implemented.Count -gt 0) {
         $Arguments += @('--implemented', ($Entry.Implemented -join ','))

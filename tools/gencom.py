@@ -27,7 +27,30 @@ HEADER_TEMPLATE = """/*
 """
 
 
+def read_macro_interface(text, name):
+    # dwrite.h and d2d1.h: interface X_DECLARE_INTERFACE("iid") Name : public Base { STDMETHOD(...) PURE; };
+    match = re.search(r"\binterface\s+\w+\(\"[^\"]*\"\)\s+" + re.escape(name) + r"\s*:\s*public\s+\w+\s*\{(.*?)\n\};", text, re.S)
+    if match is None:
+        return None
+
+    body = re.sub(r"//[^\n]*", "", match.group(1))
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    methods = []
+    pattern = r"STDMETHOD(?:_\(\s*(.+?)\s*,\s*(\w+)\s*\)|\(\s*(\w+)\s*\))\s*\((.*?)\)\s*(?:CONST\s*)?PURE\s*;"
+    for method in re.finditer(pattern, body, re.S):
+        result, typed_name, plain_name, params = method.groups()
+        if plain_name is not None:
+            methods.append(("HRESULT", plain_name, split_params(params)))
+        else:
+            methods.append((" ".join(result.split()), typed_name, split_params(params)))
+    return methods
+
+
 def read_interface(text, name):
+    methods = read_macro_interface(text, name)
+    if methods is not None:
+        return methods
+
     match = re.search(r"\n\s*" + re.escape(name) + r"\s*:\s*public\s+\w+\s*\{\s*public:(.*?)\n\s*\};", text, re.S)
     if match is None:
         sys.exit("interface %s not found" % name)
@@ -86,6 +109,9 @@ def signature(method, prefix, indent, terminator):
         return lines
 
     lines.append("%s%s%s(" % (indent, prefix, name))
+    # Default arguments belong on the declaration only
+    if prefix:
+        params = [re.sub(r"\s*=\s*[^,]+$", "", param) for param in params]
     for index, param in enumerate(params):
         tail = "," if index + 1 < len(params) else ")" + terminator
         lines.append(indent + "    " + param + tail)
