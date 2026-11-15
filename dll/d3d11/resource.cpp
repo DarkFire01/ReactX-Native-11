@@ -596,7 +596,7 @@ DdiResource::AcquireSync(
         return DXGI_ERROR_INVALID_CALL;
 
     /* Work recorded before the acquire goes out first, so it does not end up behind the GPU wait */
-    Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+    Device.FlushDriver(0);
 
     Acquire.hKeyedMutex = Runtime->KeyedMutex;
     Acquire.Key = Key;
@@ -655,7 +655,7 @@ DdiResource::ReleaseSync(
     }
 
     /* The next owner waits for the fence value signaled after all of our work */
-    Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+    Device.FlushDriver(0);
     Release.FenceValue = 0;
     if (Runtime->SyncObject != 0)
     {

@@ -273,7 +273,7 @@ RxPresentBridge::SubmitPresent(
         {
             Device.GetDeviceFuncs().pfnResourceCopy(Device.GetDriverDevice(), Destination->GetResource()->GetHandle(),
                                                     Source->GetDdiResource().GetHandle());
-            Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+            Device.FlushDriver(0);
         }
     }
 

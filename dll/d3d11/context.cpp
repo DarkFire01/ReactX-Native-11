@@ -88,7 +88,7 @@ VOID
 STDMETHODCALLTYPE
 RxImmediateContext::Flush(VOID)
 {
-    Device.GetDeviceFuncs().pfnFlush(Device.GetDriverDevice(), 0);
+    Device.FlushDriver(0);
 }
 
 HRESULT

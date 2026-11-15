@@ -702,6 +702,20 @@ public:
         return reinterpret_cast<const D3DWDDM1_3DDI_DEVICEFUNCS&>(DeviceFuncs);
     }
 
+    /* The table as WDDM 2.0 types it, where some 1.3 entries take newer arguments */
+    const D3DWDDM2_0DDI_DEVICEFUNCS&
+    GetWddm2DeviceFuncs() const
+    {
+        return DeviceFuncs;
+    }
+
+    BOOLEAN
+    IsWddm2Driver();
+
+    VOID
+    FlushDriver(
+        _In_ UINT Flags);
+
     const DXGI1_6_1_DDI_BASE_FUNCTIONS&
     GetDxgiFuncs() const
     {

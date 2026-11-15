@@ -83,8 +83,8 @@ RxQuery::Create(
     _In_ const D3D11_QUERY_DESC& Desc,
     _Outptr_ RxQuery** Query)
 {
-    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
-    D3D10DDIARG_CREATEQUERY Args = {};
+    const D3DWDDM2_0DDI_DEVICEFUNCS& Funcs = Device.GetWddm2DeviceFuncs();
+    D3DWDDM2_0DDIARG_CREATEQUERY Args = {};
     D3D10DDI_HRTQUERY RuntimeHandle;
     RxQuery* NewQuery;
     HRESULT hr;
@@ -98,6 +98,9 @@ RxQuery::Create(
     NewQuery->Desc = Desc;
     Args.Query = RxDdiQueryKind(Desc.Query);
     Args.MiscFlags = Desc.MiscFlags;
+
+    /* Drivers before WDDM 2.0 stop reading ahead of the context type */
+    Args.ContextType = D3DWDDM2_0DDI_CONTEXTTYPE_3D;
 
     NewQuery->Handle.pDrvPrivate = NewQuery->Memory.Allocate(Funcs.pfnCalcPrivateQuerySize(Device.GetDriverDevice(), &Args));
     if (NewQuery->Handle.pDrvPrivate == nullptr)

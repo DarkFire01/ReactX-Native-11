@@ -282,6 +282,24 @@ RxDevice::TakeDriverError()
     return Error;
 }
 
+/* True when the driver speaks the WDDM 2.0 DDI or a later one */
+BOOLEAN
+RxDevice::IsWddm2Driver()
+{
+    return GetAdapter().GetRevision()->Interface >= D3DWDDM2_0_DDI_INTERFACE_VERSION;
+}
+
+/* From WDDM 2.0 the flush entry takes the context types to flush ahead of the flags */
+VOID
+RxDevice::FlushDriver(
+    _In_ UINT Flags)
+{
+    if (IsWddm2Driver())
+        DeviceFuncs.pfnFlush(DriverDevice, D3DWDDM2_0DDI_CONTEXTTYPE_3D, Flags);
+    else
+        GetDeviceFuncs().pfnFlush(DriverDevice, Flags);
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDevice::QueryInterface(
