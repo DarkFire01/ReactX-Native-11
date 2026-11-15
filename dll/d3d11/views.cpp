@@ -696,7 +696,7 @@ RxView<Traits>::Create(
     _In_opt_ const ApiDesc* Desc,
     _Outptr_ RxView** View)
 {
-    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
+    const D3DWDDM2_0DDI_DEVICEFUNCS& Funcs = Device.GetWddm2DeviceFuncs();
     typename Traits::DdiArgs Args;
     typename Traits::RuntimeHandle RuntimeHandle;
     RxResourceInfo Info;
