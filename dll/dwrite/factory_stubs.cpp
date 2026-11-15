@@ -33,39 +33,6 @@ RxWriteFactory::CreateCustomFontCollection(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::CreateRenderingParams(
-    _COM_Outptr_ IDWriteRenderingParams** renderingParams)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateMonitorRenderingParams(
-    HMONITOR monitor,
-    _COM_Outptr_ IDWriteRenderingParams** renderingParams)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateCustomRenderingParams(
-    FLOAT gamma,
-    FLOAT enhancedContrast,
-    FLOAT clearTypeLevel,
-    DWRITE_PIXEL_GEOMETRY pixelGeometry,
-    DWRITE_RENDERING_MODE renderingMode,
-    _COM_Outptr_ IDWriteRenderingParams** renderingParams)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateTextFormat(
     _In_z_ WCHAR const* fontFamilyName,
     _In_opt_ IDWriteFontCollection* fontCollection,
@@ -162,40 +129,9 @@ RxWriteFactory::CreateNumberSubstitution(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::CreateGlyphRunAnalysis(
-    _In_ DWRITE_GLYPH_RUN const* glyphRun,
-    FLOAT pixelsPerDip,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    DWRITE_RENDERING_MODE renderingMode,
-    DWRITE_MEASURING_MODE measuringMode,
-    FLOAT baselineOriginX,
-    FLOAT baselineOriginY,
-    _COM_Outptr_ IDWriteGlyphRunAnalysis** glyphRunAnalysis)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::GetEudcFontCollection(
     _COM_Outptr_ IDWriteFontCollection** fontCollection,
     BOOL checkForUpdates)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateCustomRenderingParams(
-    FLOAT gamma,
-    FLOAT enhancedContrast,
-    FLOAT enhancedContrastGrayscale,
-    FLOAT clearTypeLevel,
-    DWRITE_PIXEL_GEOMETRY pixelGeometry,
-    DWRITE_RENDERING_MODE renderingMode,
-    _COM_Outptr_ IDWriteRenderingParams1** renderingParams)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
@@ -230,72 +166,6 @@ RxWriteFactory::TranslateColorGlyphRun(
     _In_opt_ DWRITE_MATRIX const* worldToDeviceTransform,
     UINT32 colorPaletteIndex,
     _COM_Outptr_ IDWriteColorGlyphRunEnumerator** colorLayers)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateCustomRenderingParams(
-    FLOAT gamma,
-    FLOAT enhancedContrast,
-    FLOAT grayscaleEnhancedContrast,
-    FLOAT clearTypeLevel,
-    DWRITE_PIXEL_GEOMETRY pixelGeometry,
-    DWRITE_RENDERING_MODE renderingMode,
-    DWRITE_GRID_FIT_MODE gridFitMode,
-    _COM_Outptr_ IDWriteRenderingParams2** renderingParams)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateGlyphRunAnalysis(
-    _In_ DWRITE_GLYPH_RUN const* glyphRun,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    DWRITE_RENDERING_MODE renderingMode,
-    DWRITE_MEASURING_MODE measuringMode,
-    DWRITE_GRID_FIT_MODE gridFitMode,
-    DWRITE_TEXT_ANTIALIAS_MODE antialiasMode,
-    FLOAT baselineOriginX,
-    FLOAT baselineOriginY,
-    _COM_Outptr_ IDWriteGlyphRunAnalysis** glyphRunAnalysis)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateGlyphRunAnalysis(
-    _In_ DWRITE_GLYPH_RUN const* glyphRun,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    DWRITE_RENDERING_MODE1 renderingMode,
-    DWRITE_MEASURING_MODE measuringMode,
-    DWRITE_GRID_FIT_MODE gridFitMode,
-    DWRITE_TEXT_ANTIALIAS_MODE antialiasMode,
-    FLOAT baselineOriginX,
-    FLOAT baselineOriginY,
-    _COM_Outptr_ IDWriteGlyphRunAnalysis** glyphRunAnalysis)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateCustomRenderingParams(
-    FLOAT gamma,
-    FLOAT enhancedContrast,
-    FLOAT grayscaleEnhancedContrast,
-    FLOAT clearTypeLevel,
-    DWRITE_PIXEL_GEOMETRY pixelGeometry,
-    DWRITE_RENDERING_MODE1 renderingMode,
-    DWRITE_GRID_FIT_MODE gridFitMode,
-    _COM_Outptr_ IDWriteRenderingParams3** renderingParams)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

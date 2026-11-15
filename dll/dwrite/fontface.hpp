@@ -9,6 +9,8 @@
 
 #include "facetables.hpp"
 
+class RxGlyphRasterizer;
+
 class RxFontFace final : public IDWriteFontFace5
 {
 public:
@@ -30,6 +32,10 @@ public:
         return Data;
     }
 
+    /* Created on first use; NULL when out of memory */
+    RxGlyphRasterizer*
+    Rasterizer(VOID);
+
     /* Our own faces carry their tables; anything else is not one of ours */
     static
     RxFontFace*
@@ -37,7 +43,8 @@ public:
         _In_opt_ IUnknown* Face);
 
 private:
-    RxFontFace() : RefCount(1), Data(nullptr), Simulations(DWRITE_FONT_SIMULATIONS_NONE), Metrics{} {}
+    RxFontFace() : RefCount(1), Data(nullptr), Simulations(DWRITE_FONT_SIMULATIONS_NONE), Metrics{},
+                   GlyphRasterizer(nullptr), RasterizerOnce(INIT_ONCE_STATIC_INIT) {}
     ~RxFontFace();
 
     VOID
@@ -47,6 +54,8 @@ private:
     RxFaceTables* Data;
     DWRITE_FONT_SIMULATIONS Simulations;
     DWRITE_FONT_METRICS1 Metrics;
+    RxGlyphRasterizer* GlyphRasterizer;
+    INIT_ONCE RasterizerOnce;
 };
 
 /* Glyph box in font units from the glyf header; FALSE for a glyph without outline */

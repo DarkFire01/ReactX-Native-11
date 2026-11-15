@@ -330,9 +330,15 @@ RxTrueTypeHinter::Run(
 
         hr = Step(Current, Opcode, Depth);
         if (FAILED(hr))
+        {
+            RX_TRACE(L"hinting stopped at opcode %02X, offset %u, depth %lu, program %d", Opcode, Current.Ip - 1, Depth,
+                     static_cast<INT>(Where));
             return hr;
+        }
     }
-    return Depth == 0 ? S_OK : RX_HINT_FAIL;
+
+    /* Stored function bodies stop short of their ENDF */
+    return S_OK;
 }
 
 BOOLEAN
@@ -529,6 +535,24 @@ RxF26Dot6
 RxTrueTypeHinter::Round(
     _In_ RxF26Dot6 Distance) const
 {
+    /* Native ClearType fonts measuring along x round to sixteenths of a pixel */
+    if ((Size.ClearTypeFlags & RxClearTypeEnabled) && NativeClearType && State.Projection.Y == 0)
+    {
+        RxF26Dot6 Value;
+
+        switch (State.RoundState)
+        {
+            case RxRoundGrid:
+            case RxRoundHalfGrid:
+            case RxRoundDoubleGrid:
+                Value = Distance >= 0 ? (Distance + 2) & ~3 : -((-Distance + 2) & ~3);
+                return Value;
+            case RxRoundDownGrid:
+                return Distance >= 0 ? Distance & ~3 : -((-Distance) & ~3);
+            case RxRoundUpGrid:
+                return Distance >= 0 ? (Distance + 3) & ~3 : -((-Distance + 3) & ~3);
+        }
+    }
     return RoundWith(State.RoundState, Distance);
 }
 
@@ -607,34 +631,33 @@ RxTrueTypeHinter::MovePoint(
     _In_ BOOLEAN Touch)
 {
     Zone& Target = Zones[ZoneIndex];
-    BOOLEAN Locked = Size.IgnoreXMoves && !NativeClearType && DidIupX && DidIupY;
 
     if (State.Freedom.X != 0)
     {
-        /* ClearType compatibility keeps glyph points where the outline put them horizontally */
-        if (!(Size.IgnoreXMoves && !NativeClearType && ZoneIndex == 1) && !Locked)
-        {
-            if (State.Freedom.X == RxOne14 && State.Projection.X == RxOne14)
-                Target.CurrentX[Point] += Distance;
-            else
-                Target.CurrentX[Point] += RxMulDiv(Distance, State.Freedom.X, ProjectionDot);
-        }
+        if (State.Freedom.X == RxOne14 && State.Projection.X == RxOne14)
+            Target.CurrentX[Point] += Distance;
+        else
+            Target.CurrentX[Point] += RxMulDiv(Distance, State.Freedom.X, ProjectionDot);
         if (Touch)
             Target.Flags[Point] |= RxTouchedX;
     }
 
     if (State.Freedom.Y != 0)
     {
-        if (!Locked)
-        {
-            if (State.Freedom.Y == RxOne14 && State.Projection.Y == RxOne14)
-                Target.CurrentY[Point] += Distance;
-            else
-                Target.CurrentY[Point] += RxMulDiv(Distance, State.Freedom.Y, ProjectionDot);
-        }
+        if (State.Freedom.Y == RxOne14 && State.Projection.Y == RxOne14)
+            Target.CurrentY[Point] += Distance;
+        else
+            Target.CurrentY[Point] += RxMulDiv(Distance, State.Freedom.Y, ProjectionDot);
         if (Touch)
             Target.Flags[Point] |= RxTouchedY;
     }
+}
+
+/* ClearType on for a font that does not declare native ClearType hinting */
+BOOLEAN
+RxTrueTypeHinter::Compatibility(VOID) const
+{
+    return (Size.ClearTypeFlags & RxClearTypeEnabled) && !NativeClearType;
 }
 
 VOID
@@ -830,10 +853,10 @@ RxTrueTypeHinter::DoDelta(
         if (!ValidPoint(State.Zp0, Target))
             return RX_HINT_FAIL;
 
-        /* Compatibility mode only honors deltas on points already placed vertically, before IUP */
-        if (Size.IgnoreXMoves && !NativeClearType)
+        /* Compatibility mode only takes vertical deltas on points already placed vertically */
+        if (Compatibility())
         {
-            if (DidIupX && DidIupY)
+            if (State.Freedom.X != 0 || State.Freedom.Y != RxOne14)
                 continue;
             if (!(Zones[State.Zp0].Flags[Target] & RxTouchedY))
                 continue;
@@ -982,10 +1005,6 @@ RxTrueTypeHinter::DoInterpolateUntouched(
         DidIupX = TRUE;
     else
         DidIupY = TRUE;
-
-    /* Compatibility mode leaves x where the outline put it */
-    if (XAxis && Size.IgnoreXMoves && !NativeClearType)
-        return S_OK;
 
     for (USHORT End : Glyph.ContourEnds)
     {
@@ -1152,20 +1171,38 @@ RxTrueTypeHinter::DoGetInfo(VOID)
     if (!Pop(&Selector))
         return RX_HINT_FAIL;
 
+    /* Version 42, the ClearType capable rasterizer */
     if (Selector & 0x1)
-        Result |= Size.InfoVersion & 0xFF;
+        Result |= 42;
     if ((Selector & 0x2) && Size.Rotated)
-        Result |= 1 << 8;
+        Result |= 0x100;
     if ((Selector & 0x4) && Size.Stretched)
-        Result |= 1 << 9;
-    if ((Selector & 0x8) && Face->Sfnt().HasTable(RxTag('f', 'v', 'a', 'r')))
-        Result |= 1 << 10;
+        Result |= 0x200;
+    if (Selector & 0x8)
+        Result |= 0x400;
+    if (Selector & 0x10)
+        Result |= 0x800;
+    if ((Selector & 0x20) && Size.Oversampled)
+        Result |= 0x1000;
 
-    /* Selector bits 5 to 12 ask for result bits 12 to 19 */
-    for (UINT32 Bit = 5; Bit <= 12; Bit++)
+    /* Selector bits 6 to 12 report the ClearType state bits 0x01 to 0x80, skipping 0x40 */
     {
-        if (Selector & (1 << Bit))
-            Result |= Size.InfoFlags & (1u << (Bit + 7));
+        static const UINT32 Map[][3] =
+        {
+            { 0x0040, 0x01, 0x2000 },
+            { 0x0080, 0x02, 0x4000 },
+            { 0x0100, 0x04, 0x8000 },
+            { 0x0200, 0x08, 0x10000 },
+            { 0x0400, 0x10, 0x20000 },
+            { 0x0800, 0x20, 0x40000 },
+            { 0x1000, 0x80, 0x80000 },
+        };
+
+        for (const auto& Entry : Map)
+        {
+            if ((Selector & Entry[0]) && (Size.ClearTypeFlags & Entry[1]))
+                Result |= Entry[2];
+        }
     }
 
     return Push(Result) ? S_OK : RX_HINT_FAIL;
@@ -1617,17 +1654,12 @@ RxTrueTypeHinter::Step(
             while (State.Loop-- > 0)
             {
                 Zone* Target;
-                BOOLEAN Locked = Size.IgnoreXMoves && !NativeClearType && DidIupX && DidIupY;
 
                 if (!Pop(&A) || !ValidPoint(State.Zp2, A))
                     return RX_HINT_FAIL;
                 Target = &Zones[State.Zp2];
-                if (!Locked)
-                {
-                    if (!(Size.IgnoreXMoves && !NativeClearType && State.Zp2 == 1))
-                        Target->CurrentX[A] += Dx;
-                    Target->CurrentY[A] += Dy;
-                }
+                Target->CurrentX[A] += Dx;
+                Target->CurrentY[A] += Dy;
                 if (State.Freedom.X != 0)
                     Target->Flags[A] |= RxTouchedX;
                 if (State.Freedom.Y != 0)
@@ -2386,9 +2418,8 @@ RxTrueTypeHinter::HintComposite(
             Dy = RxScale(static_cast<INT32>(std::lround(OffsetY)), Size.ScaleY);
             if (Flags & RxCompRoundXy)
             {
+                Dx = RxRoundToGrid(Dx);
                 Dy = RxRoundToGrid(Dy);
-                if (!(Size.IgnoreXMoves && !NativeClearType))
-                    Dx = RxRoundToGrid(Dx);
             }
         }
         else

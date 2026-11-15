@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "fontface.hpp"
+#include "glyphrun.hpp"
 
 class RxWriteFactory final : public IDWriteFactory7
 {

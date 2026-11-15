@@ -401,7 +401,8 @@ $Classes = @(
         Purpose     = 'IDWriteFactory methods'
         Implemented = @(
             'CreateFontFileReference', 'CreateCustomFontFileReference', 'RegisterFontFileLoader',
-            'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader', 'CreateFontFace'
+            'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader', 'CreateFontFace', 'CreateRenderingParams',
+            'CreateMonitorRenderingParams', 'CreateCustomRenderingParams', 'CreateGlyphRunAnalysis'
         )
     },
     @{
@@ -420,6 +421,20 @@ $Classes = @(
             'IsColorFont', 'GetColorPaletteCount', 'GetPaletteEntryCount', 'GetWeight', 'GetStretch', 'GetStyle',
             'GetPanose', 'IsCharacterLocal', 'HasCharacter', 'GetGlyphImageFormats', 'IsGlyphLocal', 'AreGlyphsLocal',
             'AreCharactersLocal', 'GetFontAxisValueCount', 'HasVariations', 'Equals'
+        )
+    },
+    @{
+        Class       = 'RxRenderingParams'
+        Interfaces  = @('IDWriteRenderingParams', 'IDWriteRenderingParams1', 'IDWriteRenderingParams2',
+                        'IDWriteRenderingParams3')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h', 'um\dwrite_3.h')
+        Include     = 'params.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'params'
+        Purpose     = 'IDWriteRenderingParams methods'
+        Implemented = @(
+            'GetGamma', 'GetEnhancedContrast', 'GetClearTypeLevel', 'GetPixelGeometry', 'GetRenderingMode',
+            'GetGrayscaleEnhancedContrast', 'GetGridFitMode', 'GetRenderingMode1'
         )
     }
 )

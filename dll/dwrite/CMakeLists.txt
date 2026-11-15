@@ -8,7 +8,11 @@ nt_add_usermode_dll(dwrite
         fontface.cpp
         fontface_stubs.cpp
         fontfile.cpp
+        glyphraster.cpp
+        glyphrun.cpp
         hinter.cpp
+        params.cpp
+        params_stubs.cpp
         scan.cpp
         sfnt.cpp)
 

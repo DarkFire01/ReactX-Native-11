@@ -40,13 +40,20 @@ struct RxHintRequest
     RxF26Dot6 PointSize;
     BOOLEAN Rotated;
     BOOLEAN Stretched;
-    /* Bits 12 to 19 of the GETINFO result, as the request selects them */
-    UINT32 InfoFlags;
-    /* Version GETINFO reports in its low byte */
-    UINT32 InfoVersion;
-    /* ClearType backward compatibility: x direction moves are dropped */
-    BOOLEAN IgnoreXMoves;
+    /* Rendering at more than one sample per pixel */
+    BOOLEAN Oversampled;
+    /*
+     * ClearType state GETINFO reports: 0x01 ClearType, 0x02 compatible widths, 0x04 symmetric smoothing,
+     * 0x08 BGR, 0x10 subpixel positioned, 0x20 symmetric rendering, 0x80 gray ClearType
+     */
+    UINT32 ClearTypeFlags;
 };
+
+constexpr UINT32 RxClearTypeEnabled = 0x01;
+constexpr UINT32 RxClearTypeCompatibleWidths = 0x02;
+constexpr UINT32 RxClearTypeSubpixelPositioned = 0x10;
+constexpr UINT32 RxClearTypeSymmetric = 0x20;
+constexpr UINT32 RxClearTypeGray = 0x80;
 
 class RxTrueTypeHinter
 {
@@ -225,6 +232,7 @@ private:
     VOID UpdateProjectionDot(VOID);
     RxF26Dot6 ScaledCvt(_In_ UINT32 Index) const;
     RxF26Dot6 CurrentPpem(VOID) const;
+    BOOLEAN Compatibility(VOID) const;
 
     /* Instruction groups */
     HRESULT DoShift(_In_ BYTE Opcode);

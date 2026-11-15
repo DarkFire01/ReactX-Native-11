@@ -7,6 +7,7 @@
 
 #include "precomp.hpp"
 #include "fontface.hpp"
+#include "glyphraster.hpp"
 
 /* Private interface our faces answer to, so internal code can find the tables behind one */
 static constexpr GUID RxFontFaceIid = { 0x5a0f8b31, 0x7c2e, 0x4d6a, { 0x9e, 0x13, 0x48, 0xb2, 0x0c, 0x7f, 0xd1, 0x66 } };
@@ -65,8 +66,34 @@ RxFontFace::Create(
 
 RxFontFace::~RxFontFace()
 {
+    delete GlyphRasterizer;
     if (Data != nullptr)
         Data->Release();
+}
+
+static
+BOOL
+CALLBACK
+RxCreateRasterizer(
+    _Inout_ PINIT_ONCE InitOnce,
+    _Inout_opt_ PVOID Parameter,
+    _Outptr_opt_result_maybenull_ PVOID* Context)
+{
+    RxFaceTables* Tables = static_cast<RxFaceTables*>(Parameter);
+
+    *Context = new (std::nothrow) RxGlyphRasterizer(Tables);
+    return *Context != nullptr;
+}
+
+RxGlyphRasterizer*
+RxFontFace::Rasterizer(VOID)
+{
+    PVOID Context = nullptr;
+
+    if (!InitOnceExecuteOnce(&RasterizerOnce, RxCreateRasterizer, Data, &Context))
+        return nullptr;
+    GlyphRasterizer = static_cast<RxGlyphRasterizer*>(Context);
+    return GlyphRasterizer;
 }
 
 RxFontFace*

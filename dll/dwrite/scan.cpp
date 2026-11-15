@@ -408,11 +408,15 @@ RxScanConvert(
         }
     }
 
-    /* Dropout samples may land one outside the hull */
-    Mask->Left = static_cast<INT32>(std::floor(MinX)) - 1;
-    Mask->Right = static_cast<INT32>(std::ceil(MaxX)) + 1;
-    Mask->Top = static_cast<INT32>(std::floor(MinY)) - 1;
-    Mask->Bottom = static_cast<INT32>(std::ceil(MaxY)) + 1;
+    /* The image covers the outline's control box rounded to the sample grid */
+    Mask->Left = static_cast<INT32>(std::floor(MinX + 0.5));
+    Mask->Right = static_cast<INT32>(std::floor(MaxX + 0.5));
+    Mask->Top = static_cast<INT32>(std::floor(MinY + 0.5));
+    Mask->Bottom = static_cast<INT32>(std::floor(MaxY + 0.5));
+    if (Mask->Right == Mask->Left)
+        Mask->Right++;
+    if (Mask->Bottom == Mask->Top)
+        Mask->Bottom++;
     if (static_cast<INT64>(Mask->Right - Mask->Left) * (Mask->Bottom - Mask->Top) > 64 * 1024 * 1024)
         return E_OUTOFMEMORY;
 
