@@ -29,6 +29,7 @@ struct TdOptions
     std::wstring Capture;
     UINT Frames = 60;
     BOOLEAN Blt = FALSE;
+    BOOLEAN Warp = FALSE;
 };
 
 static
@@ -74,6 +75,8 @@ TdParseOptions(
             Options.Capture = argv[++Index];
         else if (_wcsicmp(argv[Index], L"-blt") == 0)
             Options.Blt = TRUE;
+        else if (_wcsicmp(argv[Index], L"-warp") == 0)
+            Options.Warp = TRUE;
         else if (argv[Index][0] != L'-' && Options.Scene == nullptr)
             Options.Scene = TdFindScene(argv[Index]);
         else
@@ -296,7 +299,7 @@ wmain(
 
     if (!TdParseOptions(argc, argv, Options))
     {
-        fwprintf(stderr, L"usage: tinyd3d <scene> [-runtime system|reactx|<path>] [-frames N] [-capture out.bmp] [-blt]\n");
+        fwprintf(stderr, L"usage: tinyd3d <scene> [-runtime system|reactx|<path>] [-frames N] [-capture out.bmp] [-blt] [-warp]\n");
         fwprintf(stderr, L"       tinyd3d -list\n");
         return 2;
     }
@@ -313,7 +316,7 @@ wmain(
 
     wprintf(L"scene %s on %s\n", Options.Scene->Name, RuntimePath.c_str());
 
-    hr = CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, Levels, _countof(Levels), D3D11_SDK_VERSION,
+    hr = CreateDevice(nullptr, Options.Warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE, NULL, 0, Levels, _countof(Levels), D3D11_SDK_VERSION,
                       &Device, &FeatureLevel, &Context);
     if (FAILED(TdCheck(hr, "D3D11CreateDevice")))
         return 1;
