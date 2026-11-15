@@ -401,7 +401,25 @@ $Classes = @(
         Purpose     = 'IDWriteFactory methods'
         Implemented = @(
             'CreateFontFileReference', 'CreateCustomFontFileReference', 'RegisterFontFileLoader',
-            'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader'
+            'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader', 'CreateFontFace'
+        )
+    },
+    @{
+        Class       = 'RxFontFace'
+        Interfaces  = @('IDWriteFontFace', 'IDWriteFontFace1', 'IDWriteFontFace2', 'IDWriteFontFace3', 'IDWriteFontFace4',
+                        'IDWriteFontFace5')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h', 'um\dwrite_3.h')
+        Include     = 'fontface.hpp'
+        Dir         = 'dll\dwrite'
+        Name        = 'fontface'
+        Purpose     = 'IDWriteFontFace methods'
+        Implemented = @(
+            'GetType', 'GetFiles', 'GetIndex', 'GetSimulations', 'IsSymbolFont', 'GetMetrics', 'GetGlyphCount',
+            'GetDesignGlyphMetrics', 'GetGlyphIndices', 'TryGetFontTable', 'ReleaseFontTable', 'IsMonospacedFont',
+            'GetDesignGlyphAdvances', 'GetCaretMetrics', 'HasKerningPairs', 'GetKerningPairAdjustments',
+            'IsColorFont', 'GetColorPaletteCount', 'GetPaletteEntryCount', 'GetWeight', 'GetStretch', 'GetStyle',
+            'GetPanose', 'IsCharacterLocal', 'HasCharacter', 'GetGlyphImageFormats', 'IsGlyphLocal', 'AreGlyphsLocal',
+            'AreCharactersLocal', 'GetFontAxisValueCount', 'HasVariations', 'Equals'
         )
     }
 )
