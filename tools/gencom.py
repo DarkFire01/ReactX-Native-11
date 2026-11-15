@@ -36,13 +36,13 @@ def read_macro_interface(text, name):
     body = re.sub(r"//[^\n]*", "", match.group(1))
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
     methods = []
-    pattern = r"STDMETHOD(?:_\(\s*(.+?)\s*,\s*(\w+)\s*\)|\(\s*(\w+)\s*\))\s*\((.*?)\)\s*(?:CONST\s*)?PURE\s*;"
+    pattern = r"STDMETHOD(?:_\(\s*(.+?)\s*,\s*(\w+)\s*\)|\(\s*(\w+)\s*\))\s*\((.*?)\)\s*(CONST\s*)?PURE\s*;"
     for method in re.finditer(pattern, body, re.S):
-        result, typed_name, plain_name, params = method.groups()
+        result, typed_name, plain_name, params, constant = method.groups()
         if plain_name is not None:
-            methods.append(("HRESULT", plain_name, split_params(params)))
+            methods.append(("HRESULT", plain_name, split_params(params), constant is not None))
         else:
-            methods.append((" ".join(result.split()), typed_name, split_params(params)))
+            methods.append((" ".join(result.split()), typed_name, split_params(params), constant is not None))
     return methods
 
 
@@ -62,7 +62,7 @@ def read_interface(text, name):
     methods = []
     for method in re.finditer(r"virtual\s+(.*?)\s+STDMETHODCALLTYPE\s+(\w+)\s*\((.*?)\)\s*(const\s*)?=\s*0\s*;", body, re.S):
         result, method_name, params, _ = method.groups()
-        methods.append((result.strip(), method_name, split_params(params)))
+        methods.append((result.strip(), method_name, split_params(params), False))
     return methods
 
 
@@ -102,8 +102,10 @@ def map_result(result):
 
 
 def signature(method, prefix, indent, terminator):
-    result, name, params = method
+    result, name, params, constant = method
     lines = [indent + map_result(result), indent + "STDMETHODCALLTYPE"]
+    if constant:
+        terminator = " const" + terminator
     if not params:
         lines.append("%s%s%s(VOID)%s" % (indent, prefix, name, terminator))
         return lines

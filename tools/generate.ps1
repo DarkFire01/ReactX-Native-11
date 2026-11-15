@@ -512,6 +512,92 @@ $Classes = @(
             'GetOverhangMetrics', 'GetClusterMetrics', 'DetermineMinWidth', 'HitTestPoint', 'HitTestTextPosition',
             'HitTestTextRange', 'SetPairKerning', 'GetPairKerning', 'SetCharacterSpacing', 'GetCharacterSpacing'
         )
+    },
+    @{
+        Class       = 'RxD2DFactory'
+        Interfaces  = @('ID2D1Factory', 'ID2D1Factory1')
+        Headers     = @('um\d2d1.h', 'um\d2d1_1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'factory'
+        Purpose     = 'ID2D1Factory methods'
+        Implemented = @('ReloadSystemMetrics', 'GetDesktopDpi', 'CreateDevice')
+    },
+    @{
+        Class       = 'RxD2DDevice'
+        Interfaces  = @('ID2D1Resource', 'ID2D1Device')
+        Headers     = @('um\d2d1.h', 'um\d2d1_1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'device'
+        Purpose     = 'ID2D1Device methods'
+        Implemented = @('GetFactory', 'CreateDeviceContext', 'SetMaximumTextureMemory', 'GetMaximumTextureMemory',
+                        'ClearResources')
+    },
+    @{
+        Class       = 'RxD2DContext'
+        Interfaces  = @('ID2D1Resource', 'ID2D1RenderTarget', 'ID2D1DeviceContext')
+        Headers     = @('um\d2d1.h', 'um\d2d1_1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'context'
+        Purpose     = 'ID2D1DeviceContext methods'
+        Implemented = @(
+            'GetFactory', 'CreateBitmap', 'CreateBitmapFromWicBitmap', 'CreateSolidColorBrush',
+            'CreateGradientStopCollection', 'CreateLinearGradientBrush', 'DrawRectangle', 'FillRectangle',
+            'DrawRoundedRectangle', 'FillRoundedRectangle', 'DrawLine', 'DrawBitmap', 'DrawGlyphRun', 'DrawTextLayout',
+            'DrawText', 'SetTransform', 'GetTransform', 'SetAntialiasMode', 'GetAntialiasMode', 'SetTextAntialiasMode',
+            'GetTextAntialiasMode', 'SetTextRenderingParams', 'GetTextRenderingParams', 'SetTags', 'GetTags', 'Flush',
+            'PushAxisAlignedClip', 'PopAxisAlignedClip', 'Clear', 'BeginDraw', 'EndDraw', 'GetPixelFormat', 'SetDpi',
+            'GetDpi', 'GetSize', 'GetPixelSize', 'GetMaximumBitmapSize', 'IsSupported', 'GetDevice', 'SetTarget',
+            'GetTarget', 'SetPrimitiveBlend', 'GetPrimitiveBlend', 'SetUnitMode', 'GetUnitMode',
+            'CreateBitmapFromDxgiSurface', 'IsDxgiFormatSupported', 'IsBufferPrecisionSupported', 'SaveDrawingState',
+            'RestoreDrawingState', 'FillEllipse', 'DrawEllipse'
+        )
+    },
+    @{
+        Class       = 'RxD2DBitmap'
+        Interfaces  = @('ID2D1Resource', 'ID2D1Image', 'ID2D1Bitmap', 'ID2D1Bitmap1')
+        Headers     = @('um\d2d1.h', 'um\d2d1_1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'bitmap'
+        Purpose     = 'ID2D1Bitmap1 methods'
+        Implemented = @('GetFactory', 'GetSize', 'GetPixelSize', 'GetPixelFormat', 'GetDpi', 'CopyFromMemory',
+                        'GetColorContext', 'GetOptions', 'GetSurface')
+    },
+    @{
+        Class       = 'RxSolidBrush'
+        Interfaces  = @('ID2D1Resource', 'ID2D1Brush', 'ID2D1SolidColorBrush')
+        Headers     = @('um\d2d1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'solidbrush'
+        Purpose     = 'ID2D1SolidColorBrush methods'
+        Implemented = @('GetFactory', 'SetOpacity', 'SetTransform', 'GetOpacity', 'GetTransform', 'SetColor', 'GetColor')
+    },
+    @{
+        Class       = 'RxLinearBrush'
+        Interfaces  = @('ID2D1Resource', 'ID2D1Brush', 'ID2D1LinearGradientBrush')
+        Headers     = @('um\d2d1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'linearbrush'
+        Purpose     = 'ID2D1LinearGradientBrush methods'
+        Implemented = @('GetFactory', 'SetOpacity', 'SetTransform', 'GetOpacity', 'GetTransform', 'SetStartPoint',
+                        'SetEndPoint', 'GetStartPoint', 'GetEndPoint', 'GetGradientStopCollection')
+    },
+    @{
+        Class       = 'RxGradientStops'
+        Interfaces  = @('ID2D1Resource', 'ID2D1GradientStopCollection', 'ID2D1GradientStopCollection1')
+        Headers     = @('um\d2d1.h', 'um\d2d1_1.h')
+        Include     = 'd2dobjects.hpp'
+        Dir         = 'dll\d2d1'
+        Name        = 'gradientstops'
+        Purpose     = 'ID2D1GradientStopCollection methods'
+        Implemented = @('GetFactory', 'GetGradientStopCount', 'GetGradientStops', 'GetColorInterpolationGamma',
+                        'GetExtendMode', 'GetGradientStops1', 'GetPreInterpolationSpace', 'GetPostInterpolationSpace',
+                        'GetBufferPrecision', 'GetColorInterpolationMode')
     }
 )
 
