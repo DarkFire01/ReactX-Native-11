@@ -116,6 +116,35 @@ RxBindFlagsForUsage(
     return BindFlags;
 }
 
+/* Drivers on the DXGI 1.2 DDI or later may fill only Present1, which takes the same present as a surface list */
+static
+HRESULT
+RxDriverPresent(
+    _In_ RxDevice& Device,
+    _In_ DXGI_DDI_ARG_PRESENT* Args)
+{
+    DXGI1_6_1_DDI_ARG_PRESENT Present1 = {};
+    DXGI_DDI_ARG_PRESENTSURFACE Surface = {};
+
+    if (Device.GetDxgiFuncs().pfnPresent != nullptr)
+        return Device.GetDxgiFuncs().pfnPresent(Args);
+    if (Device.GetDxgiFuncs().pfnPresent1 == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Surface.hSurface = Args->hSurfaceToPresent;
+    Surface.SubResourceIndex = Args->SrcSubResourceIndex;
+    Present1.hDevice = Args->hDevice;
+    Present1.phSurfacesToPresent = &Surface;
+    Present1.SurfacesToPresent = 1;
+    Present1.hDstResource = Args->hDstResource;
+    Present1.DstSubResourceIndex = Args->DstSubResourceIndex;
+    Present1.pDXGIContext = Args->pDXGIContext;
+    Present1.Flags = Args->Flags;
+    Present1.FlipInterval = Args->FlipInterval;
+    Present1.RotationHint = DXGI_DDI_MODE_ROTATION_IDENTITY;
+    return Device.GetDxgiFuncs().pfnPresent1(&Present1);
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxPresentBridge::QueryInterface(
@@ -286,7 +315,7 @@ RxPresentBridge::SubmitPresent(
     Args.Flags.Blt = 1;
     Args.FlipInterval = DXGI_DDI_FLIP_INTERVAL_IMMEDIATE;
 
-    hr = Device.GetDxgiFuncs().pfnPresent(&Args);
+    hr = RxDriverPresent(Device, &Args);
     if (SUCCEEDED(hr))
         hr = Device.TakeDriverError();
     if (FAILED(hr))
@@ -382,7 +411,7 @@ RxPresentBridge::PresentPrimary(
     Args.Flags.Flip = 1;
     Args.FlipInterval = (DXGI_DDI_FLIP_INTERVAL_TYPE)FlipInterval;
 
-    hr = Device.GetDxgiFuncs().pfnPresent(&Args);
+    hr = RxDriverPresent(Device, &Args);
     if (SUCCEEDED(hr))
         hr = Device.TakeDriverError();
     if (FAILED(hr))
