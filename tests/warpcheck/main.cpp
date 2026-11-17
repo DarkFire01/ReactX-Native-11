@@ -240,6 +240,7 @@ static const char TcShaderSource[] =
     "VO vs(VI i) { VO o; o.p = i.p; o.c = i.c; o.t = i.t; return o; }\n"
     "float4 ps(VO i) : SV_Target { return i.c; }\n"
     "float4 pstex(VO i) : SV_Target { return Tex.Sample(Smp, i.t); }\n"
+    "float4 psload(VO i) : SV_Target { return Tex.Load(int3(i.p.xy, 0)); }\n"
     "float4 psmath(VO i) : SV_Target { float4 v = i.c * 3.0 - 1.0; float d = dot(v.xyz, v.xyz);\n"
     "    float4 r = float4(sqrt(abs(v.x)), rsqrt(d + 1.0), frac(v.z * 7.3), 0.5);\n"
     "    [loop] for (int k = 0; k < 3; k++) { if (r.x > 0.6) break; r.x += 0.1; }\n"
@@ -325,6 +326,7 @@ struct TcDrawSetup
     D3D11_FILTER Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
     D3D11_CULL_MODE Cull = D3D11_CULL_NONE;
     D3D11_VIEWPORT Viewport = { 0, 0, 0, 0, 0, 1 };
+    ID3D11ShaderResourceView *View = NULL;
 };
 
 static
@@ -418,7 +420,12 @@ TcDrawScene(
         BlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         hr = Device->CreateBlendState(&BlendDesc, &BlendState);
     }
-    if (SUCCEEDED(hr) && Setup.Texture)
+    if (SUCCEEDED(hr) && Setup.View != NULL)
+    {
+        ImageView = Setup.View;
+        ImageView->AddRef();
+    }
+    if (SUCCEEDED(hr) && Setup.Texture && Setup.View == NULL)
     {
         UINT Texels[16 * 16];
         D3D11_TEXTURE2D_DESC ImageDesc = { 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
@@ -1125,6 +1132,68 @@ SceneCompute(
     return hr;
 }
 
+/* Every BC1 to BC5 variant, random blocks, loaded texel by texel into a float target */
+static
+HRESULT
+SceneBlocks(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const DXGI_FORMAT Formats[] =
+    {
+        DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC3_UNORM,
+        DXGI_FORMAT_BC3_UNORM_SRGB, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_BC4_SNORM, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC5_SNORM,
+    };
+    const TcVertex Vertices[] =
+    {
+        TcMake(-1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0),
+        TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(1.0f, -1.0f, 0.5f, 1.0f, 0), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0),
+    };
+    HRESULT hr = S_OK;
+
+    for (DXGI_FORMAT Format : Formats)
+    {
+        BOOLEAN Small = (Format == DXGI_FORMAT_BC1_UNORM || Format == DXGI_FORMAT_BC1_UNORM_SRGB ||
+                         Format == DXGI_FORMAT_BC4_UNORM || Format == DXGI_FORMAT_BC4_SNORM);
+        UINT BlockBytes = Small ? 8 : 16;
+        D3D11_TEXTURE2D_DESC Desc = { 16, 16, 1, 1, Format, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        std::vector<BYTE> Blocks(16 * BlockBytes);
+        D3D11_SUBRESOURCE_DATA Data = { Blocks.data(), 4 * BlockBytes, 0 };
+        ID3D11Texture2D *Texture = NULL;
+        ID3D11ShaderResourceView *View = NULL;
+        UINT Seed = (UINT)Format * 7919;
+        TcDrawSetup Setup;
+
+        for (SIZE_T Index = 0; Index < Blocks.size(); Index++)
+        {
+            Seed = Seed * 1103515245 + 12345;
+            Blocks[Index] = (BYTE)(Seed >> 16);
+        }
+        hr = Device->CreateTexture2D(&Desc, &Data, &Texture);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateShaderResourceView(Texture, NULL, &View);
+        if (SUCCEEDED(hr))
+        {
+            Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            Setup.BytesPerPixel = 16;
+            Setup.Size = 16;
+            Setup.Vertices = Vertices;
+            Setup.VertexCount = ARRAYSIZE(Vertices);
+            Setup.PixelEntry = "psload";
+            Setup.View = View;
+            hr = TcDrawScene(Device, Context, Setup, Result);
+        }
+        if (View)
+            View->Release();
+        if (Texture)
+            Texture->Release();
+        if (FAILED(hr))
+            break;
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -1143,6 +1212,7 @@ static const TcScene Scenes[] =
     { "queries", 0, SceneQueries },
     { "mips", 0, SceneMips },
     { "compute", 0, SceneCompute },
+    { "bc", 0, SceneBlocks },
 };
 
 static
