@@ -72,18 +72,6 @@ RxWarpRoundEven(
     return (INT)nearbyintf(Value);
 }
 
-static
-UINT
-RxWarpLaneCount(
-    _In_ UINT Mask)
-{
-    UINT Count = 0;
-
-    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
-        Count += (Mask >> Lane) & 1;
-    return Count;
-}
-
 class RxWarpDraw
 {
 public:
@@ -1071,7 +1059,9 @@ RxWarpDraw::ShadeQuad(
         }
 
         Invocation.Run(PixelShader, &PixelBindings);
-        Device->Counters[RxWarpCountPsInvocations] += RxWarpLaneCount(Covered);
+
+        /* The reference counts every lane of a shaded quad, helpers included */
+        Device->Counters[RxWarpCountPsInvocations] += RxWarpLanes;
         Survivors &= ~Invocation.Discarded;
         if (PixelShader->WritesDepth)
         {
