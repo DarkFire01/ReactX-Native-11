@@ -231,11 +231,488 @@ SceneCopy(
     return hr;
 }
 
+/* Shared shaders for the draw scenes */
+static const char TcShaderSource[] =
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "Texture2D Tex : register(t0); SamplerState Smp : register(s0);\n"
+    "VO vs(VI i) { VO o; o.p = i.p; o.c = i.c; o.t = i.t; return o; }\n"
+    "float4 ps(VO i) : SV_Target { return i.c; }\n"
+    "float4 pstex(VO i) : SV_Target { return Tex.Sample(Smp, i.t); }\n"
+    "float4 psmath(VO i) : SV_Target { float4 v = i.c * 3.0 - 1.0; float d = dot(v.xyz, v.xyz);\n"
+    "    float4 r = float4(sqrt(abs(v.x)), rsqrt(d + 1.0), frac(v.z * 7.3), 0.5);\n"
+    "    [loop] for (int k = 0; k < 3; k++) { if (r.x > 0.6) break; r.x += 0.1; }\n"
+    "    if (i.t.x > 0.5) discard; return saturate(r); }\n";
+
+struct TcVertex
+{
+    FLOAT Position[4];
+    FLOAT Color[4];
+    FLOAT Texcoord[2];
+};
+
+static
+HRESULT
+TcCompile(
+    _In_z_ PCSTR Entry,
+    _In_z_ PCSTR Profile,
+    _Out_ ID3DBlob **Blob)
+{
+    ID3DBlob *Errors = NULL;
+    HRESULT hr;
+
+    hr = D3DCompile(TcShaderSource, sizeof(TcShaderSource) - 1, "warpcheck", NULL, NULL, Entry, Profile, 0, 0, Blob, &Errors);
+    if (Errors)
+    {
+        if (FAILED(hr))
+            printf("%s", (const char *)Errors->GetBufferPointer());
+        Errors->Release();
+    }
+    return hr;
+}
+
+/* Reads a 2D texture of any plain format, BytesPerPixel wide */
+static
+HRESULT
+TcReadBytes(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _In_ ID3D11Texture2D *Texture,
+    _In_ UINT BytesPerPixel,
+    _Inout_ TcResult *Result)
+{
+    D3D11_TEXTURE2D_DESC Desc;
+    D3D11_MAPPED_SUBRESOURCE Map;
+    ID3D11Texture2D *Staging = NULL;
+    HRESULT hr;
+
+    Texture->GetDesc(&Desc);
+    Desc.Usage = D3D11_USAGE_STAGING;
+    Desc.BindFlags = 0;
+    Desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    Desc.MiscFlags = 0;
+    hr = Device->CreateTexture2D(&Desc, NULL, &Staging);
+    if (FAILED(hr))
+        return hr;
+    Context->CopyResource(Staging, Texture);
+    hr = Context->Map(Staging, 0, D3D11_MAP_READ, 0, &Map);
+    if (SUCCEEDED(hr))
+    {
+        for (UINT Row = 0; Row < Desc.Height; Row++)
+            TcAppend(Result, static_cast<BYTE *>(Map.pData) + (SIZE_T)Row * Map.RowPitch, (SIZE_T)Desc.Width * BytesPerPixel);
+        Context->Unmap(Staging, 0);
+    }
+    Staging->Release();
+    return hr;
+}
+
+/* Options for one draw */
+struct TcDrawSetup
+{
+    DXGI_FORMAT Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    UINT BytesPerPixel = 4;
+    UINT Size = 64;
+    PCSTR PixelEntry = "ps";
+    const TcVertex *Vertices = NULL;
+    UINT VertexCount = 0;
+    const UINT16 *Indices = NULL;
+    UINT IndexCount = 0;
+    D3D11_PRIMITIVE_TOPOLOGY Topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    BOOL Depth = FALSE;
+    BOOL Blend = FALSE;
+    BOOL Texture = FALSE;
+    D3D11_FILTER Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    D3D11_CULL_MODE Cull = D3D11_CULL_NONE;
+    D3D11_VIEWPORT Viewport = { 0, 0, 0, 0, 0, 1 };
+};
+
+static
+HRESULT
+TcDrawScene(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _In_ const TcDrawSetup &Setup,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    const FLOAT Clear[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+    D3D11_TEXTURE2D_DESC Desc = { Setup.Size, Setup.Size, 1, 1, Setup.Format, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET, 0, 0 };
+    D3D11_BUFFER_DESC BufferDesc = { Setup.VertexCount * (UINT)sizeof(TcVertex), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+    D3D11_SUBRESOURCE_DATA Data = { Setup.Vertices, 0, 0 };
+    D3D11_VIEWPORT Viewport = Setup.Viewport;
+    ID3D11Texture2D *Target = NULL;
+    ID3D11RenderTargetView *TargetView = NULL;
+    ID3D11Texture2D *DepthTexture = NULL;
+    ID3D11DepthStencilView *DepthView = NULL;
+    ID3D11Buffer *VertexBuffer = NULL;
+    ID3D11Buffer *IndexBuffer = NULL;
+    ID3DBlob *VsBlob = NULL;
+    ID3DBlob *PsBlob = NULL;
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11PixelShader *Ps = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11RasterizerState *Raster = NULL;
+    ID3D11BlendState *BlendState = NULL;
+    ID3D11Texture2D *Image = NULL;
+    ID3D11ShaderResourceView *ImageView = NULL;
+    ID3D11SamplerState *Sampler = NULL;
+    UINT Stride = sizeof(TcVertex);
+    UINT Offset = 0;
+    HRESULT hr;
+
+    hr = Device->CreateTexture2D(&Desc, NULL, &Target);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateRenderTargetView(Target, NULL, &TargetView);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&BufferDesc, &Data, &VertexBuffer);
+    if (SUCCEEDED(hr) && Setup.Indices != NULL)
+    {
+        D3D11_BUFFER_DESC IndexDesc = { Setup.IndexCount * 2u, D3D11_USAGE_DEFAULT, D3D11_BIND_INDEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA IndexData = { Setup.Indices, 0, 0 };
+
+        hr = Device->CreateBuffer(&IndexDesc, &IndexData, &IndexBuffer);
+    }
+    if (SUCCEEDED(hr))
+        hr = TcCompile("vs", "vs_4_0", &VsBlob);
+    if (SUCCEEDED(hr))
+        hr = TcCompile(Setup.PixelEntry, "ps_4_0", &PsBlob);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(PsBlob->GetBufferPointer(), PsBlob->GetBufferSize(), NULL, &Ps);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, Setup.Cull, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, FALSE, FALSE };
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+    }
+    if (SUCCEEDED(hr) && Setup.Depth)
+    {
+        D3D11_TEXTURE2D_DESC DepthDesc = Desc;
+
+        DepthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        DepthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        hr = Device->CreateTexture2D(&DepthDesc, NULL, &DepthTexture);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateDepthStencilView(DepthTexture, NULL, &DepthView);
+    }
+    if (SUCCEEDED(hr) && Setup.Blend)
+    {
+        D3D11_BLEND_DESC BlendDesc = {};
+
+        BlendDesc.RenderTarget[0].BlendEnable = TRUE;
+        BlendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        BlendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        BlendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        BlendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        BlendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        BlendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        BlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        hr = Device->CreateBlendState(&BlendDesc, &BlendState);
+    }
+    if (SUCCEEDED(hr) && Setup.Texture)
+    {
+        UINT Texels[16 * 16];
+        D3D11_TEXTURE2D_DESC ImageDesc = { 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_SUBRESOURCE_DATA ImageData = { Texels, 16 * 4, 0 };
+        D3D11_SAMPLER_DESC SamplerDesc = {};
+
+        for (UINT Index = 0; Index < 256; Index++)
+            Texels[Index] = 0xFF000000 | ((Index * 37) & 0xFF) | (((Index * 91) & 0xFF) << 8) | ((((Index % 16) ^ (Index / 16)) * 16) << 16);
+        hr = Device->CreateTexture2D(&ImageDesc, &ImageData, &Image);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateShaderResourceView(Image, NULL, &ImageView);
+        SamplerDesc.Filter = Setup.Filter;
+        SamplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+        SamplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_MIRROR;
+        SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        if (SUCCEEDED(hr))
+            hr = Device->CreateSamplerState(&SamplerDesc, &Sampler);
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        if (Viewport.Width == 0.0f)
+        {
+            Viewport.Width = (FLOAT)Setup.Size;
+            Viewport.Height = (FLOAT)Setup.Size;
+        }
+        Context->ClearRenderTargetView(TargetView, Clear);
+        if (DepthView)
+            Context->ClearDepthStencilView(DepthView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+        Context->OMSetRenderTargets(1, &TargetView, DepthView);
+        Context->OMSetBlendState(BlendState, NULL, 0xFFFFFFFF);
+        Context->RSSetViewports(1, &Viewport);
+        Context->RSSetState(Raster);
+        Context->IASetInputLayout(Layout);
+        Context->IASetVertexBuffers(0, 1, &VertexBuffer, &Stride, &Offset);
+        Context->IASetPrimitiveTopology(Setup.Topology);
+        Context->VSSetShader(Vs, NULL, 0);
+        Context->PSSetShader(Ps, NULL, 0);
+        if (ImageView)
+        {
+            Context->PSSetShaderResources(0, 1, &ImageView);
+            Context->PSSetSamplers(0, 1, &Sampler);
+        }
+        if (IndexBuffer)
+        {
+            Context->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+            Context->DrawIndexed(Setup.IndexCount, 0, 0);
+        }
+        else
+        {
+            Context->Draw(Setup.VertexCount, 0);
+        }
+        hr = TcReadBytes(Device, Context, Target, Setup.BytesPerPixel, Result);
+
+        /* Eight bit targets double as the picture */
+        if (SUCCEEDED(hr) && Setup.BytesPerPixel == 4)
+        {
+            Result->Width = Setup.Size;
+            Result->Height = Setup.Size;
+            Result->Pixels.assign(Result->Data.end() - (SIZE_T)Setup.Size * Setup.Size * 4, Result->Data.end());
+        }
+    }
+
+    ID3D11DeviceChild *Objects[] = { Target, TargetView, DepthTexture, DepthView, VertexBuffer, IndexBuffer, Vs, Ps, Layout,
+                                     Raster, BlendState, Image, ImageView, Sampler };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    if (VsBlob)
+        VsBlob->Release();
+    if (PsBlob)
+        PsBlob->Release();
+    return hr;
+}
+
+/* A vertex given in normalized device coordinates, scaled by W so the divide brings it back */
+static
+TcVertex
+TcMake(
+    _In_ FLOAT X,
+    _In_ FLOAT Y,
+    _In_ FLOAT Z,
+    _In_ FLOAT W,
+    _In_ UINT Rgba,
+    _In_ FLOAT U = 0.0f,
+    _In_ FLOAT V = 0.0f)
+{
+    TcVertex Vertex = { { X * W, Y * W, Z * W, W },
+                        { (Rgba >> 24) / 255.0f, ((Rgba >> 16) & 0xFF) / 255.0f, ((Rgba >> 8) & 0xFF) / 255.0f, (Rgba & 0xFF) / 255.0f },
+                        { U, V } };
+
+    return Vertex;
+}
+
+/* Flat colored triangles on awkward sub pixel positions: coverage and the fill rule */
+static
+HRESULT
+SceneTriangles(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    std::vector<TcVertex> Vertices;
+    TcDrawSetup Setup;
+    UINT Seed = 12345;
+
+    for (UINT Index = 0; Index < 40; Index++)
+    {
+        UINT Color;
+        FLOAT Corner[6];
+
+        for (FLOAT &Value : Corner)
+        {
+            Seed = Seed * 1103515245 + 12345;
+            Value = ((Seed >> 8) % 2001) / 1000.0f - 1.0f;
+        }
+        Seed = Seed * 1103515245 + 12345;
+        Color = (Seed & 0xFFFFFF00) | 0xFF;
+        Vertices.push_back(TcMake(Corner[0], Corner[1], 0.5f, 1.0f, Color));
+        Vertices.push_back(TcMake(Corner[2], Corner[3], 0.5f, 1.0f, Color));
+        Vertices.push_back(TcMake(Corner[4], Corner[5], 0.5f, 1.0f, Color));
+    }
+
+    /* Two triangles sharing an edge on exact pixel boundaries */
+    Vertices.push_back(TcMake(-0.5f, 0.5f, 0.5f, 1.0f, 0xFFFFFFFF));
+    Vertices.push_back(TcMake(0.0f, 0.5f, 0.5f, 1.0f, 0xFFFFFFFF));
+    Vertices.push_back(TcMake(-0.5f, 0.0f, 0.5f, 1.0f, 0xFFFFFFFF));
+    Vertices.push_back(TcMake(0.0f, 0.5f, 0.5f, 1.0f, 0xFF0000FF));
+    Vertices.push_back(TcMake(0.0f, 0.0f, 0.5f, 1.0f, 0xFF0000FF));
+    Vertices.push_back(TcMake(-0.5f, 0.0f, 0.5f, 1.0f, 0xFF0000FF));
+
+    Setup.Vertices = Vertices.data();
+    Setup.VertexCount = (UINT)Vertices.size();
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+static const TcVertex TcGradient[] =
+{
+    TcMake(-0.9f, -0.8f, 0.2f, 1.0f, 0xFF0000FF),
+    TcMake(0.85f, -0.95f, 0.5f, 3.0f, 0x00FF00FF),
+    TcMake(0.1f, 0.9f, 0.9f, 1.5f, 0x0000FF80),
+};
+
+/* Colors interpolated with perspective, into a float target so every bit shows */
+static
+HRESULT
+SceneGradient(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    TcDrawSetup Setup;
+
+    Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    Setup.BytesPerPixel = 16;
+    Setup.Size = 32;
+    Setup.Vertices = TcGradient;
+    Setup.VertexCount = ARRAYSIZE(TcGradient);
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+/* The same in eight bits: the float to unorm conversion of shader output */
+static
+HRESULT
+SceneGradient8(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    TcDrawSetup Setup;
+
+    Setup.Vertices = TcGradient;
+    Setup.VertexCount = ARRAYSIZE(TcGradient);
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+/* Overlapping triangles with a depth test and alpha blending */
+static
+HRESULT
+SceneDepthBlend(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    const TcVertex Vertices[] =
+    {
+        TcMake(-0.9f, -0.9f, 0.1f, 1.0f, 0xFF000080), TcMake(0.9f, -0.9f, 0.9f, 1.0f, 0xFF000080), TcMake(0.0f, 0.9f, 0.5f, 1.0f, 0xFF000080),
+        TcMake(-0.9f, 0.9f, 0.9f, 1.0f, 0x00FF00C0), TcMake(0.9f, 0.9f, 0.1f, 1.0f, 0x00FF00C0), TcMake(0.0f, -0.9f, 0.5f, 1.0f, 0x00FF00C0),
+    };
+    TcDrawSetup Setup;
+
+    Setup.Vertices = Vertices;
+    Setup.VertexCount = ARRAYSIZE(Vertices);
+    Setup.Depth = TRUE;
+    Setup.Blend = TRUE;
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+/* Triangles crossing the near plane and the viewport edges, drawn with indices and back face culling */
+static
+HRESULT
+SceneClip(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    const TcVertex Vertices[] =
+    {
+        TcMake(-1.6f, -0.5f, -0.4f, 1.0f, 0xFF8000FF),
+        TcMake(1.4f, -1.3f, 0.6f, 2.0f, 0x2080FFFF),
+        TcMake(0.2f, 1.7f, 1.3f, 1.0f, 0x80FF20FF),
+        TcMake(0.5f, 0.5f, 0.5f, 1.0f, 0xFFFFFFFF),
+    };
+    static const UINT16 Indices[] = { 0, 2, 1, 0, 1, 3, 3, 1, 2 };
+    TcDrawSetup Setup;
+    D3D11_VIEWPORT Viewport = { 4.5f, 6.0f, 50.0f, 44.0f, 0.0f, 1.0f };
+
+    Setup.Vertices = Vertices;
+    Setup.VertexCount = ARRAYSIZE(Vertices);
+    Setup.Indices = Indices;
+    Setup.IndexCount = ARRAYSIZE(Indices);
+    Setup.Cull = D3D11_CULL_BACK;
+    Setup.Viewport = Viewport;
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+/* Point then linear sampling with wrap and mirror addressing */
+static
+HRESULT
+SceneTexture(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    const TcVertex Vertices[] =
+    {
+        TcMake(-1.0f, 1.0f, 0.5f, 1.0f, 0, -0.3f, -0.2f), TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0, 1.7f, -0.2f), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0, -0.3f, 1.9f),
+        TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0, 1.7f, -0.2f), TcMake(1.0f, -1.0f, 0.5f, 2.0f, 0, 1.7f, 1.9f), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0, -0.3f, 1.9f),
+    };
+    TcDrawSetup Setup;
+    HRESULT hr;
+
+    Setup.Vertices = Vertices;
+    Setup.VertexCount = ARRAYSIZE(Vertices);
+    Setup.Texture = TRUE;
+    Setup.PixelEntry = "pstex";
+    hr = TcDrawScene(Device, Context, Setup, Result);
+    if (SUCCEEDED(hr))
+    {
+        Setup.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        hr = TcDrawScene(Device, Context, Setup, Result);
+    }
+    return hr;
+}
+
+/* Arithmetic, a loop with a break, and discard in the pixel shader */
+static
+HRESULT
+SceneMath(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    const TcVertex Vertices[] =
+    {
+        TcMake(-1.0f, 1.0f, 0.5f, 1.0f, 0x000000FF, 0.0f, 0.0f), TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0xFF00FFFF, 1.0f, 0.0f),
+        TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0x00FF00FF, 0.0f, 1.0f), TcMake(1.0f, -1.0f, 0.5f, 1.0f, 0xFFFF80FF, 1.0f, 1.0f),
+    };
+    TcDrawSetup Setup;
+
+    Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    Setup.BytesPerPixel = 16;
+    Setup.Size = 32;
+    Setup.Vertices = Vertices;
+    Setup.VertexCount = ARRAYSIZE(Vertices);
+    Setup.Topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+    Setup.PixelEntry = "psmath";
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
     { "clear", 0, SceneClear },
     { "copy", 0, SceneCopy },
+    { "tri", 0, SceneTriangles },
+    { "grad", 0, SceneGradient },
+    { "grad8", 0, SceneGradient8 },
+    { "depth", 0, SceneDepthBlend },
+    { "clip", 0, SceneClip },
+    { "tex", 0, SceneTexture },
+    { "math", 0, SceneMath },
 };
 
 static
