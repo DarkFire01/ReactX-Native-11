@@ -2505,6 +2505,205 @@ Exit:
     return hr;
 }
 
+static const char TcCoverageSource[] =
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "float4 vs(VI i) : SV_Position { return i.p; }\n"
+    "cbuffer C : register(b0) { uint Samples; float Scale; float Bias; };\n"
+    "float4 ps(float4 p : SV_Position) : SV_Target { return float4(1, 0.5, 0.25, (floor(p.x) + floor(p.y) * 64 + 0.5) * Scale + Bias); }\n"
+    "Texture2DMS<float4> T : register(t0);\n"
+    "RWByteAddressBuffer Out : register(u0);\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void cs(uint3 i : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint mask = 0;\n"
+    "    for (uint s = 0; s < Samples; s++)\n"
+    "        mask |= (T.Load(i.xy, s).x > 0.5) ? (1u << s) : 0;\n"
+    "    Out.Store((i.y * 64 + i.x) * 4, mask);\n"
+    "}\n";
+
+/* Alpha to coverage: which samples each alpha keeps, at every sample count and dither position */
+static
+HRESULT
+SceneAlphaCoverage(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const UINT Counts[5] = { 1, 2, 4, 8, 16 };
+    static const FLOAT Ranges[2][2] = { { 1.0f / 4096.0f, 0.0f }, { 1.0f / (4096.0f * 16.0f), 0.40625f } };
+    const TcVertex Vertices[] =
+    {
+        TcMake(-1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0),
+        TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(1.0f, -1.0f, 0.5f, 1.0f, 0), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0),
+    };
+    D3D11_VIEWPORT Viewport = { 0, 0, 64, 64, 0, 1 };
+    const FLOAT Clear[4] = {};
+    ID3DBlob *Blobs[3] = {};
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11PixelShader *Ps = NULL;
+    ID3D11ComputeShader *Cs = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11Buffer *Input = NULL;
+    ID3D11Buffer *Constants = NULL;
+    ID3D11BlendState *Blend = NULL;
+    ID3D11RasterizerState *Raster = NULL;
+    UINT Stride = sizeof(TcVertex);
+    UINT Offset = 0;
+    HRESULT hr;
+
+    hr = TcCompileFrom(TcCoverageSource, "vs", "vs_5_0", &Blobs[0]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcCoverageSource, "ps", "ps_5_0", &Blobs[1]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcCoverageSource, "cs", "cs_5_0", &Blobs[2]);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(Blobs[0]->GetBufferPointer(), Blobs[0]->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(Blobs[1]->GetBufferPointer(), Blobs[1]->GetBufferSize(), NULL, &Ps);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateComputeShader(Blobs[2]->GetBufferPointer(), Blobs[2]->GetBufferSize(), NULL, &Cs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), Blobs[0]->GetBufferPointer(), Blobs[0]->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC InputDesc = { sizeof(Vertices), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Vertices, 0, 0 };
+
+        hr = Device->CreateBuffer(&InputDesc, &Data, &Input);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC ConstantDesc = { 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+
+        hr = Device->CreateBuffer(&ConstantDesc, NULL, &Constants);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BLEND_DESC BlendDesc = {};
+
+        BlendDesc.AlphaToCoverageEnable = TRUE;
+        BlendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        BlendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+        BlendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        BlendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        BlendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        BlendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        BlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        hr = Device->CreateBlendState(&BlendDesc, &Blend);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, TRUE, FALSE };
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+    }
+    if (FAILED(hr))
+        goto Exit;
+
+    for (UINT Count : Counts)
+    {
+        D3D11_TEXTURE2D_DESC ColorDesc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { Count, 0 }, D3D11_USAGE_DEFAULT,
+                                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_BUFFER_DESC OutDesc = { 64 * 64 * 4, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0 };
+        D3D11_UNORDERED_ACCESS_VIEW_DESC UavDesc = {};
+        D3D11_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
+        UINT Levels = 0;
+        ID3D11Texture2D *Color = NULL;
+        ID3D11RenderTargetView *ColorView = NULL;
+        ID3D11ShaderResourceView *View = NULL;
+        ID3D11Buffer *Out = NULL;
+        ID3D11UnorderedAccessView *Uav = NULL;
+
+        if (Count > 1 && (FAILED(Device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, Count, &Levels)) || Levels == 0))
+            continue;
+        UavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        UavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        UavDesc.Buffer.NumElements = OutDesc.ByteWidth / 4;
+        UavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        SrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        SrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+
+        hr = Device->CreateTexture2D(&ColorDesc, NULL, &Color);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateRenderTargetView(Color, NULL, &ColorView);
+        if (SUCCEEDED(hr) && Count > 1)
+            hr = Device->CreateShaderResourceView(Color, &SrvDesc, &View);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateBuffer(&OutDesc, NULL, &Out);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateUnorderedAccessView(Out, &UavDesc, &Uav);
+
+        /* Every pixel a different alpha, over the whole range and then finely around one value */
+        for (UINT Range = 0; Range < 2 && SUCCEEDED(hr); Range++)
+        {
+            struct { UINT Samples; FLOAT Scale; FLOAT Bias; UINT Pad; } Data = { Count, Ranges[Range][0], Ranges[Range][1], 0 };
+            ID3D11ShaderResourceView *NoView = NULL;
+            ID3D11UnorderedAccessView *NoUav = NULL;
+            ID3D11RenderTargetView *NoTarget = NULL;
+
+            Context->UpdateSubresource(Constants, 0, NULL, &Data, 0, 0);
+            Context->ClearRenderTargetView(ColorView, Clear);
+            Context->OMSetRenderTargets(1, &ColorView, NULL);
+            Context->OMSetBlendState(Blend, NULL, 0xFFFFFFFF);
+            Context->OMSetDepthStencilState(NULL, 0);
+            Context->RSSetViewports(1, &Viewport);
+            Context->RSSetState(Raster);
+            Context->IASetInputLayout(Layout);
+            Context->IASetVertexBuffers(0, 1, &Input, &Stride, &Offset);
+            Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            Context->VSSetShader(Vs, NULL, 0);
+            Context->PSSetShader(Ps, NULL, 0);
+            Context->PSSetConstantBuffers(0, 1, &Constants);
+            Context->Draw(6, 0);
+            Context->OMSetRenderTargets(1, &NoTarget, NULL);
+            Context->OMSetBlendState(NULL, NULL, 0xFFFFFFFF);
+            if (Count == 1)
+            {
+                hr = TcReadBytes(Device, Context, Color, 4, Result);
+                continue;
+            }
+
+            Context->CSSetShader(Cs, NULL, 0);
+            Context->CSSetConstantBuffers(0, 1, &Constants);
+            Context->CSSetShaderResources(0, 1, &View);
+            Context->CSSetUnorderedAccessViews(0, 1, &Uav, NULL);
+            Context->Dispatch(8, 8, 1);
+            Context->CSSetShaderResources(0, 1, &NoView);
+            Context->CSSetUnorderedAccessViews(0, 1, &NoUav, NULL);
+            hr = TcReadBuffer(Device, Context, Out, Result);
+        }
+
+        ID3D11DeviceChild *Objects[] = { Color, ColorView, View, Out, Uav };
+        for (ID3D11DeviceChild *Object : Objects)
+        {
+            if (Object)
+                Object->Release();
+        }
+        if (FAILED(hr))
+            break;
+    }
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Vs, Ps, Cs, Layout, Input, Constants, Blend, Raster };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    for (ID3DBlob *Blob : Blobs)
+    {
+        if (Blob)
+            Blob->Release();
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -2532,6 +2731,7 @@ static const TcScene Scenes[] =
     { "bias", 0, SceneBias },
     { "ops", 0, SceneOps },
     { "msaa", 0, SceneMsaa },
+    { "a2c", 0, SceneAlphaCoverage },
 };
 
 static
