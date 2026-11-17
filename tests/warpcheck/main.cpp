@@ -1890,6 +1890,195 @@ Exit:
     return hr;
 }
 
+static const char TcBiasSource[] =
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
+    "struct CO { float4 p : SV_Position; float4 c : COLOR; float2 d : SV_ClipDistance0; float e : SV_CullDistance0; };\n"
+    "VO vs(VI i) { VO o; o.p = i.p; o.c = i.c; return o; }\n"
+    "CO vsclip(VI i)\n"
+    "{\n"
+    "    CO o; o.p = i.p; o.c = i.c;\n"
+    "    o.d = float2(i.p.x + 0.35 * i.p.w, 0.45 * i.p.w - i.p.y + i.t.x);\n"
+    "    o.e = i.t.y;\n"
+    "    return o;\n"
+    "}\n"
+    "float4 ps(VO i) : SV_Target { return i.c; }\n";
+
+/* Depth bias on each depth format, then clip and cull distances */
+static
+HRESULT
+SceneBias(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const DXGI_FORMAT Formats[3] = { DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT };
+    static const UINT FormatBytes[3] = { 2, 4, 4 };
+    static const FLOAT Biases[][3] =
+    {
+        { 0, 0, 0 },
+        { 1, 0, 0 },
+        { -1, 0, 0 },
+        { 5, 0, 0 },
+        { 100000, 0.001f, 0 },
+        { 0, 0, 2.5f },
+        { 3, 0, -1.5f },
+        { -1000, -0.002f, 0 },
+        { 2, 0.0001f, 7 },
+    };
+    std::vector<TcVertex> Vertices;
+    D3D11_VIEWPORT Viewport = { 0, 0, 64, 64, 0, 1 };
+    const FLOAT Clear[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+    ID3DBlob *VsBlob = NULL;
+    ID3DBlob *ClipBlob = NULL;
+    ID3DBlob *PsBlob = NULL;
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11VertexShader *ClipVs = NULL;
+    ID3D11PixelShader *Ps = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11Buffer *Input = NULL;
+    ID3D11Texture2D *Target = NULL;
+    ID3D11RenderTargetView *TargetView = NULL;
+    ID3D11DepthStencilState *Always = NULL;
+    UINT Stride = sizeof(TcVertex);
+    UINT Offset = 0;
+    HRESULT hr;
+
+    /* A sloped triangle, a flat one, then the clip distance triangles */
+    Vertices.push_back(TcMake(-0.8f, -0.8f, 0.1f, 1.0f, 0xFF0000FF));
+    Vertices.push_back(TcMake(0.8f, -0.6f, 0.7f, 1.0f, 0x00FF00FF));
+    Vertices.push_back(TcMake(0.0f, 0.8f, 0.4f, 1.0f, 0x0000FFFF));
+    Vertices.push_back(TcMake(-0.9f, 0.5f, 0.25f, 1.0f, 0xFFFF00FF));
+    Vertices.push_back(TcMake(-0.3f, 0.9f, 0.25f, 1.0f, 0xFFFF00FF));
+    Vertices.push_back(TcMake(-0.9f, 0.9f, 0.25f, 1.0f, 0xFFFF00FF));
+    Vertices.push_back(TcMake(-0.9f, -0.9f, 0.5f, 1.0f, 0xFF8000FF, 0.0f, 1.0f));
+    Vertices.push_back(TcMake(0.9f, -0.7f, 0.5f, 2.0f, 0x80FF00FF, -0.2f, 1.0f));
+    Vertices.push_back(TcMake(0.1f, 0.9f, 0.5f, 1.0f, 0x0080FFFF, 0.3f, -1.0f));
+    Vertices.push_back(TcMake(0.2f, -0.2f, 0.5f, 1.0f, 0xFFFFFFFF, 0.0f, -1.0f));
+    Vertices.push_back(TcMake(0.9f, -0.2f, 0.5f, 1.0f, 0xFFFFFFFF, 0.0f, -0.5f));
+    Vertices.push_back(TcMake(0.5f, 0.6f, 0.5f, 1.0f, 0xFFFFFFFF, 0.0f, -2.0f));
+
+    hr = TcCompileFrom(TcBiasSource, "vs", "vs_5_0", &VsBlob);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcBiasSource, "vsclip", "vs_5_0", &ClipBlob);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcBiasSource, "ps", "ps_5_0", &PsBlob);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(ClipBlob->GetBufferPointer(), ClipBlob->GetBufferSize(), NULL, &ClipVs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(PsBlob->GetBufferPointer(), PsBlob->GetBufferSize(), NULL, &Ps);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC InputDesc = { (UINT)(Vertices.size() * sizeof(TcVertex)), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Vertices.data(), 0, 0 };
+
+        hr = Device->CreateBuffer(&InputDesc, &Data, &Input);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_TEXTURE2D_DESC Desc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET, 0, 0 };
+
+        hr = Device->CreateTexture2D(&Desc, NULL, &Target);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateRenderTargetView(Target, NULL, &TargetView);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_DEPTH_STENCIL_DESC DepthDesc = {};
+
+        DepthDesc.DepthEnable = TRUE;
+        DepthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        DepthDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+        hr = Device->CreateDepthStencilState(&DepthDesc, &Always);
+    }
+    if (FAILED(hr))
+        goto Exit;
+
+    Context->IASetInputLayout(Layout);
+    Context->IASetVertexBuffers(0, 1, &Input, &Stride, &Offset);
+    Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    Context->VSSetShader(Vs, NULL, 0);
+    Context->PSSetShader(Ps, NULL, 0);
+    Context->RSSetViewports(1, &Viewport);
+    Context->OMSetDepthStencilState(Always, 0);
+
+    for (UINT Format = 0; Format < 3 && SUCCEEDED(hr); Format++)
+    {
+        D3D11_TEXTURE2D_DESC DepthDesc = { 64, 64, 1, 1, Formats[Format], { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_DEPTH_STENCIL, 0, 0 };
+        ID3D11Texture2D *Depth = NULL;
+        ID3D11DepthStencilView *DepthView = NULL;
+
+        hr = Device->CreateTexture2D(&DepthDesc, NULL, &Depth);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateDepthStencilView(Depth, NULL, &DepthView);
+        for (UINT Case = 0; Case < ARRAYSIZE(Biases) && SUCCEEDED(hr); Case++)
+        {
+            D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, (INT)Biases[Case][0], Biases[Case][1], Biases[Case][2],
+                                                 TRUE, FALSE, FALSE, FALSE };
+            ID3D11RasterizerState *Raster = NULL;
+
+            hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+            if (FAILED(hr))
+                break;
+            Context->RSSetState(Raster);
+            Context->OMSetRenderTargets(1, &TargetView, DepthView);
+            Context->ClearDepthStencilView(DepthView, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+            Context->Draw(6, 0);
+            hr = TcReadBytes(Device, Context, Depth, FormatBytes[Format], Result);
+            Raster->Release();
+        }
+        Context->OMSetRenderTargets(1, &TargetView, NULL);
+        if (DepthView)
+            DepthView->Release();
+        if (Depth)
+            Depth->Release();
+    }
+
+    /* Clip distances cut the triangles; the second one is culled whole */
+    if (SUCCEEDED(hr))
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, FALSE, FALSE };
+        ID3D11RasterizerState *Raster = NULL;
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+        if (SUCCEEDED(hr))
+        {
+            Context->RSSetState(Raster);
+            Context->ClearRenderTargetView(TargetView, Clear);
+            Context->OMSetRenderTargets(1, &TargetView, NULL);
+            Context->VSSetShader(ClipVs, NULL, 0);
+            Context->Draw(6, 6);
+            hr = TcReadBytes(Device, Context, Target, 4, Result);
+            Raster->Release();
+        }
+    }
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Vs, ClipVs, Ps, Layout, Input, Target, TargetView, Always };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    ID3DBlob *Blobs[] = { VsBlob, ClipBlob, PsBlob };
+    for (ID3DBlob *Blob : Blobs)
+    {
+        if (Blob)
+            Blob->Release();
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -1914,6 +2103,7 @@ static const TcScene Scenes[] =
     { "interp", 0, SceneInterpolate },
     { "geometry", 0, SceneGeometry },
     { "tess", 0, SceneTessellation },
+    { "bias", 0, SceneBias },
 };
 
 static
