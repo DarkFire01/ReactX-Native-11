@@ -4,8 +4,13 @@ nt_add_usermode_dll(d3d10warp
         adapter.cpp
         clear.cpp
         device.cpp
+        draw.cpp
+        exec.cpp
         format.cpp
         resource.cpp
+        sample.cpp
+        shader.cpp
+        state.cpp
         view.cpp
         warpmain.cpp)
 

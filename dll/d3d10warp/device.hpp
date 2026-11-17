@@ -8,6 +8,7 @@
 #pragma once
 
 #include "format.hpp"
+#include "shader.hpp"
 
 class RxWarpAdapter;
 
@@ -78,6 +79,94 @@ public:
     UINT Flags = 0;
 };
 
+class RxWarpBlendState
+{
+public:
+    D3D11_1_DDI_BLEND_DESC Desc = {};
+};
+
+class RxWarpDepthStencilState
+{
+public:
+    D3D10_DDI_DEPTH_STENCIL_DESC Desc = {};
+};
+
+class RxWarpRasterizerState
+{
+public:
+    D3DWDDM2_0DDI_RASTERIZER_DESC Desc = {};
+};
+
+class RxWarpSampler
+{
+public:
+    RX_WARP_SAMPLER State = {};
+};
+
+class RxWarpElementLayout
+{
+public:
+    std::vector<D3D10DDIARG_INPUT_ELEMENT_DESC> Elements;
+};
+
+typedef struct _RX_WARP_BUFFER_BINDING
+{
+    RxWarpResource *Resource;
+    UINT Stride;
+    UINT Offset;
+} RX_WARP_BUFFER_BINDING;
+
+typedef struct _RX_WARP_CONSTANT_BINDING
+{
+    RxWarpResource *Resource;
+    UINT First;             /* in sixteen byte constants */
+    UINT Count;
+} RX_WARP_CONSTANT_BINDING;
+
+typedef enum _RX_WARP_STAGE
+{
+    RxWarpStageVertex,
+    RxWarpStagePixel,
+    RxWarpStageGeometry,
+    RxWarpStageHull,
+    RxWarpStageDomain,
+    RxWarpStageCompute,
+    RxWarpStageCount
+} RX_WARP_STAGE;
+
+typedef struct _RX_WARP_STAGE_STATE
+{
+    RxWarpShader *Shader;
+    RX_WARP_CONSTANT_BINDING ConstantBuffers[RxWarpConstantBufferSlots];
+    RxWarpView *Views[128];
+    RxWarpSampler *Samplers[16];
+} RX_WARP_STAGE_STATE;
+
+/* Everything bound to the device that draws read */
+typedef struct _RX_WARP_PIPELINE
+{
+    RxWarpElementLayout *Layout;
+    RX_WARP_BUFFER_BINDING VertexBuffers[32];
+    RxWarpResource *IndexBuffer;
+    DXGI_FORMAT IndexFormat;
+    UINT IndexOffset;
+    D3D10_DDI_PRIMITIVE_TOPOLOGY Topology;
+    RX_WARP_STAGE_STATE Stages[RxWarpStageCount];
+    RxWarpBlendState *Blend;
+    FLOAT BlendFactor[4];
+    UINT SampleMask;
+    RxWarpDepthStencilState *DepthStencil;
+    UINT StencilRef;
+    RxWarpRasterizerState *Rasterizer;
+    D3D10_DDI_VIEWPORT Viewports[16];
+    UINT ViewportCount;
+    D3D10_DDI_RECT Scissors[16];
+    UINT ScissorCount;
+    RxWarpView *RenderTargets[8];
+    UINT RenderTargetCount;
+    RxWarpView *DepthStencilView;
+} RX_WARP_PIPELINE;
+
 class RxWarpDevice
 {
 public:
@@ -99,6 +188,7 @@ public:
     const D3D11DDI_CORELAYER_DEVICECALLBACKS *CoreCallbacks = nullptr;
     UINT Interface = 0;
     UINT Version = 0;
+    RX_WARP_PIPELINE Pipeline = {};
 };
 
 /* DDI entry points, grouped by the file that implements them */
@@ -134,4 +224,45 @@ namespace RxWarpDdi
     VOID APIENTRY ClearUnorderedAccessViewUint(D3D10DDI_HDEVICE, D3D11DDI_HUNORDEREDACCESSVIEW, const UINT[4]);
     VOID APIENTRY ClearUnorderedAccessViewFloat(D3D10DDI_HDEVICE, D3D11DDI_HUNORDEREDACCESSVIEW, const FLOAT[4]);
     VOID APIENTRY ClearView(D3D10DDI_HDEVICE, D3D11DDI_HANDLETYPE, VOID *, const FLOAT[4], const D3D10_DDI_RECT *, UINT);
+
+    /* state.cpp */
+    VOID APIENTRY CreateBlendState(D3D10DDI_HDEVICE, const D3D11_1_DDI_BLEND_DESC *, D3D10DDI_HBLENDSTATE, D3D10DDI_HRTBLENDSTATE);
+    VOID APIENTRY DestroyBlendState(D3D10DDI_HDEVICE, D3D10DDI_HBLENDSTATE);
+    VOID APIENTRY CreateDepthStencilState(D3D10DDI_HDEVICE, const D3D10_DDI_DEPTH_STENCIL_DESC *, D3D10DDI_HDEPTHSTENCILSTATE, D3D10DDI_HRTDEPTHSTENCILSTATE);
+    VOID APIENTRY DestroyDepthStencilState(D3D10DDI_HDEVICE, D3D10DDI_HDEPTHSTENCILSTATE);
+    VOID APIENTRY CreateRasterizerState(D3D10DDI_HDEVICE, const D3D11_1_DDI_RASTERIZER_DESC *, D3D10DDI_HRASTERIZERSTATE, D3D10DDI_HRTRASTERIZERSTATE);
+    VOID APIENTRY CreateRasterizerState2(D3D10DDI_HDEVICE, const D3DWDDM2_0DDI_RASTERIZER_DESC *, D3D10DDI_HRASTERIZERSTATE, D3D10DDI_HRTRASTERIZERSTATE);
+    VOID APIENTRY DestroyRasterizerState(D3D10DDI_HDEVICE, D3D10DDI_HRASTERIZERSTATE);
+    VOID APIENTRY CreateSampler(D3D10DDI_HDEVICE, const D3D10_DDI_SAMPLER_DESC *, D3D10DDI_HSAMPLER, D3D10DDI_HRTSAMPLER);
+    VOID APIENTRY DestroySampler(D3D10DDI_HDEVICE, D3D10DDI_HSAMPLER);
+    VOID APIENTRY CreateElementLayout(D3D10DDI_HDEVICE, const D3D10DDIARG_CREATEELEMENTLAYOUT *, D3D10DDI_HELEMENTLAYOUT, D3D10DDI_HRTELEMENTLAYOUT);
+    VOID APIENTRY DestroyElementLayout(D3D10DDI_HDEVICE, D3D10DDI_HELEMENTLAYOUT);
+    VOID APIENTRY CreateVertexShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const D3D11_1DDIARG_STAGE_IO_SIGNATURES *);
+    VOID APIENTRY CreatePixelShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const D3D11_1DDIARG_STAGE_IO_SIGNATURES *);
+    VOID APIENTRY DestroyShader(D3D10DDI_HDEVICE, D3D10DDI_HSHADER);
+
+    VOID APIENTRY IaSetInputLayout(D3D10DDI_HDEVICE, D3D10DDI_HELEMENTLAYOUT);
+    VOID APIENTRY IaSetVertexBuffers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HRESOURCE *, const UINT *, const UINT *);
+    VOID APIENTRY IaSetIndexBuffer(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, DXGI_FORMAT, UINT);
+    VOID APIENTRY IaSetTopology(D3D10DDI_HDEVICE, D3D10_DDI_PRIMITIVE_TOPOLOGY);
+    VOID APIENTRY VsSetShader(D3D10DDI_HDEVICE, D3D10DDI_HSHADER);
+    VOID APIENTRY PsSetShader(D3D10DDI_HDEVICE, D3D10DDI_HSHADER);
+    VOID APIENTRY VsSetConstantBuffers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HRESOURCE *, const UINT *, const UINT *);
+    VOID APIENTRY PsSetConstantBuffers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HRESOURCE *, const UINT *, const UINT *);
+    VOID APIENTRY VsSetShaderResources(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSHADERRESOURCEVIEW *);
+    VOID APIENTRY PsSetShaderResources(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSHADERRESOURCEVIEW *);
+    VOID APIENTRY VsSetSamplers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSAMPLER *);
+    VOID APIENTRY PsSetSamplers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSAMPLER *);
+    VOID APIENTRY SetBlendState(D3D10DDI_HDEVICE, D3D10DDI_HBLENDSTATE, const FLOAT[4], UINT);
+    VOID APIENTRY SetDepthStencilState(D3D10DDI_HDEVICE, D3D10DDI_HDEPTHSTENCILSTATE, UINT);
+    VOID APIENTRY SetRasterizerState(D3D10DDI_HDEVICE, D3D10DDI_HRASTERIZERSTATE);
+    VOID APIENTRY SetViewports(D3D10DDI_HDEVICE, UINT, UINT, const D3D10_DDI_VIEWPORT *);
+    VOID APIENTRY SetScissorRects(D3D10DDI_HDEVICE, UINT, UINT, const D3D10_DDI_RECT *);
+    VOID APIENTRY SetRenderTargets(D3D10DDI_HDEVICE, const D3D10DDI_HRENDERTARGETVIEW *, UINT, UINT, D3D10DDI_HDEPTHSTENCILVIEW, const D3D11DDI_HUNORDEREDACCESSVIEW *, const UINT *, UINT, UINT, UINT, UINT);
+
+    /* draw.cpp */
+    VOID APIENTRY Draw(D3D10DDI_HDEVICE, UINT, UINT);
+    VOID APIENTRY DrawIndexed(D3D10DDI_HDEVICE, UINT, UINT, INT);
+    VOID APIENTRY DrawInstanced(D3D10DDI_HDEVICE, UINT, UINT, UINT, UINT);
+    VOID APIENTRY DrawIndexedInstanced(D3D10DDI_HDEVICE, UINT, UINT, UINT, INT, UINT);
 }

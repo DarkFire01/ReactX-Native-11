@@ -260,6 +260,44 @@ RxWarpDevice::Create(
         Funcs.pfnClearUnorderedAccessViewFloat = RxWarpDdi::ClearUnorderedAccessViewFloat;
         Funcs.pfnClearView = RxWarpDdi::ClearView;
 
+        Funcs.pfnCreateBlendState = RxWarpDdi::CreateBlendState;
+        Funcs.pfnDestroyBlendState = RxWarpDdi::DestroyBlendState;
+        Funcs.pfnCreateDepthStencilState = RxWarpDdi::CreateDepthStencilState;
+        Funcs.pfnDestroyDepthStencilState = RxWarpDdi::DestroyDepthStencilState;
+        Funcs.pfnCreateRasterizerState = RxWarpDdi::CreateRasterizerState2;
+        Funcs.pfnDestroyRasterizerState = RxWarpDdi::DestroyRasterizerState;
+        Funcs.pfnCreateSampler = RxWarpDdi::CreateSampler;
+        Funcs.pfnDestroySampler = RxWarpDdi::DestroySampler;
+        Funcs.pfnCreateElementLayout = RxWarpDdi::CreateElementLayout;
+        Funcs.pfnDestroyElementLayout = RxWarpDdi::DestroyElementLayout;
+        Funcs.pfnCreateVertexShader = RxWarpDdi::CreateVertexShader;
+        Funcs.pfnCreatePixelShader = RxWarpDdi::CreatePixelShader;
+        Funcs.pfnDestroyShader = RxWarpDdi::DestroyShader;
+
+        Funcs.pfnIaSetInputLayout = RxWarpDdi::IaSetInputLayout;
+        Funcs.pfnIaSetVertexBuffers = RxWarpDdi::IaSetVertexBuffers;
+        Funcs.pfnIaSetIndexBuffer = RxWarpDdi::IaSetIndexBuffer;
+        Funcs.pfnIaSetTopology = RxWarpDdi::IaSetTopology;
+        Funcs.pfnVsSetShader = RxWarpDdi::VsSetShader;
+        Funcs.pfnPsSetShader = RxWarpDdi::PsSetShader;
+        Funcs.pfnVsSetConstantBuffers = RxWarpDdi::VsSetConstantBuffers;
+        Funcs.pfnPsSetConstantBuffers = RxWarpDdi::PsSetConstantBuffers;
+        Funcs.pfnVsSetShaderResources = RxWarpDdi::VsSetShaderResources;
+        Funcs.pfnPsSetShaderResources = RxWarpDdi::PsSetShaderResources;
+        Funcs.pfnVsSetSamplers = RxWarpDdi::VsSetSamplers;
+        Funcs.pfnPsSetSamplers = RxWarpDdi::PsSetSamplers;
+        Funcs.pfnSetBlendState = RxWarpDdi::SetBlendState;
+        Funcs.pfnSetDepthStencilState = RxWarpDdi::SetDepthStencilState;
+        Funcs.pfnSetRasterizerState = RxWarpDdi::SetRasterizerState;
+        Funcs.pfnSetViewports = RxWarpDdi::SetViewports;
+        Funcs.pfnSetScissorRects = RxWarpDdi::SetScissorRects;
+        Funcs.pfnSetRenderTargets = RxWarpDdi::SetRenderTargets;
+
+        Funcs.pfnDraw = RxWarpDdi::Draw;
+        Funcs.pfnDrawIndexed = RxWarpDdi::DrawIndexed;
+        Funcs.pfnDrawInstanced = RxWarpDdi::DrawInstanced;
+        Funcs.pfnDrawIndexedInstanced = RxWarpDdi::DrawIndexedInstanced;
+
         /* Left empty, as the reference does: the runtime emulates deferred contexts */
         Funcs.pfnCommandListExecute = nullptr;
         Funcs.pfnCheckDeferredContextHandleSizes = nullptr;
@@ -341,7 +379,7 @@ RxWarpDevice::Create(
         Args->pWDDM1_3DeviceFuncs->pfnCreateRenderTargetView = RxWarpDdi::CreateRenderTargetView;
         Args->pWDDM1_3DeviceFuncs->pfnCreateShaderResourceView = RxWarpDdi::CreateShaderResourceView;
         Args->pWDDM1_3DeviceFuncs->pfnCreateUnorderedAccessView = RxWarpDdi::CreateUnorderedAccessView;
-        Args->pWDDM1_3DeviceFuncs->pfnCreateRasterizerState = &RxWarpStub<PFND3D11_1DDI_CREATERASTERIZERSTATE>::Call;
+        Args->pWDDM1_3DeviceFuncs->pfnCreateRasterizerState = RxWarpDdi::CreateRasterizerState;
     }
 
     /* DXGI: 1.3 for WDDM 1.3, 1.4 for WDDM 2.0, 1.6.1 after that */
