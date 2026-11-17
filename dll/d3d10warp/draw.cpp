@@ -1052,6 +1052,9 @@ RxWarpInDiamond(
     INT64 Dx = X - Cx;
     INT64 Dy = Y - Cy;
 
+    /* Open, except for the right and bottom corners */
+    if ((Dx == 128 && Dy == 0) || (Dx == 0 && Dy == 128))
+        return TRUE;
     return ((Dx < 0) ? -Dx : Dx) + ((Dy < 0) ? -Dy : Dy) < 128;
 }
 
@@ -1078,7 +1081,8 @@ RxWarpSegmentMeetsDiamond(
         INT64 Offset = (Y0 - Cy) * Dx + (Cx - X0) * Dy;
         INT64 Limit = 128 * ((Dx < 0) ? -Dx : Dx);
 
-        if (((Offset < 0) ? -Offset : Offset) < Limit)
+        /* Offset / Dx is the height where the segment crosses the vertical axis */
+        if (((Offset < 0) ? -Offset : Offset) < Limit || Offset == 128 * Dx)
             return TRUE;
     }
     if (Dy != 0 && ((Cy >= Y0 && Cy <= Y1) || (Cy <= Y0 && Cy >= Y1)))
@@ -1086,7 +1090,7 @@ RxWarpSegmentMeetsDiamond(
         INT64 Offset = (X0 - Cx) * Dy + (Cy - Y0) * Dx;
         INT64 Limit = 128 * ((Dy < 0) ? -Dy : Dy);
 
-        if (((Offset < 0) ? -Offset : Offset) < Limit)
+        if (((Offset < 0) ? -Offset : Offset) < Limit || Offset == 128 * Dy)
             return TRUE;
     }
     return FALSE;
