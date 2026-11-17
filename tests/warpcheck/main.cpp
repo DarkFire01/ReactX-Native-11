@@ -969,6 +969,162 @@ SceneMips(
     return hr;
 }
 
+static const char TcComputeSource[] =
+    "RWStructuredBuffer<uint4> Out : register(u0);\n"
+    "RWByteAddressBuffer Counts : register(u1);\n"
+    "RWTexture2D<float4> Image : register(u2);\n"
+    "AppendStructuredBuffer<uint2> Picked : register(u3);\n"
+    "groupshared uint Sum[64];\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void cs(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID, uint li : SV_GroupIndex)\n"
+    "{\n"
+    "    Sum[li] = id.x * 3 + id.y * 7 + gid.x;\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    [loop] for (uint s = 32; s > 0; s >>= 1) { if (li < s) Sum[li] += Sum[li + s]; GroupMemoryBarrierWithGroupSync(); }\n"
+    "    uint flat = id.y * 32 + id.x;\n"
+    "    Out[flat] = uint4(id.x, id.y, lid.x + lid.y * 10, Sum[0]);\n"
+    "    uint old;\n"
+    "    Counts.InterlockedAdd((id.x & 3) * 4, 1, old);\n"
+    "    Counts.InterlockedMax(16, flat * 13 % 97);\n"
+    "    Image[id.xy] = float4(id.x / 32.0, id.y / 16.0, sqrt(li / 64.0), 1);\n"
+    "    if ((flat % 7) == 0) Picked.Append(uint2(flat, 0));\n"
+    "}\n";
+
+/* Fills a buffer from the GPU and reads it back */
+static
+HRESULT
+TcReadBuffer(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _In_ ID3D11Buffer *Buffer,
+    _Inout_ TcResult *Result)
+{
+    D3D11_BUFFER_DESC Desc;
+    D3D11_MAPPED_SUBRESOURCE Map;
+    ID3D11Buffer *Staging = NULL;
+    HRESULT hr;
+
+    Buffer->GetDesc(&Desc);
+    Desc.Usage = D3D11_USAGE_STAGING;
+    Desc.BindFlags = 0;
+    Desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    Desc.MiscFlags = 0;
+    Desc.StructureByteStride = 0;
+    hr = Device->CreateBuffer(&Desc, NULL, &Staging);
+    if (FAILED(hr))
+        return hr;
+    Context->CopyResource(Staging, Buffer);
+    hr = Context->Map(Staging, 0, D3D11_MAP_READ, 0, &Map);
+    if (SUCCEEDED(hr))
+    {
+        TcAppend(Result, Map.pData, Desc.ByteWidth);
+        Context->Unmap(Staging, 0);
+    }
+    Staging->Release();
+    return hr;
+}
+
+/* Thread ids, a shared memory reduction across barriers, atomics, a typed UAV and an append buffer */
+static
+HRESULT
+SceneCompute(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    D3D11_BUFFER_DESC OutDesc = { 512 * 16, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 16 };
+    D3D11_BUFFER_DESC CountDesc = { 32, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0 };
+    D3D11_BUFFER_DESC PickDesc = { 128 * 8, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, 8 };
+    D3D11_BUFFER_DESC TallyDesc = { 16, D3D11_USAGE_DEFAULT, 0, 0, 0, 0 };
+    D3D11_TEXTURE2D_DESC ImageDesc = { 32, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0 };
+    D3D11_UNORDERED_ACCESS_VIEW_DESC RawDesc = {};
+    D3D11_UNORDERED_ACCESS_VIEW_DESC AppendDesc = {};
+    ID3D11Buffer *Out = NULL;
+    ID3D11Buffer *Counts = NULL;
+    ID3D11Buffer *Picked = NULL;
+    ID3D11Buffer *Tally = NULL;
+    ID3D11Texture2D *Image = NULL;
+    ID3D11UnorderedAccessView *Views[4] = {};
+    ID3D11ComputeShader *Shader = NULL;
+    ID3DBlob *Blob = NULL;
+    ID3DBlob *Errors = NULL;
+    const UINT Initial[4] = { 0, 0, 0, 0 };
+    HRESULT hr;
+
+    hr = D3DCompile(TcComputeSource, sizeof(TcComputeSource) - 1, "compute", NULL, NULL, "cs", "cs_5_0", 0, 0, &Blob, &Errors);
+    if (Errors)
+    {
+        if (FAILED(hr))
+            printf("%s", (const char *)Errors->GetBufferPointer());
+        Errors->Release();
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateComputeShader(Blob->GetBufferPointer(), Blob->GetBufferSize(), NULL, &Shader);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&OutDesc, NULL, &Out);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&CountDesc, NULL, &Counts);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&PickDesc, NULL, &Picked);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&TallyDesc, NULL, &Tally);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateTexture2D(&ImageDesc, NULL, &Image);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateUnorderedAccessView(Out, NULL, &Views[0]);
+    if (SUCCEEDED(hr))
+    {
+        RawDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        RawDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        RawDesc.Buffer.NumElements = 8;
+        RawDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        hr = Device->CreateUnorderedAccessView(Counts, &RawDesc, &Views[1]);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateUnorderedAccessView(Image, NULL, &Views[2]);
+    if (SUCCEEDED(hr))
+    {
+        AppendDesc.Format = DXGI_FORMAT_UNKNOWN;
+        AppendDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        AppendDesc.Buffer.NumElements = 128;
+        AppendDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_APPEND;
+        hr = Device->CreateUnorderedAccessView(Picked, &AppendDesc, &Views[3]);
+    }
+    if (SUCCEEDED(hr))
+    {
+        const UINT Zero[4] = {};
+
+        Context->ClearUnorderedAccessViewUint(Views[1], Zero);
+        Context->ClearUnorderedAccessViewUint(Views[3], Zero);
+        Context->CSSetShader(Shader, NULL, 0);
+        Context->CSSetUnorderedAccessViews(0, 4, Views, Initial);
+        Context->Dispatch(4, 2, 1);
+        Context->CopyStructureCount(Tally, 0, Views[3]);
+        hr = TcReadBuffer(Device, Context, Out, Result);
+        if (SUCCEEDED(hr))
+            hr = TcReadBuffer(Device, Context, Counts, Result);
+        if (SUCCEEDED(hr))
+            hr = TcReadBuffer(Device, Context, Tally, Result);
+        if (SUCCEEDED(hr))
+            hr = TcReadBytes(Device, Context, Image, 4, Result);
+    }
+
+    for (ID3D11UnorderedAccessView *View : Views)
+    {
+        if (View)
+            View->Release();
+    }
+    ID3D11DeviceChild *Objects[] = { Out, Counts, Picked, Tally, Image, Shader };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    if (Blob)
+        Blob->Release();
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -986,6 +1142,7 @@ static const TcScene Scenes[] =
     { "points", 0, ScenePoints },
     { "queries", 0, SceneQueries },
     { "mips", 0, SceneMips },
+    { "compute", 0, SceneCompute },
 };
 
 static
@@ -1120,6 +1277,18 @@ wmain(
         TcWritePpm(Name, Expected);
         sprintf_s(Name, "%s_ours.ppm", Scene.Name);
         TcWritePpm(Name, Actual);
+
+        /* Raw results too, for scenes that produce data rather than a picture */
+        {
+            FILE *File;
+
+            sprintf_s(Name, "%s_ours.bin", Scene.Name);
+            if (fopen_s(&File, Name, "wb") == 0)
+            {
+                fwrite(Actual.Data.data(), 1, Actual.Data.size(), File);
+                fclose(File);
+            }
+        }
     }
     return Failures ? 1 : 0;
 }
