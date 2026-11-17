@@ -94,40 +94,181 @@ RxWarpReadTexel(
     return RxWarpDecodeTexel(View->Format, Element, Value);
 }
 
+/* Not a number or infinite: addressing treats these as zero */
 static
-INT
-RxWarpAddress(
-    _In_ INT Coordinate,
+BOOLEAN
+RxWarpUnaddressable(
+    _In_ FLOAT Value)
+{
+    UINT Bits;
+
+    memcpy(&Bits, &Value, sizeof(Bits));
+    return (Bits & 0x7F800000) == 0x7F800000;
+}
+
+static
+FLOAT
+RxWarpFraction(
+    _In_ FLOAT Value)
+{
+    return (fabsf(Value) <= 8388600.0f) ? Value - floorf(Value) : 0.0f;
+}
+
+/*
+ * Texture coordinates become texel positions with eight fraction bits, as the reference
+ * computes them: the normalized coordinate is folded into range by the address mode first and
+ * only then scaled by the size.
+ */
+static
+VOID
+RxWarpAddressPoint(
+    _In_ FLOAT Coordinate,
     _In_ INT Size,
     _In_ UINT Mode,
+    _In_ INT Offset,
+    _Out_ INT *Index,
     _Out_ BOOLEAN *Border)
 {
-    INT Period;
+    FLOAT Scale = (FLOAT)Size * 256.0f;
+    INT Fixed;
+    INT Texel;
 
     *Border = FALSE;
+    *Index = 0;
+    if (RxWarpUnaddressable(Coordinate))
+        return;
+
     switch (Mode)
     {
         case D3D10_DDI_TEXTURE_ADDRESS_WRAP:
-            Coordinate %= Size;
-            return (Coordinate < 0) ? Coordinate + Size : Coordinate;
+            Fixed = (INT)floorf(Scale * RxWarpFraction(Coordinate)) + Offset * 256;
+            Texel = Fixed >> 8;
+            Texel %= Size;
+            *Index = (Texel < 0) ? Texel + Size : Texel;
+            return;
         case D3D10_DDI_TEXTURE_ADDRESS_MIRROR:
-            Period = Size * 2;
-            Coordinate %= Period;
-            if (Coordinate < 0)
-                Coordinate += Period;
-            return (Coordinate < Size) ? Coordinate : Period - 1 - Coordinate;
+        {
+            INT Period = Size * 2;
+
+            Fixed = (INT)floorf(((FLOAT)Period * 256.0f) * RxWarpFraction(Coordinate * 0.5f)) + Offset * 256;
+            Texel = (Fixed >> 8) % Period;
+            if (Texel < 0)
+                Texel += Period;
+            *Index = (Texel >= Size) ? Period - 1 - Texel : Texel;
+            return;
+        }
         case D3D10_DDI_TEXTURE_ADDRESS_BORDER:
-            if (Coordinate < 0 || Coordinate >= Size)
-                *Border = TRUE;
-            return Coordinate;
+        {
+            FLOAT Clamped = (Coordinate > -1.0f) ? Coordinate : -1.0f;
+
+            Clamped = (Clamped >= 2.0f) ? 2.0f : Clamped;
+            Texel = (((INT)floorf(Scale * Clamped)) >> 8) + Offset;
+            *Border = (Texel < 0 || Texel > Size - 1);
+            *Index = *Border ? 0 : Texel;
+            return;
+        }
         case D3D10_DDI_TEXTURE_ADDRESS_MIRRORONCE:
-            if (Coordinate < 0)
-                Coordinate = -1 - Coordinate;
-            return (Coordinate >= Size) ? Size - 1 : Coordinate;
+        {
+            FLOAT Folded = fabsf(Coordinate);
+
+            Folded = (Folded >= 1.0f) ? 1.0f : Folded;
+            Texel = (((INT)floorf(Scale * Folded)) >> 8) + Offset;
+            *Index = (Texel < 0) ? 0 : ((Texel > Size - 1) ? Size - 1 : Texel);
+            return;
+        }
         default:
-            if (Coordinate < 0)
-                return 0;
-            return (Coordinate >= Size) ? Size - 1 : Coordinate;
+        {
+            FLOAT Clamped = (Coordinate > 0.0f) ? Coordinate : 0.0f;
+
+            Clamped = (Clamped >= 1.0f) ? 1.0f : Clamped;
+            Texel = (((INT)floorf(Scale * Clamped)) >> 8) + Offset;
+            *Index = (Texel < 0) ? 0 : ((Texel > Size - 1) ? Size - 1 : Texel);
+            return;
+        }
+    }
+}
+
+/* The two texels a linear filter blends and the eight bit weight of the second */
+typedef struct _RX_WARP_TAPS
+{
+    INT First;
+    INT Second;
+    UINT Weight;
+    BOOLEAN FirstBorder;
+    BOOLEAN SecondBorder;
+} RX_WARP_TAPS;
+
+static
+VOID
+RxWarpAddressLinear(
+    _In_ FLOAT Coordinate,
+    _In_ INT Size,
+    _In_ UINT Mode,
+    _In_ INT Offset,
+    _Out_ RX_WARP_TAPS *Taps)
+{
+    FLOAT Scale = (FLOAT)Size * 256.0f;
+    FLOAT Folded;
+    INT Fixed;
+
+    ZeroMemory(Taps, sizeof(*Taps));
+    if (RxWarpUnaddressable(Coordinate))
+        return;
+
+    switch (Mode)
+    {
+        case D3D10_DDI_TEXTURE_ADDRESS_WRAP:
+            Folded = RxWarpFraction(Coordinate);
+            break;
+        case D3D10_DDI_TEXTURE_ADDRESS_MIRROR:
+            Folded = RxWarpFraction(Coordinate * 0.5f);
+            Scale = (FLOAT)Size * 512.0f;
+            break;
+        case D3D10_DDI_TEXTURE_ADDRESS_BORDER:
+            Folded = (Coordinate > -1.0f) ? Coordinate : -1.0f;
+            Folded = (Folded >= 2.0f) ? 2.0f : Folded;
+            break;
+        case D3D10_DDI_TEXTURE_ADDRESS_MIRRORONCE:
+            Folded = fabsf(Coordinate);
+            Folded = (Folded >= 1.0f) ? 1.0f : Folded;
+            break;
+        default:
+            Folded = (Coordinate > 0.0f) ? Coordinate : 0.0f;
+            Folded = (Folded >= 1.0f) ? 1.0f : Folded;
+            break;
+    }
+
+    Fixed = (INT)nearbyintf(Folded * Scale) + Offset * 256;
+    Taps->First = (Fixed - 128) >> 8;
+    Taps->Second = (Fixed + 128) >> 8;
+    Taps->Weight = (UINT)(Fixed + 128) & 0xFF;
+
+    switch (Mode)
+    {
+        case D3D10_DDI_TEXTURE_ADDRESS_WRAP:
+            Taps->First = ((Taps->First % Size) + Size) % Size;
+            Taps->Second = ((Taps->Second % Size) + Size) % Size;
+            break;
+        case D3D10_DDI_TEXTURE_ADDRESS_MIRROR:
+        {
+            INT Period = Size * 2;
+
+            Taps->First = ((Taps->First % Period) + Period) % Period;
+            Taps->Second = ((Taps->Second % Period) + Period) % Period;
+            if (Taps->First >= Size)
+                Taps->First = Period - 1 - Taps->First;
+            if (Taps->Second >= Size)
+                Taps->Second = Period - 1 - Taps->Second;
+            break;
+        }
+        case D3D10_DDI_TEXTURE_ADDRESS_BORDER:
+            Taps->FirstBorder = (Taps->First < 0 || Taps->First > Size - 1);
+            Taps->SecondBorder = (Taps->Second < 0 || Taps->Second > Size - 1);
+            break;
+        default:
+            Taps->First = (Taps->First < 0) ? 0 : ((Taps->First > Size - 1) ? Size - 1 : Taps->First);
+            Taps->Second = (Taps->Second < 0) ? 0 : ((Taps->Second > Size - 1) ? Size - 1 : Taps->Second);
+            break;
     }
 }
 
@@ -265,6 +406,123 @@ RxWarpCubeFace(
     return Face;
 }
 
+/* Eight bit normalized formats, which the reference filters in fixed point */
+static
+BOOLEAN
+RxWarpByteFormat(
+    _In_ DXGI_FORMAT Format)
+{
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Format);
+
+    if (Info == nullptr || Info->Kind != RxKindPlain || Info->ChannelCount == 0)
+        return FALSE;
+    for (UINT Index = 0; Index < Info->ChannelCount; Index++)
+    {
+        if (Info->Channels[Index].Bits != 8 ||
+            (Info->Channels[Index].Type != RxChannelUnorm && Info->Channels[Index].Type != RxChannelUnused))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* The border color as the texture format would store it */
+static
+VOID
+RxWarpQuantizedBorder(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_(4) const FLOAT *Color,
+    _Out_writes_(4) FLOAT *Result)
+{
+    BYTE Element[16];
+    UINT Raw[4];
+
+    if (RxWarpFormatInfo(Format) == nullptr || RxWarpFormatIsInteger(Format) || !RxWarpEncodeColor(Format, Color, Element))
+    {
+        memcpy(Result, Color, 4 * sizeof(FLOAT));
+        return;
+    }
+    RxWarpDecodeTexel(Format, Element, Raw);
+    memcpy(Result, Raw, 4 * sizeof(FLOAT));
+}
+
+/* A texel or the quantized border color as eight bit channel values */
+static
+VOID
+RxWarpFetchBytes(
+    _In_ const RX_WARP_SAMPLE_REQUEST *Request,
+    _In_ const RX_WARP_VIEW_EXTENT *Extent,
+    _In_ UINT Mip,
+    _In_ UINT Slice,
+    _In_reads_(3) const INT *At,
+    _In_ BOOLEAN Border,
+    _Out_writes_(4) INT *Bytes)
+{
+    FLOAT Color[4];
+    UINT Raw[4];
+
+    if (Border)
+        RxWarpQuantizedBorder(Request->View->Format, Request->Sampler->Desc.BorderColor, Color);
+    else
+    {
+        RxWarpReadTexel(Request->View, Extent, Mip, Slice, At[0], At[1], At[2], Raw);
+        memcpy(Color, Raw, sizeof(Color));
+    }
+    for (UINT Component = 0; Component < 4; Component++)
+        Bytes[Component] = (INT)nearbyintf(Color[Component] * 255.0f);
+}
+
+/*
+ * The reference's eight bit filter: seven bit weights, eight bit values with seven fraction
+ * bits, the second step floored, and the result scaled to float in two terms: 1/32768 and 1/(32768 * 255).
+ */
+static
+FLOAT
+RxWarpByteResult(
+    _In_ INT Fixed)
+{
+    FLOAT Value = (FLOAT)Fixed;
+    UINT Bits = 0x34008081;
+    FLOAT Correction;
+
+    memcpy(&Correction, &Bits, sizeof(Correction));
+    return Value * (1.0f / 32768.0f) + Value * Correction;
+}
+
+/* Reads one texel or the border color as four floats, compared when the sampler compares */
+static
+VOID
+RxWarpFetch(
+    _In_ const RX_WARP_SAMPLE_REQUEST *Request,
+    _In_ const RX_WARP_VIEW_EXTENT *Extent,
+    _In_ UINT Mip,
+    _In_ UINT Slice,
+    _In_reads_(3) const INT *At,
+    _In_ BOOLEAN Border,
+    _Out_writes_(4) FLOAT *Texel)
+{
+    const D3D10_DDI_SAMPLER_DESC *Desc = &Request->Sampler->Desc;
+    UINT Raw[4];
+
+    if (Border)
+    {
+        RxWarpQuantizedBorder(Request->View->Format, Desc->BorderColor, Texel);
+    }
+    else
+    {
+        RxWarpReadTexel(Request->View, Extent, Mip, Slice, At[0], At[1], At[2], Raw);
+        for (UINT Component = 0; Component < 4; Component++)
+            Texel[Component] = RxWarpBitsFloat(Raw[Component]);
+    }
+    if (Request->Compare)
+    {
+        FLOAT Pass = RxWarpCompare(Desc->ComparisonFunc, Request->Reference, Texel[0]) ? 1.0f : 0.0f;
+
+        Texel[0] = Texel[1] = Texel[2] = Texel[3] = Pass;
+    }
+}
+
 /* One filtered lookup at a single mip level */
 static
 VOID
@@ -282,10 +540,8 @@ RxWarpFilterLevel(
     RX_WARP_SUBRESOURCE *Level = RxWarpExtentLevel(Extent, Mip, Slice);
     UINT Modes[3] = { (UINT)Desc->AddressU, (UINT)Desc->AddressV, (UINT)Desc->AddressW };
     INT Size[3];
-    INT Base[3] = {};
-    FLOAT Weight[3] = {};
-    UINT Taps = Linear ? 2 : 1;
-    FLOAT Gathered[4] = {};
+    RX_WARP_TAPS Taps[3] = {};
+    UINT Axes = Shape->Axes;
 
     Result[0] = Result[1] = Result[2] = Result[3] = 0.0f;
     if (Level == nullptr)
@@ -297,90 +553,116 @@ RxWarpFilterLevel(
     if (Shape->Cube)
         Modes[0] = Modes[1] = D3D10_DDI_TEXTURE_ADDRESS_CLAMP;
 
-    for (UINT Axis = 0; Axis < Shape->Axes; Axis++)
+    if (!Linear && !Request->Gather)
     {
-        FLOAT Scaled = Coordinate[Axis] * (FLOAT)Size[Axis];
+        INT At[3] = {};
+        BOOLEAN Border = FALSE;
 
-        if (Linear)
+        for (UINT Axis = 0; Axis < Axes; Axis++)
         {
-            Scaled -= 0.5f;
-            Base[Axis] = (INT)floorf(Scaled);
-            Weight[Axis] = Scaled - floorf(Scaled);
+            BOOLEAN Outside;
+
+            RxWarpAddressPoint(Coordinate[Axis], Size[Axis], Modes[Axis], Request->Offset[Axis], &At[Axis], &Outside);
+            Border |= Outside;
         }
-        else
-        {
-            Base[Axis] = (INT)floorf(Scaled);
-        }
-        Base[Axis] += Request->Offset[Axis];
+        RxWarpFetch(Request, Extent, Mip, Slice, At, Border, Result);
+        return;
     }
 
-    for (UINT Tz = 0; Tz < ((Shape->Axes > 2) ? Taps : 1); Tz++)
+    for (UINT Axis = 0; Axis < 3; Axis++)
     {
-        for (UINT Ty = 0; Ty < ((Shape->Axes > 1) ? Taps : 1); Ty++)
+        if (Axis < Axes)
+            RxWarpAddressLinear(Coordinate[Axis], Size[Axis], Modes[Axis], Request->Offset[Axis], &Taps[Axis]);
+    }
+
+    /* Gather: the four texels of the footprint, ordered (0,1), (1,1), (1,0), (0,0) */
+    if (Request->Gather)
+    {
+        static const UINT Order[4][2] = { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 0, 0 } };
+
+        for (UINT Index = 0; Index < 4; Index++)
         {
-            for (UINT Tx = 0; Tx < Taps; Tx++)
+            INT At[3] = { Order[Index][0] ? Taps[0].Second : Taps[0].First, Order[Index][1] ? Taps[1].Second : Taps[1].First, 0 };
+            BOOLEAN Border = (Order[Index][0] ? Taps[0].SecondBorder : Taps[0].FirstBorder) ||
+                             (Order[Index][1] ? Taps[1].SecondBorder : Taps[1].FirstBorder);
+            FLOAT Texel[4];
+
+            RxWarpFetch(Request, Extent, Mip, Slice, At, Border, Texel);
+            Result[Index] = Texel[Request->GatherComponent & 3];
+        }
+        return;
+    }
+
+    /* Eight bit normalized textures filter in fixed point, horizontally first */
+    if (Axes == 2 && !Request->Compare && RxWarpByteFormat(Request->View->Format))
+    {
+        INT Corner[2][2][4];
+        INT Wx = (INT)(Taps[0].Weight >> 1);
+        INT Wy = (INT)(Taps[1].Weight >> 1);
+
+        for (UINT Ty = 0; Ty < 2; Ty++)
+        {
+            for (UINT Tx = 0; Tx < 2; Tx++)
             {
-                INT At[3] = { Base[0] + (INT)Tx, Base[1] + (INT)Ty, Base[2] + (INT)Tz };
-                BOOLEAN Border = FALSE;
-                FLOAT Texel[4];
-                FLOAT Factor = 1.0f;
-                UINT Raw[4];
+                INT At[3] = { Tx ? Taps[0].Second : Taps[0].First, Ty ? Taps[1].Second : Taps[1].First, 0 };
+                BOOLEAN Border = (Tx ? Taps[0].SecondBorder : Taps[0].FirstBorder) || (Ty ? Taps[1].SecondBorder : Taps[1].FirstBorder);
 
-                for (UINT Axis = 0; Axis < 3; Axis++)
-                {
-                    BOOLEAN Outside;
-
-                    if (Axis >= Shape->Axes)
-                    {
-                        At[Axis] = 0;
-                        continue;
-                    }
-                    At[Axis] = RxWarpAddress(At[Axis], Size[Axis], Modes[Axis], &Outside);
-                    Border |= Outside;
-                }
-
-                if (Border)
-                {
-                    memcpy(Texel, Desc->BorderColor, sizeof(Texel));
-                }
-                else
-                {
-                    RxWarpReadTexel(Request->View, Extent, Mip, Slice, At[0], At[1], At[2], Raw);
-                    for (UINT Component = 0; Component < 4; Component++)
-                        Texel[Component] = RxWarpBitsFloat(Raw[Component]);
-                }
-
-                if (Request->Compare)
-                {
-                    FLOAT Pass = RxWarpCompare(Desc->ComparisonFunc, Request->Reference, Texel[0]) ? 1.0f : 0.0f;
-
-                    Texel[0] = Texel[1] = Texel[2] = Texel[3] = Pass;
-                }
-
-                /* Gather order: (0,1), (1,1), (1,0), (0,0) */
-                if (Request->Gather)
-                {
-                    static const UINT Slot[2][2] = { { 3, 2 }, { 0, 1 } };
-
-                    Gathered[Slot[Ty][Tx]] = Texel[Request->GatherComponent & 3];
-                    continue;
-                }
-
-                if (Linear)
-                {
-                    Factor = Tx ? Weight[0] : 1.0f - Weight[0];
-                    if (Shape->Axes > 1)
-                        Factor *= Ty ? Weight[1] : 1.0f - Weight[1];
-                    if (Shape->Axes > 2)
-                        Factor *= Tz ? Weight[2] : 1.0f - Weight[2];
-                }
-                for (UINT Component = 0; Component < 4; Component++)
-                    Result[Component] += Texel[Component] * Factor;
+                RxWarpFetchBytes(Request, Extent, Mip, Slice, At, Border, Corner[Ty][Tx]);
             }
         }
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            INT Top = Corner[0][0][Component] * 128 + (Corner[0][1][Component] - Corner[0][0][Component]) * Wx;
+            INT Bottom = Corner[1][0][Component] * 128 + (Corner[1][1][Component] - Corner[1][0][Component]) * Wx;
+
+            Result[Component] = RxWarpByteResult(Top + (((Bottom - Top) * Wy) >> 7));
+        }
+        return;
     }
-    if (Request->Gather)
-        memcpy(Result, Gathered, sizeof(Gathered));
+
+    /* Everything else blends in float with the same eight bit weights */
+    {
+        FLOAT Corners[2][2][2][4];
+
+        for (UINT Tz = 0; Tz < ((Axes > 2) ? 2u : 1u); Tz++)
+        {
+            for (UINT Ty = 0; Ty < ((Axes > 1) ? 2u : 1u); Ty++)
+            {
+                for (UINT Tx = 0; Tx < 2; Tx++)
+                {
+                    INT At[3] = { Tx ? Taps[0].Second : Taps[0].First, (Axes > 1) ? (Ty ? Taps[1].Second : Taps[1].First) : 0,
+                                  (Axes > 2) ? (Tz ? Taps[2].Second : Taps[2].First) : 0 };
+                    BOOLEAN Border = (Tx ? Taps[0].SecondBorder : Taps[0].FirstBorder) ||
+                                     (Axes > 1 && (Ty ? Taps[1].SecondBorder : Taps[1].FirstBorder)) ||
+                                     (Axes > 2 && (Tz ? Taps[2].SecondBorder : Taps[2].FirstBorder));
+
+                    RxWarpFetch(Request, Extent, Mip, Slice, At, Border, Corners[Tz][Ty][Tx]);
+                }
+            }
+        }
+
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            FLOAT Wx = (FLOAT)Taps[0].Weight * (1.0f / 256.0f);
+            FLOAT Wy = (FLOAT)Taps[1].Weight * (1.0f / 256.0f);
+            FLOAT Wz = (FLOAT)Taps[2].Weight * (1.0f / 256.0f);
+            FLOAT Plane[2];
+
+            for (UINT Tz = 0; Tz < ((Axes > 2) ? 2u : 1u); Tz++)
+            {
+                FLOAT Top = Corners[Tz][0][0][Component] + (Corners[Tz][0][1][Component] - Corners[Tz][0][0][Component]) * Wx;
+
+                if (Axes > 1)
+                {
+                    FLOAT Bottom = Corners[Tz][1][0][Component] + (Corners[Tz][1][1][Component] - Corners[Tz][1][0][Component]) * Wx;
+
+                    Top = Top + (Bottom - Top) * Wy;
+                }
+                Plane[Tz] = Top;
+            }
+            Result[Component] = (Axes > 2) ? Plane[0] + (Plane[1] - Plane[0]) * Wz : Plane[0];
+        }
+    }
 }
 
 /* Level of detail before clamping to the view's mips, from screen space derivatives */

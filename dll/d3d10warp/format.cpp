@@ -745,13 +745,15 @@ RxWarpDecodeTexel(
         switch (Channel.Type)
         {
             case RxChannelUnorm:
-                Value[Slot] = RxWarpFloatToBits(RxWarpUnormToFloat((UINT)Bits, Channel.Bits));
+                /* Sampling divides exactly; the two term form is only for conversions */
+                Max = (FLOAT)((1ull << Channel.Bits) - 1);
+                Value[Slot] = RxWarpFloatToBits((FLOAT)Bits / Max);
                 break;
             case RxChannelSrgb:
                 Max = (FLOAT)((1ull << Channel.Bits) - 1);
                 /* Alpha stays linear */
                 if (Channel.Source == 3)
-                    Value[Slot] = RxWarpFloatToBits(RxWarpUnormToFloat((UINT)Bits, Channel.Bits));
+                    Value[Slot] = RxWarpFloatToBits((FLOAT)Bits / Max);
                 else if (Channel.Bits == 8)
                     Value[Slot] = RxWarpFloatToBits(RxWarpSrgbByteToLinear((UINT)Bits));
                 else
