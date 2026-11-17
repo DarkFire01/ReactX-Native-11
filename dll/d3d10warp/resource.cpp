@@ -320,7 +320,7 @@ RxWarpDdi::ResourceCopyRegion(
 
     if (Box == nullptr)
     {
-        Whole = { 0, (INT)Sub->Width, 0, (INT)Sub->Height, 0, (INT)Sub->Depth };
+        Whole = { 0, 0, 0, (INT)Sub->Width, (INT)Sub->Height, (INT)Sub->Depth };
         Box = &Whole;
     }
 
@@ -363,7 +363,7 @@ RxWarpDdi::ResourceUpdateSubresourceUP(
 
     if (Box == nullptr)
     {
-        Whole = { 0, (INT)Sub->Width, 0, (INT)Sub->Height, 0, (INT)Sub->Depth };
+        Whole = { 0, 0, 0, (INT)Sub->Width, (INT)Sub->Height, (INT)Sub->Depth };
         Box = &Whole;
     }
 
