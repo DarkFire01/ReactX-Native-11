@@ -293,6 +293,13 @@ RxWarpDevice::Create(
         Funcs.pfnSetScissorRects = RxWarpDdi::SetScissorRects;
         Funcs.pfnSetRenderTargets = RxWarpDdi::SetRenderTargets;
 
+        Funcs.pfnCreateQuery = RxWarpDdi::CreateQuery2;
+        Funcs.pfnDestroyQuery = RxWarpDdi::DestroyQuery;
+        Funcs.pfnQueryBegin = RxWarpDdi::QueryBegin;
+        Funcs.pfnQueryEnd = RxWarpDdi::QueryEnd;
+        Funcs.pfnQueryGetData = RxWarpDdi::QueryGetData;
+        Funcs.pfnSetPredication = RxWarpDdi::SetPredication;
+
         Funcs.pfnDraw = RxWarpDdi::Draw;
         Funcs.pfnDrawIndexed = RxWarpDdi::DrawIndexed;
         Funcs.pfnDrawInstanced = RxWarpDdi::DrawInstanced;
@@ -372,7 +379,7 @@ RxWarpDevice::Create(
 
     memcpy(Args->pWDDM2_6DeviceFuncs, &Funcs, Bytes);
 
-    /* WDDM 1.3 takes the older argument structs for these five */
+    /* WDDM 1.3 takes the older argument structs for these */
     if (Args->Interface == D3DWDDM1_3_DDI_INTERFACE_VERSION)
     {
         Args->pWDDM1_3DeviceFuncs->pfnFlush = RxWarpFlush;
@@ -380,6 +387,7 @@ RxWarpDevice::Create(
         Args->pWDDM1_3DeviceFuncs->pfnCreateShaderResourceView = RxWarpDdi::CreateShaderResourceView;
         Args->pWDDM1_3DeviceFuncs->pfnCreateUnorderedAccessView = RxWarpDdi::CreateUnorderedAccessView;
         Args->pWDDM1_3DeviceFuncs->pfnCreateRasterizerState = RxWarpDdi::CreateRasterizerState;
+        Args->pWDDM1_3DeviceFuncs->pfnCreateQuery = RxWarpDdi::CreateQuery;
     }
 
     /* DXGI: 1.3 for WDDM 1.3, 1.4 for WDDM 2.0, 1.6.1 after that */

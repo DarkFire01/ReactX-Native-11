@@ -72,6 +72,18 @@ RxWarpRoundEven(
     return (INT)nearbyintf(Value);
 }
 
+static
+UINT
+RxWarpLaneCount(
+    _In_ UINT Mask)
+{
+    UINT Count = 0;
+
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        Count += (Mask >> Lane) & 1;
+    return Count;
+}
+
 class RxWarpDraw
 {
 public:
@@ -119,10 +131,9 @@ private:
         _In_ UINT Lane);
 
     VOID
-    ClipTriangle(
-        _In_ const RX_WARP_VERTEX *A,
-        _In_ const RX_WARP_VERTEX *B,
-        _In_ const RX_WARP_VERTEX *C);
+    ClipPrimitive(
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+        _In_ UINT Count);
 
     VOID
     ToScreen(
@@ -134,6 +145,24 @@ private:
         _In_ const RX_WARP_VERTEX *A,
         _In_ const RX_WARP_VERTEX *B,
         _In_ const RX_WARP_VERTEX *C);
+
+    VOID
+    RasterizeLine(
+        _In_ const RX_WARP_VERTEX *A,
+        _In_ const RX_WARP_VERTEX *B);
+
+    VOID
+    RasterizePoint(
+        _In_ const RX_WARP_VERTEX *A);
+
+    template <typename Test>
+    VOID
+    Cover(
+        _In_ INT MinX,
+        _In_ INT MinY,
+        _In_ INT MaxX,
+        _In_ INT MaxY,
+        _In_ Test Inside);
 
     VOID
     ShadeQuad(
@@ -191,6 +220,7 @@ private:
     RX_WARP_PLANE DepthPlane = {};
     RX_WARP_PLANE RhwPlane = {};
     BOOLEAN FrontFacing = TRUE;
+    BOOLEAN PointSprite = FALSE;
 };
 
 VOID
@@ -413,6 +443,7 @@ RxWarpDraw::ShadeVertices(
         for (UINT Lane = 0; Lane < Lanes; Lane++)
             FetchVertex((UINT)((INT)Indices[First + Lane] + BaseVertex), Instance, StartInstance, Lane);
         Invocation.Run(VertexShader, &VertexBindings);
+        Device->Counters[RxWarpCountVsInvocations] += Lanes;
 
         for (UINT Lane = 0; Lane < Lanes; Lane++)
         {
@@ -476,45 +507,85 @@ RxWarpClipDistances(
     Distance[5] = W + Y;
 }
 
+/* Interpolates every register from Inner toward Outer, stopping on the plane */
+static
 VOID
-RxWarpDraw::ClipTriangle(
-    _In_ const RX_WARP_VERTEX *A,
-    _In_ const RX_WARP_VERTEX *B,
-    _In_ const RX_WARP_VERTEX *C)
+RxWarpClipPoint(
+    _In_ const RX_WARP_VERTEX &Inner,
+    _In_ const RX_WARP_VERTEX &Outer,
+    _In_ FLOAT InnerDistance,
+    _In_ FLOAT OuterDistance,
+    _Out_ RX_WARP_VERTEX *Point)
 {
-    const RX_WARP_VERTEX *Corners[3] = { A, B, C };
-    FLOAT Distance[3][6];
+    FLOAT Span = InnerDistance - OuterDistance;
+
+    for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
+    {
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            FLOAT P = RxWarpBitsAsFloat(Inner.Registers[Register][Component]);
+            FLOAT Q = RxWarpBitsAsFloat(Outer.Registers[Register][Component]);
+
+            Point->Registers[Register][Component] = RxWarpFloatAsBits((Q - P) * InnerDistance / Span + P);
+        }
+    }
+}
+
+VOID
+RxWarpDraw::ClipPrimitive(
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+    _In_ UINT Count)
+{
+    FLOAT Distance[6];
     UINT Outside[3] = {};
+    UINT Any;
     std::vector<RX_WARP_VERTEX> Polygon;
     std::vector<RX_WARP_VERTEX> Next;
 
-    for (UINT Index = 0; Index < 3; Index++)
+    Device->Counters[RxWarpCountClipInvocations]++;
+    for (UINT Index = 0; Index < Count; Index++)
     {
-        RxWarpClipDistances(Corners[Index]->Registers[PositionRegister], Raster.DepthClipEnable != FALSE, Distance[Index]);
+        RxWarpClipDistances(Corners[Index]->Registers[PositionRegister], Raster.DepthClipEnable != FALSE, Distance);
         for (UINT Plane = 0; Plane < 6; Plane++)
         {
-            if (Distance[Index][Plane] < 0.0f)
+            if (Distance[Plane] < 0.0f)
                 Outside[Index] |= 1u << Plane;
         }
     }
 
-    Provoking = A;
-    if (Outside[0] & Outside[1] & Outside[2])
+    Provoking = Corners[0];
+    Any = Outside[0] | ((Count > 1) ? Outside[1] : 0) | ((Count > 2) ? Outside[2] : 0);
+    if ((Outside[0] & ((Count > 1) ? Outside[1] : ~0u) & ((Count > 2) ? Outside[2] : ~0u)) != 0)
         return;
-    if ((Outside[0] | Outside[1] | Outside[2]) == 0)
+
+    if (Any == 0)
     {
-        Rasterize(A, B, C);
+        Device->Counters[RxWarpCountClipPrimitives]++;
+        if (Count == 1)
+            RasterizePoint(Corners[0]);
+        else if (Count == 2)
+            RasterizeLine(Corners[0], Corners[1]);
+        else
+            Rasterize(Corners[0], Corners[1], Corners[2]);
         return;
     }
 
-    Polygon.assign({ *A, *B, *C });
-    for (UINT Plane = 0; Plane < 6 && Polygon.size() >= 3; Plane++)
+    /* A point is all or nothing */
+    if (Count == 1)
+        return;
+
+    for (UINT Index = 0; Index < Count; Index++)
+        Polygon.push_back(*Corners[Index]);
+
+    for (UINT Plane = 0; Plane < 6 && Polygon.size() >= Count; Plane++)
     {
-        if (!((Outside[0] | Outside[1] | Outside[2]) & (1u << Plane)))
+        SIZE_T Edges = (Count == 2) ? 1 : Polygon.size();
+
+        if (!(Any & (1u << Plane)))
             continue;
 
         Next.clear();
-        for (SIZE_T Index = 0; Index < Polygon.size(); Index++)
+        for (SIZE_T Index = 0; Index < Edges; Index++)
         {
             const RX_WARP_VERTEX &From = Polygon[Index];
             const RX_WARP_VERTEX &To = Polygon[(Index + 1) % Polygon.size()];
@@ -522,6 +593,7 @@ RxWarpDraw::ClipTriangle(
             FLOAT ToDistance[6];
             BOOLEAN FromIn;
             BOOLEAN ToIn;
+            RX_WARP_VERTEX Point;
 
             RxWarpClipDistances(From.Registers[PositionRegister], Raster.DepthClipEnable != FALSE, FromDistance);
             RxWarpClipDistances(To.Registers[PositionRegister], Raster.DepthClipEnable != FALSE, ToDistance);
@@ -533,32 +605,34 @@ RxWarpDraw::ClipTriangle(
             if (FromIn != ToIn)
             {
                 /* The new point always interpolates from the inside vertex */
-                const RX_WARP_VERTEX &Inner = FromIn ? From : To;
-                const RX_WARP_VERTEX &Outer = FromIn ? To : From;
-                FLOAT InnerDistance = FromIn ? FromDistance[Plane] : ToDistance[Plane];
-                FLOAT OuterDistance = FromIn ? ToDistance[Plane] : FromDistance[Plane];
-                FLOAT Span = InnerDistance - OuterDistance;
-                RX_WARP_VERTEX Point;
-
-                for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
-                {
-                    for (UINT Component = 0; Component < 4; Component++)
-                    {
-                        FLOAT P = RxWarpBitsAsFloat(Inner.Registers[Register][Component]);
-                        FLOAT Q = RxWarpBitsAsFloat(Outer.Registers[Register][Component]);
-
-                        Point.Registers[Register][Component] = RxWarpFloatAsBits((Q - P) * InnerDistance / Span + P);
-                    }
-                }
+                if (FromIn)
+                    RxWarpClipPoint(From, To, FromDistance[Plane], ToDistance[Plane], &Point);
+                else
+                    RxWarpClipPoint(To, From, ToDistance[Plane], FromDistance[Plane], &Point);
                 Next.push_back(Point);
             }
+            if (Count == 2 && ToIn)
+                Next.push_back(To);
         }
         Polygon.swap(Next);
     }
 
+    if (Count == 2)
+    {
+        if (Polygon.size() == 2)
+        {
+            Device->Counters[RxWarpCountClipPrimitives]++;
+            RasterizeLine(&Polygon[0], &Polygon[1]);
+        }
+        return;
+    }
+
     /* Flat attributes still come from the original first vertex */
     for (SIZE_T Index = 1; Index + 1 < Polygon.size(); Index++)
+    {
+        Device->Counters[RxWarpCountClipPrimitives]++;
         Rasterize(&Polygon[0], &Polygon[Index], &Polygon[Index + 1]);
+    }
 }
 
 /* The same plane setup the reference uses: offsets from the first vertex, divided by the area */
@@ -633,6 +707,47 @@ RxWarpInsideEdge(
     return (Edge.Dx * (Y - Edge.Y0) - Edge.Dy * (X - Edge.X0) + Edge.Bias) >= 0;
 }
 
+/* Walks the 2x2 quads of a pixel rectangle and shades the ones Inside covers */
+template <typename Test>
+VOID
+RxWarpDraw::Cover(
+    _In_ INT MinX,
+    _In_ INT MinY,
+    _In_ INT MaxX,
+    _In_ INT MaxY,
+    _In_ Test Inside)
+{
+    MinX = (MinX > Left) ? MinX : Left;
+    MinY = (MinY > Top) ? MinY : Top;
+    MaxX = (MaxX < Right) ? MaxX : Right;
+    MaxY = (MaxY < Bottom) ? MaxY : Bottom;
+    if (MinX >= MaxX || MinY >= MaxY)
+        return;
+
+    for (INT Y = MinY & ~1; Y < MaxY; Y += 2)
+    {
+        for (INT X = MinX & ~1; X < MaxX; X += 2)
+        {
+            UINT Covered = 0;
+
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                INT Px = X + (INT)(Lane & 1);
+                INT Py = Y + (INT)(Lane >> 1);
+
+                if (Px < MinX || Px >= MaxX || Py < MinY || Py >= MaxY)
+                    continue;
+
+                /* Sample points sit one whole unit in, because of the half pixel bias */
+                if (Inside(((INT64)Px + 1) << 8, ((INT64)Py + 1) << 8))
+                    Covered |= 1u << Lane;
+            }
+            if (Covered != 0)
+                ShadeQuad(X, Y, Covered);
+        }
+    }
+}
+
 VOID
 RxWarpDraw::Rasterize(
     _In_ const RX_WARP_VERTEX *A,
@@ -702,7 +817,6 @@ RxWarpDraw::Rasterize(
     Edges[1] = RxWarpMakeEdge(Ordered[1], Ordered[2]);
     Edges[2] = RxWarpMakeEdge(Ordered[2], Ordered[0]);
 
-    /* Pixel bounds; sample points sit one whole unit in, because of the half pixel bias */
     MinX = Corner[0].X;
     MaxX = Corner[0].X;
     MinY = Corner[0].Y;
@@ -714,39 +828,192 @@ RxWarpDraw::Rasterize(
         MinY = (Corner[Index].Y < MinY) ? Corner[Index].Y : MinY;
         MaxY = (Corner[Index].Y > MaxY) ? Corner[Index].Y : MaxY;
     }
-    MinX = (MinX >> 8) - 1;
-    MinY = (MinY >> 8) - 1;
-    MaxX = ((MaxX + 255) >> 8);
-    MaxY = ((MaxY + 255) >> 8);
-    MinX = (MinX > Left) ? MinX : Left;
-    MinY = (MinY > Top) ? MinY : Top;
-    MaxX = (MaxX < Right) ? MaxX : Right;
-    MaxY = (MaxY < Bottom) ? MaxY : Bottom;
-    if (MinX >= MaxX || MinY >= MaxY)
+    PointSprite = FALSE;
+    Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8,
+          [&Edges](INT64 Sx, INT64 Sy)
+          {
+              return RxWarpInsideEdge(Edges[0], Sx, Sy) && RxWarpInsideEdge(Edges[1], Sx, Sy) && RxWarpInsideEdge(Edges[2], Sx, Sy);
+          });
+}
+
+/* A line plane follows the major axis only, as the reference sets lines up */
+static
+RX_WARP_PLANE
+RxWarpMakeLinePlane(
+    _In_ BOOLEAN XMajor,
+    _In_ FLOAT Start,
+    _In_ FLOAT InverseLength,
+    _In_ FLOAT V0,
+    _In_ FLOAT V1)
+{
+    RX_WARP_PLANE Plane;
+    FLOAT Slope = (V1 - V0) * InverseLength;
+
+    Plane.A = XMajor ? Slope : 0.0f;
+    Plane.B = XMajor ? 0.0f : Slope;
+    Plane.C = V0 - Start * Slope;
+    return Plane;
+}
+
+static
+BOOLEAN
+RxWarpInDiamond(
+    _In_ INT64 X,
+    _In_ INT64 Y,
+    _In_ INT64 Cx,
+    _In_ INT64 Cy)
+{
+    INT64 Dx = X - Cx;
+    INT64 Dy = Y - Cy;
+
+    return ((Dx < 0) ? -Dx : Dx) + ((Dy < 0) ? -Dy : Dy) < 128;
+}
+
+/* Whether the segment passes through the open diamond around a pixel center, in 24.8 */
+static
+BOOLEAN
+RxWarpSegmentMeetsDiamond(
+    _In_ INT64 X0,
+    _In_ INT64 Y0,
+    _In_ INT64 X1,
+    _In_ INT64 Y1,
+    _In_ INT64 Cx,
+    _In_ INT64 Cy)
+{
+    INT64 Dx = X1 - X0;
+    INT64 Dy = Y1 - Y0;
+
+    if (RxWarpInDiamond(X0, Y0, Cx, Cy) || RxWarpInDiamond(X1, Y1, Cx, Cy))
+        return TRUE;
+
+    /* The distance is smallest where the segment crosses the diamond's axes */
+    if (Dx != 0 && ((Cx >= X0 && Cx <= X1) || (Cx <= X0 && Cx >= X1)))
+    {
+        INT64 Offset = (Y0 - Cy) * Dx + (Cx - X0) * Dy;
+        INT64 Limit = 128 * ((Dx < 0) ? -Dx : Dx);
+
+        if (((Offset < 0) ? -Offset : Offset) < Limit)
+            return TRUE;
+    }
+    if (Dy != 0 && ((Cy >= Y0 && Cy <= Y1) || (Cy <= Y0 && Cy >= Y1)))
+    {
+        INT64 Offset = (X0 - Cx) * Dy + (Cy - Y0) * Dx;
+        INT64 Limit = 128 * ((Dy < 0) ? -Dy : Dy);
+
+        if (((Offset < 0) ? -Offset : Offset) < Limit)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Aliased lines: a pixel is drawn when the line leaves its diamond, so the last pixel is left for the next line */
+VOID
+RxWarpDraw::RasterizeLine(
+    _In_ const RX_WARP_VERTEX *A,
+    _In_ const RX_WARP_VERTEX *B)
+{
+    FLOAT X0;
+    FLOAT Y0;
+    FLOAT X1;
+    FLOAT Y1;
+    BOOLEAN XMajor;
+    FLOAT InverseLength;
+    FLOAT Start;
+    INT64 Fx0;
+    INT64 Fy0;
+    INT64 Fx1;
+    INT64 Fy1;
+
+    ToScreen(A, &Corner[0]);
+    ToScreen(B, &Corner[1]);
+    Corner[2] = Corner[1];
+
+    X0 = (FLOAT)Corner[0].X * (1.0f / 256.0f);
+    Y0 = (FLOAT)Corner[0].Y * (1.0f / 256.0f);
+    X1 = (FLOAT)Corner[1].X * (1.0f / 256.0f);
+    Y1 = (FLOAT)Corner[1].Y * (1.0f / 256.0f);
+    if (X0 == X1 && Y0 == Y1)
         return;
 
-    for (INT Y = MinY & ~1; Y < MaxY; Y += 2)
+    XMajor = !(fabsf(X0 - X1) < fabsf(Y0 - Y1));
+    InverseLength = 1.0f / (XMajor ? X1 - X0 : Y1 - Y0);
+    Start = XMajor ? X0 : Y0;
+    FrontFacing = TRUE;
+
+    if (PixelShader != nullptr)
     {
-        for (INT X = MinX & ~1; X < MaxX; X += 2)
+        for (UINT Register = 0; Register < PixelShader->InputCount; Register++)
         {
-            UINT Covered = 0;
+            UINT Mode = PixelShader->InputMode[Register];
+            BOOLEAN Perspective = (Mode == D3D10_SB_INTERPOLATION_LINEAR || Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
+                                   Mode == D3D10_SB_INTERPOLATION_LINEAR_SAMPLE);
 
-            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            for (UINT Component = 0; Component < 4; Component++)
             {
-                INT Px = X + (INT)(Lane & 1);
-                INT Py = Y + (INT)(Lane >> 1);
-                INT64 Sx = ((INT64)Px + 1) << 8;
-                INT64 Sy = ((INT64)Py + 1) << 8;
+                FLOAT V0 = RxWarpBitsAsFloat(Corner[0].Source->Registers[Register][Component]);
+                FLOAT V1 = RxWarpBitsAsFloat(Corner[1].Source->Registers[Register][Component]);
 
-                if (Px < MinX || Px >= MaxX || Py < MinY || Py >= MaxY)
-                    continue;
-                if (RxWarpInsideEdge(Edges[0], Sx, Sy) && RxWarpInsideEdge(Edges[1], Sx, Sy) && RxWarpInsideEdge(Edges[2], Sx, Sy))
-                    Covered |= 1u << Lane;
+                if (Perspective)
+                {
+                    V0 = Corner[0].Rhw * V0;
+                    V1 = Corner[1].Rhw * V1;
+                }
+                Planes[Register][Component] = RxWarpMakeLinePlane(XMajor, Start, InverseLength, V0, V1);
             }
-            if (Covered != 0)
-                ShadeQuad(X, Y, Covered);
         }
     }
+    DepthPlane = RxWarpMakeLinePlane(XMajor, Start, InverseLength, Corner[0].Z, Corner[1].Z);
+    RhwPlane = RxWarpMakeLinePlane(XMajor, Start, InverseLength, Corner[0].Rhw, Corner[1].Rhw);
+
+    Fx0 = Corner[0].X;
+    Fy0 = Corner[0].Y;
+    Fx1 = Corner[1].X;
+    Fy1 = Corner[1].Y;
+    PointSprite = FALSE;
+    Cover((INT)(((Fx0 < Fx1) ? Fx0 : Fx1) >> 8) - 1, (INT)(((Fy0 < Fy1) ? Fy0 : Fy1) >> 8) - 1,
+          (INT)((((Fx0 > Fx1) ? Fx0 : Fx1) + 255) >> 8), (INT)((((Fy0 > Fy1) ? Fy0 : Fy1) + 255) >> 8),
+          [=](INT64 Sx, INT64 Sy)
+          {
+              return RxWarpSegmentMeetsDiamond(Fx0, Fy0, Fx1, Fy1, Sx, Sy) && !RxWarpInDiamond(Fx1, Fy1, Sx, Sy);
+          });
+}
+
+/* Points cover a one pixel square around the vertex, with the triangle fill rule on its edges */
+VOID
+RxWarpDraw::RasterizePoint(
+    _In_ const RX_WARP_VERTEX *A)
+{
+    INT64 SquareLeft;
+    INT64 SquareTop;
+
+    ToScreen(A, &Corner[0]);
+    Corner[1] = Corner[0];
+    Corner[2] = Corner[0];
+    FrontFacing = TRUE;
+
+    if (PixelShader != nullptr)
+    {
+        for (UINT Register = 0; Register < PixelShader->InputCount; Register++)
+        {
+            for (UINT Component = 0; Component < 4; Component++)
+            {
+                Planes[Register][Component].A = 0.0f;
+                Planes[Register][Component].B = 0.0f;
+                Planes[Register][Component].C = RxWarpBitsAsFloat(Corner[0].Source->Registers[Register][Component]);
+            }
+        }
+    }
+    DepthPlane = { 0.0f, 0.0f, Corner[0].Z };
+    RhwPlane = { 0.0f, 0.0f, Corner[0].Rhw };
+
+    SquareLeft = (INT64)Corner[0].X - 128;
+    SquareTop = (INT64)Corner[0].Y - 128;
+    PointSprite = TRUE;
+    Cover((Corner[0].X - 256) >> 8, (Corner[0].Y - 256) >> 8, (Corner[0].X + 511) >> 8, (Corner[0].Y + 511) >> 8,
+          [=](INT64 Sx, INT64 Sy)
+          {
+              return Sx >= SquareLeft && Sx < SquareLeft + 256 && Sy >= SquareTop && Sy < SquareTop + 256;
+          });
 }
 
 VOID
@@ -812,8 +1079,8 @@ RxWarpDraw::ShadeQuad(
                 {
                     FLOAT Value = RxWarpEvaluate(Planes[Register][Component], Sx, Sy);
 
-                    if (Mode == D3D10_SB_INTERPOLATION_LINEAR || Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
-                        Mode == D3D10_SB_INTERPOLATION_LINEAR_SAMPLE)
+                    if (!PointSprite && (Mode == D3D10_SB_INTERPOLATION_LINEAR || Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
+                                         Mode == D3D10_SB_INTERPOLATION_LINEAR_SAMPLE))
                     {
                         Value = Value / Rhw;
                     }
@@ -823,6 +1090,7 @@ RxWarpDraw::ShadeQuad(
         }
 
         Invocation.Run(PixelShader, &PixelBindings);
+        Device->Counters[RxWarpCountPsInvocations] += RxWarpLaneCount(Covered);
         Survivors &= ~Invocation.Discarded;
         if (PixelShader->WritesDepth)
         {
@@ -1213,6 +1481,7 @@ RxWarpDraw::WritePixel(
 
     if (!DepthStencilTest(X, Y, Depth))
         return;
+    Device->Counters[RxWarpCountSamplesPassed]++;
     if (PixelShader == nullptr)
         return;
 
@@ -1223,6 +1492,54 @@ RxWarpDraw::WritePixel(
         if (!(PixelShader->OutputMask[Target]))
             continue;
         Blend(Target, X, Y, Invocation.Output(Target, Lane), Color1);
+    }
+}
+
+/* How a topology groups vertices: primitive size, vertices per step, and where adjacency puts the real ones */
+typedef struct _RX_WARP_TOPOLOGY
+{
+    UINT Size;
+    BOOLEAN Strip;
+    BOOLEAN Adjacency;
+} RX_WARP_TOPOLOGY;
+
+static
+BOOLEAN
+RxWarpTopologyOf(
+    _In_ D3D10_DDI_PRIMITIVE_TOPOLOGY Topology,
+    _Out_ RX_WARP_TOPOLOGY *Shape)
+{
+    switch (Topology)
+    {
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_POINTLIST:
+            *Shape = { 1, FALSE, FALSE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_LINELIST:
+            *Shape = { 2, FALSE, FALSE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_LINESTRIP:
+            *Shape = { 2, TRUE, FALSE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLELIST:
+            *Shape = { 3, FALSE, FALSE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
+            *Shape = { 3, TRUE, FALSE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:
+            *Shape = { 2, FALSE, TRUE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:
+            *Shape = { 2, TRUE, TRUE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
+            *Shape = { 3, FALSE, TRUE };
+            return TRUE;
+        case D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
+            *Shape = { 3, TRUE, TRUE };
+            return TRUE;
+        default:
+            return FALSE;
     }
 }
 
@@ -1237,9 +1554,11 @@ RxWarpDraw::Run(
 {
     std::vector<UINT> Indices(VertexCount);
     UINT Restart = (Pipeline->IndexFormat == DXGI_FORMAT_R16_UINT) ? 0xFFFF : UINT_MAX;
-    BOOLEAN Strip = (Pipeline->Topology == D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    RX_WARP_TOPOLOGY Shape;
 
-    if (Pipeline->Topology != D3D10_DDI_PRIMITIVE_TOPOLOGY_TRIANGLELIST && !Strip)
+    if (Device->Predicated())
+        return;
+    if (!RxWarpTopologyOf(Pipeline->Topology, &Shape))
         return;
     if (!Prepare())
         return;
@@ -1249,37 +1568,84 @@ RxWarpDraw::Run(
 
     for (UINT Instance = 0; Instance < InstanceCount; Instance++)
     {
-        UINT Run = 0;
+        std::vector<UINT> Run;
 
         Primitive = 0;
+        Device->Counters[RxWarpCountIaVertices] += VertexCount;
         ShadeVertices(Indices.data(), VertexCount, Indexed ? BaseVertex : 0, Instance, StartInstance);
 
-        if (!Strip)
+        /* Strips break at the cut index; lists only take whole primitives */
+        for (UINT Position = 0; Position <= VertexCount; Position++)
         {
-            for (UINT First = 0; First + 2 < VertexCount; First += 3)
-            {
-                ClipTriangle(&Vertices[First], &Vertices[First + 1], &Vertices[First + 2]);
-                Primitive++;
-            }
-            continue;
-        }
+            UINT Width = Shape.Adjacency ? Shape.Size * 2 : Shape.Size;
+            SIZE_T Count;
 
-        /* Strips: odd triangles swap their last two vertices so every triangle keeps its winding */
-        for (UINT Position = 0; Position < VertexCount; Position++)
-        {
-            if (Indexed && Indices[Position] == Restart)
+            if (Position < VertexCount && !(Shape.Strip && Indexed && Indices[Position] == Restart))
             {
-                Run = 0;
+                Run.push_back(Position);
+                if (Shape.Strip || Run.size() < Width)
+                    continue;
+            }
+
+            Count = Run.size();
+            if (!Shape.Strip)
+            {
+                if (Count == Width)
+                {
+                    const RX_WARP_VERTEX *Corners[3];
+
+                    for (UINT Index = 0; Index < Shape.Size; Index++)
+                        Corners[Index] = &Vertices[Run[Shape.Adjacency ? Index * ((Shape.Size == 2) ? 1 : 2) + ((Shape.Size == 2) ? 1 : 0) : Index]];
+                    Device->Counters[RxWarpCountIaPrimitives]++;
+                    ClipPrimitive(Corners, Shape.Size);
+                    Primitive++;
+                }
+                Run.clear();
                 continue;
             }
-            Run++;
-            if (Run < 3)
-                continue;
-            if (((Run - 3) & 1) == 0)
-                ClipTriangle(&Vertices[Position - 2], &Vertices[Position - 1], &Vertices[Position]);
+
+            /* A strip ended: walk it */
+            if (Shape.Size == 2)
+            {
+                SIZE_T First = Shape.Adjacency ? 1 : 0;
+                SIZE_T Last = (Shape.Adjacency && Count != 0) ? Count - 1 : Count;
+
+                for (SIZE_T Index = First; Index + 1 < Last; Index++)
+                {
+                    const RX_WARP_VERTEX *Corners[2] = { &Vertices[Run[Index]], &Vertices[Run[Index + 1]] };
+
+                    Device->Counters[RxWarpCountIaPrimitives]++;
+                    ClipPrimitive(Corners, 2);
+                    Primitive++;
+                }
+            }
+            else if (!Shape.Adjacency)
+            {
+                /* Odd triangles swap their last two vertices so every triangle keeps its winding */
+                for (SIZE_T Index = 0; Index + 2 < Count; Index++)
+                {
+                    const RX_WARP_VERTEX *Corners[3] = { &Vertices[Run[Index]], &Vertices[Run[Index + ((Index & 1) ? 2 : 1)]],
+                                                         &Vertices[Run[Index + ((Index & 1) ? 1 : 2)]] };
+
+                    Device->Counters[RxWarpCountIaPrimitives]++;
+                    ClipPrimitive(Corners, 3);
+                    Primitive++;
+                }
+            }
             else
-                ClipTriangle(&Vertices[Position - 2], &Vertices[Position], &Vertices[Position - 1]);
-            Primitive++;
+            {
+                for (SIZE_T Index = 0; Index * 2 + 4 < Count; Index++)
+                {
+                    SIZE_T Base = Index * 2;
+                    const RX_WARP_VERTEX *Corners[3] = { &Vertices[Run[Base]], &Vertices[Run[Base + ((Index & 1) ? 4 : 2)]],
+                                                         &Vertices[Run[Base + ((Index & 1) ? 2 : 4)]] };
+
+                    Device->Counters[RxWarpCountIaPrimitives]++;
+                    ClipPrimitive(Corners, 3);
+                    Primitive++;
+                }
+            }
+            Run.clear();
         }
     }
 }
