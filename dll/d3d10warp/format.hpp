@@ -99,3 +99,22 @@ RxWarpEncodeUint(
     _In_ DXGI_FORMAT Format,
     _In_reads_(4) const UINT *Values,
     _Out_writes_bytes_(16) BYTE *Element);
+
+/* One element to its four components as raw bits: floats for float and normalized formats, integers otherwise */
+BOOLEAN
+RxWarpDecodeTexel(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_bytes_(16) const BYTE *Element,
+    _Out_writes_(4) UINT *Value);
+
+BOOLEAN
+RxWarpFormatIsInteger(
+    _In_ DXGI_FORMAT Format);
+
+FLOAT
+RxWarpHalfToFloat(
+    _In_ UINT Half);
+
+UINT
+RxWarpFloatToHalf(
+    _In_ FLOAT Value);

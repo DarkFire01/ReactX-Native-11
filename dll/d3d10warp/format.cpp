@@ -532,3 +532,199 @@ RxWarpEncodeUint(
     }
     return TRUE;
 }
+
+static
+UINT64
+RxWarpGetBits(
+    _In_reads_bytes_(16) const BYTE *Element,
+    _In_ UINT Offset,
+    _In_ UINT Bits)
+{
+    UINT64 Value = 0;
+
+    for (UINT Bit = 0; Bit < Bits; Bit++)
+    {
+        UINT Position = Offset + Bit;
+
+        Value |= (UINT64)((Element[Position / 8] >> (Position % 8)) & 1) << Bit;
+    }
+    return Value;
+}
+
+static
+FLOAT
+RxWarpBitsToFloat(
+    _In_ UINT Bits)
+{
+    FLOAT Value;
+
+    memcpy(&Value, &Bits, sizeof(Value));
+    return Value;
+}
+
+static
+UINT
+RxWarpFloatToBits(
+    _In_ FLOAT Value)
+{
+    UINT Bits;
+
+    memcpy(&Bits, &Value, sizeof(Bits));
+    return Bits;
+}
+
+/* Small float with a five bit exponent and the given mantissa width to float */
+static
+FLOAT
+RxWarpFromSmallFloat(
+    _In_ UINT Value,
+    _In_ UINT MantissaBits,
+    _In_ BOOLEAN Signed)
+{
+    UINT Exponent = (Value >> MantissaBits) & 0x1F;
+    UINT Mantissa = Value & ((1u << MantissaBits) - 1);
+    UINT Sign = Signed ? (Value >> 15) & 1 : 0;
+    UINT Bits;
+
+    if (Exponent == 0x1F)
+        Bits = 0x7F800000 | (Mantissa << (23 - MantissaBits));
+    else if (Exponent != 0)
+        Bits = ((Exponent + 112) << 23) | (Mantissa << (23 - MantissaBits));
+    else if (Mantissa != 0)
+        return (Sign ? -1.0f : 1.0f) * ldexpf((FLOAT)Mantissa, -14 - (INT)MantissaBits);
+    else
+        Bits = 0;
+    return RxWarpBitsToFloat(Bits | (Sign << 31));
+}
+
+FLOAT
+RxWarpHalfToFloat(
+    _In_ UINT Half)
+{
+    return RxWarpFromSmallFloat(Half & 0xFFFF, 10, TRUE);
+}
+
+static
+FLOAT
+RxWarpSrgbToLinear(
+    _In_ FLOAT Value)
+{
+    if (Value <= 0.04045f)
+        return Value / 12.92f;
+    return powf((Value + 0.055f) / 1.055f, 2.4f);
+}
+
+BOOLEAN
+RxWarpDecodeTexel(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_bytes_(16) const BYTE *Element,
+    _Out_writes_(4) UINT *Value)
+{
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Format);
+    BOOLEAN Integer = FALSE;
+    UINT Offset = 0;
+    UINT Packed;
+
+    Value[0] = Value[1] = Value[2] = 0;
+    Value[3] = RxWarpFloatToBits(1.0f);
+    if (Info == nullptr)
+        return FALSE;
+
+    if (Info->Kind == RxKindR11G11B10)
+    {
+        memcpy(&Packed, Element, sizeof(Packed));
+        Value[0] = RxWarpFloatToBits(RxWarpFromSmallFloat(Packed & 0x7FF, 6, FALSE));
+        Value[1] = RxWarpFloatToBits(RxWarpFromSmallFloat((Packed >> 11) & 0x7FF, 6, FALSE));
+        Value[2] = RxWarpFloatToBits(RxWarpFromSmallFloat(Packed >> 22, 5, FALSE));
+        return TRUE;
+    }
+    if (Info->Kind == RxKindR9G9B9E5)
+    {
+        memcpy(&Packed, Element, sizeof(Packed));
+        FLOAT Scale = ldexpf(1.0f, (INT)(Packed >> 27) - 15 - 9);
+
+        Value[0] = RxWarpFloatToBits((FLOAT)(Packed & 0x1FF) * Scale);
+        Value[1] = RxWarpFloatToBits((FLOAT)((Packed >> 9) & 0x1FF) * Scale);
+        Value[2] = RxWarpFloatToBits((FLOAT)((Packed >> 18) & 0x1FF) * Scale);
+        return TRUE;
+    }
+    if (Info->Kind != RxKindPlain)
+        return FALSE;
+
+    for (UINT Index = 0; Index < Info->ChannelCount; Index++)
+    {
+        if (Info->Channels[Index].Type == RxChannelUint || Info->Channels[Index].Type == RxChannelSint)
+            Integer = TRUE;
+    }
+    if (Integer)
+        Value[3] = 1;
+
+    for (UINT Index = 0; Index < Info->ChannelCount; Index++)
+    {
+        const RX_WARP_CHANNEL &Channel = Info->Channels[Index];
+        UINT64 Bits = RxWarpGetBits(Element, Offset, Channel.Bits);
+        UINT Slot = (Channel.Source < 4) ? Channel.Source : Channel.Source - 4;
+        FLOAT Max;
+
+        Offset += Channel.Bits;
+        switch (Channel.Type)
+        {
+            case RxChannelUnorm:
+                Max = (FLOAT)((1ull << Channel.Bits) - 1);
+                Value[Slot] = RxWarpFloatToBits((FLOAT)Bits / Max);
+                break;
+            case RxChannelSrgb:
+                Max = (FLOAT)((1ull << Channel.Bits) - 1);
+                Value[Slot] = RxWarpFloatToBits(RxWarpSrgbToLinear((FLOAT)Bits / Max));
+                break;
+            case RxChannelSnorm:
+            {
+                INT Signed = (INT)(Bits << (32 - Channel.Bits)) >> (32 - Channel.Bits);
+                FLOAT Result;
+
+                Max = (FLOAT)((1ull << (Channel.Bits - 1)) - 1);
+                Result = (FLOAT)Signed / Max;
+                Value[Slot] = RxWarpFloatToBits(Result < -1.0f ? -1.0f : Result);
+                break;
+            }
+            case RxChannelFloat:
+                Value[Slot] = (Channel.Bits == 32) ? (UINT)Bits : RxWarpFloatToBits(RxWarpHalfToFloat((UINT)Bits));
+                break;
+            case RxChannelUint:
+                Value[Slot] = (UINT)Bits;
+                break;
+            case RxChannelSint:
+                Value[Slot] = (Channel.Bits == 32) ? (UINT)Bits : (UINT)((INT)(Bits << (32 - Channel.Bits)) >> (32 - Channel.Bits));
+                break;
+            case RxChannelTypeless:
+                Value[Slot] = (UINT)Bits;
+                break;
+            default:
+                break;
+        }
+    }
+    return TRUE;
+}
+
+BOOLEAN
+RxWarpFormatIsInteger(
+    _In_ DXGI_FORMAT Format)
+{
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Format);
+
+    if (Info == nullptr || Info->Kind != RxKindPlain)
+        return FALSE;
+    for (UINT Index = 0; Index < Info->ChannelCount; Index++)
+    {
+        if (Info->Channels[Index].Type == RxChannelUint || Info->Channels[Index].Type == RxChannelSint)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+UINT
+RxWarpFloatToHalf(
+    _In_ FLOAT Value)
+{
+    return RxWarpToHalf(Value);
+}
