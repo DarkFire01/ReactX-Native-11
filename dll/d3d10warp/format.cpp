@@ -293,7 +293,7 @@ RxWarpMultisampleQuality(
     return 1;
 }
 
-/* Float to normalized integer: clamp, scale and round half up */
+/* Float to normalized integer: clamp, scale and round half away from zero */
 static
 UINT
 RxWarpToUnorm(
@@ -306,7 +306,7 @@ RxWarpToUnorm(
         return 0;
     if (Value >= 1.0f)
         return (UINT)Max;
-    return (UINT)(Value * Max + 0.5f);
+    return (UINT)roundf(Value * Max);
 }
 
 static
