@@ -879,6 +879,96 @@ Exit:
     return hr;
 }
 
+/* GenerateMips on even and odd sizes, eight bit, sRGB and half float */
+static
+HRESULT
+SceneMips(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const struct
+    {
+        UINT Width;
+        UINT Height;
+        DXGI_FORMAT Format;
+        UINT Bytes;
+    } Cases[] =
+    {
+        { 32, 32, DXGI_FORMAT_R8G8B8A8_UNORM, 4 },
+        { 21, 13, DXGI_FORMAT_R8G8B8A8_UNORM, 4 },
+        { 16, 9, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 4 },
+        { 12, 7, DXGI_FORMAT_R16G16B16A16_FLOAT, 8 },
+    };
+    HRESULT hr = S_OK;
+
+    for (const auto &Case : Cases)
+    {
+        D3D11_TEXTURE2D_DESC Desc = { Case.Width, Case.Height, 0, 1, Case.Format, { 1, 0 }, D3D11_USAGE_DEFAULT,
+                                      D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, 0, D3D11_RESOURCE_MISC_GENERATE_MIPS };
+        std::vector<BYTE> Texels((SIZE_T)Case.Width * Case.Height * Case.Bytes);
+        ID3D11Texture2D *Texture = NULL;
+        ID3D11Texture2D *Staging = NULL;
+        ID3D11ShaderResourceView *View = NULL;
+        UINT Seed = Case.Width * 31 + Case.Height;
+
+        for (BYTE &Value : Texels)
+        {
+            Seed = Seed * 1103515245 + 12345;
+            Value = (BYTE)(Seed >> 16);
+        }
+        /* Keep half floats finite: clear the top exponent bit */
+        if (Case.Bytes == 8)
+        {
+            for (SIZE_T Index = 1; Index < Texels.size(); Index += 2)
+                Texels[Index] &= 0x3F;
+        }
+
+        hr = Device->CreateTexture2D(&Desc, NULL, &Texture);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateShaderResourceView(Texture, NULL, &View);
+        if (SUCCEEDED(hr))
+        {
+            D3D11_TEXTURE2D_DESC Read;
+
+            Context->UpdateSubresource(Texture, 0, NULL, Texels.data(), Case.Width * Case.Bytes, 0);
+            Context->GenerateMips(View);
+            Texture->GetDesc(&Read);
+            Read.Usage = D3D11_USAGE_STAGING;
+            Read.BindFlags = 0;
+            Read.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            Read.MiscFlags = 0;
+            hr = Device->CreateTexture2D(&Read, NULL, &Staging);
+            if (SUCCEEDED(hr))
+            {
+                Context->CopyResource(Staging, Texture);
+                for (UINT Mip = 0; Mip < Read.MipLevels && SUCCEEDED(hr); Mip++)
+                {
+                    D3D11_MAPPED_SUBRESOURCE Map;
+                    UINT Width = (Case.Width >> Mip) ? (Case.Width >> Mip) : 1;
+                    UINT Height = (Case.Height >> Mip) ? (Case.Height >> Mip) : 1;
+
+                    hr = Context->Map(Staging, Mip, D3D11_MAP_READ, 0, &Map);
+                    if (FAILED(hr))
+                        break;
+                    for (UINT Row = 0; Row < Height; Row++)
+                        TcAppend(Result, static_cast<BYTE *>(Map.pData) + (SIZE_T)Row * Map.RowPitch, (SIZE_T)Width * Case.Bytes);
+                    Context->Unmap(Staging, Mip);
+                }
+            }
+        }
+        if (Staging)
+            Staging->Release();
+        if (View)
+            View->Release();
+        if (Texture)
+            Texture->Release();
+        if (FAILED(hr))
+            break;
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -895,6 +985,7 @@ static const TcScene Scenes[] =
     { "strips", 0, SceneStrips },
     { "points", 0, ScenePoints },
     { "queries", 0, SceneQueries },
+    { "mips", 0, SceneMips },
 };
 
 static
