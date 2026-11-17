@@ -9,6 +9,7 @@
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 #include <string>
 #include <vector>
@@ -701,6 +702,183 @@ SceneMath(
     return TcDrawScene(Device, Context, Setup, Result);
 }
 
+/* Aliased lines: random ones, then axis aligned and diagonal ones on exact pixel centers and edges */
+static
+HRESULT
+SceneLines(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    std::vector<TcVertex> Vertices;
+    TcDrawSetup Setup;
+    UINT Seed = 777;
+
+    for (UINT Index = 0; Index < 48; Index++)
+    {
+        FLOAT Corner[4];
+
+        for (FLOAT &Value : Corner)
+        {
+            Seed = Seed * 1103515245 + 12345;
+            Value = ((Seed >> 8) % 2201) / 1000.0f - 1.1f;
+        }
+        Vertices.push_back(TcMake(Corner[0], Corner[1], 0.5f, 1.0f, 0xFF4020FF));
+        Vertices.push_back(TcMake(Corner[2], Corner[3], 0.5f, 1.0f, 0x20C0FFFF));
+    }
+
+    /* Pixel units: center is +0.5, so k / 32 - 1 lands on edges and (k + 0.5) / 32 - 1 on centers */
+    for (UINT Index = 0; Index < 16; Index++)
+    {
+        FLOAT A = (FLOAT)(Index * 4) / 32.0f - 1.0f;
+        FLOAT B = (FLOAT)(Index * 4 + 1) / 32.0f - 1.0f + ((Index & 1) ? 1.0f / 64.0f : 0.0f);
+        FLOAT C = (FLOAT)(Index * 3 + 7) / 32.0f - 1.0f;
+
+        Vertices.push_back(TcMake(A, B, 0.5f, 1.0f, 0xFFFFFFFF));
+        Vertices.push_back(TcMake(C, B, 0.5f, 1.0f, 0xFFFF00FF));
+        Vertices.push_back(TcMake(B, A, 0.5f, 1.0f, 0x00FFFFFF));
+        Vertices.push_back(TcMake(B, C, 0.5f, 1.0f, 0xFF00FFFF));
+        Vertices.push_back(TcMake(A, A, 0.5f, 1.0f, 0x80FF80FF));
+        Vertices.push_back(TcMake(C, C + (FLOAT)(Index & 3) / 64.0f, 0.5f, 1.0f, 0x8080FFFF));
+    }
+
+    Setup.Vertices = Vertices.data();
+    Setup.VertexCount = (UINT)Vertices.size();
+    Setup.Topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST;
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+/* A line strip and a triangle list with adjacency, which drops the adjacent vertices */
+static
+HRESULT
+SceneStrips(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    std::vector<TcVertex> Vertices;
+    TcDrawSetup Setup;
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < 24; Index++)
+    {
+        FLOAT Angle = (FLOAT)Index * 0.55f;
+
+        Vertices.push_back(TcMake(cosf(Angle) * (0.2f + Index * 0.03f), sinf(Angle) * (0.25f + Index * 0.028f), 0.5f, 1.0f,
+                                  0x10101000 | (Index * 0x0A0B0C00) | 0xFF));
+    }
+    Setup.Vertices = Vertices.data();
+    Setup.VertexCount = (UINT)Vertices.size();
+    Setup.Topology = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    hr = TcDrawScene(Device, Context, Setup, Result);
+    if (SUCCEEDED(hr))
+    {
+        Setup.Topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ;
+        hr = TcDrawScene(Device, Context, Setup, Result);
+    }
+    if (SUCCEEDED(hr))
+    {
+        Setup.Topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ;
+        hr = TcDrawScene(Device, Context, Setup, Result);
+    }
+    return hr;
+}
+
+/* Points on whole, half and quarter pixel positions */
+static
+HRESULT
+ScenePoints(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    std::vector<TcVertex> Vertices;
+    TcDrawSetup Setup;
+
+    for (UINT Y = 0; Y < 12; Y++)
+    {
+        for (UINT X = 0; X < 12; X++)
+        {
+            FLOAT Px = ((FLOAT)X * 5.0f + (FLOAT)(Y % 4) * 0.25f + 2.0f) / 32.0f - 1.0f;
+            FLOAT Py = ((FLOAT)Y * 5.0f + (FLOAT)(X % 4) * 0.25f + 2.0f) / 32.0f - 1.0f;
+
+            Vertices.push_back(TcMake(Px, Py, 0.5f, 1.0f + (FLOAT)(X & 1), 0xFF000000 | (X * 20) << 16 | (Y * 20) << 8 | 0xFF));
+        }
+    }
+    Setup.Vertices = Vertices.data();
+    Setup.VertexCount = (UINT)Vertices.size();
+    Setup.Topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
+/* Occlusion, pipeline statistics and predication around the depth scene */
+static
+HRESULT
+SceneQueries(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    D3D11_QUERY_DESC Desc[4] = { { D3D11_QUERY_OCCLUSION, 0 }, { D3D11_QUERY_PIPELINE_STATISTICS, 0 },
+                                 { D3D11_QUERY_OCCLUSION_PREDICATE, 0 }, { D3D11_QUERY_EVENT, 0 } };
+    ID3D11Query *Queries[4] = {};
+    ID3D11Predicate *Predicate = NULL;
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS Statistics = {};
+    UINT64 Samples = 0;
+    BOOL Visible = FALSE;
+    BOOL Event = FALSE;
+    TcResult Scratch;
+    HRESULT hr = S_OK;
+
+    for (UINT Index = 0; Index < 4 && SUCCEEDED(hr); Index++)
+        hr = Device->CreateQuery(&Desc[Index], &Queries[Index]);
+    if (FAILED(hr))
+        goto Exit;
+    Queries[2]->QueryInterface(IID_PPV_ARGS(&Predicate));
+
+    Context->Begin(Queries[0]);
+    Context->Begin(Queries[1]);
+    Context->Begin(Queries[2]);
+    hr = SceneDepthBlend(Device, Context, &Scratch);
+    Context->End(Queries[2]);
+    Context->End(Queries[1]);
+    Context->End(Queries[0]);
+    Context->End(Queries[3]);
+    if (FAILED(hr))
+        goto Exit;
+
+    while (Context->GetData(Queries[0], &Samples, sizeof(Samples), 0) == S_FALSE)
+        ;
+    while (Context->GetData(Queries[1], &Statistics, sizeof(Statistics), 0) == S_FALSE)
+        ;
+    while (Context->GetData(Queries[2], &Visible, sizeof(Visible), 0) == S_FALSE)
+        ;
+    while (Context->GetData(Queries[3], &Event, sizeof(Event), 0) == S_FALSE)
+        ;
+    TcAppend(Result, &Samples, sizeof(Samples));
+    TcAppend(Result, &Statistics, sizeof(Statistics));
+    TcAppend(Result, &Visible, sizeof(Visible));
+    TcAppend(Result, &Event, sizeof(Event));
+
+    /* Something was drawn, so predicating on TRUE skips this draw and FALSE keeps it */
+    Context->SetPredication(Predicate, TRUE);
+    hr = SceneTriangles(Device, Context, Result);
+    Context->SetPredication(Predicate, FALSE);
+    if (SUCCEEDED(hr))
+        hr = SceneTriangles(Device, Context, Result);
+    Context->SetPredication(NULL, FALSE);
+
+Exit:
+    if (Predicate)
+        Predicate->Release();
+    for (ID3D11Query *Query : Queries)
+    {
+        if (Query)
+            Query->Release();
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -713,6 +891,10 @@ static const TcScene Scenes[] =
     { "clip", 0, SceneClip },
     { "tex", 0, SceneTexture },
     { "math", 0, SceneMath },
+    { "lines", 0, SceneLines },
+    { "strips", 0, SceneStrips },
+    { "points", 0, ScenePoints },
+    { "queries", 0, SceneQueries },
 };
 
 static
@@ -824,7 +1006,24 @@ wmain(
         printf("%-8s %s (%zu bytes, %zu differ, worst %u)\n", Scene.Name, Differ ? "FAIL" : "ok",
                Expected.Data.size(), Differ, Worst);
         if (Differ)
+        {
             Failures++;
+
+            /* Small results are counters: show them whole */
+            if (Expected.Data.size() <= 256)
+            {
+                for (SIZE_T Index = 0; Index + 8 <= Expected.Data.size(); Index += 8)
+                {
+                    UINT64 Want;
+                    UINT64 Got;
+
+                    memcpy(&Want, &Expected.Data[Index], sizeof(Want));
+                    memcpy(&Got, &Actual.Data[Index], sizeof(Got));
+                    if (Want != Got)
+                        printf("  %s qword %zu: %llu vs %llu\n", Scene.Name, Index / 8, Want, Got);
+                }
+            }
+        }
 
         sprintf_s(Name, "%s_system.ppm", Scene.Name);
         TcWritePpm(Name, Expected);
