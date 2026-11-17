@@ -343,6 +343,33 @@ RxWarpLinearToSrgb(
     return 1.055f * powf(Value, 1.0f / 2.4f) - 0.055f;
 }
 
+/* Eight bit sRGB from linear: the value scaled to 4095 steps picks from a table of rounded sRGB codes */
+static
+UINT
+RxWarpLinearToSrgbByte(
+    _In_ FLOAT Value)
+{
+    static UINT8 Codes[4096];
+    static BOOLEAN Ready;
+
+    if (!Ready)
+    {
+        for (UINT Index = 0; Index < 4096; Index++)
+        {
+            double Linear = (double)Index / 4095.0;
+            double Encoded = (Linear <= 0.0031308) ? Linear * 12.92 : 1.055 * pow(Linear, 1.0 / 2.4) - 0.055;
+
+            Codes[Index] = (UINT8)(Encoded * 255.0 + 0.5);
+        }
+        Ready = TRUE;
+    }
+    if (!(Value > 0.0f))
+        Value = 0.0f;
+    if (Value > 1.0f)
+        Value = 1.0f;
+    return Codes[(UINT)nearbyintf(Value * 4095.0f)];
+}
+
 /* IEEE half from float, rounding to nearest even; NaN stays NaN, overflow becomes infinity */
 static
 UINT
@@ -472,6 +499,8 @@ RxWarpEncodeColor(
                 /* Alpha is linear in sRGB formats */
                 if (Channel.Source == 3)
                     Bits = RxWarpToUnorm(Value, Channel.Bits);
+                else if (Channel.Bits == 8)
+                    Bits = RxWarpLinearToSrgbByte(Value);
                 else
                     Bits = RxWarpToUnorm(RxWarpLinearToSrgb(Value), Channel.Bits);
                 break;
