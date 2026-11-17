@@ -333,6 +333,11 @@ RxWarpShader::Decode(
                     WritesDepth = TRUE;
                     break;
                 }
+                if (Operand.Type == D3D10_SB_OPERAND_TYPE_OUTPUT_COVERAGE_MASK)
+                {
+                    WritesCoverage = TRUE;
+                    break;
+                }
                 if (Operand.Type != D3D10_SB_OPERAND_TYPE_OUTPUT)
                     break;
                 Register = Operand.Index[0].Immediate;

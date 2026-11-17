@@ -26,6 +26,7 @@ typedef struct _RX_WARP_SAMPLE_REQUEST
     FLOAT Reference;
     BOOLEAN Gather;
     UINT GatherComponent;
+    UINT Sample;            /* ld_ms */
 } RX_WARP_SAMPLE_REQUEST;
 
 VOID
@@ -49,6 +50,13 @@ RxWarpComputeLod(
     _In_reads_(3) const FLOAT *Dx,
     _In_reads_(3) const FLOAT *Dy,
     _Out_writes_(4) FLOAT *Result);
+
+/* Position of a sample from the pixel center, in pixels; zero for a bad index */
+VOID
+RxWarpSamplePosition(
+    _In_ UINT Count,
+    _In_ UINT Index,
+    _Out_writes_(2) FLOAT *Position);
 
 VOID
 RxWarpResourceInfo(

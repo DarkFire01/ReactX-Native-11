@@ -156,6 +156,7 @@ public:
     std::vector<RxWarpShader> Phases;
 
     BOOLEAN WritesDepth = FALSE;
+    BOOLEAN WritesCoverage = FALSE;
     BOOLEAN Discards = FALSE;
 };
 
@@ -213,6 +214,10 @@ public:
     UINT Inputs[RxWarpMaxRegisters][RxWarpLanes][4];
     UINT Outputs[RxWarpMaxRegisters][RxWarpLanes][4];
     FLOAT Depth[RxWarpLanes];
+    UINT CoverageIn[RxWarpLanes] = {};      /* SV_Coverage as the pixel shader reads it */
+    UINT CoverageOut[RxWarpLanes] = {};     /* oMask */
+    UINT SampleIndex[RxWarpLanes] = {};
+    UINT RasterSamples = 1;                 /* the bound targets' sample count, for the rasterizer operand */
     UINT PrimitiveId = 0;
     UINT Live = 0xF;            /* lanes that run */
     UINT Helper = 0;            /* lanes that run only for derivatives */

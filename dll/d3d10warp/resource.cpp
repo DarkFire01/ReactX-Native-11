@@ -7,6 +7,7 @@
 
 #include "precomp.hpp"
 #include "device.hpp"
+#include "sample.hpp"
 
 #define RX_ALIGN(Value, Alignment) (((Value) + (Alignment) - 1) & ~((SIZE_T)(Alignment) - 1))
 
@@ -369,4 +370,87 @@ RxWarpDdi::ResourceUpdateSubresourceUP(
 
     RxWarpCopyBox(Target, DestinationIndex, (UINT)Box->left, (UINT)Box->top, (UINT)Box->front, static_cast<const BYTE *>(Data),
                   RowPitch, DepthPitch, (UINT)(Box->right - Box->left), (UINT)(Box->bottom - Box->top), (UINT)(Box->back - Box->front));
+}
+
+/* Averages each pixel's samples into a single sampled target, top sample first */
+VOID
+APIENTRY
+RxWarpDdi::ResourceResolveSubresource(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ D3D10DDI_HRESOURCE Destination,
+    _In_ UINT DestinationIndex,
+    _In_ D3D10DDI_HRESOURCE Source,
+    _In_ UINT SourceIndex,
+    _In_ DXGI_FORMAT Format)
+{
+    RxWarpLock Lock;
+    RxWarpResource *To = RxWarpObject<RxWarpResource>(Destination);
+    RxWarpResource *From = RxWarpObject<RxWarpResource>(Source);
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Format);
+    RX_WARP_SUBRESOURCE *ToSub;
+    RX_WARP_SUBRESOURCE *FromSub;
+    UINT Order[16];
+    UINT Count;
+    FLOAT Positions[16][2];
+
+    UNREFERENCED_PARAMETER(Device);
+    if (To == nullptr || From == nullptr || Info == nullptr || To->Memory == nullptr || From->Memory == nullptr)
+        return;
+    ToSub = To->Subresource(DestinationIndex);
+    FromSub = From->Subresource(SourceIndex);
+    if (ToSub == nullptr || FromSub == nullptr)
+        return;
+
+    Count = (From->SampleCount < 16) ? From->SampleCount : 16;
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        RxWarpSamplePosition(Count, Index, Positions[Index]);
+        Order[Index] = Index;
+    }
+    for (UINT Index = 1; Index < Count; Index++)
+    {
+        UINT Moving = Order[Index];
+        UINT Place = Index;
+
+        while (Place > 0 && Positions[Order[Place - 1]][1] > Positions[Moving][1])
+        {
+            Order[Place] = Order[Place - 1];
+            Place--;
+        }
+        Order[Place] = Moving;
+    }
+
+    for (UINT Y = 0; Y < ToSub->Height && Y < FromSub->Height; Y++)
+    {
+        for (UINT X = 0; X < ToSub->Width && X < FromSub->Width; X++)
+        {
+            FLOAT Parts[16][4] = {};
+            FLOAT Average[4];
+            BYTE Element[16] = {};
+
+            for (UINT Index = 0; Index < Count; Index++)
+            {
+                const BYTE *Texel = From->Memory + FromSub->Offset + (SIZE_T)Y * FromSub->RowPitch +
+                                    ((SIZE_T)X * From->SampleCount + Order[Index]) * Info->Bytes;
+                BYTE Raw[16] = {};
+
+                memcpy(Raw, Texel, (Info->Bytes <= 16) ? Info->Bytes : 16);
+                RxWarpDecodeTexel(Format, Raw, (UINT *)Parts[Index]);
+            }
+
+            /* Neighbours add in pairs, then the pairs, down to one */
+            for (UINT Width = Count; Width > 1; Width /= 2)
+            {
+                for (UINT Index = 0; Index < Width / 2; Index++)
+                {
+                    for (UINT Component = 0; Component < 4; Component++)
+                        Parts[Index][Component] = Parts[Index * 2][Component] + Parts[Index * 2 + 1][Component];
+                }
+            }
+            for (UINT Component = 0; Component < 4; Component++)
+                Average[Component] = Parts[0][Component] / (FLOAT)Count;
+            if (RxWarpEncodeColor(Format, Average, Element))
+                memcpy(To->Memory + ToSub->Offset + (SIZE_T)Y * ToSub->RowPitch + (SIZE_T)X * To->SampleCount * Info->Bytes, Element, Info->Bytes);
+        }
+    }
 }

@@ -76,6 +76,48 @@ RxWarpRoundEven(
     return (INT)nearbyintf(Value);
 }
 
+/* The standard sample positions for each count, from the pixel center in 1/256 pixel; one sample sits at the center */
+static
+VOID
+RxWarpSamplePattern(
+    _In_ UINT Count,
+    _Out_writes_(16) INT (*Offset)[2])
+{
+    static const INT8 Two[2][2] = { { 4, 4 }, { -4, -4 } };
+    static const INT8 Four[4][2] = { { -2, -6 }, { 6, -2 }, { -6, 2 }, { 2, 6 } };
+    static const INT8 Eight[8][2] = { { 1, -3 }, { -1, 3 }, { 5, 1 }, { -3, -5 }, { -5, 5 }, { -7, -1 }, { 3, 7 }, { 7, -7 } };
+    static const INT8 Sixteen[16][2] =
+    {
+        { 1, 1 }, { -1, -3 }, { -3, 2 }, { 4, -1 }, { -5, -2 }, { 2, 5 }, { 5, 3 }, { 3, -5 },
+        { -2, 6 }, { 0, -7 }, { -4, -6 }, { -6, 4 }, { -8, 0 }, { 7, -4 }, { 6, 7 }, { -7, -8 },
+    };
+    const INT8 (*Table)[2] = nullptr;
+
+    ZeroMemory(Offset, sizeof(INT) * 2 * 16);
+    switch (Count)
+    {
+        case 2:
+            Table = Two;
+            break;
+        case 4:
+            Table = Four;
+            break;
+        case 8:
+            Table = Eight;
+            break;
+        case 16:
+            Table = Sixteen;
+            break;
+        default:
+            return;
+    }
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        Offset[Index][0] = Table[Index][0] * 16;
+        Offset[Index][1] = Table[Index][1] * 16;
+    }
+}
+
 class RxWarpDraw
 {
 public:
@@ -210,13 +252,15 @@ private:
         _In_ INT MinY,
         _In_ INT MaxX,
         _In_ INT MaxY,
+        _In_ BOOLEAN PerSample,
         _In_ Test Inside);
 
     VOID
     ShadeQuad(
         _In_ INT X,
         _In_ INT Y,
-        _In_ UINT Covered);
+        _In_ UINT Covered,
+        _In_reads_(RxWarpLanes) const UINT *Samples);
 
     VOID
     WritePixel(
@@ -271,6 +315,9 @@ private:
     UINT ViewportRegister = UINT_MAX;
     UINT SliceRegister = UINT_MAX;
     UINT TargetSlice = 0;
+    UINT SampleCount = 1;
+    INT SampleOffset[16][2] = {};       /* from the pixel center, in 1/256 pixel */
+    UINT Sample = 0;                    /* the sample being tested and written */
     D3DWDDM2_0DDI_RASTERIZER_DESC Raster = {};
     D3D10_DDI_DEPTH_STENCIL_DESC DepthState = {};
     const D3D11_1_DDI_BLEND_DESC *BlendState = nullptr;
@@ -404,6 +451,14 @@ RxWarpDraw::Prepare(VOID)
     }
     if (Width == UINT_MAX)
         Width = Height = 16384;
+
+    /* The targets' sample count decides the raster pattern */
+    SampleCount = 1;
+    if (Pipeline->RenderTargetCount != 0 && Pipeline->RenderTargets[0] != nullptr && Pipeline->RenderTargets[0]->Resource != nullptr)
+        SampleCount = Pipeline->RenderTargets[0]->Resource->SampleCount;
+    else if (Pipeline->DepthStencilView != nullptr && Pipeline->DepthStencilView->Resource != nullptr)
+        SampleCount = Pipeline->DepthStencilView->Resource->SampleCount;
+    RxWarpSamplePattern(SampleCount, SampleOffset);
     TargetWidth = Width;
     TargetHeight = Height;
 
@@ -643,7 +698,7 @@ RxWarpDraw::ClipPrimitive(
     _In_ UINT Count)
 {
     FLOAT Distance[RxWarpClipPlanes];
-    UINT Planes = 6 + ClipCount;
+    UINT PlaneCount = 6 + ClipCount;
     UINT Outside[3] = {};
     UINT Any;
     std::vector<RX_WARP_VERTEX> Polygon;
@@ -673,7 +728,7 @@ RxWarpDraw::ClipPrimitive(
     for (UINT Index = 0; Index < Count; Index++)
     {
         ClipDistances(Corners[Index], Distance);
-        for (UINT Plane = 0; Plane < Planes; Plane++)
+        for (UINT Plane = 0; Plane < PlaneCount; Plane++)
         {
             if (Distance[Plane] < 0.0f)
                 Outside[Index] |= 1u << Plane;
@@ -704,7 +759,7 @@ RxWarpDraw::ClipPrimitive(
     for (UINT Index = 0; Index < Count; Index++)
         Polygon.push_back(*Corners[Index]);
 
-    for (UINT Plane = 0; Plane < Planes && Polygon.size() >= Count; Plane++)
+    for (UINT Plane = 0; Plane < PlaneCount && Polygon.size() >= Count; Plane++)
     {
         SIZE_T Edges = (Count == 2) ? 1 : Polygon.size();
 
@@ -834,7 +889,7 @@ RxWarpDraw::BiasDepth(
     FLOAT Slope = Raster.SlopeScaledDepthBias;
     FLOAT Clamp = Raster.DepthBiasClamp;
     UINT Unit;
-    FLOAT Bias;
+    FLOAT Shift;
 
     if (Raster.DepthBias == 0 && Slope == 0.0f)
         return;
@@ -857,13 +912,13 @@ RxWarpDraw::BiasDepth(
 
     if (Slope != 0.0f)
         Slope = RxWarpLargerMagnitude(DepthPlane.A, DepthPlane.B) * Slope;
-    Bias = RxWarpBitsAsFloat(Unit) * Constant;
-    Bias = Bias + Slope;
-    if (Clamp > 0.0f && Clamp < Bias)
-        Bias = Clamp;
-    else if (Clamp < 0.0f && Clamp > Bias)
-        Bias = Clamp;
-    DepthPlane.C = DepthPlane.C + Bias;
+    Shift = RxWarpBitsAsFloat(Unit) * Constant;
+    Shift = Shift + Slope;
+    if (Clamp > 0.0f && Clamp < Shift)
+        Shift = Clamp;
+    else if (Clamp < 0.0f && Clamp > Shift)
+        Shift = Clamp;
+    DepthPlane.C = DepthPlane.C + Shift;
 }
 
 static
@@ -900,35 +955,55 @@ RxWarpDraw::Cover(
     _In_ INT MinY,
     _In_ INT MaxX,
     _In_ INT MaxY,
+    _In_ BOOLEAN PerSample,
     _In_ Test Inside)
 {
+    UINT AllSamples = (SampleCount >= 32) ? UINT_MAX : (1u << SampleCount) - 1;
+
     MinX = (MinX > Left) ? MinX : Left;
     MinY = (MinY > Top) ? MinY : Top;
     MaxX = (MaxX < Right) ? MaxX : Right;
     MaxY = (MaxY < Bottom) ? MaxY : Bottom;
     if (MinX >= MaxX || MinY >= MaxY)
         return;
+    if (SampleCount <= 1)
+        PerSample = FALSE;
 
     for (INT Y = MinY & ~1; Y < MaxY; Y += 2)
     {
         for (INT X = MinX & ~1; X < MaxX; X += 2)
         {
             UINT Covered = 0;
+            UINT Samples[RxWarpLanes] = {};
 
             for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
             {
                 INT Px = X + (INT)(Lane & 1);
                 INT Py = Y + (INT)(Lane >> 1);
+                INT64 Cx = ((INT64)Px << 8) + 128;
+                INT64 Cy = ((INT64)Py << 8) + 128;
 
                 if (Px < MinX || Px >= MaxX || Py < MinY || Py >= MaxY)
                     continue;
 
-                /* Sample at pixel centers */
-                if (Inside(((INT64)Px << 8) + 128, ((INT64)Py << 8) + 128))
+                if (PerSample)
+                {
+                    for (UINT Index = 0; Index < SampleCount; Index++)
+                    {
+                        if (Inside(Cx + SampleOffset[Index][0], Cy + SampleOffset[Index][1]))
+                            Samples[Lane] |= 1u << Index;
+                    }
+                }
+                else if (Inside(Cx, Cy))
+                {
+                    /* Aliased coverage stands for every sample */
+                    Samples[Lane] = AllSamples;
+                }
+                if (Samples[Lane] != 0)
                     Covered |= 1u << Lane;
             }
             if (Covered != 0)
-                ShadeQuad(X, Y, Covered);
+                ShadeQuad(X, Y, Covered, Samples);
         }
     }
 }
@@ -1015,7 +1090,7 @@ RxWarpDraw::Rasterize(
         MaxY = (Corner[Index].Y > MaxY) ? Corner[Index].Y : MaxY;
     }
     PointSprite = FALSE;
-    Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8,
+    Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8, TRUE,
           [&Edges](INT64 Sx, INT64 Sy)
           {
               return RxWarpInsideEdge(Edges[0], Sx, Sy) && RxWarpInsideEdge(Edges[1], Sx, Sy) && RxWarpInsideEdge(Edges[2], Sx, Sy);
@@ -1162,7 +1237,7 @@ RxWarpDraw::RasterizeLine(
     Fy1 = Corner[1].Y;
     PointSprite = FALSE;
     Cover((INT)(((Fx0 < Fx1) ? Fx0 : Fx1) >> 8) - 1, (INT)(((Fy0 < Fy1) ? Fy0 : Fy1) >> 8) - 1,
-          (INT)((((Fx0 > Fx1) ? Fx0 : Fx1) + 255) >> 8), (INT)((((Fy0 > Fy1) ? Fy0 : Fy1) + 255) >> 8),
+          (INT)((((Fx0 > Fx1) ? Fx0 : Fx1) + 255) >> 8), (INT)((((Fy0 > Fy1) ? Fy0 : Fy1) + 255) >> 8), FALSE,
           [=](INT64 Sx, INT64 Sy)
           {
               return RxWarpSegmentMeetsDiamond(Fx0, Fy0, Fx1, Fy1, Sx, Sy) && !RxWarpInDiamond(Fx1, Fy1, Sx, Sy);
@@ -1200,7 +1275,7 @@ RxWarpDraw::RasterizePoint(
     SquareLeft = (INT64)Corner[0].X - 128;
     SquareTop = (INT64)Corner[0].Y - 128;
     PointSprite = TRUE;
-    Cover((Corner[0].X - 256) >> 8, (Corner[0].Y - 256) >> 8, (Corner[0].X + 511) >> 8, (Corner[0].Y + 511) >> 8,
+    Cover((Corner[0].X - 256) >> 8, (Corner[0].Y - 256) >> 8, (Corner[0].X + 511) >> 8, (Corner[0].Y + 511) >> 8, TRUE,
           [=](INT64 Sx, INT64 Sy)
           {
               return Sx >= SquareLeft && Sx < SquareLeft + 256 && Sy >= SquareTop && Sy < SquareTop + 256;
@@ -1211,10 +1286,12 @@ VOID
 RxWarpDraw::ShadeQuad(
     _In_ INT X,
     _In_ INT Y,
-    _In_ UINT Covered)
+    _In_ UINT Covered,
+    _In_reads_(RxWarpLanes) const UINT *Samples)
 {
     FLOAT Depth[RxWarpLanes];
     UINT Survivors = Covered;
+    UINT AllSamples = (SampleCount >= 32) ? UINT_MAX : (1u << SampleCount) - 1;
 
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
     {
@@ -1227,6 +1304,7 @@ RxWarpDraw::ShadeQuad(
     if (PixelShader != nullptr)
     {
         Invocation.Prepare(PixelShader);
+        Invocation.RasterSamples = SampleCount;
         Invocation.Live = Covered;
         Invocation.Helper = 0xF & ~Covered;
         Invocation.PrimitiveId = Primitive;
@@ -1237,6 +1315,22 @@ RxWarpDraw::ShadeQuad(
             FLOAT Sy = (FLOAT)(Y + (INT)(Lane >> 1)) + 0.5f;
             FLOAT Rhw = RxWarpEvaluate(RhwPlane, Sx, Sy);
             FLOAT W = 1.0f / Rhw;
+            FLOAT Cx = Sx;
+            FLOAT Cy = Sy;
+            FLOAT CentroidW = W;
+
+            Invocation.CoverageIn[Lane] = Samples[Lane] & Pipeline->SampleMask;
+
+            /* Pixels the sample mask or the edges leave partly covered take centroid attributes at their first covered sample */
+            if (Invocation.CoverageIn[Lane] != 0 && Invocation.CoverageIn[Lane] != AllSamples)
+            {
+                ULONG First;
+
+                _BitScanForward(&First, Invocation.CoverageIn[Lane]);
+                Cx = Sx + (FLOAT)SampleOffset[First][0] * (1.0f / 256.0f);
+                Cy = Sy + (FLOAT)SampleOffset[First][1] * (1.0f / 256.0f);
+                CentroidW = 1.0f / RxWarpEvaluate(RhwPlane, Cx, Cy);
+            }
 
             for (UINT Register = 0; Register < PixelShader->InputCount; Register++)
             {
@@ -1269,12 +1363,14 @@ RxWarpDraw::ShadeQuad(
                 }
                 for (UINT Component = 0; Component < 4; Component++)
                 {
-                    FLOAT Value = RxWarpEvaluate(Planes[Register][Component], Sx, Sy);
+                    BOOLEAN Centroid = (Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
+                                        Mode == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_CENTROID);
+                    FLOAT Value = RxWarpEvaluate(Planes[Register][Component], Centroid ? Cx : Sx, Centroid ? Cy : Sy);
 
                     if (!PointSprite && (Mode == D3D10_SB_INTERPOLATION_LINEAR || Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
                                          Mode == D3D10_SB_INTERPOLATION_LINEAR_SAMPLE))
                     {
-                        Value = Value * W;
+                        Value = Value * (Centroid ? CentroidW : W);
                     }
                     Input[Component] = RxWarpFloatAsBits(Value);
                 }
@@ -1295,14 +1391,34 @@ RxWarpDraw::ShadeQuad(
 
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
     {
-        FLOAT Value = Depth[Lane];
+        UINT Mask = Samples[Lane] & Pipeline->SampleMask;
 
         if (!(Survivors & (1u << Lane)))
             continue;
-        Value = (Value < MinDepth) ? MinDepth : Value;
-        Value = (Value > MaxDepth) ? MaxDepth : Value;
-        WritePixel(X + (INT)(Lane & 1), Y + (INT)(Lane >> 1), Lane, Value);
+        if (PixelShader != nullptr && PixelShader->WritesCoverage)
+            Mask &= Invocation.CoverageOut[Lane];
+
+        for (Sample = 0; Sample < SampleCount; Sample++)
+        {
+            FLOAT Value = Depth[Lane];
+
+            if (!(Mask & (1u << Sample)))
+                continue;
+
+            /* Each sample moves the center depth along the plane's slopes, unless the shader wrote one */
+            if (SampleCount > 1 && (PixelShader == nullptr || !PixelShader->WritesDepth))
+            {
+                FLOAT Ox = (FLOAT)SampleOffset[Sample][0] * (1.0f / 256.0f);
+                FLOAT Oy = (FLOAT)SampleOffset[Sample][1] * (1.0f / 256.0f);
+
+                Value = Value + (DepthPlane.A * Ox + DepthPlane.B * Oy);
+            }
+            Value = (Value < MinDepth) ? MinDepth : Value;
+            Value = (Value > MaxDepth) ? MaxDepth : Value;
+            WritePixel(X + (INT)(Lane & 1), Y + (INT)(Lane >> 1), Lane, Value);
+        }
     }
+    Sample = 0;
 }
 
 static
@@ -1312,6 +1428,7 @@ RxWarpViewTexel(
     _In_ INT X,
     _In_ INT Y,
     _In_ UINT Slice,
+    _In_ UINT Sample,
     _Out_ UINT *Bytes)
 {
     RxWarpResource *Resource = View->Resource;
@@ -1340,7 +1457,10 @@ RxWarpViewTexel(
     if (Sub == nullptr || X < 0 || Y < 0 || (UINT)X >= Sub->Width || (UINT)Y >= Sub->Height)
         return nullptr;
     *Bytes = Info->Bytes;
-    return Resource->Memory + Sub->Offset + Depth + (SIZE_T)Y * Sub->RowPitch + (SIZE_T)X * Info->Bytes;
+    if (Sample >= Resource->SampleCount)
+        Sample = 0;
+    return Resource->Memory + Sub->Offset + Depth + (SIZE_T)Y * Sub->RowPitch +
+           ((SIZE_T)X * Resource->SampleCount + Sample) * Info->Bytes;
 }
 
 static
@@ -1423,7 +1543,7 @@ RxWarpDraw::DepthStencilTest(
 
     if (View == nullptr || (!DepthState.DepthEnable && !DepthState.StencilEnable))
         return TRUE;
-    Texel = RxWarpViewTexel(View, X, Y, TargetSlice, &Bytes);
+    Texel = RxWarpViewTexel(View, X, Y, TargetSlice, Sample, &Bytes);
     if (Texel == nullptr)
         return TRUE;
 
@@ -1613,7 +1733,7 @@ RxWarpDraw::Blend(
 
     if (View == nullptr || WriteMask == 0)
         return;
-    Texel = RxWarpViewTexel(View, X, Y, TargetSlice, &Bytes);
+    Texel = RxWarpViewTexel(View, X, Y, TargetSlice, Sample, &Bytes);
     if (Texel == nullptr)
         return;
     memcpy(Element, Texel, Bytes);

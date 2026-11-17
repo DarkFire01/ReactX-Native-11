@@ -65,7 +65,8 @@ RxWarpReadTexel(
     _In_ INT X,
     _In_ INT Y,
     _In_ INT Z,
-    _Out_writes_(4) UINT *Value)
+    _Out_writes_(4) UINT *Value,
+    _In_ UINT Sample = 0)
 {
     RX_WARP_SUBRESOURCE *Level = RxWarpExtentLevel(Extent, Mip, Slice);
     const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(View->Format);
@@ -88,8 +89,14 @@ RxWarpReadTexel(
         return RxWarpDecodeBlockTexel(View->Format, Element, X, Y, Value);
     }
 
+    /* Multisampled texels keep their samples together */
+    if (Sample >= Extent->Resource->SampleCount)
+    {
+        Value[0] = Value[1] = Value[2] = Value[3] = 0;
+        return FALSE;
+    }
     Source = Extent->Resource->Memory + Level->Offset + (SIZE_T)Z * Level->DepthPitch + (SIZE_T)Y * Level->RowPitch +
-             (SIZE_T)X * Info->Bytes;
+             ((SIZE_T)X * Extent->Resource->SampleCount + Sample) * Info->Bytes;
     memcpy(Element, Source, (Info->Bytes <= 16) ? Info->Bytes : 16);
     return RxWarpDecodeTexel(View->Format, Element, Value);
 }
@@ -889,7 +896,47 @@ RxWarpLoad(
 
     if (Mip < 0 || (UINT)Mip >= Extent.MipCount || Slice < 0 || (UINT)Slice >= Extent.SliceCount)
         return;
-    RxWarpReadTexel(View, &Extent, (UINT)Mip, (UINT)Slice, At[0], At[1], At[2], Result);
+    RxWarpReadTexel(View, &Extent, (UINT)Mip, (UINT)Slice, At[0], At[1], At[2], Result, Request->Sample);
+}
+
+VOID
+RxWarpSamplePosition(
+    _In_ UINT Count,
+    _In_ UINT Index,
+    _Out_writes_(2) FLOAT *Position)
+{
+    static const INT8 Two[2][2] = { { 4, 4 }, { -4, -4 } };
+    static const INT8 Four[4][2] = { { -2, -6 }, { 6, -2 }, { -6, 2 }, { 2, 6 } };
+    static const INT8 Eight[8][2] = { { 1, -3 }, { -1, 3 }, { 5, 1 }, { -3, -5 }, { -5, 5 }, { -7, -1 }, { 3, 7 }, { 7, -7 } };
+    static const INT8 Sixteen[16][2] =
+    {
+        { 1, 1 }, { -1, -3 }, { -3, 2 }, { 4, -1 }, { -5, -2 }, { 2, 5 }, { 5, 3 }, { 3, -5 },
+        { -2, 6 }, { 0, -7 }, { -4, -6 }, { -6, 4 }, { -8, 0 }, { 7, -4 }, { 6, 7 }, { -7, -8 },
+    };
+    const INT8 *Entry = nullptr;
+
+    Position[0] = Position[1] = 0.0f;
+    if (Index >= Count)
+        return;
+    switch (Count)
+    {
+        case 2:
+            Entry = Two[Index];
+            break;
+        case 4:
+            Entry = Four[Index];
+            break;
+        case 8:
+            Entry = Eight[Index];
+            break;
+        case 16:
+            Entry = Sixteen[Index];
+            break;
+        default:
+            return;
+    }
+    Position[0] = (FLOAT)(Entry[0] * 16) * (1.0f / 256.0f);
+    Position[1] = (FLOAT)(Entry[1] * 16) * (1.0f / 256.0f);
 }
 
 VOID

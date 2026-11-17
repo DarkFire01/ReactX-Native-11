@@ -335,8 +335,10 @@ RxWarpMachine::Locate(
             return (UINT *)&Invocation->Depth[Lane];
         case D3D11_SB_OPERAND_TYPE_INPUT_COVERAGE_MASK:
             *Writable = FALSE;
-            Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = 1;
+            Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = Invocation->CoverageIn[Lane];
             return Scratch;
+        case D3D10_SB_OPERAND_TYPE_OUTPUT_COVERAGE_MASK:
+            return &Invocation->CoverageOut[Lane];
         case D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID:
             *Writable = FALSE;
             memcpy(Scratch, Invocation->ThreadId[Lane], 3 * sizeof(UINT));
@@ -712,6 +714,9 @@ RxWarpMachine::Execute(VOID)
             case D3D11_SB_OPCODE_GATHER4_PO:
             case D3D11_SB_OPCODE_GATHER4_PO_C:
             case D3D11_SB_OPCODE_BUFINFO:
+            case D3D10_SB_OPCODE_LD_MS:
+            case D3D10_1_SB_OPCODE_SAMPLE_INFO:
+            case D3D10_1_SB_OPCODE_SAMPLE_POS:
                 if (Active != 0)
                     Texture(Instruction);
                 break;
@@ -1564,6 +1569,50 @@ RxWarpMachine::Texture(
         return;
     }
 
+    /* Sample counts and positions, of a resource or of the bound targets */
+    if (Opcode == D3D10_1_SB_OPCODE_SAMPLE_INFO || Opcode == D3D10_1_SB_OPCODE_SAMPLE_POS)
+    {
+        RX_WARP_LANE_VALUES Index = {};
+        UINT Count = 0;
+
+        if (Instruction.OperandCount < 2)
+            return;
+        Resource = &Instruction.Operands[1];
+        if (Resource->Type == D3D10_SB_OPERAND_TYPE_RASTERIZER)
+        {
+            Count = Invocation->RasterSamples;
+        }
+        else
+        {
+            Slot = Resource->Index[0].Immediate;
+            if (Slot < 128 && Bindings->Views[Slot] != nullptr && Bindings->Views[Slot]->Resource != nullptr)
+                Count = Bindings->Views[Slot]->Resource->SampleCount;
+        }
+        if (Opcode == D3D10_1_SB_OPCODE_SAMPLE_POS && Instruction.OperandCount > 2)
+            FetchAll(Instruction.Operands[2], TRUE, Index);
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        {
+            UINT Raw[4] = {};
+
+            if (Opcode == D3D10_1_SB_OPCODE_SAMPLE_INFO)
+            {
+                Raw[0] = (Instruction.ReturnType == D3D10_SB_RESINFO_INSTRUCTION_RETURN_RCPFLOAT) ? Count : RxWarpAsUint((FLOAT)Count);
+            }
+            else
+            {
+                FLOAT Position[2];
+
+                RxWarpSamplePosition(Count, Index[Lane][0], Position);
+                Raw[0] = RxWarpAsUint(Position[0]);
+                Raw[1] = RxWarpAsUint(Position[1]);
+            }
+            for (UINT Component = 0; Component < 4; Component++)
+                Result[Lane][Component] = Raw[Resource->Swizzle[Component]];
+        }
+        Store(Instruction, 0, Result, FALSE);
+        return;
+    }
+
     if (Opcode == D3D11_SB_OPCODE_BUFINFO)
     {
         RX_WARP_REGION Memory;
@@ -1594,12 +1643,14 @@ RxWarpMachine::Texture(
     if (Instruction.OperandCount < 3 + Shift)
         return;
     Resource = &Instruction.Operands[2 + Shift];
-    if (Opcode != D3D10_SB_OPCODE_LD)
+    if (Opcode != D3D10_SB_OPCODE_LD && Opcode != D3D10_SB_OPCODE_LD_MS)
     {
         if (Instruction.OperandCount < 4 + Shift)
             return;
         SamplerOperand = &Instruction.Operands[3 + Shift];
     }
+    if (Opcode == D3D10_SB_OPCODE_LD_MS && Instruction.OperandCount > 3)
+        FetchAll(Instruction.Operands[3], TRUE, Offsets);
     if (Programmable)
         FetchAll(Instruction.Operands[2], TRUE, Offsets);
     Slot = Resource->Index[0].Immediate;
@@ -1612,7 +1663,7 @@ RxWarpMachine::Texture(
     Request.Offset[1] = Instruction.Offset[1];
     Request.Offset[2] = Instruction.Offset[2];
 
-    FetchAll(Instruction.Operands[1], Opcode == D3D10_SB_OPCODE_LD, Address);
+    FetchAll(Instruction.Operands[1], Opcode == D3D10_SB_OPCODE_LD || Opcode == D3D10_SB_OPCODE_LD_MS, Address);
     if (Instruction.OperandCount > 4 + Shift)
         FetchAll(Instruction.Operands[4 + Shift], FALSE, Extra);
     if (Opcode == D3D10_SB_OPCODE_SAMPLE_D && Instruction.OperandCount > 5)
@@ -1632,6 +1683,10 @@ RxWarpMachine::Texture(
         switch (Opcode)
         {
             case D3D10_SB_OPCODE_LD:
+                RxWarpLoad(&Request, (const INT *)Address[Lane], Raw);
+                break;
+            case D3D10_SB_OPCODE_LD_MS:
+                Request.Sample = Offsets[Lane][0];
                 RxWarpLoad(&Request, (const INT *)Address[Lane], Raw);
                 break;
             case D3D10_SB_OPCODE_SAMPLE:
@@ -1713,6 +1768,8 @@ RxWarpInvocation::Prepare(
     IndexableStorage.assign((SIZE_T)Shader->IndexableRegisters * RxWarpLanes * 4, 0);
     ZeroMemory(Outputs, sizeof(Outputs));
     ZeroMemory(Depth, sizeof(Depth));
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        CoverageOut[Lane] = UINT_MAX;
     Discarded = 0;
 }
 

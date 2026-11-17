@@ -242,6 +242,7 @@ RxWarpDevice::Create(
         Funcs.pfnResourceConvert = RxWarpDdi::ResourceCopy;
         Funcs.pfnResourceCopyRegion = RxWarpDdi::ResourceCopyRegion;
         Funcs.pfnResourceConvertRegion = RxWarpDdi::ResourceCopyRegion;
+        Funcs.pfnResourceResolveSubresource = RxWarpDdi::ResourceResolveSubresource;
         Funcs.pfnResourceUpdateSubresourceUP = RxWarpDdi::ResourceUpdateSubresourceUP;
         Funcs.pfnDefaultConstantBufferUpdateSubresourceUP = RxWarpDdi::ResourceUpdateSubresourceUP;
 
