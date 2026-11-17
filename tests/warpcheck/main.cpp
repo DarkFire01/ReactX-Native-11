@@ -1194,6 +1194,38 @@ SceneBlocks(
     return hr;
 }
 
+/* A large target covered several times with filtered texturing and blending: mostly a speed check */
+static
+HRESULT
+SceneFill(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    std::vector<TcVertex> Vertices;
+    TcDrawSetup Setup;
+
+    for (UINT Layer = 0; Layer < 4; Layer++)
+    {
+        FLOAT Shift = (FLOAT)Layer * 0.37f;
+
+        Vertices.push_back(TcMake(-1.0f, 1.0f, 0.5f, 1.0f, 0, Shift, 0.0f));
+        Vertices.push_back(TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0, Shift + 3.0f, 0.0f));
+        Vertices.push_back(TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0, Shift, 3.0f));
+        Vertices.push_back(TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0, Shift + 3.0f, 0.0f));
+        Vertices.push_back(TcMake(1.0f, -1.0f, 0.5f, 1.0f, 0, Shift + 3.0f, 3.0f));
+        Vertices.push_back(TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0, Shift, 3.0f));
+    }
+    Setup.Size = 512;
+    Setup.Vertices = Vertices.data();
+    Setup.VertexCount = (UINT)Vertices.size();
+    Setup.Texture = TRUE;
+    Setup.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    Setup.PixelEntry = "pstex";
+    Setup.Blend = TRUE;
+    return TcDrawScene(Device, Context, Setup, Result);
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -1213,6 +1245,7 @@ static const TcScene Scenes[] =
     { "mips", 0, SceneMips },
     { "compute", 0, SceneCompute },
     { "bc", 0, SceneBlocks },
+    { "fill", 0, SceneFill },
 };
 
 static
@@ -1257,6 +1290,124 @@ TcWritePpm(
     fclose(File);
 }
 
+/*
+ * Results cross processes as files: the Direct3D runtime finds the software rasterizer by its
+ * module name, so two modules called d3d10warp.dll in one process would end up as one.
+ */
+static
+BOOLEAN
+TcSaveResult(
+    _In_z_ PCWSTR Path,
+    _In_ HRESULT Status,
+    _In_ double Milliseconds,
+    _In_ const TcResult &Result)
+{
+    FILE *File;
+    UINT64 Sizes[2] = { Result.Data.size(), Result.Pixels.size() };
+
+    if (_wfopen_s(&File, Path, L"wb") != 0)
+        return FALSE;
+    fwrite(&Status, sizeof(Status), 1, File);
+    fwrite(&Milliseconds, sizeof(Milliseconds), 1, File);
+    fwrite(&Result.Width, sizeof(Result.Width), 1, File);
+    fwrite(&Result.Height, sizeof(Result.Height), 1, File);
+    fwrite(Sizes, sizeof(Sizes), 1, File);
+    fwrite(Result.Data.data(), 1, Result.Data.size(), File);
+    fwrite(Result.Pixels.data(), 1, Result.Pixels.size(), File);
+    fclose(File);
+    return TRUE;
+}
+
+static
+BOOLEAN
+TcLoadResult(
+    _In_z_ PCWSTR Path,
+    _Out_ HRESULT *Status,
+    _Out_ double *Milliseconds,
+    _Out_ TcResult *Result)
+{
+    FILE *File;
+    UINT64 Sizes[2] = {};
+    BOOLEAN Complete;
+
+    *Status = E_FAIL;
+    *Milliseconds = 0.0;
+    if (_wfopen_s(&File, Path, L"rb") != 0)
+        return FALSE;
+    Complete = fread(Status, sizeof(*Status), 1, File) == 1 && fread(Milliseconds, sizeof(*Milliseconds), 1, File) == 1 &&
+               fread(&Result->Width, sizeof(Result->Width), 1, File) == 1 &&
+               fread(&Result->Height, sizeof(Result->Height), 1, File) == 1 && fread(Sizes, sizeof(Sizes), 1, File) == 1;
+    if (Complete)
+    {
+        Result->Data.resize((SIZE_T)Sizes[0]);
+        Result->Pixels.resize((SIZE_T)Sizes[1]);
+        Complete = fread(Result->Data.data(), 1, Result->Data.size(), File) == Result->Data.size() &&
+                   fread(Result->Pixels.data(), 1, Result->Pixels.size(), File) == Result->Pixels.size();
+    }
+    fclose(File);
+    return Complete;
+}
+
+/* Child: loads exactly one WARP, runs one scene and writes what it produced */
+static
+int
+TcChild(
+    _In_z_ PCWSTR ModulePath,
+    _In_z_ PCWSTR SceneName,
+    _In_z_ PCWSTR OutputPath)
+{
+    std::string Name(SceneName, SceneName + wcslen(SceneName));
+    HMODULE Module = LoadLibraryExW(ModulePath, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    LARGE_INTEGER Frequency;
+    LARGE_INTEGER Start;
+    LARGE_INTEGER End;
+
+    if (Module == NULL)
+        return 3;
+    QueryPerformanceFrequency(&Frequency);
+    for (const TcScene &Scene : Scenes)
+    {
+        TcResult Result;
+        HRESULT Status;
+
+        if (_stricmp(Scene.Name, Name.c_str()) != 0)
+            continue;
+        QueryPerformanceCounter(&Start);
+        Status = TcRun(Module, Scene, &Result);
+        QueryPerformanceCounter(&End);
+        return TcSaveResult(OutputPath, Status, (End.QuadPart - Start.QuadPart) * 1000.0 / Frequency.QuadPart, Result) ? 0 : 4;
+    }
+    return 5;
+}
+
+/* Parent: runs one scene in a fresh copy of this program and reads the result back */
+static
+BOOLEAN
+TcRunIsolated(
+    _In_z_ PCWSTR ModulePath,
+    _In_z_ PCSTR SceneName,
+    _In_z_ PCWSTR OutputPath,
+    _Out_ HRESULT *Status,
+    _Out_ double *Milliseconds,
+    _Out_ TcResult *Result)
+{
+    WCHAR Self[MAX_PATH];
+    std::wstring Command;
+    STARTUPINFOW Startup = { sizeof(Startup) };
+    PROCESS_INFORMATION Process = {};
+    std::wstring Scene(SceneName, SceneName + strlen(SceneName));
+
+    GetModuleFileNameW(NULL, Self, ARRAYSIZE(Self));
+    DeleteFileW(OutputPath);
+    Command = L"\"" + std::wstring(Self) + L"\" --child \"" + ModulePath + L"\" " + Scene + L" \"" + OutputPath + L"\"";
+    if (!CreateProcessW(NULL, &Command[0], NULL, NULL, FALSE, 0, NULL, NULL, &Startup, &Process))
+        return FALSE;
+    WaitForSingleObject(Process.hProcess, INFINITE);
+    CloseHandle(Process.hThread);
+    CloseHandle(Process.hProcess);
+    return TcLoadResult(OutputPath, Status, Milliseconds, Result);
+}
+
 int
 __cdecl
 wmain(
@@ -1264,9 +1415,11 @@ wmain(
     _In_reads_(argc) wchar_t **argv)
 {
     WCHAR SystemPath[MAX_PATH];
-    HMODULE System;
-    HMODULE Ours;
+    WCHAR OursPath[MAX_PATH];
     UINT Failures = 0;
+
+    if (argc == 5 && wcscmp(argv[1], L"--child") == 0)
+        return TcChild(argv[2], argv[3], argv[4]);
 
     if (argc < 2)
     {
@@ -1276,11 +1429,9 @@ wmain(
 
     GetSystemDirectoryW(SystemPath, ARRAYSIZE(SystemPath));
     wcscat_s(SystemPath, L"\\d3d10warp.dll");
-    System = LoadLibraryExW(SystemPath, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-    Ours = LoadLibraryExW(argv[1], NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (System == NULL || Ours == NULL || System == Ours)
+    if (GetFullPathNameW(argv[1], ARRAYSIZE(OursPath), OursPath, NULL) == 0 || _wcsicmp(SystemPath, OursPath) == 0)
     {
-        wprintf(L"could not load both WARPs (%p, %p)\n", System, Ours);
+        wprintf(L"give the path of our WARP, not the system one\n");
         return 2;
     }
 
@@ -1290,6 +1441,8 @@ wmain(
         TcResult Actual;
         HRESULT SystemHr;
         HRESULT OurHr;
+        double SystemTime;
+        double OurTime;
         SIZE_T Differ = 0;
         UINT Worst = 0;
         char Name[96];
@@ -1297,8 +1450,13 @@ wmain(
         if (argc > 2 && _stricmp(Scene.Name, std::string(argv[2], argv[2] + wcslen(argv[2])).c_str()) != 0)
             continue;
 
-        SystemHr = TcRun(System, Scene, &Expected);
-        OurHr = TcRun(Ours, Scene, &Actual);
+        if (!TcRunIsolated(SystemPath, Scene.Name, L"warpcheck_system.out", &SystemHr, &SystemTime, &Expected) ||
+            !TcRunIsolated(OursPath, Scene.Name, L"warpcheck_ours.out", &OurHr, &OurTime, &Actual))
+        {
+            printf("%-8s FAIL a child process did not report back\n", Scene.Name);
+            Failures++;
+            continue;
+        }
         if (SystemHr != OurHr || Expected.Data.size() != Actual.Data.size())
         {
             printf("%-8s FAIL hr %08lX vs %08lX, %zu vs %zu bytes\n", Scene.Name, SystemHr, OurHr,
@@ -1321,8 +1479,8 @@ wmain(
                 Worst = Delta;
         }
 
-        printf("%-8s %s (%zu bytes, %zu differ, worst %u)\n", Scene.Name, Differ ? "FAIL" : "ok",
-               Expected.Data.size(), Differ, Worst);
+        printf("%-8s %s (%zu bytes, %zu differ, worst %u; %.1f ms system, %.1f ms ours)\n", Scene.Name, Differ ? "FAIL" : "ok",
+               Expected.Data.size(), Differ, Worst, SystemTime, OurTime);
         if (Differ)
         {
             Failures++;
@@ -1356,6 +1514,12 @@ wmain(
             if (fopen_s(&File, Name, "wb") == 0)
             {
                 fwrite(Actual.Data.data(), 1, Actual.Data.size(), File);
+                fclose(File);
+            }
+            sprintf_s(Name, "%s_system.bin", Scene.Name);
+            if (fopen_s(&File, Name, "wb") == 0)
+            {
+                fwrite(Expected.Data.data(), 1, Expected.Data.size(), File);
                 fclose(File);
             }
         }
