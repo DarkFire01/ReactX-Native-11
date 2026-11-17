@@ -199,6 +199,10 @@ private:
     RasterizePoint(
         _In_ const RX_WARP_VERTEX *A);
 
+    VOID
+    BiasDepth(
+        _In_ FLOAT LargestDepth);
+
     template <typename Test>
     VOID
     Cover(
@@ -807,6 +811,61 @@ typedef struct _RX_WARP_EDGE
     INT64 Bias;
 } RX_WARP_EDGE;
 
+/* The magnitude of whichever value is larger, compared as bits */
+static
+FLOAT
+RxWarpLargerMagnitude(
+    _In_ FLOAT First,
+    _In_ FLOAT Second)
+{
+    UINT A = RxWarpFloatAsBits(First) & 0x7FFFFFFF;
+    UINT B = RxWarpFloatAsBits(Second) & 0x7FFFFFFF;
+
+    return RxWarpBitsAsFloat((A > B) ? A : B);
+}
+
+/* Moves the depth plane by the rasterizer state's bias; one unit depends on the depth format */
+VOID
+RxWarpDraw::BiasDepth(
+    _In_ FLOAT LargestDepth)
+{
+    DXGI_FORMAT Format = (Pipeline->DepthStencilView != nullptr) ? Pipeline->DepthStencilView->Format : DXGI_FORMAT_UNKNOWN;
+    FLOAT Constant = (FLOAT)Raster.DepthBias;
+    FLOAT Slope = Raster.SlopeScaledDepthBias;
+    FLOAT Clamp = Raster.DepthBiasClamp;
+    UINT Unit;
+    FLOAT Bias;
+
+    if (Raster.DepthBias == 0 && Slope == 0.0f)
+        return;
+
+    if (Format == DXGI_FORMAT_D16_UNORM)
+    {
+        Unit = 0x37800000;
+    }
+    else if (Format == DXGI_FORMAT_D24_UNORM_S8_UINT)
+    {
+        /* The reference doubles the unit for a bias of exactly one */
+        Unit = (Constant == 1.0f || Constant == -1.0f) ? 0x34000000 : 0x33800000;
+    }
+    else
+    {
+        UINT Exponent = (RxWarpFloatAsBits(LargestDepth) >> 23) & 0xFF;
+
+        Unit = (Exponent > 23) ? (Exponent - 23) << 23 : 0;
+    }
+
+    if (Slope != 0.0f)
+        Slope = RxWarpLargerMagnitude(DepthPlane.A, DepthPlane.B) * Slope;
+    Bias = RxWarpBitsAsFloat(Unit) * Constant;
+    Bias = Bias + Slope;
+    if (Clamp > 0.0f && Clamp < Bias)
+        Bias = Clamp;
+    else if (Clamp < 0.0f && Clamp > Bias)
+        Bias = Clamp;
+    DepthPlane.C = DepthPlane.C + Bias;
+}
+
 static
 RX_WARP_EDGE
 RxWarpMakeEdge(
@@ -933,6 +992,7 @@ RxWarpDraw::Rasterize(
         }
     }
     DepthPlane = RxWarpMakePlane(Corner, InverseArea, Corner[0].Z, Corner[1].Z, Corner[2].Z);
+    BiasDepth(RxWarpLargerMagnitude(RxWarpLargerMagnitude(Corner[1].Z, Corner[2].Z), Corner[0].Z));
     RhwPlane = RxWarpMakePlane(Corner, InverseArea, Corner[0].Rhw, Corner[1].Rhw, Corner[2].Rhw);
 
     /* Coverage wants a consistent winding */
@@ -1089,6 +1149,7 @@ RxWarpDraw::RasterizeLine(
         }
     }
     DepthPlane = RxWarpMakeLinePlane(XMajor, Start, InverseLength, Corner[0].Z, Corner[1].Z);
+    BiasDepth(RxWarpLargerMagnitude(Corner[0].Z, Corner[1].Z));
     RhwPlane = RxWarpMakeLinePlane(XMajor, Start, InverseLength, Corner[0].Rhw, Corner[1].Rhw);
 
     Fx0 = Corner[0].X;
