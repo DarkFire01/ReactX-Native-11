@@ -1199,62 +1199,125 @@ RxWarpMakeLinePlane(
     return Plane;
 }
 
+/* A point in the diamond around a pixel center; its lower edges, and the right corner for steep lines, count as inside */
 static
 BOOLEAN
-RxWarpInDiamond(
-    _In_ INT64 X,
-    _In_ INT64 Y,
-    _In_ INT64 Cx,
-    _In_ INT64 Cy)
+RxWarpPointInDiamond(
+    _In_ BOOLEAN XMajor,
+    _In_ FLOAT X,
+    _In_ FLOAT Y,
+    _In_ FLOAT Cx,
+    _In_ FLOAT Cy)
 {
-    INT64 Dx = X - Cx;
-    INT64 Dy = Y - Cy;
+    FLOAT Distance = fabsf(X - Cx) + fabsf(Y - Cy);
+    BOOLEAN RightCorner = (Y == Cy && !XMajor && X > Cx);
 
-    /* Open, except for the right and bottom corners */
-    if ((Dx == 128 && Dy == 0) || (Dx == 0 && Dy == 128))
-        return TRUE;
-    return ((Dx < 0) ? -Dx : Dx) + ((Dy < 0) ? -Dy : Dy) < 128;
+    if (!RightCorner && Y <= Cy)
+        return Distance < 0.5f;
+    return Distance <= 0.5f;
 }
 
-/* Whether the segment passes through the open diamond around a pixel center, in 24.8 */
+/*
+ * The line as a start point and a direction with each end pulled to just short of the center
+ * of a pixel whose diamond holds it: the start pixel is drawn and the end pixel is left alone.
+ */
+static
+VOID
+RxWarpLineCoverage(
+    _In_ FLOAT X0,
+    _In_ FLOAT X1,
+    _In_ FLOAT Y0,
+    _In_ FLOAT Y1,
+    _Out_writes_(4) FLOAT *Line,
+    _Out_ UINT *Inclusive)
+{
+    FLOAT Dx = X1 - X0;
+    FLOAT Dy = Y1 - Y0;
+    BOOLEAN XMajor = fabsf(X0 - X1) >= fabsf(Y0 - Y1);
+    FLOAT StartX = ceilf(X0) - 0.5f;
+    FLOAT StartY = ceilf(Y0) - 0.5f;
+    FLOAT EndX = ceilf(X1) - 0.5f;
+    FLOAT EndY = ceilf(Y1) - 0.5f;
+    BOOLEAN StartIn = RxWarpPointInDiamond(XMajor, X0, Y0, StartX, StartY);
+    BOOLEAN EndIn = RxWarpPointInDiamond(XMajor, X1, Y1, EndX, EndY);
+
+    *Inclusive = XMajor ? 4 : 12;
+    if (StartIn && EndIn && StartX == EndX && StartY == EndY)
+    {
+        Line[0] = 0.0f;
+        Line[1] = 0.0f;
+        Line[2] = -0.5f;
+        Line[3] = -0.5f;
+        return;
+    }
+
+    if (StartIn)
+    {
+        FLOAT Mx;
+        FLOAT My;
+
+        if (XMajor)
+        {
+            Mx = (X0 - StartX) + ((Dx <= 0.0f) ? -1.0f / 256.0f : 1.0f / 256.0f);
+            My = (Dy / Dx) * Mx;
+        }
+        else
+        {
+            My = (Y0 - StartY) + ((Dy <= 0.0f) ? -1.0f / 256.0f : 1.0f / 256.0f);
+            Mx = (Dx / Dy) * My;
+        }
+        X0 = X0 - Mx;
+        Y0 = Y0 - My;
+        Dx = Dx + Mx;
+        Dy = Dy + My;
+    }
+    if (EndIn)
+    {
+        FLOAT Mx;
+        FLOAT My;
+
+        if (XMajor)
+        {
+            Mx = ((X0 + Dx) - EndX) + ((Dx <= 0.0f) ? -1.0f / 256.0f : 1.0f / 256.0f);
+            My = (Dy / Dx) * Mx;
+        }
+        else
+        {
+            My = ((Y0 + Dy) - EndY) + ((Dy <= 0.0f) ? -1.0f / 256.0f : 1.0f / 256.0f);
+            Mx = (Dx / Dy) * My;
+        }
+        Dx = Dx - Mx;
+        Dy = Dy - My;
+    }
+    Line[0] = Dx;
+    Line[1] = Dy;
+    Line[2] = X0;
+    Line[3] = Y0;
+}
+
+/* Inside when the pixel center projects onto the line along either axis no more than half a pixel off */
 static
 BOOLEAN
-RxWarpSegmentMeetsDiamond(
-    _In_ INT64 X0,
-    _In_ INT64 Y0,
-    _In_ INT64 X1,
-    _In_ INT64 Y1,
-    _In_ INT64 Cx,
-    _In_ INT64 Cy)
+RxWarpLineCovers(
+    _In_reads_(4) const FLOAT *Line,
+    _In_ UINT Inclusive,
+    _In_ FLOAT X,
+    _In_ FLOAT Y)
 {
-    INT64 Dx = X1 - X0;
-    INT64 Dy = Y1 - Y0;
+    FLOAT Wide = nextafterf(0.5f, 1.0f);
+    FLOAT AcrossX = (Line[2] - X) * (-1.0f / Line[0]);
+    FLOAT AcrossY = (Line[3] - Y) * (-1.0f / Line[1]);
+    FLOAT OffY = (Line[3] - Y) + Line[1] * AcrossX;
+    FLOAT OffX = (Line[2] - X) + Line[0] * AcrossY;
+    BOOLEAN AlongX;
+    BOOLEAN AlongY;
 
-    if (RxWarpInDiamond(X0, Y0, Cx, Cy) || RxWarpInDiamond(X1, Y1, Cx, Cy))
-        return TRUE;
-
-    /* The distance is smallest where the segment crosses the diamond's axes */
-    if (Dx != 0 && ((Cx >= X0 && Cx <= X1) || (Cx <= X0 && Cx >= X1)))
-    {
-        INT64 Offset = (Y0 - Cy) * Dx + (Cx - X0) * Dy;
-        INT64 Limit = 128 * ((Dx < 0) ? -Dx : Dx);
-
-        /* Offset / Dx is the height where the segment crosses the vertical axis */
-        if (((Offset < 0) ? -Offset : Offset) < Limit || Offset == 128 * Dx)
-            return TRUE;
-    }
-    if (Dy != 0 && ((Cy >= Y0 && Cy <= Y1) || (Cy <= Y0 && Cy >= Y1)))
-    {
-        INT64 Offset = (X0 - Cx) * Dy + (Cy - Y0) * Dx;
-        INT64 Limit = 128 * ((Dy < 0) ? -Dy : Dy);
-
-        if (((Offset < 0) ? -Offset : Offset) < Limit || Offset == 128 * Dy)
-            return TRUE;
-    }
-    return FALSE;
+    AlongX = AcrossX >= 0.0f && AcrossX <= 1.0f && OffY > -((Inclusive & 1) ? Wide : 0.5f) && OffY < ((Inclusive & 4) ? Wide : 0.5f);
+    AlongY = AcrossY >= 0.0f && AcrossY <= 1.0f && OffX > -((Inclusive & 2) ? Wide : 0.5f) && OffX < ((Inclusive & 8) ? Wide : 0.5f);
+    return AlongX || AlongY;
 }
 
-/* Aliased lines: a pixel is drawn when the line leaves its diamond, so the last pixel is left for the next line */
+/* Aliased lines: the diamond exit rule, with the last pixel left for the next line */
 VOID
 RxWarpDraw::RasterizeLine(
     _In_ const RX_WARP_VERTEX *A,
@@ -1271,6 +1334,8 @@ RxWarpDraw::RasterizeLine(
     INT64 Fy0;
     INT64 Fx1;
     INT64 Fy1;
+    FLOAT Line[4];
+    UINT Inclusive;
 
     ToScreen(A, &Corner[0]);
     ToScreen(B, &Corner[1]);
@@ -1318,13 +1383,14 @@ RxWarpDraw::RasterizeLine(
     Fy0 = Corner[0].Y;
     Fx1 = Corner[1].X;
     Fy1 = Corner[1].Y;
+    RxWarpLineCoverage(X0, X1, Y0, Y1, Line, &Inclusive);
     PointSprite = FALSE;
     Triangle = FALSE;
     Cover((INT)(((Fx0 < Fx1) ? Fx0 : Fx1) >> 8) - 1, (INT)(((Fy0 < Fy1) ? Fy0 : Fy1) >> 8) - 1,
           (INT)((((Fx0 > Fx1) ? Fx0 : Fx1) + 255) >> 8), (INT)((((Fy0 > Fy1) ? Fy0 : Fy1) + 255) >> 8), FALSE,
           [=](INT64 Sx, INT64 Sy)
           {
-              return RxWarpSegmentMeetsDiamond(Fx0, Fy0, Fx1, Fy1, Sx, Sy) && !RxWarpInDiamond(Fx1, Fy1, Sx, Sy);
+              return RxWarpLineCovers(Line, Inclusive, (FLOAT)Sx * (1.0f / 256.0f), (FLOAT)Sy * (1.0f / 256.0f));
           });
 }
 
