@@ -234,6 +234,7 @@ RxWarpShader::Initialize(
         Cursor = Position + 1;
 
         Instruction.Opcode = (UINT16)Opcode;
+        Instruction.Control = Token;
         Instruction.Saturate = DECODE_IS_D3D10_SB_INSTRUCTION_SATURATE_ENABLED(Token) ? 1 : 0;
         Instruction.NonZero = (DECODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(Token) == D3D10_SB_INSTRUCTION_TEST_NONZERO);
         Instruction.ReturnType = (UINT8)DECODE_D3D10_SB_RESINFO_INSTRUCTION_RETURN_TYPE(Token);
@@ -346,6 +347,75 @@ RxWarpShader::Initialize(
                     ResourceReturn[Operand.Index[0].Immediate] = (Cursor < End) ? Code[Cursor] : 0;
                 }
                 break;
+            case D3D11_SB_OPCODE_DCL_THREAD_GROUP:
+                GroupSize[0] = Code[Cursor];
+                GroupSize[1] = Code[Cursor + 1];
+                GroupSize[2] = Code[Cursor + 2];
+                break;
+            case D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_RAW:
+            case D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_STRUCTURED:
+            {
+                RX_WARP_SHARED Region = {};
+                UINT Register;
+
+                if (!RxWarpDecodeOperand(Code, End, &Cursor, &Operand))
+                    return E_INVALIDARG;
+                Register = Operand.Index[0].Immediate;
+                if (Opcode == D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_RAW)
+                {
+                    Region.Size = Code[Cursor];
+                }
+                else
+                {
+                    Region.Stride = Code[Cursor];
+                    Region.Size = Code[Cursor] * Code[Cursor + 1];
+                }
+                Region.Offset = SharedBytes;
+                SharedBytes += (Region.Size + 15) & ~15u;
+                if (Register >= Shared.size())
+                    Shared.resize(Register + 1);
+                Shared[Register] = Region;
+                break;
+            }
+            case D3D11_SB_OPCODE_DCL_RESOURCE_STRUCTURED:
+            case D3D11_SB_OPCODE_DCL_RESOURCE_RAW:
+                if (!RxWarpDecodeOperand(Code, End, &Cursor, &Operand))
+                    return E_INVALIDARG;
+                if (Operand.Index[0].Immediate < 128)
+                {
+                    BOOLEAN Structured = (Opcode == D3D11_SB_OPCODE_DCL_RESOURCE_STRUCTURED);
+
+                    ResourceDimension[Operand.Index[0].Immediate] = Structured ? D3D11_SB_RESOURCE_DIMENSION_STRUCTURED_BUFFER :
+                                                                                 D3D11_SB_RESOURCE_DIMENSION_RAW_BUFFER;
+                    ResourceStride[Operand.Index[0].Immediate] = Structured ? Code[Cursor] : 0;
+                }
+                break;
+            case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_TYPED:
+            case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW:
+            case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_STRUCTURED:
+            {
+                UINT Register;
+
+                if (!RxWarpDecodeOperand(Code, End, &Cursor, &Operand))
+                    return E_INVALIDARG;
+                Register = Operand.Index[0].Immediate;
+                if (Register >= 64)
+                    break;
+                if (Opcode == D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_TYPED)
+                {
+                    UavDimension[Register] = DECODE_D3D10_SB_RESOURCE_DIMENSION(Token);
+                }
+                else if (Opcode == D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW)
+                {
+                    UavDimension[Register] = D3D11_SB_RESOURCE_DIMENSION_RAW_BUFFER;
+                }
+                else
+                {
+                    UavDimension[Register] = D3D11_SB_RESOURCE_DIMENSION_STRUCTURED_BUFFER;
+                    UavStride[Register] = Code[Cursor];
+                }
+                break;
+            }
             case D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER:
             case D3D10_SB_OPCODE_DCL_SAMPLER:
             case D3D10_SB_OPCODE_DCL_GLOBAL_FLAGS:
@@ -353,14 +423,6 @@ RxWarpShader::Initialize(
             case D3D10_SB_OPCODE_DCL_GS_INPUT_PRIMITIVE:
             case D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
             case D3D10_SB_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT:
-            case D3D11_SB_OPCODE_DCL_THREAD_GROUP:
-            case D3D11_SB_OPCODE_DCL_RESOURCE_RAW:
-            case D3D11_SB_OPCODE_DCL_RESOURCE_STRUCTURED:
-            case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_TYPED:
-            case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW:
-            case D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_STRUCTURED:
-            case D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_RAW:
-            case D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_STRUCTURED:
             case D3D11_SB_OPCODE_DCL_STREAM:
             case D3D11_SB_OPCODE_DCL_GS_INSTANCE_COUNT:
                 break;

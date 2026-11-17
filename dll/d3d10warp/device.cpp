@@ -302,6 +302,18 @@ RxWarpDevice::Create(
 
         Funcs.pfnGenMips = RxWarpDdi::GenMips;
 
+        Funcs.pfnCreateComputeShader = RxWarpDdi::CreateComputeShader;
+        Funcs.pfnCsSetShader = RxWarpDdi::CsSetShader;
+        Funcs.pfnCsSetShaderResources = RxWarpDdi::CsSetShaderResources;
+        Funcs.pfnCsSetSamplers = RxWarpDdi::CsSetSamplers;
+        Funcs.pfnCsSetConstantBuffers = RxWarpDdi::CsSetConstantBuffers;
+        Funcs.pfnCsSetUnorderedAccessViews = RxWarpDdi::CsSetUnorderedAccessViews;
+        Funcs.pfnDispatch = RxWarpDdi::Dispatch;
+        Funcs.pfnDispatchIndirect = RxWarpDdi::DispatchIndirect;
+        Funcs.pfnCopyStructureCount = RxWarpDdi::CopyStructureCount;
+        Funcs.pfnDrawInstancedIndirect = RxWarpDdi::DrawInstancedIndirect;
+        Funcs.pfnDrawIndexedInstancedIndirect = RxWarpDdi::DrawIndexedInstancedIndirect;
+
         Funcs.pfnDraw = RxWarpDdi::Draw;
         Funcs.pfnDrawIndexed = RxWarpDdi::DrawIndexed;
         Funcs.pfnDrawInstanced = RxWarpDdi::DrawInstanced;

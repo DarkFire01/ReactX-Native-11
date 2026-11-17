@@ -228,26 +228,7 @@ RxWarpDraw::BindStage(
     _In_ RX_WARP_STAGE Stage,
     _Out_ RX_WARP_STAGE_BINDINGS *Bindings)
 {
-    RX_WARP_STAGE_STATE *State = &Pipeline->Stages[Stage];
-
-    ZeroMemory(Bindings, sizeof(*Bindings));
-    for (UINT Slot = 0; Slot < RxWarpConstantBufferSlots; Slot++)
-    {
-        RX_WARP_CONSTANT_BINDING *Binding = &State->ConstantBuffers[Slot];
-        UINT Available;
-
-        if (Binding->Resource == nullptr || Binding->Resource->Memory == nullptr)
-            continue;
-        Available = (UINT)(Binding->Resource->MemorySize / 16);
-        if (Binding->First >= Available)
-            continue;
-        Available -= Binding->First;
-        Bindings->ConstantBuffer[Slot] = Binding->Resource->Memory + (SIZE_T)Binding->First * 16;
-        Bindings->ConstantCount[Slot] = (Binding->Count < Available) ? Binding->Count : Available;
-    }
-    memcpy(Bindings->Views, State->Views, sizeof(Bindings->Views));
-    for (UINT Slot = 0; Slot < 16; Slot++)
-        Bindings->Samplers[Slot] = State->Samplers[Slot] ? &State->Samplers[Slot]->State : nullptr;
+    RxWarpBindStage(&Pipeline->Stages[Stage], Bindings);
 }
 
 /* Gathers state for the draw; FALSE when nothing can be drawn */
@@ -1714,4 +1695,43 @@ RxWarpDdi::DrawIndexedInstanced(
     RxWarpDraw Work(RxWarpGetDevice(Device));
 
     Work.Run(IndexCount, StartIndex, TRUE, BaseVertex, InstanceCount, StartInstance);
+}
+
+/* Arguments come from a buffer the GPU may have written: count, instances, start, then base and start instance */
+VOID
+APIENTRY
+RxWarpDdi::DrawInstancedIndirect(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ D3D10DDI_HRESOURCE Buffer,
+    _In_ UINT Offset)
+{
+    RxWarpLock Lock;
+    RxWarpResource *Arguments = RxWarpObject<RxWarpResource>(Buffer);
+    UINT Values[4];
+
+    if (Arguments == nullptr || Arguments->Memory == nullptr || (SIZE_T)Offset + sizeof(Values) > Arguments->MemorySize)
+        return;
+    memcpy(Values, Arguments->Memory + Offset, sizeof(Values));
+
+    RxWarpDraw Work(RxWarpGetDevice(Device));
+    Work.Run(Values[0], Values[2], FALSE, 0, Values[1], Values[3]);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::DrawIndexedInstancedIndirect(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ D3D10DDI_HRESOURCE Buffer,
+    _In_ UINT Offset)
+{
+    RxWarpLock Lock;
+    RxWarpResource *Arguments = RxWarpObject<RxWarpResource>(Buffer);
+    UINT Values[5];
+
+    if (Arguments == nullptr || Arguments->Memory == nullptr || (SIZE_T)Offset + sizeof(Values) > Arguments->MemorySize)
+        return;
+    memcpy(Values, Arguments->Memory + Offset, sizeof(Values));
+
+    RxWarpDraw Work(RxWarpGetDevice(Device));
+    Work.Run(Values[0], Values[2], TRUE, (INT)Values[3], Values[1], Values[4]);
 }

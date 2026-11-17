@@ -77,6 +77,7 @@ public:
     UINT FirstElement = 0;
     UINT ElementCount = 0;
     UINT Flags = 0;
+    UINT Counter = 0;           /* append and consume, and counter buffers */
 };
 
 class RxWarpBlendState
@@ -140,6 +141,7 @@ typedef struct _RX_WARP_STAGE_STATE
     RX_WARP_CONSTANT_BINDING ConstantBuffers[RxWarpConstantBufferSlots];
     RxWarpView *Views[128];
     RxWarpSampler *Samplers[16];
+    RxWarpView *Uavs[64];
 } RX_WARP_STAGE_STATE;
 
 /* Everything bound to the device that draws read */
@@ -228,6 +230,20 @@ public:
     BOOL PredicateValue = FALSE;
 };
 
+/* What a stage's shader sees, gathered from its bound state */
+VOID
+RxWarpBindStage(
+    _In_ const RX_WARP_STAGE_STATE *State,
+    _Out_ RX_WARP_STAGE_BINDINGS *Bindings);
+
+VOID
+RxWarpBindUavs(
+    _Inout_ RX_WARP_STAGE_STATE *State,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_opt_(Count) const D3D11DDI_HUNORDEREDACCESSVIEW *Views,
+    _In_reads_opt_(Count) const UINT *InitialCounts);
+
 /* DDI entry points, grouped by the file that implements them */
 namespace RxWarpDdi
 {
@@ -309,7 +325,20 @@ namespace RxWarpDdi
     VOID APIENTRY QueryGetData(D3D10DDI_HDEVICE, D3D10DDI_HQUERY, VOID *, UINT, UINT);
     VOID APIENTRY SetPredication(D3D10DDI_HDEVICE, D3D10DDI_HQUERY, BOOL);
 
+    /* compute.cpp */
+    VOID APIENTRY CreateComputeShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER);
+    VOID APIENTRY CsSetShader(D3D10DDI_HDEVICE, D3D10DDI_HSHADER);
+    VOID APIENTRY CsSetShaderResources(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSHADERRESOURCEVIEW *);
+    VOID APIENTRY CsSetSamplers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSAMPLER *);
+    VOID APIENTRY CsSetConstantBuffers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HRESOURCE *, const UINT *, const UINT *);
+    VOID APIENTRY CsSetUnorderedAccessViews(D3D10DDI_HDEVICE, UINT, UINT, const D3D11DDI_HUNORDEREDACCESSVIEW *, const UINT *);
+    VOID APIENTRY Dispatch(D3D10DDI_HDEVICE, UINT, UINT, UINT);
+    VOID APIENTRY DispatchIndirect(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT);
+    VOID APIENTRY CopyStructureCount(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT, D3D11DDI_HUNORDEREDACCESSVIEW);
+
     /* draw.cpp */
+    VOID APIENTRY DrawInstancedIndirect(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT);
+    VOID APIENTRY DrawIndexedInstancedIndirect(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT);
     VOID APIENTRY Draw(D3D10DDI_HDEVICE, UINT, UINT);
     VOID APIENTRY DrawIndexed(D3D10DDI_HDEVICE, UINT, UINT, INT);
     VOID APIENTRY DrawInstanced(D3D10DDI_HDEVICE, UINT, UINT, UINT, UINT);

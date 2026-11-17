@@ -51,8 +51,30 @@ typedef struct _RX_WARP_INSTRUCTION
     INT8 Offset[3];             /* texel offsets from the extended opcode */
     UINT Target;                /* matching else, endif, endloop or endswitch */
     UINT Extra;                 /* loop start, switch case list */
+    UINT Control;               /* the opcode token, for flags like the sync kind */
     RX_WARP_OPERAND Operands[RxWarpMaxOperands];
 } RX_WARP_INSTRUCTION;
+
+/* Block bookkeeping for structured flow; masks hold one bit per lane */
+typedef struct _RX_WARP_FRAME
+{
+    UINT16 Opcode;
+    UINT Start;             /* first instruction of a loop body */
+    UINT Saved;             /* lanes running when the block began */
+    UINT Else;              /* lanes for the else branch */
+    UINT Removed;           /* lanes that left through break or continue of an outer block */
+    UINT Continued;         /* loop lanes waiting for the next iteration */
+    UINT Selector;          /* switch: index into the case lists */
+    UINT Matched;           /* switch: lanes that already took a case */
+} RX_WARP_FRAME;
+
+/* Thread group shared memory g#: bytes, and the structure stride when structured */
+typedef struct _RX_WARP_SHARED
+{
+    UINT Offset;
+    UINT Size;
+    UINT Stride;
+} RX_WARP_SHARED;
 
 typedef struct _RX_WARP_INDEXABLE
 {
@@ -86,6 +108,12 @@ public:
     UINT PositionInput = UINT_MAX;
     UINT ResourceDimension[128] = {};
     UINT ResourceReturn[128] = {};
+    UINT ResourceStride[128] = {};
+    UINT UavDimension[64] = {};
+    UINT UavStride[64] = {};
+    UINT GroupSize[3] = { 1, 1, 1 };
+    std::vector<RX_WARP_SHARED> Shared;
+    UINT SharedBytes = 0;
     BOOLEAN WritesDepth = FALSE;
     BOOLEAN Discards = FALSE;
 };
@@ -102,6 +130,7 @@ typedef struct _RX_WARP_STAGE_BINDINGS
     UINT ConstantCount[RxWarpConstantBufferSlots];
     RxWarpView *Views[128];
     const RX_WARP_SAMPLER *Samplers[16];
+    RxWarpView *Uavs[64];
 } RX_WARP_STAGE_BINDINGS;
 
 /* One run of a program over four lanes */
@@ -116,6 +145,13 @@ public:
     Run(
         _In_ const RxWarpShader *Shader,
         _In_ const RX_WARP_STAGE_BINDINGS *Bindings);
+
+    /* Starts or continues the program; TRUE when it stopped at a group barrier */
+    BOOLEAN
+    Resume(
+        _In_ const RxWarpShader *Shader,
+        _In_ const RX_WARP_STAGE_BINDINGS *Bindings,
+        _In_ BOOLEAN Restart);
 
     UINT *
     Input(
@@ -142,4 +178,17 @@ public:
     UINT Discarded = 0;
     std::vector<UINT> Temps;
     std::vector<UINT> IndexableStorage;
+
+    /* Compute: the group, each lane's place in it, and the group's shared memory */
+    UINT GroupId[3] = {};
+    UINT ThreadInGroup[RxWarpLanes][3] = {};
+    UINT ThreadId[RxWarpLanes][3] = {};
+    UINT Flattened[RxWarpLanes] = {};
+    BYTE *SharedMemory = nullptr;
+
+    /* Where the program stands, so it can stop at a barrier and continue */
+    std::vector<RX_WARP_FRAME> Frames;
+    UINT Active = 0;
+    UINT Dead = 0;
+    UINT Next = 0;
 };

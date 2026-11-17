@@ -124,18 +124,17 @@ RxWarpFirstLow(
     return UINT_MAX;
 }
 
-/* Block bookkeeping for structured flow; masks hold one bit per lane */
-typedef struct _RX_WARP_FRAME
+
+/* Memory an instruction addresses by bytes: a buffer view, a texture view, or group shared memory */
+typedef struct _RX_WARP_REGION
 {
-    UINT16 Opcode;
-    UINT Start;             /* first instruction of a loop body */
-    UINT Saved;             /* lanes running when the block began */
-    UINT Else;              /* lanes for the else branch */
-    UINT Removed;           /* lanes that left through break or continue of an outer block */
-    UINT Continued;         /* loop lanes waiting for the next iteration */
-    UINT Selector;          /* switch: index into the shader's case lists */
-    UINT Matched;           /* switch: lanes that already took a case */
-} RX_WARP_FRAME;
+    BYTE *Data;
+    SIZE_T Size;
+    UINT Stride;
+    RxWarpView *View;
+    UINT Dimension;
+    BOOLEAN Typed;
+} RX_WARP_REGION;
 
 class RxWarpMachine
 {
@@ -144,11 +143,13 @@ public:
         _In_ const RxWarpShader *Program,
         _In_ RxWarpInvocation *Context,
         _In_ const RX_WARP_STAGE_BINDINGS *Stage)
-        : Shader(Program), Invocation(Context), Bindings(Stage)
+        : Shader(Program), Invocation(Context), Bindings(Stage), Frames(Context->Frames), Active(Context->Active),
+          Dead(Context->Dead), Next(Context->Next)
     {
     }
 
-    VOID
+    /* Runs until the end, or until a barrier that the whole group waits on; TRUE at a barrier */
+    BOOLEAN
     Execute(VOID);
 
 private:
@@ -201,13 +202,22 @@ private:
     Texture(
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
+    VOID
+    Access(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    BOOLEAN
+    Region(
+        _In_ const RX_WARP_OPERAND &Operand,
+        _Out_ RX_WARP_REGION *Region);
+
     const RxWarpShader *Shader;
     RxWarpInvocation *Invocation;
     const RX_WARP_STAGE_BINDINGS *Bindings;
-    std::vector<RX_WARP_FRAME> Frames;
-    UINT Active = 0;
-    UINT Dead = 0;
-    UINT Next = 0;
+    std::vector<RX_WARP_FRAME> &Frames;
+    UINT &Active;
+    UINT &Dead;
+    UINT &Next;
     UINT Zero[4] = {};
     UINT Scratch[4] = {};
 };
@@ -303,6 +313,25 @@ RxWarpMachine::Locate(
         case D3D11_SB_OPERAND_TYPE_INPUT_COVERAGE_MASK:
             *Writable = FALSE;
             Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = 1;
+            return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID:
+            *Writable = FALSE;
+            memcpy(Scratch, Invocation->ThreadId[Lane], 3 * sizeof(UINT));
+            Scratch[3] = 0;
+            return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_THREAD_GROUP_ID:
+            *Writable = FALSE;
+            memcpy(Scratch, Invocation->GroupId, 3 * sizeof(UINT));
+            Scratch[3] = 0;
+            return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID_IN_GROUP:
+            *Writable = FALSE;
+            memcpy(Scratch, Invocation->ThreadInGroup[Lane], 3 * sizeof(UINT));
+            Scratch[3] = 0;
+            return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID_IN_GROUP_FLATTENED:
+            *Writable = FALSE;
+            Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = Invocation->Flattened[Lane];
             return Scratch;
         default:
             break;
@@ -447,13 +476,10 @@ RxWarpMachine::Leave(
     Active &= ~Lanes;
 }
 
-VOID
+BOOLEAN
 RxWarpMachine::Execute(VOID)
 {
     const std::vector<RX_WARP_INSTRUCTION> &Program = Shader->Program;
-
-    Active = Invocation->Live | Invocation->Helper;
-    Next = 0;
 
     while (Next < Program.size())
     {
@@ -597,7 +623,10 @@ RxWarpMachine::Execute(VOID)
             }
             case D3D10_SB_OPCODE_RET:
                 if (Frames.empty())
-                    return;
+                {
+                    Next = (UINT)Program.size();
+                    return FALSE;
+                }
                 Dead |= Active;
                 Active = 0;
                 break;
@@ -632,12 +661,47 @@ RxWarpMachine::Execute(VOID)
                 if (Active != 0)
                     Texture(Instruction);
                 break;
+            case D3D11_SB_OPCODE_SYNC:
+                if (DECODE_D3D11_SB_SYNC_FLAGS(Instruction.Control) & D3D11_SB_SYNC_THREADS_IN_GROUP)
+                    return TRUE;
+                break;
+            case D3D11_SB_OPCODE_LD_RAW:
+            case D3D11_SB_OPCODE_LD_STRUCTURED:
+            case D3D11_SB_OPCODE_STORE_RAW:
+            case D3D11_SB_OPCODE_STORE_STRUCTURED:
+            case D3D11_SB_OPCODE_LD_UAV_TYPED:
+            case D3D11_SB_OPCODE_STORE_UAV_TYPED:
+            case D3D11_SB_OPCODE_ATOMIC_AND:
+            case D3D11_SB_OPCODE_ATOMIC_OR:
+            case D3D11_SB_OPCODE_ATOMIC_XOR:
+            case D3D11_SB_OPCODE_ATOMIC_CMP_STORE:
+            case D3D11_SB_OPCODE_ATOMIC_IADD:
+            case D3D11_SB_OPCODE_ATOMIC_IMAX:
+            case D3D11_SB_OPCODE_ATOMIC_IMIN:
+            case D3D11_SB_OPCODE_ATOMIC_UMAX:
+            case D3D11_SB_OPCODE_ATOMIC_UMIN:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_CONSUME:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_IADD:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_AND:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_OR:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_XOR:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_EXCH:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_IMAX:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_IMIN:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_UMAX:
+            case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:
+                if (Active != 0)
+                    Access(Instruction);
+                break;
             default:
                 if (Active != 0)
                     Arithmetic(Instruction);
                 break;
         }
     }
+    return FALSE;
 }
 
 /* Per component float operation over the masked components of every running lane */
@@ -1176,7 +1240,28 @@ RxWarpMachine::Texture(
     }
 
     if (Opcode == D3D11_SB_OPCODE_BUFINFO)
+    {
+        RX_WARP_REGION Memory;
+        UINT Count = 0;
+
+        if (Instruction.OperandCount < 2)
+            return;
+        Resource = &Instruction.Operands[1];
+        if (Region(*Resource, &Memory) && Memory.View != nullptr)
+        {
+            if (Memory.Dimension == D3D11_SB_RESOURCE_DIMENSION_RAW_BUFFER)
+                Count = (UINT)Memory.Size;
+            else
+                Count = Memory.View->ElementCount;
+        }
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        {
+            for (UINT Component = 0; Component < 4; Component++)
+                Result[Lane][Component] = Count;
+        }
+        Store(Instruction, 0, Result, FALSE);
         return;
+    }
 
     if (Instruction.OperandCount < 3)
         return;
@@ -1291,12 +1376,454 @@ RxWarpInvocation::Prepare(
     Discarded = 0;
 }
 
+/* Bytes per element of a buffer view: four for raw views, the stride for structured ones, else the format */
+static
+UINT
+RxWarpElementBytes(
+    _In_ RxWarpView *View,
+    _In_ UINT Stride,
+    _In_ BOOLEAN Raw)
+{
+    const RX_WARP_FORMAT_INFO *Info;
+
+    if (Raw)
+        return 4;
+    if (Stride != 0)
+        return Stride;
+    if (View->Resource->ByteStride != 0 && View->Format == DXGI_FORMAT_UNKNOWN)
+        return View->Resource->ByteStride;
+    Info = RxWarpFormatInfo(View->Format);
+    return (Info != nullptr && Info->Bytes != 0) ? Info->Bytes : 4;
+}
+
+BOOLEAN
+RxWarpMachine::Region(
+    _In_ const RX_WARP_OPERAND &Operand,
+    _Out_ RX_WARP_REGION *Region)
+{
+    UINT Slot = Operand.Index[0].Immediate;
+    RxWarpView *View;
+    BOOLEAN Raw;
+    BOOLEAN Structured;
+    UINT Bytes;
+    SIZE_T Start;
+
+    ZeroMemory(Region, sizeof(*Region));
+    if (Operand.Type == D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY)
+    {
+        if (Slot >= Shader->Shared.size() || Invocation->SharedMemory == nullptr)
+            return FALSE;
+        Region->Data = Invocation->SharedMemory + Shader->Shared[Slot].Offset;
+        Region->Size = Shader->Shared[Slot].Size;
+        Region->Stride = Shader->Shared[Slot].Stride;
+        return TRUE;
+    }
+
+    if (Operand.Type == D3D11_SB_OPERAND_TYPE_UNORDERED_ACCESS_VIEW && Slot < 64)
+    {
+        View = Bindings->Uavs[Slot];
+        Region->Dimension = Shader->UavDimension[Slot];
+        Region->Stride = Shader->UavStride[Slot];
+    }
+    else if (Operand.Type == D3D10_SB_OPERAND_TYPE_RESOURCE && Slot < 128)
+    {
+        View = Bindings->Views[Slot];
+        Region->Dimension = Shader->ResourceDimension[Slot];
+        Region->Stride = Shader->ResourceStride[Slot];
+    }
+    else
+    {
+        return FALSE;
+    }
+    if (View == nullptr || View->Resource == nullptr || View->Resource->Memory == nullptr)
+        return FALSE;
+
+    Region->View = View;
+    Raw = (Region->Dimension == D3D11_SB_RESOURCE_DIMENSION_RAW_BUFFER);
+    Structured = (Region->Dimension == D3D11_SB_RESOURCE_DIMENSION_STRUCTURED_BUFFER);
+    Region->Typed = !Raw && !Structured;
+    if (Region->Typed && View->Resource->Dimension != D3D10DDIRESOURCE_BUFFER)
+        return TRUE;
+
+    Bytes = RxWarpElementBytes(View, Region->Stride, Raw);
+    if (Structured && Region->Stride == 0)
+        Region->Stride = Bytes;
+    Start = (SIZE_T)View->FirstElement * Bytes;
+    if (Start > View->Resource->MemorySize)
+        return FALSE;
+    Region->Data = View->Resource->Memory + Start;
+    Region->Size = (SIZE_T)View->ElementCount * Bytes;
+    if (Region->Size > View->Resource->MemorySize - Start)
+        Region->Size = View->Resource->MemorySize - Start;
+    return TRUE;
+}
+
+/* The element of a typed view that an integer address names, or null outside the view */
+static
+BYTE *
+RxWarpTypedElement(
+    _In_ const RX_WARP_REGION *Region,
+    _In_reads_(4) const UINT *Address,
+    _Out_ UINT *Bytes)
+{
+    RxWarpView *View = Region->View;
+    RxWarpResource *Resource = View->Resource;
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(View->Format);
+    RX_WARP_SUBRESOURCE *Sub;
+    UINT X = Address[0];
+    UINT Y = 0;
+    UINT Z = 0;
+    UINT Slice = 0;
+
+    *Bytes = 0;
+    if (Info == nullptr || Info->Bytes == 0)
+        return nullptr;
+    *Bytes = Info->Bytes;
+
+    if (Resource->Dimension == D3D10DDIRESOURCE_BUFFER)
+    {
+        SIZE_T Offset = (SIZE_T)X * Info->Bytes;
+
+        if (Region->Data == nullptr || X >= View->ElementCount || Offset + Info->Bytes > Region->Size)
+            return nullptr;
+        return Region->Data + Offset;
+    }
+
+    switch (Region->Dimension)
+    {
+        case D3D10_SB_RESOURCE_DIMENSION_TEXTURE1DARRAY:
+            Slice = Address[1];
+            break;
+        case D3D10_SB_RESOURCE_DIMENSION_TEXTURE2D:
+            Y = Address[1];
+            break;
+        case D3D10_SB_RESOURCE_DIMENSION_TEXTURE2DARRAY:
+            Y = Address[1];
+            Slice = Address[2];
+            break;
+        case D3D10_SB_RESOURCE_DIMENSION_TEXTURE3D:
+            Y = Address[1];
+            Z = Address[2];
+            break;
+        default:
+            break;
+    }
+
+    if (Resource->Dimension == D3D10DDIRESOURCE_TEXTURE3D)
+    {
+        Sub = Resource->Subresource(View->MipSlice);
+        Z += View->FirstSlice;
+        if (Sub == nullptr || Z >= Sub->Depth || Z >= View->FirstSlice + View->SliceCount)
+            return nullptr;
+    }
+    else
+    {
+        if (Slice >= (View->SliceCount ? View->SliceCount : 1))
+            return nullptr;
+        Sub = Resource->Subresource((View->FirstSlice + Slice) * Resource->MipLevels + View->MipSlice);
+    }
+    if (Sub == nullptr || X >= Sub->Width || Y >= Sub->Height)
+        return nullptr;
+    return Resource->Memory + Sub->Offset + (SIZE_T)Z * Sub->DepthPitch + (SIZE_T)Y * Sub->RowPitch + (SIZE_T)X * Info->Bytes;
+}
+
+/* The DWORD an atomic works on: raw byte offset, structure and offset, or a typed element */
+static
+UINT *
+RxWarpAtomicTarget(
+    _In_ const RX_WARP_REGION *Region,
+    _In_reads_(4) const UINT *Address)
+{
+    SIZE_T Offset;
+    UINT Bytes;
+
+    if (Region->Typed && Region->View != nullptr)
+    {
+        BYTE *Element = RxWarpTypedElement(Region, Address, &Bytes);
+
+        return (Element != nullptr && Bytes == 4) ? (UINT *)Element : nullptr;
+    }
+    Offset = (Region->Stride != 0) ? (SIZE_T)Address[0] * Region->Stride + Address[1] : Address[0];
+    if (Region->Data == nullptr || (Offset & 3) != 0 || Offset + 4 > Region->Size)
+        return nullptr;
+    return (UINT *)(Region->Data + Offset);
+}
+
+static
+UINT
+RxWarpAtomicApply(
+    _In_ UINT Opcode,
+    _In_ UINT Old,
+    _In_ UINT Value,
+    _In_ UINT Compare,
+    _Out_ BOOLEAN *Write)
+{
+    *Write = TRUE;
+    switch (Opcode)
+    {
+        case D3D11_SB_OPCODE_ATOMIC_AND:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_AND:
+            return Old & Value;
+        case D3D11_SB_OPCODE_ATOMIC_OR:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_OR:
+            return Old | Value;
+        case D3D11_SB_OPCODE_ATOMIC_XOR:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_XOR:
+            return Old ^ Value;
+        case D3D11_SB_OPCODE_ATOMIC_IADD:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_IADD:
+            return Old + Value;
+        case D3D11_SB_OPCODE_ATOMIC_IMAX:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_IMAX:
+            return ((INT)Value > (INT)Old) ? Value : Old;
+        case D3D11_SB_OPCODE_ATOMIC_IMIN:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_IMIN:
+            return ((INT)Value < (INT)Old) ? Value : Old;
+        case D3D11_SB_OPCODE_ATOMIC_UMAX:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_UMAX:
+            return (Value > Old) ? Value : Old;
+        case D3D11_SB_OPCODE_ATOMIC_UMIN:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:
+            return (Value < Old) ? Value : Old;
+        case D3D11_SB_OPCODE_IMM_ATOMIC_EXCH:
+            return Value;
+        case D3D11_SB_OPCODE_ATOMIC_CMP_STORE:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH:
+            *Write = (Old == Compare);
+            return Value;
+        default:
+            *Write = FALSE;
+            return Old;
+    }
+}
+
+VOID
+RxWarpMachine::Access(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Result = {};
+    RX_WARP_LANE_VALUES First = {};
+    RX_WARP_LANE_VALUES Second = {};
+    RX_WARP_LANE_VALUES Third = {};
+    RX_WARP_REGION Memory;
+    UINT Opcode = Instruction.Opcode;
+    const RX_WARP_OPERAND *Target;
+
+    /* Helper lanes only exist for derivatives and must not change memory */
+    UINT Writers = Active & Invocation->Live;
+
+    switch (Opcode)
+    {
+        case D3D11_SB_OPCODE_LD_RAW:
+        case D3D11_SB_OPCODE_LD_STRUCTURED:
+        {
+            BOOLEAN Structured = (Opcode == D3D11_SB_OPCODE_LD_STRUCTURED);
+
+            Target = &Instruction.Operands[Structured ? 3 : 2];
+            if (!Region(*Target, &Memory))
+            {
+                Store(Instruction, 0, Result, FALSE);
+                return;
+            }
+            FetchAll(Instruction.Operands[1], TRUE, First);
+            if (Structured)
+                FetchAll(Instruction.Operands[2], TRUE, Second);
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                SIZE_T Offset = Structured ? (SIZE_T)First[Lane][0] * Memory.Stride + Second[Lane][0] : First[Lane][0];
+                UINT Raw[4] = {};
+
+                if (!(Active & (1u << Lane)))
+                    continue;
+                for (UINT Component = 0; Component < 4; Component++)
+                {
+                    SIZE_T At = Offset + (SIZE_T)Component * 4;
+
+                    if (Memory.Data != nullptr && At + 4 <= Memory.Size)
+                        memcpy(&Raw[Component], Memory.Data + At, 4);
+                }
+                for (UINT Component = 0; Component < 4; Component++)
+                    Result[Lane][Component] = Raw[Target->Swizzle[Component] & 3];
+            }
+            Store(Instruction, 0, Result, FALSE);
+            return;
+        }
+        case D3D11_SB_OPCODE_STORE_RAW:
+        case D3D11_SB_OPCODE_STORE_STRUCTURED:
+        {
+            BOOLEAN Structured = (Opcode == D3D11_SB_OPCODE_STORE_STRUCTURED);
+            const RX_WARP_OPERAND &Value = Instruction.Operands[Structured ? 3 : 2];
+
+            Target = &Instruction.Operands[0];
+            if (!Region(*Target, &Memory) || Memory.Data == nullptr)
+                return;
+            FetchAll(Instruction.Operands[1], TRUE, First);
+            if (Structured)
+                FetchAll(Instruction.Operands[2], TRUE, Second);
+            FetchAll(Value, TRUE, Third);
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                SIZE_T Offset = Structured ? (SIZE_T)First[Lane][0] * Memory.Stride + Second[Lane][0] : First[Lane][0];
+
+                if (!(Writers & (1u << Lane)))
+                    continue;
+                for (UINT Component = 0; Component < 4; Component++)
+                {
+                    SIZE_T At = Offset + (SIZE_T)Component * 4;
+
+                    if ((Target->Mask & (1u << Component)) && At + 4 <= Memory.Size)
+                        memcpy(Memory.Data + At, &Third[Lane][Component], 4);
+                }
+            }
+            return;
+        }
+        case D3D11_SB_OPCODE_LD_UAV_TYPED:
+            Target = &Instruction.Operands[2];
+            if (!Region(*Target, &Memory))
+            {
+                Store(Instruction, 0, Result, FALSE);
+                return;
+            }
+            FetchAll(Instruction.Operands[1], TRUE, First);
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                BYTE Element[16] = {};
+                UINT Raw[4] = {};
+                UINT Bytes;
+                BYTE *Texel;
+
+                if (!(Active & (1u << Lane)))
+                    continue;
+                Texel = RxWarpTypedElement(&Memory, First[Lane], &Bytes);
+                if (Texel != nullptr)
+                {
+                    memcpy(Element, Texel, (Bytes <= 16) ? Bytes : 16);
+                    RxWarpDecodeTexel(Memory.View->Format, Element, Raw);
+                }
+                for (UINT Component = 0; Component < 4; Component++)
+                    Result[Lane][Component] = Raw[Target->Swizzle[Component] & 3];
+            }
+            Store(Instruction, 0, Result, FALSE);
+            return;
+        case D3D11_SB_OPCODE_STORE_UAV_TYPED:
+            Target = &Instruction.Operands[0];
+            if (!Region(*Target, &Memory))
+                return;
+            FetchAll(Instruction.Operands[1], TRUE, First);
+            FetchAll(Instruction.Operands[2], TRUE, Second);
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                BYTE Element[16];
+                UINT Bytes;
+                BYTE *Texel;
+                BOOLEAN Encoded;
+
+                if (!(Writers & (1u << Lane)))
+                    continue;
+                Texel = RxWarpTypedElement(&Memory, First[Lane], &Bytes);
+                if (Texel == nullptr)
+                    continue;
+                if (RxWarpFormatIsInteger(Memory.View->Format))
+                    Encoded = RxWarpEncodeUint(Memory.View->Format, Second[Lane], Element);
+                else
+                    Encoded = RxWarpEncodeColor(Memory.View->Format, (const FLOAT *)Second[Lane], Element);
+                if (Encoded)
+                    memcpy(Texel, Element, Bytes);
+            }
+            return;
+        case D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_CONSUME:
+            Target = &Instruction.Operands[1];
+            if (!Region(*Target, &Memory))
+                return;
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                if (!(Writers & (1u << Lane)))
+                    continue;
+                if (Opcode == D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC)
+                {
+                    Result[Lane][0] = Memory.View->Counter++;
+                }
+                else
+                {
+                    Memory.View->Counter--;
+                    Result[Lane][0] = Memory.View->Counter;
+                }
+                Result[Lane][1] = Result[Lane][2] = Result[Lane][3] = Result[Lane][0];
+            }
+            Store(Instruction, 0, Result, FALSE);
+            return;
+        default:
+        {
+            /* Atomics: the immediate forms return the old value through an extra first operand */
+            BOOLEAN Immediate = (Opcode >= D3D11_SB_OPCODE_IMM_ATOMIC_IADD);
+            UINT Base = Immediate ? 1 : 0;
+            BOOLEAN Compares = (Opcode == D3D11_SB_OPCODE_ATOMIC_CMP_STORE || Opcode == D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH);
+
+            Target = &Instruction.Operands[Base];
+            if (!Region(*Target, &Memory))
+            {
+                if (Immediate)
+                    Store(Instruction, 0, Result, FALSE);
+                return;
+            }
+            FetchAll(Instruction.Operands[Base + 1], TRUE, First);
+            if (Compares)
+            {
+                FetchAll(Instruction.Operands[Base + 2], TRUE, Third);
+                FetchAll(Instruction.Operands[Base + 3], TRUE, Second);
+            }
+            else
+            {
+                FetchAll(Instruction.Operands[Base + 2], TRUE, Second);
+            }
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                UINT *Word;
+                UINT Old;
+                UINT New;
+                BOOLEAN Write;
+
+                if (!(Writers & (1u << Lane)))
+                    continue;
+                Word = RxWarpAtomicTarget(&Memory, First[Lane]);
+                if (Word == nullptr)
+                    continue;
+                Old = *Word;
+                New = RxWarpAtomicApply(Opcode, Old, Second[Lane][0], Third[Lane][0], &Write);
+                if (Write)
+                    *Word = New;
+                Result[Lane][0] = Result[Lane][1] = Result[Lane][2] = Result[Lane][3] = Old;
+            }
+            if (Immediate)
+                Store(Instruction, 0, Result, FALSE);
+            return;
+        }
+    }
+}
+
+BOOLEAN
+RxWarpInvocation::Resume(
+    _In_ const RxWarpShader *Shader,
+    _In_ const RX_WARP_STAGE_BINDINGS *Bindings,
+    _In_ BOOLEAN Restart)
+{
+    RxWarpMachine Machine(Shader, this, Bindings);
+
+    if (Restart)
+    {
+        Frames.clear();
+        Active = Live | Helper;
+        Dead = 0;
+        Next = 0;
+    }
+    return Machine.Execute();
+}
+
 VOID
 RxWarpInvocation::Run(
     _In_ const RxWarpShader *Shader,
     _In_ const RX_WARP_STAGE_BINDINGS *Bindings)
 {
-    RxWarpMachine Machine(Shader, this, Bindings);
-
-    Machine.Execute();
+    Resume(Shader, Bindings, TRUE);
 }

@@ -257,8 +257,14 @@ RxWarpDdi::CreateUnorderedAccessView(
     _In_ D3D11DDI_HUNORDEREDACCESSVIEW View,
     _In_ D3D11DDI_HRTUNORDEREDACCESSVIEW RuntimeView)
 {
+    RxWarpLock Lock;
+    RxWarpView *Object;
+
     UNREFERENCED_PARAMETER(RuntimeView);
     RxWarpTargetView(Device, Args, View);
+    Object = RxWarpObject<RxWarpView>(View);
+    if (Object != nullptr && Args->ResourceDimension == D3D10DDIRESOURCE_BUFFER)
+        Object->Flags = Args->Buffer.Flags;
 }
 
 VOID
@@ -269,8 +275,14 @@ RxWarpDdi::CreateUnorderedAccessView2(
     _In_ D3D11DDI_HUNORDEREDACCESSVIEW View,
     _In_ D3D11DDI_HRTUNORDEREDACCESSVIEW RuntimeView)
 {
+    RxWarpLock Lock;
+    RxWarpView *Object;
+
     UNREFERENCED_PARAMETER(RuntimeView);
     RxWarpTargetView(Device, Args, View);
+    Object = RxWarpObject<RxWarpView>(View);
+    if (Object != nullptr && Args->ResourceDimension == D3D10DDIRESOURCE_BUFFER)
+        Object->Flags = Args->Buffer.Flags;
 }
 
 VOID

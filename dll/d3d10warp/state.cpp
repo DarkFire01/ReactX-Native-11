@@ -587,16 +587,41 @@ RxWarpDdi::SetRenderTargets(
     RX_WARP_PIPELINE *Pipeline = &RxWarpGetDevice(Device)->Pipeline;
 
     UNREFERENCED_PARAMETER(ClearCount);
-    UNREFERENCED_PARAMETER(Uavs);
-    UNREFERENCED_PARAMETER(InitialCounts);
-    UNREFERENCED_PARAMETER(UavStart);
-    UNREFERENCED_PARAMETER(UavCount);
     UNREFERENCED_PARAMETER(UavRangeStart);
     UNREFERENCED_PARAMETER(UavRangeSize);
+
+    /* Pixel shader UAVs share the output slots after the render targets */
+    RxWarpBindUavs(&Pipeline->Stages[RxWarpStagePixel], UavStart, UavCount, Uavs, InitialCounts);
 
     ZeroMemory(Pipeline->RenderTargets, sizeof(Pipeline->RenderTargets));
     for (UINT Index = 0; Index < Count && Index < 8; Index++)
         Pipeline->RenderTargets[Index] = RxWarpObject<RxWarpView>(Targets[Index]);
     Pipeline->RenderTargetCount = (Count < 8) ? Count : 8;
     Pipeline->DepthStencilView = RxWarpObject<RxWarpView>(DepthStencil);
+}
+
+VOID
+RxWarpBindStage(
+    _In_ const RX_WARP_STAGE_STATE *State,
+    _Out_ RX_WARP_STAGE_BINDINGS *Bindings)
+{
+    ZeroMemory(Bindings, sizeof(*Bindings));
+    for (UINT Slot = 0; Slot < RxWarpConstantBufferSlots; Slot++)
+    {
+        const RX_WARP_CONSTANT_BINDING *Binding = &State->ConstantBuffers[Slot];
+        UINT Available;
+
+        if (Binding->Resource == nullptr || Binding->Resource->Memory == nullptr)
+            continue;
+        Available = (UINT)(Binding->Resource->MemorySize / 16);
+        if (Binding->First >= Available)
+            continue;
+        Available -= Binding->First;
+        Bindings->ConstantBuffer[Slot] = Binding->Resource->Memory + (SIZE_T)Binding->First * 16;
+        Bindings->ConstantCount[Slot] = (Binding->Count < Available) ? Binding->Count : Available;
+    }
+    memcpy(Bindings->Views, State->Views, sizeof(Bindings->Views));
+    memcpy(Bindings->Uavs, State->Uavs, sizeof(Bindings->Uavs));
+    for (UINT Slot = 0; Slot < 16; Slot++)
+        Bindings->Samplers[Slot] = State->Samplers[Slot] ? &State->Samplers[Slot]->State : nullptr;
 }
