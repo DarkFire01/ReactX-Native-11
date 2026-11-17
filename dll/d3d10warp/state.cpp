@@ -719,6 +719,126 @@ RxWarpDdi::GsSetSamplers(
     RxWarpSetSamplers(Device, RxWarpStageGeometry, StartSlot, Count, Samplers);
 }
 
+VOID
+APIENTRY
+RxWarpDdi::CreateHullShader(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ const UINT *Code,
+    _In_ D3D10DDI_HSHADER Shader,
+    _In_ D3D10DDI_HRTSHADER RuntimeShader,
+    _In_ const D3D11_1DDIARG_TESSELLATION_IO_SIGNATURES *Signatures)
+{
+    RxWarpLock Lock;
+
+    UNREFERENCED_PARAMETER(RuntimeShader);
+    UNREFERENCED_PARAMETER(Signatures);
+    RxWarpCreateShader(Device, Code, Shader);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::HsSetShader(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ D3D10DDI_HSHADER Shader)
+{
+    RxWarpSetShader(Device, RxWarpStageHull, Shader);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::HsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HRESOURCE *Buffers,
+    _In_reads_opt_(Count) const UINT *First,
+    _In_reads_opt_(Count) const UINT *Constants)
+{
+    RxWarpSetConstantBuffers(Device, RxWarpStageHull, StartSlot, Count, Buffers, First, Constants);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::HsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HSHADERRESOURCEVIEW *Views)
+{
+    RxWarpSetViews(Device, RxWarpStageHull, StartSlot, Count, Views);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::HsSetSamplers(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HSAMPLER *Samplers)
+{
+    RxWarpSetSamplers(Device, RxWarpStageHull, StartSlot, Count, Samplers);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::CreateDomainShader(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ const UINT *Code,
+    _In_ D3D10DDI_HSHADER Shader,
+    _In_ D3D10DDI_HRTSHADER RuntimeShader,
+    _In_ const D3D11_1DDIARG_TESSELLATION_IO_SIGNATURES *Signatures)
+{
+    RxWarpLock Lock;
+
+    UNREFERENCED_PARAMETER(RuntimeShader);
+    UNREFERENCED_PARAMETER(Signatures);
+    RxWarpCreateShader(Device, Code, Shader);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::DsSetShader(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ D3D10DDI_HSHADER Shader)
+{
+    RxWarpSetShader(Device, RxWarpStageDomain, Shader);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::DsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HRESOURCE *Buffers,
+    _In_reads_opt_(Count) const UINT *First,
+    _In_reads_opt_(Count) const UINT *Constants)
+{
+    RxWarpSetConstantBuffers(Device, RxWarpStageDomain, StartSlot, Count, Buffers, First, Constants);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::DsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HSHADERRESOURCEVIEW *Views)
+{
+    RxWarpSetViews(Device, RxWarpStageDomain, StartSlot, Count, Views);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::DsSetSamplers(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HSAMPLER *Samplers)
+{
+    RxWarpSetSamplers(Device, RxWarpStageDomain, StartSlot, Count, Samplers);
+}
+
 /* Binds stream output buffers; an offset of all ones continues where the buffer was left */
 VOID
 APIENTRY

@@ -15,6 +15,7 @@ nt_add_usermode_dll(d3d10warp
         sample.cpp
         shader.cpp
         state.cpp
+        tess.cpp
         view.cpp
         warpmain.cpp)
 

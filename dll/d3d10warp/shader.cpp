@@ -193,19 +193,13 @@ RxWarpLinkBlocks(
     return Open.empty() ? S_OK : E_INVALIDARG;
 }
 
+/* Decodes the tokens in [Position, Length) into this program */
 HRESULT
-RxWarpShader::Initialize(
-    _In_ const UINT *Code)
+RxWarpShader::Decode(
+    _In_ const UINT *Code,
+    _In_ UINT Position,
+    _In_ UINT Length)
 {
-    UINT Length;
-    UINT Position = 2;
-
-    if (Code == nullptr)
-        return E_INVALIDARG;
-
-    Type = DECODE_D3D10_SB_TOKENIZED_PROGRAM_TYPE(Code[0]);
-    Length = DECODE_D3D10_SB_TOKENIZED_PROGRAM_LENGTH(Code[1]);
-
     while (Position < Length)
     {
         UINT Token = Code[Position];
@@ -334,9 +328,18 @@ RxWarpShader::Initialize(
                     OutputCount = Register + 1;
                 if (Opcode != D3D10_SB_OPCODE_DCL_OUTPUT && Cursor < End)
                 {
-                    OutputName[Register] = (UINT8)DECODE_D3D10_SB_NAME(Code[Cursor]);
-                    if (OutputName[Register] == D3D10_SB_NAME_POSITION)
+                    UINT Name = DECODE_D3D10_SB_NAME(Code[Cursor]);
+
+                    OutputName[Register] = (UINT8)Name;
+                    if (Name == D3D10_SB_NAME_POSITION)
                         PositionOutput = Register;
+                    if (Name >= D3D11_SB_NAME_FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR && Name <= D3D11_SB_NAME_FINAL_LINE_DENSITY_TESSFACTOR)
+                    {
+                        ULONG Component = 0;
+
+                        _BitScanForward(&Component, Operand.Mask ? Operand.Mask : 1);
+                        TessFactorSlot[Name - D3D11_SB_NAME_FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR] = Register * 4 + Component + 1;
+                    }
                 }
                 break;
             }
@@ -436,6 +439,28 @@ RxWarpShader::Initialize(
             case D3D11_SB_OPCODE_DCL_GS_INSTANCE_COUNT:
                 GsInstances = Code[Cursor] ? Code[Cursor] : 1;
                 break;
+            case D3D11_SB_OPCODE_DCL_INPUT_CONTROL_POINT_COUNT:
+                InputControlPoints = DECODE_D3D11_SB_INPUT_CONTROL_POINT_COUNT(Token);
+                break;
+            case D3D11_SB_OPCODE_DCL_OUTPUT_CONTROL_POINT_COUNT:
+                OutputControlPoints = DECODE_D3D11_SB_OUTPUT_CONTROL_POINT_COUNT(Token);
+                break;
+            case D3D11_SB_OPCODE_DCL_TESS_DOMAIN:
+                TessDomain = DECODE_D3D11_SB_TESS_DOMAIN(Token);
+                break;
+            case D3D11_SB_OPCODE_DCL_TESS_PARTITIONING:
+                TessPartitioning = DECODE_D3D11_SB_TESS_PARTITIONING(Token);
+                break;
+            case D3D11_SB_OPCODE_DCL_TESS_OUTPUT_PRIMITIVE:
+                TessOutput = DECODE_D3D11_SB_TESS_OUTPUT_PRIMITIVE(Token);
+                break;
+            case D3D11_SB_OPCODE_DCL_HS_FORK_PHASE_INSTANCE_COUNT:
+            case D3D11_SB_OPCODE_DCL_HS_JOIN_PHASE_INSTANCE_COUNT:
+                PhaseInstances = Code[Cursor];
+                break;
+            case D3D11_SB_OPCODE_DCL_HS_MAX_TESSFACTOR:
+            case D3D11_SB_OPCODE_HS_DECLS:
+                break;
             default:
             {
                 UINT Count = 0;
@@ -458,4 +483,77 @@ RxWarpShader::Initialize(
         Position = End;
     }
     return RxWarpLinkBlocks(this);
+}
+
+HRESULT
+RxWarpShader::Initialize(
+    _In_ const UINT *Code)
+{
+    std::vector<UINT> Marks;
+    std::vector<RxWarpShader> Built;
+    UINT Length;
+    HRESULT Status;
+
+    if (Code == nullptr)
+        return E_INVALIDARG;
+
+    Type = DECODE_D3D10_SB_TOKENIZED_PROGRAM_TYPE(Code[0]);
+    Length = DECODE_D3D10_SB_TOKENIZED_PROGRAM_LENGTH(Code[1]);
+
+    /* A hull shader is global declarations followed by phases, each starting at its marker token */
+    if (Type == D3D11_SB_HULL_SHADER)
+    {
+        for (UINT Position = 2; Position < Length;)
+        {
+            UINT Opcode = DECODE_D3D10_SB_OPCODE_TYPE(Code[Position]);
+            UINT Size;
+
+            if (Opcode == D3D10_SB_OPCODE_CUSTOMDATA)
+                Size = (Position + 1 < Length) ? Code[Position + 1] : 0;
+            else
+                Size = DECODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(Code[Position]);
+            if (Size == 0)
+                return E_INVALIDARG;
+            if (Opcode == D3D11_SB_OPCODE_HS_CONTROL_POINT_PHASE || Opcode == D3D11_SB_OPCODE_HS_FORK_PHASE ||
+                Opcode == D3D11_SB_OPCODE_HS_JOIN_PHASE)
+            {
+                Marks.push_back(Position);
+            }
+            Position += Size;
+        }
+    }
+    Marks.push_back(Length);
+
+    Status = Decode(Code, 2, Marks[0]);
+    if (FAILED(Status))
+        return Status;
+
+    for (SIZE_T Index = 0; Index + 1 < Marks.size(); Index++)
+    {
+        RxWarpShader Phase = *this;
+
+        Phase.PhaseKind = DECODE_D3D10_SB_OPCODE_TYPE(Code[Marks[Index]]);
+        Phase.PhaseInstances = 1;
+        Phase.TempCount = 0;
+        Phase.IndexableRegisters = 0;
+        Phase.Indexables.clear();
+        Phase.Program.clear();
+        Phase.SwitchCases.clear();
+        ZeroMemory(Phase.OutputMask, sizeof(Phase.OutputMask));
+        ZeroMemory(Phase.OutputName, sizeof(Phase.OutputName));
+        ZeroMemory(Phase.TessFactorSlot, sizeof(Phase.TessFactorSlot));
+        Phase.OutputCount = 0;
+        Phase.PositionOutput = UINT_MAX;
+        Status = Phase.Decode(Code, Marks[Index] + 1, Marks[Index + 1]);
+        if (FAILED(Status))
+            return Status;
+        for (UINT Slot = 0; Slot < 12; Slot++)
+        {
+            if (Phase.TessFactorSlot[Slot] != 0)
+                TessFactorSlot[Slot] = Phase.TessFactorSlot[Slot];
+        }
+        Built.push_back(std::move(Phase));
+    }
+    Phases = std::move(Built);
+    return S_OK;
 }

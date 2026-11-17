@@ -278,6 +278,16 @@ RxWarpDevice::Create(
         Funcs.pfnGsSetConstantBuffers = RxWarpDdi::GsSetConstantBuffers;
         Funcs.pfnGsSetShaderResources = RxWarpDdi::GsSetShaderResources;
         Funcs.pfnGsSetSamplers = RxWarpDdi::GsSetSamplers;
+        Funcs.pfnCreateHullShader = RxWarpDdi::CreateHullShader;
+        Funcs.pfnHsSetShader = RxWarpDdi::HsSetShader;
+        Funcs.pfnHsSetConstantBuffers = RxWarpDdi::HsSetConstantBuffers;
+        Funcs.pfnHsSetShaderResources = RxWarpDdi::HsSetShaderResources;
+        Funcs.pfnHsSetSamplers = RxWarpDdi::HsSetSamplers;
+        Funcs.pfnCreateDomainShader = RxWarpDdi::CreateDomainShader;
+        Funcs.pfnDsSetShader = RxWarpDdi::DsSetShader;
+        Funcs.pfnDsSetConstantBuffers = RxWarpDdi::DsSetConstantBuffers;
+        Funcs.pfnDsSetShaderResources = RxWarpDdi::DsSetShaderResources;
+        Funcs.pfnDsSetSamplers = RxWarpDdi::DsSetSamplers;
         Funcs.pfnSoSetTargets = RxWarpDdi::SoSetTargets;
         Funcs.pfnDrawAuto = RxWarpDdi::DrawAuto;
         Funcs.pfnDestroyShader = RxWarpDdi::DestroyShader;

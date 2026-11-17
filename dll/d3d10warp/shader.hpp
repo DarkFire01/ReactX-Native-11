@@ -100,6 +100,12 @@ public:
     Initialize(
         _In_ const UINT *Code);
 
+    HRESULT
+    Decode(
+        _In_ const UINT *Code,
+        _In_ UINT Position,
+        _In_ UINT Length);
+
     UINT Type = 0;              /* D3D10_SB_TOKENIZED_PROGRAM_TYPE */
     UINT TempCount = 0;
     UINT IndexableRegisters = 0;
@@ -135,6 +141,18 @@ public:
     std::vector<D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY> StreamDecl;
     UINT StreamStrides[4] = {};
     UINT RasterizedStream = 0;
+
+    /* Hull and domain shaders; a hull shader's phases are programs of their own */
+    UINT TessDomain = 0;                /* D3D11_SB_TESSELLATOR_DOMAIN */
+    UINT TessPartitioning = 0;
+    UINT TessOutput = 0;
+    UINT InputControlPoints = 0;
+    UINT OutputControlPoints = 0;
+    UINT PhaseKind = 0;                 /* the phase opcode, for phases */
+    UINT PhaseInstances = 1;
+    UINT TessFactorSlot[12] = {};       /* register * 4 + component for each tess factor name, plus one */
+    std::vector<RxWarpShader> Phases;
+
     BOOLEAN WritesDepth = FALSE;
     BOOLEAN Discards = FALSE;
 };
@@ -213,6 +231,14 @@ public:
     UINT GsInstance = 0;
     RX_WARP_EMIT_ROUTINE EmitRoutine = nullptr;
     VOID *EmitContext = nullptr;
+
+    /* Tessellation: the hull shader's output points, the patch constants and each lane's domain point */
+    const UINT *OutputPoint[32] = {};
+    UINT OutputPointCount = 0;
+    const UINT *PatchConstants = nullptr;
+    UINT ControlPointId[RxWarpLanes] = {};
+    UINT PhaseInstance = 0;
+    FLOAT Domain[RxWarpLanes][4] = {};
 
     /* Where the program stands, so it can stop at a barrier and continue */
     std::vector<RX_WARP_FRAME> Frames;

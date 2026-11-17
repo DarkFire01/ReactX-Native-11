@@ -347,6 +347,37 @@ RxWarpMachine::Locate(
             *Writable = FALSE;
             Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = Invocation->Flattened[Lane];
             return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_CONTROL_POINT:
+        case D3D11_SB_OPERAND_TYPE_OUTPUT_CONTROL_POINT:
+        {
+            BOOLEAN Outputs = (Operand.Type == D3D11_SB_OPERAND_TYPE_OUTPUT_CONTROL_POINT);
+            UINT Count = Outputs ? Invocation->OutputPointCount : Invocation->InputVertexCount;
+
+            *Writable = FALSE;
+            First = ResolveIndex(Operand.Index[0], Lane);
+            Second = ResolveIndex(Operand.Index[1], Lane);
+            if (First < 0 || (UINT)First >= Count || Second < 0 || (UINT)Second >= RxWarpMaxRegisters)
+                break;
+            return (UINT *)(Outputs ? Invocation->OutputPoint[First] : Invocation->InputVertex[First]) + (SIZE_T)Second * 4;
+        }
+        case D3D11_SB_OPERAND_TYPE_INPUT_PATCH_CONSTANT:
+            *Writable = FALSE;
+            First = ResolveIndex(Operand.Index[0], Lane);
+            if (Invocation->PatchConstants == nullptr || First < 0 || (UINT)First >= RxWarpMaxRegisters)
+                break;
+            return (UINT *)Invocation->PatchConstants + (SIZE_T)First * 4;
+        case D3D11_SB_OPERAND_TYPE_INPUT_DOMAIN_POINT:
+            *Writable = FALSE;
+            return (UINT *)Invocation->Domain[Lane];
+        case D3D11_SB_OPERAND_TYPE_OUTPUT_CONTROL_POINT_ID:
+            *Writable = FALSE;
+            Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = Invocation->ControlPointId[Lane];
+            return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_FORK_INSTANCE_ID:
+        case D3D11_SB_OPERAND_TYPE_INPUT_JOIN_INSTANCE_ID:
+            *Writable = FALSE;
+            Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = Invocation->PhaseInstance;
+            return Scratch;
         default:
             break;
     }

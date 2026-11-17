@@ -7,6 +7,7 @@
 
 #include "precomp.hpp"
 #include "device.hpp"
+#include "tess.hpp"
 
 /* A shaded vertex: every output register of the vertex shader */
 typedef struct _RX_WARP_VERTEX
@@ -140,6 +141,11 @@ private:
         _In_ UINT Count);
 
     VOID
+    RunPatch(
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Points,
+        _In_ UINT Count);
+
+    VOID
     FlushStrip(
         _In_ UINT Stream);
 
@@ -227,8 +233,16 @@ private:
     RxWarpShader *PixelShader = nullptr;
     RxWarpShader *GeometryShader = nullptr;
     RxWarpShader *StreamShader = nullptr;
+    RxWarpShader *HullShader = nullptr;
+    RxWarpShader *DomainShader = nullptr;
     RxWarpShader *LastStage = nullptr;
     RX_WARP_STAGE_BINDINGS VertexBindings = {};
+    RX_WARP_STAGE_BINDINGS HullBindings = {};
+    RX_WARP_STAGE_BINDINGS DomainBindings = {};
+    RxWarpTessellator Tessellator;
+    std::vector<RX_WARP_VERTEX> HullPoints;
+    std::vector<RX_WARP_VERTEX> DomainPoints;
+    UINT PatchConstants[RxWarpMaxRegisters][4] = {};
     RX_WARP_STAGE_BINDINGS PixelBindings = {};
     RX_WARP_STAGE_BINDINGS GeometryBindings = {};
     RxWarpInvocation GeometryInvocation;
@@ -285,14 +299,18 @@ RxWarpDraw::Prepare(VOID)
     VertexShader = Pipeline->Stages[RxWarpStageVertex].Shader;
     PixelShader = Pipeline->Stages[RxWarpStagePixel].Shader;
     GeometryShader = Pipeline->Stages[RxWarpStageGeometry].Shader;
+    HullShader = Pipeline->Stages[RxWarpStageHull].Shader;
+    DomainShader = Pipeline->Stages[RxWarpStageDomain].Shader;
     if (VertexShader == nullptr)
         return FALSE;
+    if (HullShader == nullptr || DomainShader == nullptr)
+        HullShader = DomainShader = nullptr;
 
     /* A stream output shader without code only captures what the vertex shader wrote */
     StreamShader = GeometryShader;
     if (GeometryShader != nullptr && GeometryShader->PassThrough)
         GeometryShader = nullptr;
-    LastStage = (GeometryShader != nullptr) ? GeometryShader : VertexShader;
+    LastStage = (GeometryShader != nullptr) ? GeometryShader : (DomainShader != nullptr) ? DomainShader : VertexShader;
     RasterizedStream = (StreamShader != nullptr) ? StreamShader->RasterizedStream : 0;
     PositionRegister = LastStage->PositionOutput;
 
@@ -309,6 +327,8 @@ RxWarpDraw::Prepare(VOID)
     BindStage(RxWarpStageVertex, &VertexBindings);
     BindStage(RxWarpStagePixel, &PixelBindings);
     BindStage(RxWarpStageGeometry, &GeometryBindings);
+    BindStage(RxWarpStageHull, &HullBindings);
+    BindStage(RxWarpStageDomain, &DomainBindings);
 
     if (Pipeline->Rasterizer != nullptr)
     {
@@ -1709,6 +1729,174 @@ RxWarpDraw::RunGeometry(
     }
 }
 
+/* One patch: hull shader phases, the tessellator, then the domain shader at every index it produced */
+VOID
+RxWarpDraw::RunPatch(
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Points,
+    _In_ UINT Count)
+{
+    static const UINT8 QuadNames[6] = { 0, 1, 2, 3, 4, 5 };
+    static const UINT8 TriangleNames[4] = { 6, 7, 8, 9 };
+    static const UINT8 LineNames[2] = { 10, 11 };
+    RxWarpShader *Hull = HullShader;
+    UINT OutputCount = (Hull->OutputControlPoints < 32) ? Hull->OutputControlPoints : 32;
+    const RxWarpShader *ControlPhase = nullptr;
+    const UINT8 *Names = nullptr;
+    UINT NameCount = 0;
+    FLOAT Factors[6] = {};
+    UINT PrimitiveSize;
+
+    for (const RxWarpShader &Phase : Hull->Phases)
+    {
+        if (Phase.PhaseKind == D3D11_SB_OPCODE_HS_CONTROL_POINT_PHASE)
+            ControlPhase = &Phase;
+    }
+
+    /* Output control points; without a control point phase they are the input points */
+    HullPoints.resize(OutputCount);
+    for (UINT First = 0; First < OutputCount; First += RxWarpLanes)
+    {
+        UINT Lanes = (OutputCount - First < RxWarpLanes) ? OutputCount - First : RxWarpLanes;
+
+        if (ControlPhase == nullptr)
+        {
+            for (UINT Lane = 0; Lane < Lanes; Lane++)
+            {
+                if (First + Lane < Count)
+                    HullPoints[First + Lane] = *Points[First + Lane];
+                else
+                    ZeroMemory(&HullPoints[First + Lane], sizeof(HullPoints[First + Lane]));
+            }
+            continue;
+        }
+        Invocation.Prepare(ControlPhase);
+        Invocation.Live = (1u << Lanes) - 1;
+        Invocation.Helper = 0;
+        Invocation.PrimitiveId = Primitive;
+        Invocation.InputVertexCount = Count;
+        for (UINT Index = 0; Index < Count && Index < 32; Index++)
+            Invocation.InputVertex[Index] = Points[Index]->Registers[0];
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            Invocation.ControlPointId[Lane] = First + Lane;
+        Invocation.Run(ControlPhase, &HullBindings);
+        for (UINT Lane = 0; Lane < Lanes; Lane++)
+        {
+            for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
+                memcpy(HullPoints[First + Lane].Registers[Register], Invocation.Output(Register, Lane), 16);
+        }
+    }
+
+    /* Fork and join phases build the patch constants, one instance at a time */
+    ZeroMemory(PatchConstants, sizeof(PatchConstants));
+    for (const RxWarpShader &Phase : Hull->Phases)
+    {
+        if (Phase.PhaseKind == D3D11_SB_OPCODE_HS_CONTROL_POINT_PHASE)
+            continue;
+        for (UINT Instance = 0; Instance < Phase.PhaseInstances; Instance++)
+        {
+            Invocation.Prepare(&Phase);
+            Invocation.Live = 1;
+            Invocation.Helper = 0;
+            Invocation.PrimitiveId = Primitive;
+            Invocation.PhaseInstance = Instance;
+            Invocation.InputVertexCount = Count;
+            for (UINT Index = 0; Index < Count && Index < 32; Index++)
+                Invocation.InputVertex[Index] = Points[Index]->Registers[0];
+            Invocation.OutputPointCount = OutputCount;
+            for (UINT Index = 0; Index < OutputCount; Index++)
+                Invocation.OutputPoint[Index] = HullPoints[Index].Registers[0];
+            Invocation.PatchConstants = PatchConstants[0];
+            for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
+                memcpy(Invocation.Output(Register, 0), PatchConstants[Register], 16);
+            Invocation.Run(&Phase, &HullBindings);
+            for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
+                memcpy(PatchConstants[Register], Invocation.Output(Register, 0), 16);
+        }
+    }
+    Invocation.PatchConstants = nullptr;
+    Invocation.OutputPointCount = 0;
+    Device->Counters[RxWarpCountHsInvocations]++;
+
+    switch (Hull->TessDomain)
+    {
+        case D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
+            Names = QuadNames;
+            NameCount = 6;
+            break;
+        case D3D11_SB_TESSELLATOR_DOMAIN_TRI:
+            Names = TriangleNames;
+            NameCount = 4;
+            break;
+        case D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
+            Names = LineNames;
+            NameCount = 2;
+            break;
+        default:
+            return;
+    }
+    for (UINT Index = 0; Index < NameCount; Index++)
+    {
+        UINT Slot = Hull->TessFactorSlot[Names[Index]];
+
+        if (Slot != 0)
+            memcpy(&Factors[Index], &PatchConstants[(Slot - 1) / 4][(Slot - 1) % 4], sizeof(FLOAT));
+    }
+    Tessellator.Tessellate(Hull->TessDomain, Hull->TessPartitioning, Hull->TessOutput, Factors);
+
+    /* The domain shader runs once per index, not once per point */
+    DomainPoints.resize(Tessellator.Indices.size());
+    for (SIZE_T First = 0; First < Tessellator.Indices.size(); First += RxWarpLanes)
+    {
+        SIZE_T Remaining = Tessellator.Indices.size() - First;
+        UINT Lanes = (Remaining < RxWarpLanes) ? (UINT)Remaining : RxWarpLanes;
+
+        Invocation.Prepare(DomainShader);
+        Invocation.Live = (1u << Lanes) - 1;
+        Invocation.Helper = 0;
+        Invocation.PrimitiveId = Primitive;
+        Invocation.InputVertexCount = OutputCount;
+        for (UINT Index = 0; Index < OutputCount; Index++)
+            Invocation.InputVertex[Index] = HullPoints[Index].Registers[0];
+        Invocation.PatchConstants = PatchConstants[0];
+        for (UINT Lane = 0; Lane < Lanes; Lane++)
+        {
+            UINT Point = Tessellator.Indices[First + Lane];
+            RX_WARP_DOMAIN_POINT Where = {};
+
+            if (Point < Tessellator.Points.size())
+                Where = Tessellator.Points[Point];
+            Invocation.Domain[Lane][0] = Where.U;
+            Invocation.Domain[Lane][1] = Where.V;
+            Invocation.Domain[Lane][2] = (Hull->TessDomain == D3D11_SB_TESSELLATOR_DOMAIN_TRI) ? (1.0f - Where.V) - Where.U : 0.0f;
+            Invocation.Domain[Lane][3] = 0.0f;
+        }
+        Invocation.Run(DomainShader, &DomainBindings);
+        Device->Counters[RxWarpCountDsInvocations] += Lanes;
+        for (UINT Lane = 0; Lane < Lanes; Lane++)
+        {
+            for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
+                memcpy(DomainPoints[First + Lane].Registers[Register], Invocation.Output(Register, Lane), 16);
+        }
+    }
+    Invocation.PatchConstants = nullptr;
+    Invocation.InputVertexCount = 0;
+
+    if (Hull->TessOutput == D3D11_SB_TESSELLATOR_OUTPUT_POINT)
+        PrimitiveSize = 1;
+    else if (Hull->TessDomain == D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE)
+        PrimitiveSize = 2;
+    else
+        PrimitiveSize = 3;
+    for (SIZE_T First = 0; First + PrimitiveSize <= DomainPoints.size(); First += PrimitiveSize)
+    {
+        const RX_WARP_VERTEX *Corners[3];
+
+        for (UINT Slot = 0; Slot < PrimitiveSize; Slot++)
+            Corners[Slot] = &DomainPoints[First + Slot];
+        Assemble(Corners, PrimitiveSize, Corners, PrimitiveSize);
+    }
+}
+
 /* Turns the vertices emitted since the last cut into primitives of the declared output topology */
 VOID
 RxWarpDraw::FlushStrip(
@@ -1843,10 +2031,20 @@ RxWarpDraw::Run(
     UINT Restart = (Pipeline->IndexFormat == DXGI_FORMAT_R16_UINT) ? 0xFFFF : UINT_MAX;
     RX_WARP_TOPOLOGY Shape;
 
+    UINT PatchPoints = 0;
+
     if (Device->Predicated())
         return;
-    if (!RxWarpTopologyOf(Pipeline->Topology, &Shape))
+    if (Pipeline->Topology >= D3D11_DDI_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST &&
+        Pipeline->Topology <= D3D11_DDI_PRIMITIVE_TOPOLOGY_32_CONTROL_POINT_PATCHLIST)
+    {
+        PatchPoints = Pipeline->Topology - D3D11_DDI_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + 1;
+        Shape = { PatchPoints, FALSE, FALSE };
+    }
+    else if (!RxWarpTopologyOf(Pipeline->Topology, &Shape))
+    {
         return;
+    }
     if (!Prepare())
         return;
 
@@ -1860,6 +2058,22 @@ RxWarpDraw::Run(
         Primitive = 0;
         Device->Counters[RxWarpCountIaVertices] += VertexCount;
         ShadeVertices(Indices.data(), VertexCount, Indexed ? BaseVertex : 0, Instance, StartInstance);
+
+        /* Patches need both tessellation stages; without them nothing is drawn */
+        if (PatchPoints != 0)
+        {
+            for (UINT First = 0; HullShader != nullptr && First + PatchPoints <= VertexCount; First += PatchPoints)
+            {
+                const RX_WARP_VERTEX *Points[32];
+
+                for (UINT Index = 0; Index < PatchPoints; Index++)
+                    Points[Index] = &Vertices[First + Index];
+                Device->Counters[RxWarpCountIaPrimitives]++;
+                RunPatch(Points, PatchPoints);
+                Primitive++;
+            }
+            continue;
+        }
 
         /* Strips break at the cut index; lists only take whole primitives */
         for (UINT Position = 0; Position <= VertexCount; Position++)
