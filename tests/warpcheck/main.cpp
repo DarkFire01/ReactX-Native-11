@@ -1231,6 +1231,43 @@ SceneFill(
     return TcDrawScene(Device, Context, Setup, Result);
 }
 
+/* Interpolation alone: one triangle without perspective, then the same one with it */
+static
+HRESULT
+SceneInterpolate(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    const TcVertex Flat[] =
+    {
+        TcMake(-0.9f, -0.8f, 0.2f, 1.0f, 0xFF0000FF, 0.0f, 0.0f),
+        TcMake(0.85f, -0.95f, 0.5f, 1.0f, 0x00FF00FF, 1.0f, 0.0f),
+        TcMake(0.1f, 0.9f, 0.9f, 1.0f, 0x0000FF80, 0.0f, 1.0f),
+    };
+    const TcVertex Deep[] =
+    {
+        TcMake(-0.9f, -0.8f, 0.2f, 1.0f, 0xFF0000FF, 0.0f, 0.0f),
+        TcMake(0.85f, -0.95f, 0.5f, 3.0f, 0x00FF00FF, 1.0f, 0.0f),
+        TcMake(0.1f, 0.9f, 0.9f, 1.5f, 0x0000FF80, 0.0f, 1.0f),
+    };
+    TcDrawSetup Setup;
+    HRESULT hr;
+
+    Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    Setup.BytesPerPixel = 16;
+    Setup.Size = 32;
+    Setup.Vertices = Flat;
+    Setup.VertexCount = ARRAYSIZE(Flat);
+    hr = TcDrawScene(Device, Context, Setup, Result);
+    if (SUCCEEDED(hr))
+    {
+        Setup.Vertices = Deep;
+        hr = TcDrawScene(Device, Context, Setup, Result);
+    }
+    return hr;
+}
+
 /* Exact inputs for the filter: a 4x4 texture sampled at positions known to the bit, into a float target */
 static
 HRESULT
@@ -1320,6 +1357,7 @@ static const TcScene Scenes[] =
     { "bc", 0, SceneBlocks },
     { "fill", 0, SceneFill },
     { "filter", 0, SceneFilter },
+    { "interp", 0, SceneInterpolate },
 };
 
 static
