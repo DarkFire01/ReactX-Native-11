@@ -79,6 +79,15 @@ RxWarpReadTexel(
         return FALSE;
     }
 
+    /* Block formats store a row of 4x4 blocks per row pitch */
+    if (Info->Kind == RxKindBlock)
+    {
+        Source = Extent->Resource->Memory + Level->Offset + (SIZE_T)Z * Level->DepthPitch + (SIZE_T)(Y / 4) * Level->RowPitch +
+                 (SIZE_T)(X / 4) * Info->Bytes;
+        memcpy(Element, Source, Info->Bytes);
+        return RxWarpDecodeBlockTexel(View->Format, Element, X, Y, Value);
+    }
+
     Source = Extent->Resource->Memory + Level->Offset + (SIZE_T)Z * Level->DepthPitch + (SIZE_T)Y * Level->RowPitch +
              (SIZE_T)X * Info->Bytes;
     memcpy(Element, Source, (Info->Bytes <= 16) ? Info->Bytes : 16);

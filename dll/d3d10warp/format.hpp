@@ -118,3 +118,12 @@ RxWarpHalfToFloat(
 UINT
 RxWarpFloatToHalf(
     _In_ FLOAT Value);
+
+/* One texel of a 4x4 block at (X, Y) within the texture, as raw component bits */
+BOOLEAN
+RxWarpDecodeBlockTexel(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_bytes_(16) const BYTE *Block,
+    _In_ UINT X,
+    _In_ UINT Y,
+    _Out_writes_(4) UINT *Value);

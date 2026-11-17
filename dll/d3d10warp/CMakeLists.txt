@@ -2,6 +2,7 @@ nt_add_usermode_dll(d3d10warp
     DEF d3d10warp.def
     SOURCES
         adapter.cpp
+        bc.cpp
         clear.cpp
         compute.cpp
         device.cpp
