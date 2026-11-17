@@ -448,8 +448,8 @@ RxWarpDraw::ToScreen(
     }
 
     Rhw = 1.0f / W;
-    Screen->X = RxWarpRoundEven((Rhw * X * Scale[0] + Bias[0] + 0.5f) * 256.0f);
-    Screen->Y = RxWarpRoundEven((Rhw * Y * Scale[1] + Bias[1] + 0.5f) * 256.0f);
+    Screen->X = RxWarpRoundEven((Rhw * X * Scale[0] + Bias[0]) * 256.0f);
+    Screen->Y = RxWarpRoundEven((Rhw * Y * Scale[1] + Bias[1]) * 256.0f);
     Screen->Z = Rhw * Z * Scale[2] + Bias[2];
     Screen->Rhw = Rhw;
     Screen->Source = Vertex;
@@ -637,7 +637,10 @@ RxWarpEvaluate(
     _In_ FLOAT X,
     _In_ FLOAT Y)
 {
-    return Plane.A * X + Plane.B * Y + Plane.C;
+    FLOAT Partial = Plane.C + Plane.B * Y;
+
+    /* Constant, then y, then x: the order the reference sums in */
+    return Partial + Plane.A * X;
 }
 
 /* Edge test in 24.8: inside is non negative, and only top and left edges keep their exact zeros */
@@ -707,8 +710,8 @@ RxWarpDraw::Cover(
                 if (Px < MinX || Px >= MaxX || Py < MinY || Py >= MaxY)
                     continue;
 
-                /* Sample points sit one whole unit in, because of the half pixel bias */
-                if (Inside(((INT64)Px + 1) << 8, ((INT64)Py + 1) << 8))
+                /* Sample at pixel centers */
+                if (Inside(((INT64)Px << 8) + 128, ((INT64)Py << 8) + 128))
                     Covered |= 1u << Lane;
             }
             if (Covered != 0)
@@ -996,8 +999,8 @@ RxWarpDraw::ShadeQuad(
 
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
     {
-        FLOAT Sx = (FLOAT)(X + (INT)(Lane & 1)) + 1.0f;
-        FLOAT Sy = (FLOAT)(Y + (INT)(Lane >> 1)) + 1.0f;
+        FLOAT Sx = (FLOAT)(X + (INT)(Lane & 1)) + 0.5f;
+        FLOAT Sy = (FLOAT)(Y + (INT)(Lane >> 1)) + 0.5f;
 
         Depth[Lane] = RxWarpEvaluate(DepthPlane, Sx, Sy);
     }
@@ -1011,9 +1014,10 @@ RxWarpDraw::ShadeQuad(
 
         for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         {
-            FLOAT Sx = (FLOAT)(X + (INT)(Lane & 1)) + 1.0f;
-            FLOAT Sy = (FLOAT)(Y + (INT)(Lane >> 1)) + 1.0f;
+            FLOAT Sx = (FLOAT)(X + (INT)(Lane & 1)) + 0.5f;
+            FLOAT Sy = (FLOAT)(Y + (INT)(Lane >> 1)) + 0.5f;
             FLOAT Rhw = RxWarpEvaluate(RhwPlane, Sx, Sy);
+            FLOAT W = 1.0f / Rhw;
 
             for (UINT Register = 0; Register < PixelShader->InputCount; Register++)
             {
@@ -1026,7 +1030,7 @@ RxWarpDraw::ShadeQuad(
                     Input[0] = RxWarpFloatAsBits((FLOAT)(X + (INT)(Lane & 1)) + 0.5f);
                     Input[1] = RxWarpFloatAsBits((FLOAT)(Y + (INT)(Lane >> 1)) + 0.5f);
                     Input[2] = RxWarpFloatAsBits(Depth[Lane]);
-                    Input[3] = RxWarpFloatAsBits(1.0f / Rhw);
+                    Input[3] = RxWarpFloatAsBits(W);
                     continue;
                 }
                 if (Name == D3D10_SB_NAME_IS_FRONT_FACE)
@@ -1051,7 +1055,7 @@ RxWarpDraw::ShadeQuad(
                     if (!PointSprite && (Mode == D3D10_SB_INTERPOLATION_LINEAR || Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
                                          Mode == D3D10_SB_INTERPOLATION_LINEAR_SAMPLE))
                     {
-                        Value = Value / Rhw;
+                        Value = Value * W;
                     }
                     Input[Component] = RxWarpFloatAsBits(Value);
                 }
