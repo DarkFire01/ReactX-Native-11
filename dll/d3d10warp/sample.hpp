@@ -37,6 +37,16 @@ RxWarpSample(
     _In_reads_opt_(3) const FLOAT *Dy,
     _Out_writes_(4) FLOAT *Result);
 
+/* The fixed point result of the last eight bit filter, as 8.7 per component; FALSE when the last sample used another path */
+/* The float an 8.7 filtered value reads as */
+FLOAT
+RxWarpByteResult(
+    _In_ INT Fixed);
+
+BOOLEAN
+RxWarpLastByteFilter(
+    _Out_writes_(4) INT *Fixed);
+
 VOID
 RxWarpLoad(
     _In_ const RX_WARP_SAMPLE_REQUEST *Request,

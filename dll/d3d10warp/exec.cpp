@@ -1592,6 +1592,8 @@ RxWarpMachine::Texture(
     const RX_WARP_OPERAND *Resource;
     const RX_WARP_OPERAND *SamplerOperand = nullptr;
     RX_WARP_LANE_VALUES Offsets = {};
+    BOOLEAN Filtered[RxWarpLanes] = {};
+    INT FilteredFixed[RxWarpLanes][4] = {};
     RX_WARP_SAMPLE_REQUEST Request = {};
     UINT Opcode = Instruction.Opcode;
     BOOLEAN Programmable;
@@ -1714,6 +1716,32 @@ RxWarpMachine::Texture(
     Request.Offset[2] = Instruction.Offset[2];
 
     FetchAll(Instruction.Operands[1], Opcode == D3D10_SB_OPCODE_LD || Opcode == D3D10_SB_OPCODE_LD_MS, Address);
+
+    /* Coordinates read straight from an input are interpolated again in double precision */
+    if (Invocation->PreciseRoutine != nullptr && Opcode != D3D10_SB_OPCODE_LD && Opcode != D3D10_SB_OPCODE_LD_MS &&
+        Instruction.Operands[1].Type == D3D10_SB_OPERAND_TYPE_INPUT && Instruction.Operands[1].Dimensions == 1 &&
+        Instruction.Operands[1].Index[0].RelativeType == RxWarpNoRelative)
+    {
+        const RX_WARP_OPERAND &Source = Instruction.Operands[1];
+
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        {
+            UINT Raw[4];
+
+            if (!Invocation->PreciseRoutine(Invocation->EvaluateContext, Lane, Source.Index[0].Immediate, Raw))
+                break;
+            for (UINT Component = 0; Component < 4; Component++)
+            {
+                UINT Bits = Raw[Source.Swizzle[Component] & 3];
+
+                if (Source.Absolute)
+                    Bits &= 0x7FFFFFFF;
+                if (Source.Negate)
+                    Bits ^= 0x80000000;
+                Address[Lane][Component] = Bits;
+            }
+        }
+    }
     if (Instruction.OperandCount > 4 + Shift)
         FetchAll(Instruction.Operands[4 + Shift], FALSE, Extra);
     if (Opcode == D3D10_SB_OPCODE_SAMPLE_D && Instruction.OperandCount > 5)
@@ -1806,8 +1834,27 @@ RxWarpMachine::Texture(
 
         for (UINT Component = 0; Component < 4; Component++)
             Result[Lane][Component] = Raw[Resource->Swizzle[Component]];
+        Filtered[Lane] = RxWarpLastByteFilter(FilteredFixed[Lane]);
     }
     Store(Instruction, 0, Result, TRUE);
+
+    /* A filtered result written straight to an output keeps its fixed point form for eight bit targets */
+    if (Instruction.Operands[0].Type == D3D10_SB_OPERAND_TYPE_OUTPUT && !Instruction.Saturate &&
+        Instruction.Operands[0].Index[0].RelativeType == RxWarpNoRelative && Instruction.Operands[0].Index[0].Immediate < RxWarpMaxRegisters)
+    {
+        UINT Register = Instruction.Operands[0].Index[0].Immediate;
+
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        {
+            if (!(Active & (1u << Lane)) || !Filtered[Lane])
+                continue;
+            for (UINT Component = 0; Component < 4; Component++)
+            {
+                if (Instruction.Operands[0].Mask & (1u << Component))
+                    Invocation->ByteShadow[Register][Lane][Component] = FilteredFixed[Lane][Resource->Swizzle[Component]];
+            }
+        }
+    }
 }
 
 VOID
@@ -1818,6 +1865,7 @@ RxWarpInvocation::Prepare(
     IndexableStorage.assign((SIZE_T)Shader->IndexableRegisters * RxWarpLanes * 4, 0);
     ZeroMemory(Outputs, sizeof(Outputs));
     ZeroMemory(Depth, sizeof(Depth));
+    memset(ByteShadow, 0xFF, sizeof(ByteShadow));
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         CoverageOut[Lane] = UINT_MAX;
     Discarded = 0;

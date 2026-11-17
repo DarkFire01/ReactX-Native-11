@@ -245,10 +245,11 @@ RxWarpAddressLinear(
             break;
     }
 
-    Fixed = (INT)nearbyintf(Folded * Scale) + Offset * 256;
-    Taps->First = (Fixed - 128) >> 8;
-    Taps->Second = (Fixed + 128) >> 8;
-    Taps->Weight = (UINT)(Fixed + 128) & 0xFF;
+    /* Texel space less half a texel, in 8.8 and floored */
+    Fixed = (INT)floorf((Folded * (Scale * (1.0f / 256.0f)) - 0.5f) * 256.0f) + Offset * 256;
+    Taps->First = Fixed >> 8;
+    Taps->Second = Taps->First + 1;
+    Taps->Weight = (UINT)Fixed & 0xFF;
 
     switch (Mode)
     {
@@ -484,7 +485,17 @@ RxWarpFetchBytes(
  * The reference's eight bit filter: seven bit weights, eight bit values with seven fraction
  * bits, the second step floored, and the result scaled to float in two terms: 1/32768 and 1/(32768 * 255).
  */
-static
+static BOOLEAN RxWarpByteFilterValid;
+static INT RxWarpByteFilterFixed[4];
+
+BOOLEAN
+RxWarpLastByteFilter(
+    _Out_writes_(4) INT *Fixed)
+{
+    memcpy(Fixed, RxWarpByteFilterFixed, sizeof(RxWarpByteFilterFixed));
+    return RxWarpByteFilterValid;
+}
+
 FLOAT
 RxWarpByteResult(
     _In_ INT Fixed)
@@ -604,8 +615,8 @@ RxWarpFilterLevel(
     if (Axes == 2 && !Request->Compare && RxWarpByteFormat(Request->View->Format))
     {
         INT Corner[2][2][4];
-        INT Wx = (INT)(Taps[0].Weight >> 1);
-        INT Wy = (INT)(Taps[1].Weight >> 1);
+        INT Wx = (INT)Taps[0].Weight;
+        INT Wy = (INT)Taps[1].Weight;
 
         for (UINT Ty = 0; Ty < 2; Ty++)
         {
@@ -619,11 +630,13 @@ RxWarpFilterLevel(
         }
         for (UINT Component = 0; Component < 4; Component++)
         {
-            INT Top = Corner[0][0][Component] * 128 + (Corner[0][1][Component] - Corner[0][0][Component]) * Wx;
-            INT Bottom = Corner[1][0][Component] * 128 + (Corner[1][1][Component] - Corner[1][0][Component]) * Wx;
+            INT Top = Corner[0][0][Component] * 256 + (Corner[0][1][Component] - Corner[0][0][Component]) * Wx;
+            INT Bottom = Corner[1][0][Component] * 256 + (Corner[1][1][Component] - Corner[1][0][Component]) * Wx;
 
-            Result[Component] = RxWarpByteResult(Top + (((Bottom - Top) * Wy) >> 7));
+            RxWarpByteFilterFixed[Component] = (Top + (((Bottom - Top) * Wy) >> 8)) >> 1;
+            Result[Component] = RxWarpByteResult(RxWarpByteFilterFixed[Component]);
         }
+        RxWarpByteFilterValid = TRUE;
         return;
     }
 
@@ -759,6 +772,7 @@ RxWarpSample(
     _In_reads_opt_(3) const FLOAT *Dy,
     _Out_writes_(4) FLOAT *Result)
 {
+    RxWarpByteFilterValid = FALSE;
     RX_WARP_VIEW_EXTENT Extent;
     RX_WARP_SHAPE Shape = RxWarpShapeOf(Request->Dimension);
     const D3D10_DDI_SAMPLER_DESC *Desc;

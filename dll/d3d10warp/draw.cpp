@@ -8,6 +8,7 @@
 #include "precomp.hpp"
 #include "device.hpp"
 #include "tess.hpp"
+#include "sample.hpp"
 
 /* The view volume's six planes and up to eight from the shader */
 static constexpr UINT RxWarpClipPlanes = 14;
@@ -304,6 +305,14 @@ private:
         _In_ BOOLEAN CenterW = FALSE);
 
     static
+    BOOLEAN
+    PreciseInput(
+        _In_ VOID *Context,
+        _In_ UINT Lane,
+        _In_ UINT Register,
+        _Out_writes_(4) UINT *Value);
+
+    static
     VOID
     EvaluateInput(
         _In_ VOID *Context,
@@ -332,7 +341,8 @@ private:
         _In_ INT X,
         _In_ INT Y,
         _In_reads_(4) const UINT *Color,
-        _In_reads_(4) const UINT *Color1);
+        _In_reads_(4) const UINT *Color1,
+        _In_reads_opt_(4) const INT *Shadow);
 
     RxWarpDevice *Device;
     RX_WARP_PIPELINE *Pipeline;
@@ -374,6 +384,7 @@ private:
     UINT EvaluatingLane = 0;
     INT SortedOffset[16][2] = {};       /* the pattern ordered top to bottom, as the reference stores samples */
     FLOAT CentroidAt[RxWarpLanes][2] = {};
+    BOOLEAN Triangle = FALSE;           /* the primitive being shaded has three distinct corners */
     D3DWDDM2_0DDI_RASTERIZER_DESC Raster = {};
     D3D10_DDI_DEPTH_STENCIL_DESC DepthState = {};
     const D3D11_1_DDI_BLEND_DESC *BlendState = nullptr;
@@ -1161,6 +1172,7 @@ RxWarpDraw::Rasterize(
         MaxY = (Corner[Index].Y > MaxY) ? Corner[Index].Y : MaxY;
     }
     PointSprite = FALSE;
+    Triangle = TRUE;
     Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8, TRUE,
           [&Edges](INT64 Sx, INT64 Sy)
           {
@@ -1307,6 +1319,7 @@ RxWarpDraw::RasterizeLine(
     Fx1 = Corner[1].X;
     Fy1 = Corner[1].Y;
     PointSprite = FALSE;
+    Triangle = FALSE;
     Cover((INT)(((Fx0 < Fx1) ? Fx0 : Fx1) >> 8) - 1, (INT)(((Fy0 < Fy1) ? Fy0 : Fy1) >> 8) - 1,
           (INT)((((Fx0 > Fx1) ? Fx0 : Fx1) + 255) >> 8), (INT)((((Fy0 > Fy1) ? Fy0 : Fy1) + 255) >> 8), FALSE,
           [=](INT64 Sx, INT64 Sy)
@@ -1346,6 +1359,7 @@ RxWarpDraw::RasterizePoint(
     SquareLeft = (INT64)Corner[0].X - 128;
     SquareTop = (INT64)Corner[0].Y - 128;
     PointSprite = TRUE;
+    Triangle = FALSE;
     Cover((Corner[0].X - 256) >> 8, (Corner[0].Y - 256) >> 8, (Corner[0].X + 511) >> 8, (Corner[0].Y + 511) >> 8, TRUE,
           [=](INT64 Sx, INT64 Sy)
           {
@@ -1430,6 +1444,83 @@ RxWarpDraw::EvaluateInput(
     Draw->Interpolate(Register, X, Y, Value, TRUE);
 }
 
+/* An input at the lane's interpolation point, from the three corners in double precision */
+BOOLEAN
+RxWarpDraw::PreciseInput(
+    _In_ VOID *Context,
+    _In_ UINT Lane,
+    _In_ UINT Register,
+    _Out_writes_(4) UINT *Value)
+{
+    RxWarpDraw *Draw = static_cast<RxWarpDraw *>(Context);
+    const RX_WARP_SCREEN_VERTEX *Corner = Draw->Corner;
+    UINT Mode;
+    BOOLEAN Perspective;
+    BOOLEAN Centroid;
+    double X;
+    double Y;
+    double X0;
+    double Y0;
+    double X1;
+    double Y1;
+    double X2;
+    double Y2;
+    double Area;
+    double Weight[3];
+    double Divisor = 0.0;
+
+    if (!Draw->Triangle || Draw->PixelShader == nullptr || Register >= Draw->PixelShader->InputCount)
+        return FALSE;
+    Mode = Draw->PixelShader->InputMode[Register];
+    if (Mode != D3D10_SB_INTERPOLATION_LINEAR && Mode != D3D10_SB_INTERPOLATION_LINEAR_CENTROID &&
+        Mode != D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE && Mode != D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_CENTROID)
+    {
+        return FALSE;
+    }
+    if (Draw->PixelShader->InputName[Register] != D3D10_SB_NAME_UNDEFINED)
+        return FALSE;
+    Perspective = (Mode == D3D10_SB_INTERPOLATION_LINEAR || Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID);
+    Centroid = (Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID || Mode == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_CENTROID);
+
+    X = Centroid ? Draw->CentroidAt[Lane][0] : (double)(Draw->QuadX + (INT)(Lane & 1)) + 0.5;
+    Y = Centroid ? Draw->CentroidAt[Lane][1] : (double)(Draw->QuadY + (INT)(Lane >> 1)) + 0.5;
+    X0 = Corner[0].X / 256.0;
+    Y0 = Corner[0].Y / 256.0;
+    X1 = Corner[1].X / 256.0;
+    Y1 = Corner[1].Y / 256.0;
+    X2 = Corner[2].X / 256.0;
+    Y2 = Corner[2].Y / 256.0;
+    Area = (X1 - X0) * (Y2 - Y0) - (Y1 - Y0) * (X2 - X0);
+    if (Area == 0.0)
+        return FALSE;
+    Weight[1] = ((X - X0) * (Y2 - Y0) - (Y - Y0) * (X2 - X0)) / Area;
+    Weight[2] = ((X1 - X0) * (Y - Y0) - (Y1 - Y0) * (X - X0)) / Area;
+    Weight[0] = 1.0 - Weight[1] - Weight[2];
+    if (Perspective)
+    {
+        for (UINT Index = 0; Index < 3; Index++)
+        {
+            Weight[Index] *= (double)Corner[Index].Rhw;
+            Divisor += Weight[Index];
+        }
+        if (Divisor == 0.0)
+            return FALSE;
+    }
+
+    for (UINT Component = 0; Component < 4; Component++)
+    {
+        double Sum = 0.0;
+
+        for (UINT Index = 0; Index < 3; Index++)
+            Sum += Weight[Index] * (double)RxWarpBitsAsFloat(Corner[Index].Source->Registers[Register][Component]);
+        if (Perspective)
+            Value[Component] = RxWarpFloatAsBits((FLOAT)Sum * (1.0f / (FLOAT)Divisor));
+        else
+            Value[Component] = RxWarpFloatAsBits((FLOAT)Sum);
+    }
+    return TRUE;
+}
+
 /* Shades once per pixel, or once per sample when the shader asks for sample rate */
 VOID
 RxWarpDraw::ShadeQuad(
@@ -1493,6 +1584,7 @@ RxWarpDraw::ShadePass(
         Invocation.PrimitiveId = Primitive;
         Invocation.EvaluateRoutine = EvaluateInput;
         Invocation.EvaluateContext = this;
+        Invocation.PreciseRoutine = Triangle ? PreciseInput : nullptr;
 
         for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         {
@@ -1557,6 +1649,7 @@ RxWarpDraw::ShadePass(
 
         Invocation.Run(PixelShader, &PixelBindings);
         Invocation.EvaluateRoutine = nullptr;
+        Invocation.PreciseRoutine = nullptr;
 
         /* The reference counts every lane of a shaded quad, helpers included */
         Device->Counters[RxWarpCountPsInvocations] += RxWarpLanes;
@@ -1766,6 +1859,26 @@ RxWarpDraw::DepthStencilTest(
     return StencilPass && DepthPass;
 }
 
+/* Render target formats of eight bit normalized channels */
+static
+BOOLEAN
+RxWarpIsByteTarget(
+    _In_ DXGI_FORMAT Format)
+{
+    switch (Format)
+    {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_R8G8_UNORM:
+        case DXGI_FORMAT_R8_UNORM:
+        case DXGI_FORMAT_A8_UNORM:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
 static
 VOID
 RxWarpBlendFactor(
@@ -1895,7 +2008,8 @@ RxWarpDraw::Blend(
     _In_ INT X,
     _In_ INT Y,
     _In_reads_(4) const UINT *Color,
-    _In_reads_(4) const UINT *Color1)
+    _In_reads_(4) const UINT *Color1,
+    _In_reads_opt_(4) const INT *Shadow)
 {
     RxWarpView *View = Pipeline->RenderTargets[Target];
     const D3D11_1_DDI_RENDER_TARGET_BLEND_DESC *Desc = &BlendState->RenderTarget[Target];
@@ -1956,6 +2070,15 @@ RxWarpDraw::Blend(
             }
             RxWarpClampToFormat(View->Format, Result);
         }
+        else if (Shadow != nullptr && RxWarpIsByteTarget(View->Format))
+        {
+            /* Unblended, a filtered value the shader left alone goes to eight bits by dropping its fraction */
+            for (UINT Component = 0; Component < 4; Component++)
+            {
+                if (Shadow[Component] >= 0 && RxWarpFloatAsBits(RxWarpByteResult(Shadow[Component])) == Color[Component])
+                    Result[Component] = (FLOAT)(Shadow[Component] >> 7) * (1.0f / 255.0f);
+            }
+        }
         if (!RxWarpEncodeColor(View->Format, Result, Written))
             return;
     }
@@ -2002,7 +2125,7 @@ RxWarpDraw::WritePixel(
 
         if (!(PixelShader->OutputMask[Target]))
             continue;
-        Blend(Target, X, Y, Invocation.Output(Target, Lane), Color1);
+        Blend(Target, X, Y, Invocation.Output(Target, Lane), Color1, Invocation.ByteShadow[Target][Lane]);
     }
 }
 
