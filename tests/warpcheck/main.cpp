@@ -686,6 +686,13 @@ SceneTexture(
         Setup.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         hr = TcDrawScene(Device, Context, Setup, Result);
     }
+    if (SUCCEEDED(hr))
+    {
+        /* Linear again into a float target, so the filtered values show whole */
+        Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        Setup.BytesPerPixel = 16;
+        hr = TcDrawScene(Device, Context, Setup, Result);
+    }
     return hr;
 }
 
