@@ -119,6 +119,8 @@ public:
     UINT8 InputName[RxWarpMaxRegisters] = {};   /* D3D10_SB_NAME */
     UINT8 OutputMask[RxWarpMaxRegisters] = {};
     UINT8 OutputName[RxWarpMaxRegisters] = {};
+    UINT8 ClipMask[RxWarpMaxRegisters] = {};    /* components holding SV_ClipDistance */
+    UINT8 CullMask[RxWarpMaxRegisters] = {};
     UINT InputCount = 0;
     UINT OutputCount = 0;
     UINT PositionOutput = UINT_MAX;

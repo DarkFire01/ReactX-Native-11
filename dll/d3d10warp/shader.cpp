@@ -333,6 +333,10 @@ RxWarpShader::Decode(
                     OutputName[Register] = (UINT8)Name;
                     if (Name == D3D10_SB_NAME_POSITION)
                         PositionOutput = Register;
+                    if (Name == D3D10_SB_NAME_CLIP_DISTANCE)
+                        ClipMask[Register] |= Operand.Mask;
+                    if (Name == D3D10_SB_NAME_CULL_DISTANCE)
+                        CullMask[Register] |= Operand.Mask;
                     if (Name >= D3D11_SB_NAME_FINAL_QUAD_U_EQ_0_EDGE_TESSFACTOR && Name <= D3D11_SB_NAME_FINAL_LINE_DENSITY_TESSFACTOR)
                     {
                         ULONG Component = 0;
@@ -541,6 +545,8 @@ RxWarpShader::Initialize(
         Phase.SwitchCases.clear();
         ZeroMemory(Phase.OutputMask, sizeof(Phase.OutputMask));
         ZeroMemory(Phase.OutputName, sizeof(Phase.OutputName));
+        ZeroMemory(Phase.ClipMask, sizeof(Phase.ClipMask));
+        ZeroMemory(Phase.CullMask, sizeof(Phase.CullMask));
         ZeroMemory(Phase.TessFactorSlot, sizeof(Phase.TessFactorSlot));
         Phase.OutputCount = 0;
         Phase.PositionOutput = UINT_MAX;

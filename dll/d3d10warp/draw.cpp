@@ -9,6 +9,9 @@
 #include "device.hpp"
 #include "tess.hpp"
 
+/* The view volume's six planes and up to eight from the shader */
+static constexpr UINT RxWarpClipPlanes = 14;
+
 /* A shaded vertex: every output register of the vertex shader */
 typedef struct _RX_WARP_VERTEX
 {
@@ -123,6 +126,11 @@ private:
     ClipPrimitive(
         _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
         _In_ UINT Count);
+
+    VOID
+    ClipDistances(
+        _In_ const RX_WARP_VERTEX *Vertex,
+        _Out_writes_(RxWarpClipPlanes) FLOAT *Distance);
 
     BOOLEAN
     SelectViewport(
@@ -252,6 +260,10 @@ private:
     UINT RasterizedStream = 0;
     UINT TargetWidth = 0;
     UINT TargetHeight = 0;
+    UINT ClipSlots[8] = {};             /* register * 4 + component of each clip distance */
+    UINT ClipCount = 0;
+    UINT CullSlots[8] = {};
+    UINT CullCount = 0;
     UINT ViewportRegister = UINT_MAX;
     UINT SliceRegister = UINT_MAX;
     UINT TargetSlice = 0;
@@ -316,8 +328,16 @@ RxWarpDraw::Prepare(VOID)
 
     ViewportRegister = UINT_MAX;
     SliceRegister = UINT_MAX;
+    ClipCount = CullCount = 0;
     for (UINT Register = 0; Register < LastStage->OutputCount; Register++)
     {
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            if (((LastStage->ClipMask[Register] >> Component) & 1) && ClipCount < 8)
+                ClipSlots[ClipCount++] = Register * 4 + Component;
+            if (((LastStage->CullMask[Register] >> Component) & 1) && CullCount < 8)
+                CullSlots[CullCount++] = Register * 4 + Component;
+        }
         if (LastStage->OutputName[Register] == D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX)
             ViewportRegister = Register;
         if (LastStage->OutputName[Register] == D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX)
@@ -567,25 +587,26 @@ RxWarpDraw::ToScreen(
     Screen->Source = Vertex;
 }
 
-/* Distance to each clip plane; negative is outside */
-static
+/* Distance to each clip plane, the view volume first and then the shader's clip distances; negative is outside */
 VOID
-RxWarpClipDistances(
-    _In_reads_(4) const UINT *Position,
-    _In_ BOOLEAN DepthClip,
-    _Out_writes_(6) FLOAT *Distance)
+RxWarpDraw::ClipDistances(
+    _In_ const RX_WARP_VERTEX *Vertex,
+    _Out_writes_(RxWarpClipPlanes) FLOAT *Distance)
 {
+    const UINT *Position = Vertex->Registers[PositionRegister];
     FLOAT X = RxWarpBitsAsFloat(Position[0]);
     FLOAT Y = RxWarpBitsAsFloat(Position[1]);
     FLOAT Z = RxWarpBitsAsFloat(Position[2]);
     FLOAT W = RxWarpBitsAsFloat(Position[3]);
 
-    Distance[0] = DepthClip ? Z : 1.0f;
-    Distance[1] = DepthClip ? W - Z : 1.0f;
+    Distance[0] = Raster.DepthClipEnable ? Z : 0.0f;
+    Distance[1] = Raster.DepthClipEnable ? W - Z : 0.0f;
     Distance[2] = W + X;
     Distance[3] = W - X;
     Distance[4] = W - Y;
     Distance[5] = W + Y;
+    for (UINT Index = 0; Index < ClipCount; Index++)
+        Distance[6 + Index] = RxWarpBitsAsFloat(Vertex->Registers[ClipSlots[Index] / 4][ClipSlots[Index] % 4]);
 }
 
 /* Interpolates every register from Inner toward Outer, stopping on the plane */
@@ -617,7 +638,8 @@ RxWarpDraw::ClipPrimitive(
     _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
     _In_ UINT Count)
 {
-    FLOAT Distance[6];
+    FLOAT Distance[RxWarpClipPlanes];
+    UINT Planes = 6 + ClipCount;
     UINT Outside[3] = {};
     UINT Any;
     std::vector<RX_WARP_VERTEX> Polygon;
@@ -630,10 +652,24 @@ RxWarpDraw::ClipPrimitive(
     if (ViewportRegister != UINT_MAX && !SelectViewport(Corners[0]->Registers[ViewportRegister][0]))
         return;
 
+    /* Culled when every vertex is behind the same cull distance */
+    for (UINT Slot = 0; Slot < CullCount; Slot++)
+    {
+        UINT Behind = 0;
+
+        for (UINT Index = 0; Index < Count; Index++)
+        {
+            if (!(RxWarpBitsAsFloat(Corners[Index]->Registers[CullSlots[Slot] / 4][CullSlots[Slot] % 4]) >= 0.0f))
+                Behind++;
+        }
+        if (Behind == Count)
+            return;
+    }
+
     for (UINT Index = 0; Index < Count; Index++)
     {
-        RxWarpClipDistances(Corners[Index]->Registers[PositionRegister], Raster.DepthClipEnable != FALSE, Distance);
-        for (UINT Plane = 0; Plane < 6; Plane++)
+        ClipDistances(Corners[Index], Distance);
+        for (UINT Plane = 0; Plane < Planes; Plane++)
         {
             if (Distance[Plane] < 0.0f)
                 Outside[Index] |= 1u << Plane;
@@ -664,7 +700,7 @@ RxWarpDraw::ClipPrimitive(
     for (UINT Index = 0; Index < Count; Index++)
         Polygon.push_back(*Corners[Index]);
 
-    for (UINT Plane = 0; Plane < 6 && Polygon.size() >= Count; Plane++)
+    for (UINT Plane = 0; Plane < Planes && Polygon.size() >= Count; Plane++)
     {
         SIZE_T Edges = (Count == 2) ? 1 : Polygon.size();
 
@@ -676,14 +712,14 @@ RxWarpDraw::ClipPrimitive(
         {
             const RX_WARP_VERTEX &From = Polygon[Index];
             const RX_WARP_VERTEX &To = Polygon[(Index + 1) % Polygon.size()];
-            FLOAT FromDistance[6];
-            FLOAT ToDistance[6];
+            FLOAT FromDistance[RxWarpClipPlanes];
+            FLOAT ToDistance[RxWarpClipPlanes];
             BOOLEAN FromIn;
             BOOLEAN ToIn;
             RX_WARP_VERTEX Point;
 
-            RxWarpClipDistances(From.Registers[PositionRegister], Raster.DepthClipEnable != FALSE, FromDistance);
-            RxWarpClipDistances(To.Registers[PositionRegister], Raster.DepthClipEnable != FALSE, ToDistance);
+            ClipDistances(&From, FromDistance);
+            ClipDistances(&To, ToDistance);
             FromIn = !(FromDistance[Plane] < 0.0f);
             ToIn = !(ToDistance[Plane] < 0.0f);
 
