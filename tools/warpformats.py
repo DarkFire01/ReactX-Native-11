@@ -70,7 +70,7 @@ def main():
         if field(second, 2):
             return True
         # A typeless format counts when one of its family members renders to multisample targets
-        if (first >> 8) & 3 == 2 and not field(first, 28) and not field(second, 0) and family:
+        if (first >> 10) & 3 == 2 and not field(first, 28) and not field(second, 0) and family:
             offset = 0
             while True:
                 member = struct.unpack('<I', read(family + offset, 4))[0]
