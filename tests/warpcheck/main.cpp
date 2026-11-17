@@ -2248,6 +2248,263 @@ Exit:
     return hr;
 }
 
+static const char TcMsaaSource[] =
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; centroid float2 t : TEXCOORD; };\n"
+    "VO vs(VI i) { VO o; o.p = i.p; o.c = i.c; o.t = i.t; return o; }\n"
+    "float4 ps(VO i, uint m : SV_Coverage) : SV_Target { return float4(i.c.rg, i.t.x, (countbits(m) + 1) / 17.0); }\n"
+    "struct PO { float4 c : SV_Target; uint m : SV_Coverage; };\n"
+    "PO psmask(VO i, uint m : SV_Coverage) { PO o; o.c = float4(i.t, i.c.b, 1); o.m = (m & 0x5555) | (uint)(i.t.y * 4) << 1; return o; }\n"
+    "Texture2DMS<float4> T : register(t0);\n"
+    "Texture2DMS<float> D : register(t1);\n"
+    "RWByteAddressBuffer Out : register(u0);\n"
+    "cbuffer C : register(b0) { uint Samples; };\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void cs(uint3 i : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint at = ((i.y * 64 + i.x) * Samples) * 20;\n"
+    "    for (uint s = 0; s < Samples; s++)\n"
+    "    {\n"
+    "        Out.Store4(at + s * 20, asuint(T.Load(i.xy, s)));\n"
+    "        Out.Store(at + s * 20 + 16, asuint(D.Load(i.xy, s)));\n"
+    "    }\n"
+    "    if (i.x == 0 && i.y == 0)\n"
+    "    {\n"
+    "        uint w, h, n;\n"
+    "        T.GetDimensions(w, h, n);\n"
+    "        Out.Store(64 * 64 * Samples * 20, n);\n"
+    "        for (uint s = 0; s < 17; s++)\n"
+    "            Out.Store2(64 * 64 * Samples * 20 + 4 + s * 8, asuint(T.GetSamplePosition(s)));\n"
+    "    }\n"
+    "}\n";
+
+/* Multisampled triangles with centroid inputs, coverage in and out, a sample mask and depth, read back sample by sample and resolved */
+static
+HRESULT
+SceneMsaa(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const UINT Counts[4] = { 2, 4, 8, 16 };
+    std::vector<TcVertex> Vertices;
+    D3D11_VIEWPORT Viewport = { 0, 0, 64, 64, 0, 1 };
+    const FLOAT Clear[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+    ID3DBlob *Blobs[4] = {};
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11PixelShader *Ps = NULL;
+    ID3D11PixelShader *PsMask = NULL;
+    ID3D11ComputeShader *Cs = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11Buffer *Input = NULL;
+    ID3D11Buffer *Constants = NULL;
+    ID3D11DepthStencilState *Depth = NULL;
+    ID3D11RasterizerState *Raster = NULL;
+    ID3D11BlendState *Blend = NULL;
+    UINT Stride = sizeof(TcVertex);
+    UINT Offset = 0;
+    HRESULT hr;
+
+    Vertices.push_back(TcMake(-0.93f, -0.81f, 0.2f, 1.0f, 0xFF2000FF, 0.0f, 0.0f));
+    Vertices.push_back(TcMake(0.87f, -0.62f, 0.8f, 1.0f, 0x20FF00FF, 1.0f, 0.3f));
+    Vertices.push_back(TcMake(-0.11f, 0.91f, 0.5f, 1.0f, 0x0040FFFF, 0.5f, 1.0f));
+    Vertices.push_back(TcMake(-0.95f, 0.33f, 0.9f, 1.0f, 0xFFFF00FF, 0.2f, 0.9f));
+    Vertices.push_back(TcMake(0.91f, 0.47f, 0.1f, 1.0f, 0x00FFFFFF, 0.8f, 0.1f));
+    Vertices.push_back(TcMake(0.23f, -0.93f, 0.45f, 2.0f, 0xFF00FFFF, 0.4f, 0.6f));
+    Vertices.push_back(TcMake(-0.47f, -0.27f, 0.05f, 1.0f, 0xFFFFFFFF, 0.1f, 0.2f));
+    Vertices.push_back(TcMake(0.53f, -0.11f, 0.05f, 1.0f, 0x808080FF, 0.9f, 0.7f));
+    Vertices.push_back(TcMake(0.07f, 0.61f, 0.05f, 1.0f, 0x404040FF, 0.3f, 0.95f));
+
+    hr = TcCompileFrom(TcMsaaSource, "vs", "vs_5_0", &Blobs[0]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcMsaaSource, "ps", "ps_5_0", &Blobs[1]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcMsaaSource, "psmask", "ps_5_0", &Blobs[2]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcMsaaSource, "cs", "cs_5_0", &Blobs[3]);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(Blobs[0]->GetBufferPointer(), Blobs[0]->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(Blobs[1]->GetBufferPointer(), Blobs[1]->GetBufferSize(), NULL, &Ps);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(Blobs[2]->GetBufferPointer(), Blobs[2]->GetBufferSize(), NULL, &PsMask);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateComputeShader(Blobs[3]->GetBufferPointer(), Blobs[3]->GetBufferSize(), NULL, &Cs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), Blobs[0]->GetBufferPointer(), Blobs[0]->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC InputDesc = { (UINT)(Vertices.size() * sizeof(TcVertex)), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Vertices.data(), 0, 0 };
+
+        hr = Device->CreateBuffer(&InputDesc, &Data, &Input);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC ConstantDesc = { 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+
+        hr = Device->CreateBuffer(&ConstantDesc, NULL, &Constants);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_DEPTH_STENCIL_DESC DepthDesc = {};
+
+        DepthDesc.DepthEnable = TRUE;
+        DepthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        DepthDesc.DepthFunc = D3D11_COMPARISON_LESS;
+        hr = Device->CreateDepthStencilState(&DepthDesc, &Depth);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, TRUE, FALSE };
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BLEND_DESC BlendDesc = {};
+
+        BlendDesc.RenderTarget[0].BlendEnable = TRUE;
+        BlendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        BlendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        BlendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        BlendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        BlendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        BlendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        BlendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        hr = Device->CreateBlendState(&BlendDesc, &Blend);
+    }
+    if (FAILED(hr))
+        goto Exit;
+
+    for (UINT Count : Counts)
+    {
+        D3D11_TEXTURE2D_DESC ColorDesc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { Count, 0 }, D3D11_USAGE_DEFAULT,
+                                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_TEXTURE2D_DESC DepthDesc = { 64, 64, 1, 1, DXGI_FORMAT_R32_TYPELESS, { Count, 0 }, D3D11_USAGE_DEFAULT,
+                                           D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_TEXTURE2D_DESC ResolvedDesc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET, 0, 0 };
+        D3D11_DEPTH_STENCIL_VIEW_DESC DsvDesc = {};
+        D3D11_SHADER_RESOURCE_VIEW_DESC DepthSrv = {};
+        UINT Bytes = 64 * 64 * Count * 20 + 4 + 17 * 8;
+        D3D11_BUFFER_DESC OutDesc = { (Bytes + 15) & ~15u, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0 };
+        D3D11_UNORDERED_ACCESS_VIEW_DESC UavDesc = {};
+        UINT Levels = 0;
+        UINT CountData[4] = { Count, 0, 0, 0 };
+        ID3D11Texture2D *Color = NULL;
+        ID3D11Texture2D *DepthTexture = NULL;
+        ID3D11Texture2D *Resolved = NULL;
+        ID3D11RenderTargetView *ColorView = NULL;
+        ID3D11DepthStencilView *DepthView = NULL;
+        ID3D11ShaderResourceView *Views[2] = {};
+        ID3D11Buffer *Out = NULL;
+        ID3D11UnorderedAccessView *Uav = NULL;
+
+        if (FAILED(Device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, Count, &Levels)) || Levels == 0)
+            continue;
+
+        DsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        DsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
+        DepthSrv.Format = DXGI_FORMAT_R32_FLOAT;
+        DepthSrv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        UavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        UavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        UavDesc.Buffer.NumElements = OutDesc.ByteWidth / 4;
+        UavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+
+        hr = Device->CreateTexture2D(&ColorDesc, NULL, &Color);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateTexture2D(&DepthDesc, NULL, &DepthTexture);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateTexture2D(&ResolvedDesc, NULL, &Resolved);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateRenderTargetView(Color, NULL, &ColorView);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateDepthStencilView(DepthTexture, &DsvDesc, &DepthView);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateShaderResourceView(Color, NULL, &Views[0]);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateShaderResourceView(DepthTexture, &DepthSrv, &Views[1]);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateBuffer(&OutDesc, NULL, &Out);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateUnorderedAccessView(Out, &UavDesc, &Uav);
+
+        if (SUCCEEDED(hr))
+        {
+            ID3D11ShaderResourceView *NoViews[2] = {};
+            ID3D11UnorderedAccessView *NoUav = NULL;
+            ID3D11RenderTargetView *NoTarget = NULL;
+
+            Context->ClearRenderTargetView(ColorView, Clear);
+            Context->ClearDepthStencilView(DepthView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+            Context->OMSetRenderTargets(1, &ColorView, DepthView);
+            Context->OMSetDepthStencilState(Depth, 0);
+            Context->OMSetBlendState(Blend, NULL, 0xFFFFFFFF);
+            Context->RSSetViewports(1, &Viewport);
+            Context->RSSetState(Raster);
+            Context->IASetInputLayout(Layout);
+            Context->IASetVertexBuffers(0, 1, &Input, &Stride, &Offset);
+            Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            Context->VSSetShader(Vs, NULL, 0);
+            Context->PSSetShader(Ps, NULL, 0);
+            Context->Draw(6, 0);
+
+            /* The last triangle writes its own coverage under a sample mask */
+            Context->OMSetBlendState(NULL, NULL, 0xFFFFFFF7);
+            Context->PSSetShader(PsMask, NULL, 0);
+            Context->Draw(3, 6);
+            Context->OMSetBlendState(NULL, NULL, 0xFFFFFFFF);
+            Context->OMSetRenderTargets(1, &NoTarget, NULL);
+
+            Context->UpdateSubresource(Constants, 0, NULL, CountData, 0, 0);
+            Context->CSSetShader(Cs, NULL, 0);
+            Context->CSSetConstantBuffers(0, 1, &Constants);
+            Context->CSSetShaderResources(0, 2, Views);
+            Context->CSSetUnorderedAccessViews(0, 1, &Uav, NULL);
+            Context->Dispatch(8, 8, 1);
+            Context->CSSetShaderResources(0, 2, NoViews);
+            Context->CSSetUnorderedAccessViews(0, 1, &NoUav, NULL);
+            hr = TcReadBuffer(Device, Context, Out, Result, Bytes);
+
+            if (SUCCEEDED(hr))
+            {
+                Context->ResolveSubresource(Resolved, 0, Color, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+                hr = TcReadBytes(Device, Context, Resolved, 4, Result);
+            }
+        }
+
+        ID3D11DeviceChild *Objects[] = { Color, DepthTexture, Resolved, ColorView, DepthView, Views[0], Views[1], Out, Uav };
+        for (ID3D11DeviceChild *Object : Objects)
+        {
+            if (Object)
+                Object->Release();
+        }
+        if (FAILED(hr))
+            break;
+    }
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Vs, Ps, PsMask, Cs, Layout, Input, Constants, Depth, Raster, Blend };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    for (ID3DBlob *Blob : Blobs)
+    {
+        if (Blob)
+            Blob->Release();
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -2274,6 +2531,7 @@ static const TcScene Scenes[] =
     { "tess", 0, SceneTessellation },
     { "bias", 0, SceneBias },
     { "ops", 0, SceneOps },
+    { "msaa", 0, SceneMsaa },
 };
 
 static
