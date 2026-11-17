@@ -50,6 +50,23 @@ RxWarpMipSource(
     return (First < SourceSize) ? First : SourceSize - 1;
 }
 
+/* Mip levels of half float formats round toward zero, so drop what a half cannot hold before encoding */
+static
+FLOAT
+RxWarpTowardZeroHalf(
+    _In_ FLOAT Value)
+{
+    UINT Bits;
+
+    if (fabsf(Value) < 6.103515625e-05f)
+        return truncf(Value * 16777216.0f) * (1.0f / 16777216.0f);
+    memcpy(&Bits, &Value, sizeof(Bits));
+    if (((Bits >> 23) & 0xFF) != 0xFF)
+        Bits &= ~0x1FFFu;
+    memcpy(&Value, &Bits, sizeof(Value));
+    return Value;
+}
+
 /* One level from the one above it: the average of a 2x2 (or 2x2x2) box */
 static
 VOID
@@ -60,6 +77,8 @@ RxWarpMakeLevel(
     _In_ const RX_WARP_SUBRESOURCE *Source,
     _In_ const RX_WARP_SUBRESOURCE *Target)
 {
+    BOOLEAN HalfFloat = (Format == DXGI_FORMAT_R16G16B16A16_FLOAT || Format == DXGI_FORMAT_R16G16_FLOAT || Format == DXGI_FORMAT_R16_FLOAT);
+
     for (UINT Z = 0; Z < Target->Depth; Z++)
     {
         UINT Sz = (Source->Depth > 1) ? RxWarpMipSource(Z, Source->Depth, Target->Depth) : 0;
@@ -97,7 +116,11 @@ RxWarpMakeLevel(
                 }
 
                 for (UINT Component = 0; Component < 4; Component++)
+                {
                     Sum[Component] = Sum[Component] * (1.0f / (FLOAT)Taps);
+                    if (HalfFloat)
+                        Sum[Component] = RxWarpTowardZeroHalf(Sum[Component]);
+                }
                 if (RxWarpEncodeColor(Format, Sum, Element))
                 {
                     memcpy(Memory + Target->Offset + (SIZE_T)Dz * Target->DepthPitch + (SIZE_T)Y * Target->RowPitch +
