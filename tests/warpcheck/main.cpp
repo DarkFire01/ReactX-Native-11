@@ -1157,6 +1157,7 @@ SceneBlocks(
     {
         DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB, DXGI_FORMAT_BC2_UNORM, DXGI_FORMAT_BC3_UNORM,
         DXGI_FORMAT_BC3_UNORM_SRGB, DXGI_FORMAT_BC4_UNORM, DXGI_FORMAT_BC4_SNORM, DXGI_FORMAT_BC5_UNORM, DXGI_FORMAT_BC5_SNORM,
+        DXGI_FORMAT_BC6H_UF16, DXGI_FORMAT_BC6H_SF16, DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_BC7_UNORM_SRGB,
     };
     const TcVertex Vertices[] =
     {
@@ -1169,10 +1170,12 @@ SceneBlocks(
     {
         BOOLEAN Small = (Format == DXGI_FORMAT_BC1_UNORM || Format == DXGI_FORMAT_BC1_UNORM_SRGB ||
                          Format == DXGI_FORMAT_BC4_UNORM || Format == DXGI_FORMAT_BC4_SNORM);
+        BOOLEAN Modern = (Format >= DXGI_FORMAT_BC6H_TYPELESS);
         UINT BlockBytes = Small ? 8 : 16;
-        D3D11_TEXTURE2D_DESC Desc = { 16, 16, 1, 1, Format, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
-        std::vector<BYTE> Blocks(16 * BlockBytes);
-        D3D11_SUBRESOURCE_DATA Data = { Blocks.data(), 4 * BlockBytes, 0 };
+        UINT Size = Modern ? 64 : 16;
+        D3D11_TEXTURE2D_DESC Desc = { Size, Size, 1, 1, Format, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        std::vector<BYTE> Blocks((SIZE_T)(Size / 4) * (Size / 4) * BlockBytes);
+        D3D11_SUBRESOURCE_DATA Data = { Blocks.data(), (Size / 4) * BlockBytes, 0 };
         ID3D11Texture2D *Texture = NULL;
         ID3D11ShaderResourceView *View = NULL;
         UINT Seed = (UINT)Format * 7919;
@@ -1183,6 +1186,17 @@ SceneBlocks(
             Seed = Seed * 1103515245 + 12345;
             Blocks[Index] = (BYTE)(Seed >> 16);
         }
+
+        /* BC7 picks its mode from the lowest set bit: walk through all eight and the reserved one */
+        if (Format >= DXGI_FORMAT_BC7_TYPELESS)
+        {
+            for (SIZE_T Block = 0; Block < Blocks.size() / 16; Block++)
+            {
+                UINT Mode = (UINT)(Block % 9);
+
+                Blocks[Block * 16] = (Mode == 8) ? 0 : (BYTE)((Blocks[Block * 16] & ~((2u << Mode) - 1)) | (1u << Mode));
+            }
+        }
         hr = Device->CreateTexture2D(&Desc, &Data, &Texture);
         if (SUCCEEDED(hr))
             hr = Device->CreateShaderResourceView(Texture, NULL, &View);
@@ -1190,7 +1204,7 @@ SceneBlocks(
         {
             Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
             Setup.BytesPerPixel = 16;
-            Setup.Size = 16;
+            Setup.Size = Size;
             Setup.Vertices = Vertices;
             Setup.VertexCount = ARRAYSIZE(Vertices);
             Setup.PixelEntry = "psload";
