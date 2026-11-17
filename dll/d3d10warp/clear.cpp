@@ -117,7 +117,8 @@ RxWarpDdi::ClearRenderTargetView(
     RxWarpView *Object = RxWarpObject<RxWarpView>(View);
     BYTE Element[16];
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     if (Object != nullptr && RxWarpEncodeColor(Object->Format, Color, Element))
         RxWarpFillView(Object, Element, RxWarpAllBits, nullptr, 0);
 }
@@ -139,7 +140,8 @@ RxWarpDdi::ClearDepthStencilView(
     BYTE Mask[16] = {};
     UINT Offset = 0;
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     if (Object == nullptr || (Info = RxWarpFormatInfo(Object->Format)) == nullptr)
         return;
 
@@ -169,7 +171,8 @@ RxWarpDdi::ClearUnorderedAccessViewUint(
     RxWarpView *Object = RxWarpObject<RxWarpView>(View);
     BYTE Element[16];
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     if (Object == nullptr)
         return;
 
@@ -197,7 +200,8 @@ RxWarpDdi::ClearUnorderedAccessViewFloat(
     RxWarpView *Object = RxWarpObject<RxWarpView>(View);
     BYTE Element[16];
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     if (Object != nullptr && RxWarpEncodeColor(Object->Format, Values, Element))
         RxWarpFillView(Object, Element, RxWarpAllBits, nullptr, 0);
 }
@@ -216,7 +220,8 @@ RxWarpDdi::ClearView(
     RxWarpView *Object;
     BYTE Element[16];
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     UNREFERENCED_PARAMETER(Type);
 
     /* The handle is the view's driver private pointer whatever its type */

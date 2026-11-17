@@ -167,9 +167,43 @@ typedef struct _RX_WARP_PIPELINE
     RxWarpView *DepthStencilView;
 } RX_WARP_PIPELINE;
 
+/* Running totals the queries sample, in the order of the pipeline statistics */
+typedef enum _RX_WARP_COUNTER
+{
+    RxWarpCountIaVertices,
+    RxWarpCountIaPrimitives,
+    RxWarpCountVsInvocations,
+    RxWarpCountGsInvocations,
+    RxWarpCountGsPrimitives,
+    RxWarpCountClipInvocations,
+    RxWarpCountClipPrimitives,
+    RxWarpCountPsInvocations,
+    RxWarpCountHsInvocations,
+    RxWarpCountDsInvocations,
+    RxWarpCountCsInvocations,
+    RxWarpCountSamplesPassed,
+    RxWarpCountSoWritten,
+    RxWarpCountSoNeeded,
+    RxWarpCountTotal
+} RX_WARP_COUNTER;
+
+class RxWarpQuery
+{
+public:
+    D3D10DDI_QUERY Type = D3D10DDI_QUERY_EVENT;
+    UINT64 Start[RxWarpCountTotal] = {};
+    UINT64 Stop[RxWarpCountTotal] = {};
+    UINT64 Timestamp = 0;
+    BOOLEAN Done = FALSE;
+};
+
 class RxWarpDevice
 {
 public:
+    /* TRUE when predication says to skip rendering, clears and copies */
+    BOOLEAN
+    Predicated(VOID);
+
     static
     HRESULT
     Create(
@@ -189,6 +223,9 @@ public:
     UINT Interface = 0;
     UINT Version = 0;
     RX_WARP_PIPELINE Pipeline = {};
+    UINT64 Counters[RxWarpCountTotal] = {};
+    RxWarpQuery *Predicate = nullptr;
+    BOOL PredicateValue = FALSE;
 };
 
 /* DDI entry points, grouped by the file that implements them */
@@ -259,6 +296,15 @@ namespace RxWarpDdi
     VOID APIENTRY SetViewports(D3D10DDI_HDEVICE, UINT, UINT, const D3D10_DDI_VIEWPORT *);
     VOID APIENTRY SetScissorRects(D3D10DDI_HDEVICE, UINT, UINT, const D3D10_DDI_RECT *);
     VOID APIENTRY SetRenderTargets(D3D10DDI_HDEVICE, const D3D10DDI_HRENDERTARGETVIEW *, UINT, UINT, D3D10DDI_HDEPTHSTENCILVIEW, const D3D11DDI_HUNORDEREDACCESSVIEW *, const UINT *, UINT, UINT, UINT, UINT);
+
+    /* query.cpp */
+    VOID APIENTRY CreateQuery(D3D10DDI_HDEVICE, const D3D10DDIARG_CREATEQUERY *, D3D10DDI_HQUERY, D3D10DDI_HRTQUERY);
+    VOID APIENTRY CreateQuery2(D3D10DDI_HDEVICE, const D3DWDDM2_0DDIARG_CREATEQUERY *, D3D10DDI_HQUERY, D3D10DDI_HRTQUERY);
+    VOID APIENTRY DestroyQuery(D3D10DDI_HDEVICE, D3D10DDI_HQUERY);
+    VOID APIENTRY QueryBegin(D3D10DDI_HDEVICE, D3D10DDI_HQUERY);
+    VOID APIENTRY QueryEnd(D3D10DDI_HDEVICE, D3D10DDI_HQUERY);
+    VOID APIENTRY QueryGetData(D3D10DDI_HDEVICE, D3D10DDI_HQUERY, VOID *, UINT, UINT);
+    VOID APIENTRY SetPredication(D3D10DDI_HDEVICE, D3D10DDI_HQUERY, BOOL);
 
     /* draw.cpp */
     VOID APIENTRY Draw(D3D10DDI_HDEVICE, UINT, UINT);

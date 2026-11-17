@@ -312,7 +312,8 @@ RxWarpDdi::ResourceCopyRegion(
     UINT Block;
     SIZE_T Start;
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     UNREFERENCED_PARAMETER(CopyFlags);
     if (Target == nullptr || Sub == nullptr || Target->Subresource(DestinationIndex) == nullptr)
         return;
@@ -354,7 +355,8 @@ RxWarpDdi::ResourceUpdateSubresourceUP(
     RX_WARP_SUBRESOURCE *Sub = Target ? Target->Subresource(DestinationIndex) : nullptr;
     D3D10_DDI_BOX Whole;
 
-    UNREFERENCED_PARAMETER(Device);
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
     UNREFERENCED_PARAMETER(CopyFlags);
     if (Sub == nullptr || Data == nullptr)
         return;
