@@ -115,6 +115,22 @@ FLOAT
 RxWarpHalfToFloat(
     _In_ UINT Half);
 
+/* Normalized integers of the given width to float, bit for bit with the reference */
+FLOAT
+RxWarpUnormToFloat(
+    _In_ UINT Value,
+    _In_ UINT Bits);
+
+FLOAT
+RxWarpSnormToFloat(
+    _In_ INT Value,
+    _In_ UINT Bits);
+
+/* Eight bit sRGB to linear, by the reference table */
+FLOAT
+RxWarpSrgbByteToLinear(
+    _In_ UINT Byte);
+
 UINT
 RxWarpFloatToHalf(
     _In_ FLOAT Value);

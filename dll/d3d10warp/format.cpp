@@ -609,9 +609,84 @@ FLOAT
 RxWarpSrgbToLinear(
     _In_ FLOAT Value)
 {
-    if (Value <= 0.04045f)
-        return Value / 12.92f;
-    return powf((Value + 0.055f) / 1.055f, 2.4f);
+    double Wide = Value;
+
+    /* Worked in double and rounded once, as a correctly rounded table would hold */
+    if (Wide <= 0.04045)
+        return (FLOAT)(Wide / 12.92);
+    return (FLOAT)pow((Wide + 0.055) / 1.055, 2.4);
+}
+
+static
+FLOAT
+RxWarpBitsAsFloat(
+    _In_ UINT Bits)
+{
+    FLOAT Value;
+
+    memcpy(&Value, &Bits, sizeof(Value));
+    return Value;
+}
+
+/*
+ * Normalized integers to float the way the reference does: a power of two scale plus a small
+ * correction term, two multiplies and an add, instead of one divide.
+ */
+FLOAT
+RxWarpUnormToFloat(
+    _In_ UINT Value,
+    _In_ UINT Bits)
+{
+    static const struct
+    {
+        UINT8 Bits;
+        UINT Scale;
+        UINT Correction;
+    } Factors[] =
+    {
+        { 1, 0x3F000000, 0x3F000000 }, { 2, 0x3E800000, 0x3DAAAAAC }, { 4, 0x3D800000, 0x3B888890 },
+        { 5, 0x3D000000, 0x3A842100 }, { 6, 0x3C800000, 0x39820840 }, { 8, 0x3B800000, 0x37808100 },
+        { 10, 0x3A800000, 0x35802000 }, { 16, 0x37800000, 0x2F800000 }, { 24, 0x33800000, 0x27800001 },
+    };
+    FLOAT Number = (FLOAT)Value;
+
+    for (const auto &Factor : Factors)
+    {
+        if (Factor.Bits == Bits)
+            return Number * RxWarpBitsAsFloat(Factor.Scale) + Number * RxWarpBitsAsFloat(Factor.Correction);
+    }
+    return Number / (FLOAT)((1ull << Bits) - 1);
+}
+
+FLOAT
+RxWarpSnormToFloat(
+    _In_ INT Value,
+    _In_ UINT Bits)
+{
+    FLOAT Result;
+
+    if (Bits == 8)
+        Result = (FLOAT)Value * RxWarpBitsAsFloat(0x3C010204);
+    else if (Bits == 16)
+        Result = (FLOAT)Value * RxWarpBitsAsFloat(0x38000100);
+    else
+        Result = (FLOAT)Value / (FLOAT)((1ull << (Bits - 1)) - 1);
+    return (Result < -1.0f) ? -1.0f : Result;
+}
+
+static const UINT RxWarpSrgbTable[256] =
+{
+#include "srgbtable.inl"
+};
+
+FLOAT
+RxWarpSrgbByteToLinear(
+    _In_ UINT Byte)
+{
+    FLOAT Value;
+
+    memcpy(&Value, &RxWarpSrgbTable[Byte & 0xFF], sizeof(Value));
+    return Value;
 }
 
 BOOLEAN
@@ -670,21 +745,23 @@ RxWarpDecodeTexel(
         switch (Channel.Type)
         {
             case RxChannelUnorm:
-                Max = (FLOAT)((1ull << Channel.Bits) - 1);
-                Value[Slot] = RxWarpFloatToBits((FLOAT)Bits / Max);
+                Value[Slot] = RxWarpFloatToBits(RxWarpUnormToFloat((UINT)Bits, Channel.Bits));
                 break;
             case RxChannelSrgb:
                 Max = (FLOAT)((1ull << Channel.Bits) - 1);
-                Value[Slot] = RxWarpFloatToBits(RxWarpSrgbToLinear((FLOAT)Bits / Max));
+                /* Alpha stays linear */
+                if (Channel.Source == 3)
+                    Value[Slot] = RxWarpFloatToBits(RxWarpUnormToFloat((UINT)Bits, Channel.Bits));
+                else if (Channel.Bits == 8)
+                    Value[Slot] = RxWarpFloatToBits(RxWarpSrgbByteToLinear((UINT)Bits));
+                else
+                    Value[Slot] = RxWarpFloatToBits(RxWarpSrgbToLinear((FLOAT)Bits / Max));
                 break;
             case RxChannelSnorm:
             {
                 INT Signed = (INT)(Bits << (32 - Channel.Bits)) >> (32 - Channel.Bits);
-                FLOAT Result;
 
-                Max = (FLOAT)((1ull << (Channel.Bits - 1)) - 1);
-                Result = (FLOAT)Signed / Max;
-                Value[Slot] = RxWarpFloatToBits(Result < -1.0f ? -1.0f : Result);
+                Value[Slot] = RxWarpFloatToBits(RxWarpSnormToFloat(Signed, Channel.Bits));
                 break;
             }
             case RxChannelFloat:

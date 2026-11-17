@@ -190,18 +190,6 @@ RxWarpFloatBits(
     return Bits;
 }
 
-static
-FLOAT
-RxWarpSrgbExpand(
-    _In_ UINT Byte)
-{
-    FLOAT Value = (FLOAT)Byte / 255.0f;
-
-    if (Value <= 0.04045f)
-        return Value / 12.92f;
-    return powf((Value + 0.055f) / 1.055f, 2.4f);
-}
-
 BOOLEAN
 RxWarpDecodeBlockTexel(
     _In_ DXGI_FORMAT Format,
@@ -249,7 +237,7 @@ RxWarpDecodeBlockTexel(
             Value[0] = RxWarpFloatBits((FLOAT)RxWarpRedBlock(Block, Texel, FALSE) / 65535.0f);
             return TRUE;
         case DXGI_FORMAT_BC4_SNORM:
-            Value[0] = RxWarpFloatBits((FLOAT)RxWarpRedBlock(Block, Texel, TRUE) / 32767.0f);
+            Value[0] = RxWarpFloatBits(RxWarpSnormToFloat(RxWarpRedBlock(Block, Texel, TRUE), 16));
             return TRUE;
         case DXGI_FORMAT_BC5_TYPELESS:
         case DXGI_FORMAT_BC5_UNORM:
@@ -257,8 +245,8 @@ RxWarpDecodeBlockTexel(
             Value[1] = RxWarpFloatBits((FLOAT)RxWarpRedBlock(Block + 8, Texel, FALSE) / 65535.0f);
             return TRUE;
         case DXGI_FORMAT_BC5_SNORM:
-            Value[0] = RxWarpFloatBits((FLOAT)RxWarpRedBlock(Block, Texel, TRUE) / 32767.0f);
-            Value[1] = RxWarpFloatBits((FLOAT)RxWarpRedBlock(Block + 8, Texel, TRUE) / 32767.0f);
+            Value[0] = RxWarpFloatBits(RxWarpSnormToFloat(RxWarpRedBlock(Block, Texel, TRUE), 16));
+            Value[1] = RxWarpFloatBits(RxWarpSnormToFloat(RxWarpRedBlock(Block + 8, Texel, TRUE), 16));
             return TRUE;
         default:
             return FALSE;
@@ -268,7 +256,7 @@ RxWarpDecodeBlockTexel(
     {
         UINT Byte = (Color >> (Component * 8)) & 0xFF;
 
-        Value[Component] = RxWarpFloatBits((Srgb && Component < 3) ? RxWarpSrgbExpand(Byte) : (FLOAT)Byte / 255.0f);
+        Value[Component] = RxWarpFloatBits((Srgb && Component < 3) ? RxWarpSrgbByteToLinear(Byte) : (FLOAT)Byte / 255.0f);
     }
     return TRUE;
 }
