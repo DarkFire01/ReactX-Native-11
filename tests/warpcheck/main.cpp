@@ -1343,6 +1343,227 @@ SceneFilter(
     return hr;
 }
 
+static const char TcGeometrySource[] =
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct AI { float4 p : POSITION; float4 c : COLOR; };\n"
+    "VO vs(VI i) { VO o; o.p = i.p; o.c = i.c; o.t = i.t; return o; }\n"
+    "VO vsauto(AI i) { VO o; o.p = i.p; o.c = i.c.bgra; o.t = 0; return o; }\n"
+    "float4 ps(VO i) : SV_Target { return i.c; }\n"
+    "[maxvertexcount(4)] [instance(2)]\n"
+    "void gs(point VO i[1], uint id : SV_GSInstanceID, inout TriangleStream<VO> s)\n"
+    "{\n"
+    "    float2 o = float2(0.06, 0.05) * (1 + id);\n"
+    "    VO v = i[0]; v.c.a = 0.5 + 0.25 * id;\n"
+    "    v.p = i[0].p + float4(-o.x, o.y, 0, 0); s.Append(v);\n"
+    "    v.p = i[0].p + float4(o.x, o.y, 0, 0); s.Append(v);\n"
+    "    v.p = i[0].p + float4(-o.x, -o.y, 0, 0); s.Append(v);\n"
+    "    v.p = i[0].p + float4(o.x, -o.y, 0, 0); s.Append(v);\n"
+    "}\n";
+
+static
+HRESULT
+TcCompileFrom(
+    _In_z_ PCSTR Source,
+    _In_z_ PCSTR Entry,
+    _In_z_ PCSTR Profile,
+    _Out_ ID3DBlob **Blob)
+{
+    ID3DBlob *Errors = NULL;
+    HRESULT hr = D3DCompile(Source, strlen(Source), "warpcheck", NULL, NULL, Entry, Profile, 0, 0, Blob, &Errors);
+
+    if (Errors)
+    {
+        if (FAILED(hr))
+            printf("%s", (const char *)Errors->GetBufferPointer());
+        Errors->Release();
+    }
+    return hr;
+}
+
+/* Geometry shader expansion with instancing, stream output with statistics, DrawAuto and pass through capture */
+static
+HRESULT
+SceneGeometry(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const D3D11_INPUT_ELEMENT_DESC AutoElements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const D3D11_SO_DECLARATION_ENTRY Declaration[] =
+    {
+        { 0, "SV_POSITION", 0, 0, 4, 0 },
+        { 0, "COLOR", 0, 0, 4, 0 },
+    };
+    const UINT Stride = 32;
+    std::vector<TcVertex> Points;
+    D3D11_TEXTURE2D_DESC Desc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET, 0, 0 };
+    D3D11_BUFFER_DESC CaptureDesc = { 4096, D3D11_USAGE_DEFAULT, D3D11_BIND_STREAM_OUTPUT | D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+    D3D11_QUERY_DESC StatsDesc = { D3D11_QUERY_SO_STATISTICS, 0 };
+    D3D11_VIEWPORT Viewport = { 0, 0, 64, 64, 0, 1 };
+    const FLOAT Clear[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+    ID3DBlob *VsBlob = NULL;
+    ID3DBlob *AutoBlob = NULL;
+    ID3DBlob *GsBlob = NULL;
+    ID3DBlob *PsBlob = NULL;
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11VertexShader *AutoVs = NULL;
+    ID3D11GeometryShader *Gs = NULL;
+    ID3D11GeometryShader *Capture = NULL;
+    ID3D11GeometryShader *PassThrough = NULL;
+    ID3D11PixelShader *Ps = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11InputLayout *AutoLayout = NULL;
+    ID3D11Buffer *Input = NULL;
+    ID3D11Buffer *Captured = NULL;
+    ID3D11Texture2D *Target = NULL;
+    ID3D11RenderTargetView *TargetView = NULL;
+    ID3D11RasterizerState *Raster = NULL;
+    ID3D11Query *Stats = NULL;
+    D3D11_QUERY_DATA_SO_STATISTICS StatsData = {};
+    UINT Offset = 0;
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < 9; Index++)
+    {
+        Points.push_back(TcMake(((FLOAT)(Index % 3) - 1.0f) * 0.6f, ((FLOAT)(Index / 3) - 1.0f) * 0.6f, 0.5f, 1.0f,
+                                0x20408000 | (Index * 0x1C000000) | 0xFF));
+    }
+
+    hr = TcCompileFrom(TcGeometrySource, "vs", "vs_5_0", &VsBlob);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcGeometrySource, "vsauto", "vs_5_0", &AutoBlob);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcGeometrySource, "gs", "gs_5_0", &GsBlob);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcGeometrySource, "ps", "ps_5_0", &PsBlob);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(AutoBlob->GetBufferPointer(), AutoBlob->GetBufferSize(), NULL, &AutoVs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateGeometryShader(GsBlob->GetBufferPointer(), GsBlob->GetBufferSize(), NULL, &Gs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateGeometryShaderWithStreamOutput(GsBlob->GetBufferPointer(), GsBlob->GetBufferSize(), Declaration,
+                                                          ARRAYSIZE(Declaration), &Stride, 1, 0, NULL, &Capture);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateGeometryShaderWithStreamOutput(VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), Declaration,
+                                                          ARRAYSIZE(Declaration), &Stride, 1, D3D11_SO_NO_RASTERIZED_STREAM, NULL,
+                                                          &PassThrough);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(PsBlob->GetBufferPointer(), PsBlob->GetBufferSize(), NULL, &Ps);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(AutoElements, ARRAYSIZE(AutoElements), AutoBlob->GetBufferPointer(), AutoBlob->GetBufferSize(), &AutoLayout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC InputDesc = { (UINT)(Points.size() * sizeof(TcVertex)), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Points.data(), 0, 0 };
+
+        hr = Device->CreateBuffer(&InputDesc, &Data, &Input);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&CaptureDesc, NULL, &Captured);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateTexture2D(&Desc, NULL, &Target);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateRenderTargetView(Target, NULL, &TargetView);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, FALSE, FALSE };
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateQuery(&StatsDesc, &Stats);
+    if (FAILED(hr))
+        goto Exit;
+
+    {
+        UINT VertexStride = sizeof(TcVertex);
+
+        /* Expansion straight to the screen, capturing what it emits */
+        Context->ClearRenderTargetView(TargetView, Clear);
+        Context->OMSetRenderTargets(1, &TargetView, NULL);
+        Context->RSSetViewports(1, &Viewport);
+        Context->RSSetState(Raster);
+        Context->IASetInputLayout(Layout);
+        Context->IASetVertexBuffers(0, 1, &Input, &VertexStride, &Offset);
+        Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        Context->VSSetShader(Vs, NULL, 0);
+        Context->GSSetShader(Capture, NULL, 0);
+        Context->PSSetShader(Ps, NULL, 0);
+        Context->SOSetTargets(1, &Captured, &Offset);
+        Context->Begin(Stats);
+        Context->Draw((UINT)Points.size(), 0);
+        Context->End(Stats);
+        while (Context->GetData(Stats, &StatsData, sizeof(StatsData), 0) == S_FALSE)
+            ;
+        TcAppend(Result, &StatsData, sizeof(StatsData));
+        hr = TcReadBytes(Device, Context, Target, 4, Result);
+
+        /* The captured triangles again, through DrawAuto, with their colors swapped around */
+        if (SUCCEEDED(hr))
+        {
+            ID3D11Buffer *None = NULL;
+
+            Context->SOSetTargets(1, &None, &Offset);
+            Context->ClearRenderTargetView(TargetView, Clear);
+            Context->IASetInputLayout(AutoLayout);
+            Context->IASetVertexBuffers(0, 1, &Captured, &Stride, &Offset);
+            Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            Context->VSSetShader(AutoVs, NULL, 0);
+            Context->GSSetShader(NULL, NULL, 0);
+            Context->DrawAuto();
+            hr = TcReadBytes(Device, Context, Target, 4, Result);
+        }
+
+        /* The vertex shader's own output captured with nothing drawn */
+        if (SUCCEEDED(hr))
+        {
+            ID3D11Buffer *None = NULL;
+            UINT Zero = 0;
+
+            Context->IASetInputLayout(Layout);
+            Context->IASetVertexBuffers(0, 1, &Input, &VertexStride, &Offset);
+            Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+            Context->VSSetShader(Vs, NULL, 0);
+            Context->GSSetShader(PassThrough, NULL, 0);
+            Context->SOSetTargets(1, &Captured, &Zero);
+            Context->Draw((UINT)Points.size(), 0);
+            Context->SOSetTargets(1, &None, &Offset);
+            Context->GSSetShader(NULL, NULL, 0);
+            hr = TcReadBuffer(Device, Context, Captured, Result);
+        }
+    }
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Vs, AutoVs, Gs, Capture, PassThrough, Ps, Layout, AutoLayout, Input, Captured, Target, TargetView, Raster, Stats };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    ID3DBlob *Blobs[] = { VsBlob, AutoBlob, GsBlob, PsBlob };
+    for (ID3DBlob *Blob : Blobs)
+    {
+        if (Blob)
+            Blob->Release();
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -1365,6 +1586,7 @@ static const TcScene Scenes[] =
     { "fill", 0, SceneFill },
     { "filter", 0, SceneFilter },
     { "interp", 0, SceneInterpolate },
+    { "geometry", 0, SceneGeometry },
 };
 
 static
