@@ -2079,6 +2079,161 @@ Exit:
     return hr;
 }
 
+static const char TcOpsSource[] =
+    "RWByteAddressBuffer Out : register(u0);\n"
+    "Texture2D<float4> T : register(t0);\n"
+    "Texture2D<float> D : register(t1);\n"
+    "SamplerState S : register(s0);\n"
+    "SamplerComparisonState Z : register(s1);\n"
+    "cbuffer C : register(b0) { float4 F; uint4 U; int4 O; };\n"
+    "void put(uint at, double v) { uint lo, hi; asuint(v, lo, hi); Out.Store2(at, uint2(lo, hi)); }\n"
+    "[numthreads(8, 1, 1)]\n"
+    "void cs(uint i : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint at = i * 256;\n"
+    "    double a = (double)F.x * (i + 1) + 1.0e-10 * i;\n"
+    "    double b = (double)F.y - i;\n"
+    "    double c = a * b + a / b;\n"
+    "    double d = fma(a, b, c);\n"
+    "    double e = rcp(b);\n"
+    "    double m = max(a, b) - min(a, -b);\n"
+    "    put(at + 0, a); put(at + 8, b); put(at + 16, c); put(at + 24, d); put(at + 32, e); put(at + 40, m);\n"
+    "    put(at + 48, (double)(int)(U.w - i * 7)); put(at + 56, (double)(U.z + i));\n"
+    "    put(at + 64, abs(-c) + (double)F.z);\n"
+    "    put(at + 72, (i & 1) ? a : b);\n"
+    "    Out.Store4(at + 80, uint4(a < b, a >= b, a == c, a != d));\n"
+    "    Out.Store4(at + 96, uint4(asuint((float)c), (uint)(int)(d * 1000.0), (uint)(e * 1.0e6), asuint((float)m)));\n"
+    "    Out.Store4(at + 112, msad4(U.x ^ (i * 0x01000100), uint2(U.y + i * 77, U.z * (i + 3)), uint4(i, 2, 3, 4)));\n"
+    "    int2 o = O.xy + int2(i, -i);\n"
+    "    float2 uv = float2(0.1 + 0.07 * i, 0.3 + 0.05 * i);\n"
+    "    Out.Store4(at + 128, asuint(T.GatherRed(S, uv, o)));\n"
+    "    Out.Store4(at + 144, asuint(T.GatherGreen(S, uv, o + int2(40, -40))));\n"
+    "    Out.Store4(at + 160, asuint(D.GatherCmp(Z, uv, 0.5, o)));\n"
+    "    Out.Store4(at + 176, asuint(T.GatherAlpha(S, uv, O.zw)));\n"
+    "}\n";
+
+/* Double precision math, msad4 and gathers with offsets from registers, in a compute shader */
+static
+HRESULT
+SceneOps(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    struct
+    {
+        FLOAT F[4];
+        UINT U[4];
+        INT O[4];
+    } Constants = { { 3.25f, 7.5f, 0.125f, 0.0f }, { 0x00FF8040, 0x80402010, 0x10305070, 1000 }, { 1, -2, 33, -35 } };
+    D3D11_BUFFER_DESC ConstantDesc = { sizeof(Constants), D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+    D3D11_BUFFER_DESC OutDesc = { 8 * 256, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0 };
+    D3D11_UNORDERED_ACCESS_VIEW_DESC OutView = {};
+    D3D11_SAMPLER_DESC SamplerDesc = {};
+    D3D11_SAMPLER_DESC CompareDesc = {};
+    UINT Texels[64];
+    FLOAT Depths[64];
+    ID3DBlob *CsBlob = NULL;
+    ID3D11ComputeShader *Cs = NULL;
+    ID3D11Buffer *Buffer = NULL;
+    ID3D11Buffer *Out = NULL;
+    ID3D11UnorderedAccessView *Uav = NULL;
+    ID3D11Texture2D *Color = NULL;
+    ID3D11Texture2D *Depth = NULL;
+    ID3D11ShaderResourceView *Views[2] = {};
+    ID3D11SamplerState *Samplers[2] = {};
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < 64; Index++)
+    {
+        Texels[Index] = Index * 0x04030201u + 0x10203040u;
+        Depths[Index] = (FLOAT)((Index * 37) % 64) / 63.0f;
+    }
+
+    hr = TcCompileFrom(TcOpsSource, "cs", "cs_5_0", &CsBlob);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateComputeShader(CsBlob->GetBufferPointer(), CsBlob->GetBufferSize(), NULL, &Cs);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_SUBRESOURCE_DATA Data = { &Constants, 0, 0 };
+
+        hr = Device->CreateBuffer(&ConstantDesc, &Data, &Buffer);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&OutDesc, NULL, &Out);
+    if (SUCCEEDED(hr))
+    {
+        OutView.Format = DXGI_FORMAT_R32_TYPELESS;
+        OutView.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        OutView.Buffer.NumElements = OutDesc.ByteWidth / 4;
+        OutView.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        hr = Device->CreateUnorderedAccessView(Out, &OutView, &Uav);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_TEXTURE2D_DESC Desc = { 8, 8, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Texels, 32, 0 };
+
+        hr = Device->CreateTexture2D(&Desc, &Data, &Color);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_TEXTURE2D_DESC Desc = { 8, 8, 1, 1, DXGI_FORMAT_R32_FLOAT, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Depths, 32, 0 };
+
+        hr = Device->CreateTexture2D(&Desc, &Data, &Depth);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateShaderResourceView(Color, NULL, &Views[0]);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateShaderResourceView(Depth, NULL, &Views[1]);
+    if (SUCCEEDED(hr))
+    {
+        SamplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        SamplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+        SamplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_MIRROR;
+        SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = Device->CreateSamplerState(&SamplerDesc, &Samplers[0]);
+    }
+    if (SUCCEEDED(hr))
+    {
+        CompareDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+        CompareDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        CompareDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        CompareDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        CompareDesc.ComparisonFunc = D3D11_COMPARISON_LESS;
+        CompareDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = Device->CreateSamplerState(&CompareDesc, &Samplers[1]);
+    }
+    if (FAILED(hr))
+        goto Exit;
+
+    Context->CSSetShader(Cs, NULL, 0);
+    Context->CSSetConstantBuffers(0, 1, &Buffer);
+    Context->CSSetShaderResources(0, 2, Views);
+    Context->CSSetSamplers(0, 2, Samplers);
+    Context->CSSetUnorderedAccessViews(0, 1, &Uav, NULL);
+    Context->Dispatch(1, 1, 1);
+    hr = TcReadBuffer(Device, Context, Out, Result);
+    {
+        ID3D11UnorderedAccessView *None = NULL;
+
+        Context->CSSetUnorderedAccessViews(0, 1, &None, NULL);
+    }
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Cs, Buffer, Out, Uav, Color, Depth, Views[0], Views[1], Samplers[0], Samplers[1] };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    if (CsBlob)
+        CsBlob->Release();
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -2104,6 +2259,7 @@ static const TcScene Scenes[] =
     { "geometry", 0, SceneGeometry },
     { "tess", 0, SceneTessellation },
     { "bias", 0, SceneBias },
+    { "ops", 0, SceneOps },
 };
 
 static
