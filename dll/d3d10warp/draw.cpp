@@ -118,6 +118,31 @@ RxWarpSamplePattern(
     }
 }
 
+/* Samples alpha to coverage keeps: sample i needs alpha above (dither + 2i + 1) / (2 * count), dithered over an 8x8 tile */
+static
+UINT
+RxWarpAlphaCoverage(
+    _In_ FLOAT Alpha,
+    _In_ INT X,
+    _In_ INT Y,
+    _In_ UINT Count)
+{
+    static const FLOAT Dither[64] =
+    {
+#include "dithertable.inl"
+    };
+    FLOAT Step = 1.0f / ((FLOAT)Count + (FLOAT)Count);
+    FLOAT Offset = Dither[(Y & 7) * 8 + (X & 7)];
+    UINT Mask = 0;
+
+    for (UINT Index = 0; Index < Count && Index < 32; Index++)
+    {
+        if (Alpha > (Offset + (FLOAT)(2 * Index + 1)) * Step)
+            Mask |= 1u << Index;
+    }
+    return Mask;
+}
+
 class RxWarpDraw
 {
 public:
@@ -1551,6 +1576,8 @@ RxWarpDraw::ShadePass(
             continue;
         if (PixelShader != nullptr && PixelShader->WritesCoverage)
             Mask &= Invocation.CoverageOut[Lane];
+        else if (PixelShader != nullptr && BlendState->AlphaToCoverageEnable && PixelShader->OutputMask[0] != 0)
+            Mask &= RxWarpAlphaCoverage(RxWarpBitsAsFloat(Invocation.Output(0, Lane)[3]), X + (INT)(Lane & 1), Y + (INT)(Lane >> 1), SampleCount);
 
         for (Sample = 0; Sample < SampleCount; Sample++)
         {
