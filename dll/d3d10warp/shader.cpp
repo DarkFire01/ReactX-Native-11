@@ -309,12 +309,19 @@ RxWarpShader::Decode(
                     Opcode == D3D10_SB_OPCODE_DCL_INPUT_PS_SGV)
                 {
                     InputMode[Register] = (UINT8)DECODE_D3D10_SB_INPUT_INTERPOLATION_MODE(Token);
+                    if (InputMode[Register] == D3D10_SB_INTERPOLATION_LINEAR_SAMPLE ||
+                        InputMode[Register] == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_SAMPLE)
+                    {
+                        SampleRate = TRUE;
+                    }
                 }
                 if (Opcode != D3D10_SB_OPCODE_DCL_INPUT && Opcode != D3D10_SB_OPCODE_DCL_INPUT_PS && Cursor < End)
                 {
                     InputName[Register] = (UINT8)DECODE_D3D10_SB_NAME(Code[Cursor]);
                     if (InputName[Register] == D3D10_SB_NAME_POSITION)
                         PositionInput = Register;
+                    if (InputName[Register] == D3D10_SB_NAME_SAMPLE_INDEX)
+                        SampleRate = TRUE;
                 }
                 break;
             }

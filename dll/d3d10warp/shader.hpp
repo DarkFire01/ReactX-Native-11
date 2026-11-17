@@ -84,6 +84,22 @@ typedef struct _RX_WARP_INDEXABLE
 
 class RxWarpInvocation;
 
+/* eval_* in pixel shaders: an input evaluated somewhere other than where it was interpolated */
+typedef enum _RX_WARP_EVALUATE_KIND
+{
+    RxWarpEvaluateSnapped,
+    RxWarpEvaluateSample,
+    RxWarpEvaluateCentroid
+} RX_WARP_EVALUATE_KIND;
+
+typedef VOID (*RX_WARP_EVALUATE_ROUTINE)(
+    _In_ VOID *Context,
+    _In_ UINT Lane,
+    _In_ UINT Register,
+    _In_ RX_WARP_EVALUATE_KIND Kind,
+    _In_reads_(2) const INT *Parameter,
+    _Out_writes_(4) UINT *Value);
+
 /* Called by emit and cut in geometry shaders, once per running lane */
 typedef VOID (*RX_WARP_EMIT_ROUTINE)(
     _In_ VOID *Context,
@@ -157,6 +173,7 @@ public:
 
     BOOLEAN WritesDepth = FALSE;
     BOOLEAN WritesCoverage = FALSE;
+    BOOLEAN SampleRate = FALSE;         /* reads the sample index or interpolates at samples */
     BOOLEAN Discards = FALSE;
 };
 
@@ -218,6 +235,8 @@ public:
     UINT CoverageOut[RxWarpLanes] = {};     /* oMask */
     UINT SampleIndex[RxWarpLanes] = {};
     UINT RasterSamples = 1;                 /* the bound targets' sample count, for the rasterizer operand */
+    RX_WARP_EVALUATE_ROUTINE EvaluateRoutine = nullptr;
+    VOID *EvaluateContext = nullptr;
     UINT PrimitiveId = 0;
     UINT Live = 0xF;            /* lanes that run */
     UINT Helper = 0;            /* lanes that run only for derivatives */

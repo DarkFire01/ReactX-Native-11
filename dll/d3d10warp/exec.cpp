@@ -212,6 +212,10 @@ private:
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
+    Evaluate(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
     Texture(
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
@@ -803,6 +807,12 @@ RxWarpMachine::Execute(VOID)
                 if (Active != 0)
                     MaskedDifference(Instruction);
                 break;
+            case D3D11_SB_OPCODE_EVAL_SNAPPED:
+            case D3D11_SB_OPCODE_EVAL_SAMPLE_INDEX:
+            case D3D11_SB_OPCODE_EVAL_CENTROID:
+                if (Active != 0)
+                    Evaluate(Instruction);
+                break;
             default:
                 if (Active != 0)
                     Arithmetic(Instruction);
@@ -1113,6 +1123,46 @@ RxWarpMachine::Doubles(
         }
     }
     Store(Instruction, 0, Result, FALSE);
+}
+
+/* eval_snapped, eval_sample_index and eval_centroid: the draw evaluates the input, the swizzle and modifiers apply after */
+VOID
+RxWarpMachine::Evaluate(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    const RX_WARP_OPERAND &Source = Instruction.Operands[1];
+    RX_WARP_LANE_VALUES Parameter = {};
+    RX_WARP_LANE_VALUES Result = {};
+    RX_WARP_EVALUATE_KIND Kind;
+    UINT Register;
+
+    if (Instruction.OperandCount < 2 || Invocation->EvaluateRoutine == nullptr)
+        return;
+    Kind = (Instruction.Opcode == D3D11_SB_OPCODE_EVAL_SNAPPED) ? RxWarpEvaluateSnapped :
+           (Instruction.Opcode == D3D11_SB_OPCODE_EVAL_SAMPLE_INDEX) ? RxWarpEvaluateSample : RxWarpEvaluateCentroid;
+    if (Kind != RxWarpEvaluateCentroid && Instruction.OperandCount > 2)
+        FetchAll(Instruction.Operands[2], TRUE, Parameter);
+    Register = Source.Index[0].Immediate;
+
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        UINT Raw[4] = {};
+
+        if (!(Active & (1u << Lane)))
+            continue;
+        Invocation->EvaluateRoutine(Invocation->EvaluateContext, Lane, Register, Kind, (const INT *)Parameter[Lane], Raw);
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            UINT Bits = Raw[Source.Swizzle[Component] & 3];
+
+            if (Source.Absolute)
+                Bits &= 0x7FFFFFFF;
+            if (Source.Negate)
+                Bits ^= 0x80000000;
+            Result[Lane][Component] = Bits;
+        }
+    }
+    Store(Instruction, 0, Result, TRUE);
 }
 
 /* msad, per component: absolute byte differences against the reference, skipping its zero bytes, plus the accumulator */
