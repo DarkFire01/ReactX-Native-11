@@ -300,6 +300,8 @@ RxWarpDevice::Create(
         Funcs.pfnQueryGetData = RxWarpDdi::QueryGetData;
         Funcs.pfnSetPredication = RxWarpDdi::SetPredication;
 
+        Funcs.pfnGenMips = RxWarpDdi::GenMips;
+
         Funcs.pfnDraw = RxWarpDdi::Draw;
         Funcs.pfnDrawIndexed = RxWarpDdi::DrawIndexed;
         Funcs.pfnDrawInstanced = RxWarpDdi::DrawInstanced;

@@ -7,6 +7,7 @@ nt_add_usermode_dll(d3d10warp
         draw.cpp
         exec.cpp
         format.cpp
+        mips.cpp
         query.cpp
         resource.cpp
         sample.cpp
