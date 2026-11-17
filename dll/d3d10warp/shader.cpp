@@ -89,7 +89,22 @@ RxWarpDecodeOperand(
         return TRUE;
     }
     if (Operand->Type == D3D10_SB_OPERAND_TYPE_IMMEDIATE64)
-        return FALSE;
+    {
+        /* Four components hold two doubles, one component holds one */
+        UINT Words = (Components == D3D10_SB_OPERAND_4_COMPONENT) ? 4 : 2;
+
+        if (*Position + Words > End)
+            return FALSE;
+        for (UINT Index = 0; Index < Words; Index++)
+            Operand->Immediate[Index] = Code[(*Position)++];
+        if (Words == 2)
+        {
+            Operand->Immediate[2] = Operand->Immediate[0];
+            Operand->Immediate[3] = Operand->Immediate[1];
+        }
+        Operand->Type = D3D10_SB_OPERAND_TYPE_IMMEDIATE32;
+        return TRUE;
+    }
 
     for (UINT Dimension = 0; Dimension < Operand->Dimensions && Dimension < 3; Dimension++)
     {

@@ -199,6 +199,19 @@ private:
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
+    FetchDoubles(
+        _In_ const RX_WARP_OPERAND &Operand,
+        _Out_ double (*Values)[2]);
+
+    VOID
+    Doubles(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
+    MaskedDifference(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
     Texture(
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
@@ -696,9 +709,14 @@ RxWarpMachine::Execute(VOID)
             case D3D10_1_SB_OPCODE_LOD:
             case D3D10_1_SB_OPCODE_GATHER4:
             case D3D11_SB_OPCODE_GATHER4_C:
+            case D3D11_SB_OPCODE_GATHER4_PO:
+            case D3D11_SB_OPCODE_GATHER4_PO_C:
             case D3D11_SB_OPCODE_BUFINFO:
                 if (Active != 0)
                     Texture(Instruction);
+                break;
+            case D3D11_SB_OPCODE_ABORT:
+            case D3D11_SB_OPCODE_DEBUG_BREAK:
                 break;
             case D3D10_SB_OPCODE_EMIT:
             case D3D10_SB_OPCODE_CUT:
@@ -753,6 +771,32 @@ RxWarpMachine::Execute(VOID)
             case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:
                 if (Active != 0)
                     Access(Instruction);
+                break;
+            case D3D11_SB_OPCODE_DADD:
+            case D3D11_SB_OPCODE_DMUL:
+            case D3D11_SB_OPCODE_DMAX:
+            case D3D11_SB_OPCODE_DMIN:
+            case D3D11_SB_OPCODE_DMOV:
+            case D3D11_SB_OPCODE_DMOVC:
+            case D3D11_SB_OPCODE_DEQ:
+            case D3D11_SB_OPCODE_DNE:
+            case D3D11_SB_OPCODE_DLT:
+            case D3D11_SB_OPCODE_DGE:
+            case D3D11_SB_OPCODE_DTOF:
+            case D3D11_SB_OPCODE_FTOD:
+            case D3D11_1_SB_OPCODE_DDIV:
+            case D3D11_1_SB_OPCODE_DFMA:
+            case D3D11_1_SB_OPCODE_DRCP:
+            case D3D11_1_SB_OPCODE_DTOI:
+            case D3D11_1_SB_OPCODE_DTOU:
+            case D3D11_1_SB_OPCODE_ITOD:
+            case D3D11_1_SB_OPCODE_UTOD:
+                if (Active != 0)
+                    Doubles(Instruction);
+                break;
+            case D3D11_1_SB_OPCODE_MSAD:
+                if (Active != 0)
+                    MaskedDifference(Instruction);
                 break;
             default:
                 if (Active != 0)
@@ -880,6 +924,225 @@ RxWarpIsIntegerOp(
         default:
             return FALSE;
     }
+}
+
+static
+double
+RxWarpJoinDouble(
+    _In_ UINT Low,
+    _In_ UINT High)
+{
+    UINT64 Bits = ((UINT64)High << 32) | Low;
+    double Value;
+
+    memcpy(&Value, &Bits, sizeof(Value));
+    return Value;
+}
+
+static
+VOID
+RxWarpSplitDouble(
+    _In_ double Value,
+    _Out_writes_(2) UINT *Words)
+{
+    UINT64 Bits;
+
+    memcpy(&Bits, &Value, sizeof(Bits));
+    Words[0] = (UINT)Bits;
+    Words[1] = (UINT)(Bits >> 32);
+}
+
+/* Reads a source as two doubles in xy and zw, applying its modifiers to the doubles */
+VOID
+RxWarpMachine::FetchDoubles(
+    _In_ const RX_WARP_OPERAND &Operand,
+    _Out_ double (*Values)[2])
+{
+    RX_WARP_OPERAND Plain = Operand;
+    RX_WARP_LANE_VALUES Raw;
+
+    Plain.Negate = 0;
+    Plain.Absolute = 0;
+    FetchAll(Plain, TRUE, Raw);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Pair = 0; Pair < 2; Pair++)
+        {
+            double Value = RxWarpJoinDouble(Raw[Lane][Pair * 2], Raw[Lane][Pair * 2 + 1]);
+
+            if (Operand.Absolute)
+                Value = fabs(Value);
+            if (Operand.Negate)
+                Value = -Value;
+            Values[Lane][Pair] = Value;
+        }
+    }
+}
+
+VOID
+RxWarpMachine::Doubles(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    double Source[3][RxWarpLanes][2] = {};
+    RX_WARP_LANE_VALUES Words[3] = {};
+    RX_WARP_LANE_VALUES Result = {};
+    UINT Opcode = Instruction.Opcode;
+    UINT Mask = Instruction.Operands[0].Mask;
+    UINT Sources = (Instruction.OperandCount > 1) ? Instruction.OperandCount - 1 : 0;
+    BOOLEAN Narrow;
+    UINT Slots[2];
+    UINT SlotCount = 0;
+
+    if (Sources > 3)
+        Sources = 3;
+    for (UINT Index = 0; Index < Sources; Index++)
+    {
+        FetchDoubles(Instruction.Operands[1 + Index], Source[Index]);
+        FetchAll(Instruction.Operands[1 + Index], TRUE, Words[Index]);
+    }
+
+    /* Results narrower than a double land in the written components in order */
+    Narrow = (Opcode == D3D11_SB_OPCODE_DEQ || Opcode == D3D11_SB_OPCODE_DNE || Opcode == D3D11_SB_OPCODE_DLT ||
+              Opcode == D3D11_SB_OPCODE_DGE || Opcode == D3D11_SB_OPCODE_DTOF || Opcode == D3D11_1_SB_OPCODE_DTOI ||
+              Opcode == D3D11_1_SB_OPCODE_DTOU);
+    for (UINT Component = 0; Component < 4 && SlotCount < 2; Component++)
+    {
+        if (Narrow && (Mask & (1u << Component)))
+            Slots[SlotCount++] = Component;
+    }
+
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Pair = 0; Pair < 2; Pair++)
+        {
+            double A = Source[0][Lane][Pair];
+            double B = Source[1][Lane][Pair];
+            double C = Source[2][Lane][Pair];
+            double Value = 0.0;
+            UINT Bits = 0;
+
+            switch (Opcode)
+            {
+                case D3D11_SB_OPCODE_DADD:
+                    Value = A + B;
+                    break;
+                case D3D11_SB_OPCODE_DMUL:
+                    Value = A * B;
+                    break;
+                case D3D11_1_SB_OPCODE_DDIV:
+                    Value = A / B;
+                    break;
+                case D3D11_1_SB_OPCODE_DFMA:
+                    /* The reference only computes the first pair of lanes; the other two read as zero */
+                    Value = (Lane < 2) ? fma(A, B, C) : 0.0;
+                    break;
+                case D3D11_1_SB_OPCODE_DRCP:
+                    Value = 1.0 / A;
+                    break;
+                case D3D11_SB_OPCODE_DMAX:
+                    Value = fmax(A, B);
+                    break;
+                case D3D11_SB_OPCODE_DMIN:
+                    Value = fmin(A, B);
+                    break;
+                case D3D11_SB_OPCODE_DMOV:
+                    Value = A;
+                    break;
+                case D3D11_SB_OPCODE_DMOVC:
+                    /* The condition is 32 bit, one per double */
+                    Value = Words[0][Lane][Pair * 2] ? B : C;
+                    break;
+                case D3D11_SB_OPCODE_FTOD:
+                    Value = (double)RxWarpAsFloat(Words[0][Lane][Pair]);
+                    break;
+                case D3D11_1_SB_OPCODE_ITOD:
+                    Value = (double)(INT)Words[0][Lane][Pair];
+                    break;
+                case D3D11_1_SB_OPCODE_UTOD:
+                    Value = (double)Words[0][Lane][Pair];
+                    break;
+                case D3D11_SB_OPCODE_DEQ:
+                    Bits = (A == B) ? UINT_MAX : 0;
+                    break;
+                case D3D11_SB_OPCODE_DNE:
+                    Bits = (A != B) ? UINT_MAX : 0;
+                    break;
+                case D3D11_SB_OPCODE_DLT:
+                    Bits = (A < B) ? UINT_MAX : 0;
+                    break;
+                case D3D11_SB_OPCODE_DGE:
+                    Bits = (A >= B) ? UINT_MAX : 0;
+                    break;
+                case D3D11_SB_OPCODE_DTOF:
+                    Bits = RxWarpAsUint((FLOAT)A);
+                    break;
+                case D3D11_1_SB_OPCODE_DTOI:
+                    if (A != A)
+                        Bits = 0;
+                    else if (A >= 2147483648.0)
+                        Bits = (UINT)INT_MAX;
+                    else if (A <= -2147483648.0)
+                        Bits = (UINT)INT_MIN;
+                    else
+                        Bits = (UINT)(INT)A;
+                    break;
+                case D3D11_1_SB_OPCODE_DTOU:
+                    if (!(A > 0.0))
+                        Bits = 0;
+                    else if (A >= 4294967296.0)
+                        Bits = UINT_MAX;
+                    else
+                        Bits = (UINT)A;
+                    break;
+            }
+
+            if (Narrow)
+            {
+                if (Pair < SlotCount)
+                    Result[Lane][Slots[Pair]] = Bits;
+            }
+            else
+            {
+                RxWarpSplitDouble(Value, &Result[Lane][Pair * 2]);
+            }
+        }
+    }
+    Store(Instruction, 0, Result, FALSE);
+}
+
+/* msad, per component: absolute byte differences against the reference, skipping its zero bytes, plus the accumulator */
+VOID
+RxWarpMachine::MaskedDifference(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Reference;
+    RX_WARP_LANE_VALUES Window;
+    RX_WARP_LANE_VALUES Accumulate;
+    RX_WARP_LANE_VALUES Result;
+
+    if (Instruction.OperandCount < 4)
+        return;
+    FetchAll(Instruction.Operands[1], TRUE, Reference);
+    FetchAll(Instruction.Operands[2], TRUE, Window);
+    FetchAll(Instruction.Operands[3], TRUE, Accumulate);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            UINT Sum = Accumulate[Lane][Component];
+
+            for (UINT Byte = 0; Byte < 4; Byte++)
+            {
+                INT Wanted = (INT)((Reference[Lane][Component] >> (Byte * 8)) & 0xFF);
+                INT Found = (INT)((Window[Lane][Component] >> (Byte * 8)) & 0xFF);
+
+                if (Wanted != 0)
+                    Sum += (UINT)abs(Wanted - Found);
+            }
+            Result[Lane][Component] = Sum;
+        }
+    }
+    Store(Instruction, 0, Result, FALSE);
 }
 
 VOID
@@ -1273,8 +1536,11 @@ RxWarpMachine::Texture(
     RX_WARP_LANE_VALUES DerivY = {};
     const RX_WARP_OPERAND *Resource;
     const RX_WARP_OPERAND *SamplerOperand = nullptr;
+    RX_WARP_LANE_VALUES Offsets = {};
     RX_WARP_SAMPLE_REQUEST Request = {};
     UINT Opcode = Instruction.Opcode;
+    BOOLEAN Programmable;
+    UINT Shift;
     UINT Slot;
 
     if (Opcode == D3D10_SB_OPCODE_RESINFO)
@@ -1322,15 +1588,20 @@ RxWarpMachine::Texture(
         return;
     }
 
-    if (Instruction.OperandCount < 3)
+    /* Programmable offsets come before the resource */
+    Programmable = (Opcode == D3D11_SB_OPCODE_GATHER4_PO || Opcode == D3D11_SB_OPCODE_GATHER4_PO_C);
+    Shift = Programmable ? 1 : 0;
+    if (Instruction.OperandCount < 3 + Shift)
         return;
-    Resource = &Instruction.Operands[2];
+    Resource = &Instruction.Operands[2 + Shift];
     if (Opcode != D3D10_SB_OPCODE_LD)
     {
-        if (Instruction.OperandCount < 4)
+        if (Instruction.OperandCount < 4 + Shift)
             return;
-        SamplerOperand = &Instruction.Operands[3];
+        SamplerOperand = &Instruction.Operands[3 + Shift];
     }
+    if (Programmable)
+        FetchAll(Instruction.Operands[2], TRUE, Offsets);
     Slot = Resource->Index[0].Immediate;
 
     Request.View = (Slot < 128) ? Bindings->Views[Slot] : nullptr;
@@ -1342,8 +1613,8 @@ RxWarpMachine::Texture(
     Request.Offset[2] = Instruction.Offset[2];
 
     FetchAll(Instruction.Operands[1], Opcode == D3D10_SB_OPCODE_LD, Address);
-    if (Instruction.OperandCount > 4)
-        FetchAll(Instruction.Operands[4], FALSE, Extra);
+    if (Instruction.OperandCount > 4 + Shift)
+        FetchAll(Instruction.Operands[4 + Shift], FALSE, Extra);
     if (Opcode == D3D10_SB_OPCODE_SAMPLE_D && Instruction.OperandCount > 5)
     {
         memcpy(DerivX, Extra, sizeof(DerivX));
@@ -1369,6 +1640,8 @@ RxWarpMachine::Texture(
             case D3D10_1_SB_OPCODE_LOD:
             case D3D10_1_SB_OPCODE_GATHER4:
             case D3D11_SB_OPCODE_GATHER4_C:
+            case D3D11_SB_OPCODE_GATHER4_PO:
+            case D3D11_SB_OPCODE_GATHER4_PO_C:
             {
                 /* Screen space derivatives across the quad, coarse */
                 FLOAT Dx[3];
@@ -1381,7 +1654,8 @@ RxWarpMachine::Texture(
                 }
                 Request.Mode = RxWarpSampleAuto;
                 Request.Bias = (Opcode == D3D10_SB_OPCODE_SAMPLE_B) ? RxWarpAsFloat(Extra[Lane][0]) : 0.0f;
-                Request.Compare = (Opcode == D3D10_SB_OPCODE_SAMPLE_C || Opcode == D3D11_SB_OPCODE_GATHER4_C);
+                Request.Compare = (Opcode == D3D10_SB_OPCODE_SAMPLE_C || Opcode == D3D11_SB_OPCODE_GATHER4_C ||
+                                   Opcode == D3D11_SB_OPCODE_GATHER4_PO_C);
                 Request.Reference = RxWarpAsFloat(Extra[Lane][0]);
                 if (Opcode == D3D10_1_SB_OPCODE_LOD)
                 {
@@ -1390,10 +1664,17 @@ RxWarpMachine::Texture(
                         Raw[Component] = RxWarpAsUint(Texel[Component]);
                     break;
                 }
-                if (Opcode == D3D10_1_SB_OPCODE_GATHER4 || Opcode == D3D11_SB_OPCODE_GATHER4_C)
+                if (Opcode == D3D10_1_SB_OPCODE_GATHER4 || Opcode == D3D11_SB_OPCODE_GATHER4_C || Programmable)
                 {
                     Request.Gather = TRUE;
                     Request.GatherComponent = SamplerOperand->Swizzle[0];
+                }
+
+                /* Only the low six bits of a programmable offset count, signed */
+                if (Programmable)
+                {
+                    for (UINT Axis = 0; Axis < 2; Axis++)
+                        Request.Offset[Axis] = (INT)(Offsets[Lane][Axis] << 26) >> 26;
                 }
                 RxWarpSample(&Request, (const FLOAT *)Address[Lane], Dx, Dy, Texel);
                 for (UINT Component = 0; Component < 4; Component++)
