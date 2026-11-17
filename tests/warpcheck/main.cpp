@@ -241,6 +241,7 @@ static const char TcShaderSource[] =
     "float4 ps(VO i) : SV_Target { return i.c; }\n"
     "float4 pstex(VO i) : SV_Target { return Tex.Sample(Smp, i.t); }\n"
     "float4 psload(VO i) : SV_Target { return Tex.Load(int3(i.p.xy, 0)); }\n"
+    "float4 psfilter(VO i) : SV_Target { return Tex.Sample(Smp, i.p.xy / 32.0 - 0.5); }\n"
     "float4 psmath(VO i) : SV_Target { float4 v = i.c * 3.0 - 1.0; float d = dot(v.xyz, v.xyz);\n"
     "    float4 r = float4(sqrt(abs(v.x)), rsqrt(d + 1.0), frac(v.z * 7.3), 0.5);\n"
     "    [loop] for (int k = 0; k < 3; k++) { if (r.x > 0.6) break; r.x += 0.1; }\n"
@@ -327,6 +328,7 @@ struct TcDrawSetup
     D3D11_CULL_MODE Cull = D3D11_CULL_NONE;
     D3D11_VIEWPORT Viewport = { 0, 0, 0, 0, 0, 1 };
     ID3D11ShaderResourceView *View = NULL;
+    ID3D11SamplerState *Sampler = NULL;
 };
 
 static
@@ -468,7 +470,10 @@ TcDrawScene(
         if (ImageView)
         {
             Context->PSSetShaderResources(0, 1, &ImageView);
-            Context->PSSetSamplers(0, 1, &Sampler);
+            if (Setup.Sampler != NULL)
+                Context->PSSetSamplers(0, 1, &Setup.Sampler);
+            else
+                Context->PSSetSamplers(0, 1, &Sampler);
         }
         if (IndexBuffer)
         {
@@ -1226,6 +1231,74 @@ SceneFill(
     return TcDrawScene(Device, Context, Setup, Result);
 }
 
+/* Exact inputs for the filter: a 4x4 texture sampled at positions known to the bit, into a float target */
+static
+HRESULT
+SceneFilter(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const UINT Texels[16] =
+    {
+        0xFF000000, 0x80FF2010, 0x00113377, 0xFFFFFFFF,
+        0x7F7F7F7F, 0x01020304, 0xFEFDFCFB, 0x12345678,
+        0x9ABCDEF0, 0x00FF00FF, 0xFF00FF00, 0x55AA55AA,
+        0x0F1E2D3C, 0xC3D2E1F0, 0x80808080, 0x7F808180,
+    };
+    static const D3D11_TEXTURE_ADDRESS_MODE Modes[] =
+    {
+        D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_MIRROR, D3D11_TEXTURE_ADDRESS_BORDER,
+    };
+    const TcVertex Vertices[] =
+    {
+        TcMake(-1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0),
+        TcMake(1.0f, 1.0f, 0.5f, 1.0f, 0), TcMake(1.0f, -1.0f, 0.5f, 1.0f, 0), TcMake(-1.0f, -1.0f, 0.5f, 1.0f, 0),
+    };
+    D3D11_TEXTURE2D_DESC Desc = { 4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+    D3D11_SUBRESOURCE_DATA Data = { Texels, 16, 0 };
+    ID3D11Texture2D *Texture = NULL;
+    ID3D11ShaderResourceView *View = NULL;
+    HRESULT hr;
+
+    hr = Device->CreateTexture2D(&Desc, &Data, &Texture);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateShaderResourceView(Texture, NULL, &View);
+    for (UINT Index = 0; Index < ARRAYSIZE(Modes) * 2 && SUCCEEDED(hr); Index++)
+    {
+        ID3D11SamplerState *Sampler = NULL;
+        D3D11_SAMPLER_DESC SamplerDesc = {};
+        TcDrawSetup Setup;
+
+        SamplerDesc.Filter = (Index & 1) ? D3D11_FILTER_MIN_MAG_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        SamplerDesc.AddressU = Modes[Index / 2];
+        SamplerDesc.AddressV = Modes[Index / 2];
+        SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        SamplerDesc.BorderColor[0] = 0.25f;
+        SamplerDesc.BorderColor[3] = 1.0f;
+        SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = Device->CreateSamplerState(&SamplerDesc, &Sampler);
+        if (FAILED(hr))
+            break;
+        Context->PSSetSamplers(0, 1, &Sampler);
+        Setup.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        Setup.BytesPerPixel = 16;
+        Setup.Size = 64;
+        Setup.Vertices = Vertices;
+        Setup.VertexCount = ARRAYSIZE(Vertices);
+        Setup.PixelEntry = "psfilter";
+        Setup.View = View;
+        Setup.Sampler = Sampler;
+        hr = TcDrawScene(Device, Context, Setup, Result);
+        Sampler->Release();
+    }
+    if (View)
+        View->Release();
+    if (Texture)
+        Texture->Release();
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -1246,6 +1319,7 @@ static const TcScene Scenes[] =
     { "compute", 0, SceneCompute },
     { "bc", 0, SceneBlocks },
     { "fill", 0, SceneFill },
+    { "filter", 0, SceneFilter },
 };
 
 static
