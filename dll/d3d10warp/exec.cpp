@@ -930,7 +930,7 @@ RxWarpMachine::Arithmetic(
             RxWarpFloatOp(2, Source, Result, [](FLOAT A, FLOAT B, FLOAT) { return A * B; });
             break;
         case D3D10_SB_OPCODE_MAD:
-            RxWarpFloatOp(3, Source, Result, [](FLOAT A, FLOAT B, FLOAT C) { return A * B + C; });
+            RxWarpFloatOp(3, Source, Result, [](FLOAT A, FLOAT B, FLOAT C) { return fmaf(A, B, C); });
             break;
         case D3D10_SB_OPCODE_DIV:
             RxWarpFloatOp(2, Source, Result, [](FLOAT A, FLOAT B, FLOAT) { return A / B; });
