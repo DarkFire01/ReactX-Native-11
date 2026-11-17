@@ -519,8 +519,6 @@ RxWarpMachine::Execute(VOID)
 
                 Frames.pop_back();
                 Active = Frame.Saved & ~Frame.Removed & ~Dead;
-                if (!Frames.empty())
-                    Frames.back().Removed |= Frame.Removed;
                 break;
             }
             case D3D10_SB_OPCODE_LOOP:
@@ -550,8 +548,6 @@ RxWarpMachine::Execute(VOID)
 
                 Frames.pop_back();
                 Active = Done.Saved & ~Done.Removed & ~Dead;
-                if (!Frames.empty())
-                    Frames.back().Removed |= Done.Removed;
                 break;
             }
             case D3D10_SB_OPCODE_BREAK:
@@ -617,8 +613,6 @@ RxWarpMachine::Execute(VOID)
 
                 Frames.pop_back();
                 Active = Frame.Saved & ~Frame.Removed & ~Dead;
-                if (!Frames.empty())
-                    Frames.back().Removed |= Frame.Removed;
                 break;
             }
             case D3D10_SB_OPCODE_RET:
