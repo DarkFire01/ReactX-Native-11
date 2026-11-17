@@ -1009,14 +1009,15 @@ static const char TcComputeSource[] =
     "    if ((flat % 7) == 0) Picked.Append(uint2(flat, 0));\n"
     "}\n";
 
-/* Fills a buffer from the GPU and reads it back */
+/* Fills a buffer from the GPU and reads it back, up to Limit bytes */
 static
 HRESULT
 TcReadBuffer(
     _In_ ID3D11Device *Device,
     _In_ ID3D11DeviceContext *Context,
     _In_ ID3D11Buffer *Buffer,
-    _Inout_ TcResult *Result)
+    _Inout_ TcResult *Result,
+    _In_ UINT Limit = UINT_MAX)
 {
     D3D11_BUFFER_DESC Desc;
     D3D11_MAPPED_SUBRESOURCE Map;
@@ -1036,7 +1037,7 @@ TcReadBuffer(
     hr = Context->Map(Staging, 0, D3D11_MAP_READ, 0, &Map);
     if (SUCCEEDED(hr))
     {
-        TcAppend(Result, Map.pData, Desc.ByteWidth);
+        TcAppend(Result, Map.pData, (Limit < Desc.ByteWidth) ? Limit : Desc.ByteWidth);
         Context->Unmap(Staging, 0);
     }
     Staging->Release();
@@ -1381,6 +1382,27 @@ TcCompileFrom(
     return hr;
 }
 
+static
+HRESULT
+TcCompileWith(
+    _In_z_ PCSTR Source,
+    _In_z_ PCSTR Entry,
+    _In_z_ PCSTR Profile,
+    _In_ const D3D_SHADER_MACRO *Defines,
+    _Out_ ID3DBlob **Blob)
+{
+    ID3DBlob *Errors = NULL;
+    HRESULT hr = D3DCompile(Source, strlen(Source), "warpcheck", Defines, NULL, Entry, Profile, 0, 0, Blob, &Errors);
+
+    if (Errors)
+    {
+        if (FAILED(hr))
+            printf("%s", (const char *)Errors->GetBufferPointer());
+        Errors->Release();
+    }
+    return hr;
+}
+
 /* Geometry shader expansion with instancing, stream output with statistics, DrawAuto and pass through capture */
 static
 HRESULT
@@ -1564,6 +1586,310 @@ Exit:
     return hr;
 }
 
+static const char TcTessellationSource[] =
+    "cbuffer F : register(b0) { float4 E; float4 I; };\n"
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct CP { float4 p : POS; };\n"
+    "CP vs(VI i) { CP o; o.p = i.p; return o; }\n"
+    "#if DOMAIN_QUAD\n"
+    "#define NPTS 4\n"
+    "#define LOC float2\n"
+    "#define LOCZ 0\n"
+    "struct PC { float e[4] : SV_TessFactor; float i[2] : SV_InsideTessFactor; };\n"
+    "PC pc(InputPatch<CP, NPTS> p) { PC o; o.e[0] = E.x; o.e[1] = E.y; o.e[2] = E.z; o.e[3] = E.w; o.i[0] = I.x; o.i[1] = I.y; return o; }\n"
+    "float4 place(const OutputPatch<CP, NPTS> p, LOC l) { return lerp(lerp(p[0].p, p[1].p, l.x), lerp(p[3].p, p[2].p, l.x), l.y); }\n"
+    "#elif DOMAIN_TRI\n"
+    "#define NPTS 3\n"
+    "#define LOC float3\n"
+    "#define LOCZ l.z\n"
+    "struct PC { float e[3] : SV_TessFactor; float i : SV_InsideTessFactor; };\n"
+    "PC pc(InputPatch<CP, NPTS> p) { PC o; o.e[0] = E.x; o.e[1] = E.y; o.e[2] = E.z; o.i = I.x; return o; }\n"
+    "float4 place(const OutputPatch<CP, NPTS> p, LOC l) { return p[0].p * l.x + p[1].p * l.y + p[2].p * l.z; }\n"
+    "#else\n"
+    "#define NPTS 2\n"
+    "#define LOC float2\n"
+    "#define LOCZ 0\n"
+    "struct PC { float e[2] : SV_TessFactor; };\n"
+    "PC pc(InputPatch<CP, NPTS> p) { PC o; o.e[0] = E.x; o.e[1] = E.y; return o; }\n"
+    "float4 place(const OutputPatch<CP, NPTS> p, LOC l) { return lerp(p[0].p, p[1].p, l.x) + float4(0, l.y * 0.5, 0, 0); }\n"
+    "#endif\n"
+    "#ifdef DOMAIN\n"
+    "[domain(DOMAIN)] [partitioning(PART)] [outputtopology(TOPO)] [outputcontrolpoints(NPTS)] [patchconstantfunc(\"pc\")]\n"
+    "CP hs(InputPatch<CP, NPTS> p, uint i : SV_OutputControlPointID) { CP o; o.p = p[i].p + float4(0, 0, 0.01 * i, 0); return o; }\n"
+    "struct DO { float4 p : SV_Position; float4 d : LOCATION; };\n"
+    "[domain(DOMAIN)] DO ds(PC c, LOC l : SV_DomainLocation, const OutputPatch<CP, NPTS> p, uint id : SV_PrimitiveID)\n"
+    "{ DO o; o.p = place(p, l); o.d = float4(l.xy, LOCZ, c.e[0] + id * 100); return o; }\n"
+    "float4 ps(DO i) : SV_Target { return float4(i.d.xyz, 1); }\n"
+    "#endif\n";
+
+/* Every domain, partitioning and output primitive over a set of tess factors, captured from the domain shader */
+static
+HRESULT
+SceneTessellation(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const D3D11_SO_DECLARATION_ENTRY Declaration[] =
+    {
+        { 0, "SV_POSITION", 0, 0, 4, 0 },
+        { 0, "LOCATION", 0, 0, 4, 0 },
+    };
+    static const PCSTR Domains[3] = { "\"quad\"", "\"tri\"", "\"isoline\"" };
+    static const PCSTR DomainMacros[3] = { "DOMAIN_QUAD", "DOMAIN_TRI", "DOMAIN_LINE" };
+    static const UINT PatchPoints[3] = { 4, 3, 2 };
+    static const PCSTR Partitions[4] = { "\"integer\"", "\"pow2\"", "\"fractional_odd\"", "\"fractional_even\"" };
+    static const PCSTR Topologies[4] = { "\"triangle_cw\"", "\"triangle_ccw\"", "\"point\"", "\"line\"" };
+    static const FLOAT Factors[][8] =
+    {
+        { 1, 1, 1, 1, 1, 1 },
+        { 2.5f, 3.2f, 1.7f, 4.9f, 3.3f, 2.1f },
+        { 7, 7, 7, 7, 6, 5 },
+        { 64, 1, 33.3f, 12, 17.5f, 9.9f },
+        { 0.5f, 1.2f, 2, 3, 0.7f, 1.0f },
+        { 1, 1, 1, 1, 2.2f, 1 },
+        { 0, 2, 2, 2, 2, 2 },
+        { 3, 4, 5, 6, 1.0f, 8 },
+        { 1.00001f, 1, 1, 1, 1, 1 },
+        { 100, 2.0001f, 5.5f, 6.5f, 2.9999f, 3.0001f },
+        { 2, 2, 2, 2, 2, 2 },
+        { 1, 1, 1, 1, 9, 4 },
+    };
+    const UINT Stride = 32;
+    std::vector<TcVertex> Points;
+    D3D11_BUFFER_DESC CaptureDesc = { 1 << 20, D3D11_USAGE_DEFAULT, D3D11_BIND_STREAM_OUTPUT, 0, 0, 0 };
+    D3D11_BUFFER_DESC ConstantDesc = { 32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+    D3D11_TEXTURE2D_DESC Desc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET, 0, 0 };
+    D3D11_QUERY_DESC StatsDesc = { D3D11_QUERY_SO_STATISTICS, 0 };
+    D3D11_QUERY_DESC PipeDesc = { D3D11_QUERY_PIPELINE_STATISTICS, 0 };
+    D3D11_VIEWPORT Viewport = { 0, 0, 64, 64, 0, 1 };
+    const FLOAT Clear[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+    ID3DBlob *VsBlob = NULL;
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11Buffer *Input = NULL;
+    ID3D11Buffer *Captured = NULL;
+    ID3D11Buffer *Constants = NULL;
+    ID3D11Query *Stats = NULL;
+    ID3D11Query *Pipe = NULL;
+    ID3D11Texture2D *Target = NULL;
+    ID3D11RenderTargetView *TargetView = NULL;
+    ID3D11RasterizerState *Raster = NULL;
+    UINT Offset = 0;
+    UINT VertexStride = sizeof(TcVertex);
+    HRESULT hr;
+
+    /* Two patches worth of points for every domain */
+    for (UINT Patch = 0; Patch < 2; Patch++)
+    {
+        FLOAT X = Patch ? 0.1f : -0.9f;
+
+        Points.push_back(TcMake(X, -0.8f, 0.2f, 1.0f, 0xFF));
+        Points.push_back(TcMake(X + 0.8f, -0.7f, 0.3f, 1.0f, 0xFF));
+        Points.push_back(TcMake(X + 0.7f, 0.8f, 0.4f, 1.0f, 0xFF));
+        Points.push_back(TcMake(X - 0.05f, 0.6f, 0.5f, 1.0f, 0xFF));
+    }
+
+    hr = TcCompileFrom(TcTessellationSource, "vs", "vs_5_0", &VsBlob);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), VsBlob->GetBufferPointer(), VsBlob->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC InputDesc = { (UINT)(Points.size() * sizeof(TcVertex)), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Points.data(), 0, 0 };
+
+        hr = Device->CreateBuffer(&InputDesc, &Data, &Input);
+    }
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&CaptureDesc, NULL, &Captured);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateBuffer(&ConstantDesc, NULL, &Constants);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateQuery(&StatsDesc, &Stats);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateQuery(&PipeDesc, &Pipe);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateTexture2D(&Desc, NULL, &Target);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateRenderTargetView(Target, NULL, &TargetView);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, FALSE, FALSE };
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster);
+    }
+    if (FAILED(hr))
+        goto Exit;
+
+    Context->IASetInputLayout(Layout);
+    Context->VSSetShader(Vs, NULL, 0);
+    Context->HSSetConstantBuffers(0, 1, &Constants);
+    Context->RSSetViewports(1, &Viewport);
+    Context->RSSetState(Raster);
+
+    for (UINT Domain = 0; Domain < 3 && SUCCEEDED(hr); Domain++)
+    {
+        D3D_SHADER_MACRO DomainDefines[] = { { DomainMacros[Domain], "1" }, { "DOMAIN", Domains[Domain] }, { "PART", Partitions[0] },
+                                             { "TOPO", Topologies[(Domain == 2) ? 3 : 0] }, { NULL, NULL } };
+        ID3DBlob *DsBlob = NULL;
+        ID3D11DomainShader *Ds = NULL;
+        ID3D11GeometryShader *Capture = NULL;
+        ID3D11Buffer *Packed = NULL;
+        std::vector<TcVertex> Patches;
+
+        /* Each domain's patches are packed from the shared corner list */
+        for (UINT Patch = 0; Patch < 2; Patch++)
+        {
+            for (UINT Point = 0; Point < PatchPoints[Domain]; Point++)
+                Patches.push_back(Points[Patch * 4 + Point]);
+        }
+        {
+            D3D11_BUFFER_DESC PackedDesc = { (UINT)(Patches.size() * sizeof(TcVertex)), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+            D3D11_SUBRESOURCE_DATA Data = { Patches.data(), 0, 0 };
+
+            hr = Device->CreateBuffer(&PackedDesc, &Data, &Packed);
+        }
+        if (SUCCEEDED(hr))
+            hr = TcCompileWith(TcTessellationSource, "ds", "ds_5_0", DomainDefines, &DsBlob);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateDomainShader(DsBlob->GetBufferPointer(), DsBlob->GetBufferSize(), NULL, &Ds);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateGeometryShaderWithStreamOutput(DsBlob->GetBufferPointer(), DsBlob->GetBufferSize(), Declaration,
+                                                              ARRAYSIZE(Declaration), &Stride, 1, D3D11_SO_NO_RASTERIZED_STREAM, NULL,
+                                                              &Capture);
+
+        for (UINT Partition = 0; Partition < 4 && SUCCEEDED(hr); Partition++)
+        {
+            for (UINT Topology = 0; Topology < 4 && SUCCEEDED(hr); Topology++)
+            {
+                D3D_SHADER_MACRO Defines[] = { { DomainMacros[Domain], "1" }, { "DOMAIN", Domains[Domain] },
+                                               { "PART", Partitions[Partition] }, { "TOPO", Topologies[Topology] }, { NULL, NULL } };
+                ID3DBlob *HsBlob = NULL;
+                ID3D11HullShader *Hs = NULL;
+                BOOLEAN Lines = (Domain == 2);
+
+                /* Lines only come out of isolines, triangles only out of the others */
+                if ((Lines && Topology < 2) || (!Lines && Topology == 3))
+                    continue;
+                hr = TcCompileWith(TcTessellationSource, "hs", "hs_5_0", Defines, &HsBlob);
+                if (SUCCEEDED(hr))
+                    hr = Device->CreateHullShader(HsBlob->GetBufferPointer(), HsBlob->GetBufferSize(), NULL, &Hs);
+
+                for (UINT Case = 0; Case < ARRAYSIZE(Factors) && SUCCEEDED(hr); Case++)
+                {
+                    D3D11_QUERY_DATA_SO_STATISTICS StatsData = {};
+                    D3D11_QUERY_DATA_PIPELINE_STATISTICS PipeData = {};
+                    ID3D11Buffer *None = NULL;
+                    UINT Header[4] = { Domain, Partition, Topology, Case };
+                    UINT Corners = (Topology == 2) ? 1 : (Lines ? 2 : 3);
+
+                    Context->UpdateSubresource(Constants, 0, NULL, Factors[Case], 0, 0);
+                    Context->IASetVertexBuffers(0, 1, &Packed, &VertexStride, &Offset);
+                    Context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)(D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + PatchPoints[Domain] - 1));
+                    Context->HSSetShader(Hs, NULL, 0);
+                    Context->DSSetShader(Ds, NULL, 0);
+                    Context->GSSetShader(Capture, NULL, 0);
+                    Context->PSSetShader(NULL, NULL, 0);
+                    Context->SOSetTargets(1, &Captured, &Offset);
+                    Context->Begin(Pipe);
+                    Context->Begin(Stats);
+                    Context->Draw(PatchPoints[Domain] * 2, 0);
+                    Context->End(Stats);
+                    Context->End(Pipe);
+                    Context->SOSetTargets(1, &None, &Offset);
+                    while (Context->GetData(Stats, &StatsData, sizeof(StatsData), 0) == S_FALSE)
+                        ;
+                    while (Context->GetData(Pipe, &PipeData, sizeof(PipeData), 0) == S_FALSE)
+                        ;
+                    TcAppend(Result, Header, sizeof(Header));
+                    TcAppend(Result, &StatsData, sizeof(StatsData));
+                    TcAppend(Result, &PipeData.HSInvocations, sizeof(PipeData.HSInvocations));
+                    TcAppend(Result, &PipeData.DSInvocations, sizeof(PipeData.DSInvocations));
+                    hr = TcReadBuffer(Device, Context, Captured, Result, (UINT)(StatsData.NumPrimitivesWritten * Corners * Stride));
+                }
+                if (Hs)
+                    Hs->Release();
+                if (HsBlob)
+                    HsBlob->Release();
+            }
+        }
+
+        /* One quad and one triangle patch drawn on screen */
+        if (SUCCEEDED(hr) && Domain < 2)
+        {
+            D3D_SHADER_MACRO Defines[] = { { DomainMacros[Domain], "1" }, { "DOMAIN", Domains[Domain] },
+                                           { "PART", Partitions[3] }, { "TOPO", Topologies[0] }, { NULL, NULL } };
+            ID3DBlob *HsBlob = NULL;
+            ID3DBlob *PsBlob = NULL;
+            ID3D11HullShader *Hs = NULL;
+            ID3D11PixelShader *Ps = NULL;
+
+            hr = TcCompileWith(TcTessellationSource, "hs", "hs_5_0", Defines, &HsBlob);
+            if (SUCCEEDED(hr))
+                hr = Device->CreateHullShader(HsBlob->GetBufferPointer(), HsBlob->GetBufferSize(), NULL, &Hs);
+            if (SUCCEEDED(hr))
+                hr = TcCompileWith(TcTessellationSource, "ps", "ps_5_0", DomainDefines, &PsBlob);
+            if (SUCCEEDED(hr))
+                hr = Device->CreatePixelShader(PsBlob->GetBufferPointer(), PsBlob->GetBufferSize(), NULL, &Ps);
+            if (SUCCEEDED(hr))
+            {
+                Context->UpdateSubresource(Constants, 0, NULL, Factors[1], 0, 0);
+                Context->ClearRenderTargetView(TargetView, Clear);
+                Context->OMSetRenderTargets(1, &TargetView, NULL);
+                Context->IASetVertexBuffers(0, 1, &Packed, &VertexStride, &Offset);
+                Context->IASetPrimitiveTopology((D3D11_PRIMITIVE_TOPOLOGY)(D3D11_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + PatchPoints[Domain] - 1));
+                Context->HSSetShader(Hs, NULL, 0);
+                Context->DSSetShader(Ds, NULL, 0);
+                Context->GSSetShader(NULL, NULL, 0);
+                Context->PSSetShader(Ps, NULL, 0);
+                Context->Draw(PatchPoints[Domain] * 2, 0);
+                hr = TcReadBytes(Device, Context, Target, 4, Result);
+            }
+            ID3D11DeviceChild *Objects[] = { Hs, Ps };
+            for (ID3D11DeviceChild *Object : Objects)
+            {
+                if (Object)
+                    Object->Release();
+            }
+            if (HsBlob)
+                HsBlob->Release();
+            if (PsBlob)
+                PsBlob->Release();
+        }
+
+        ID3D11DeviceChild *Objects[] = { Ds, Capture, Packed };
+        for (ID3D11DeviceChild *Object : Objects)
+        {
+            if (Object)
+                Object->Release();
+        }
+        if (DsBlob)
+            DsBlob->Release();
+    }
+    Context->HSSetShader(NULL, NULL, 0);
+    Context->DSSetShader(NULL, NULL, 0);
+    Context->GSSetShader(NULL, NULL, 0);
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Vs, Layout, Input, Captured, Constants, Stats, Pipe, Target, TargetView, Raster };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    if (VsBlob)
+        VsBlob->Release();
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -1587,6 +1913,7 @@ static const TcScene Scenes[] =
     { "filter", 0, SceneFilter },
     { "interp", 0, SceneInterpolate },
     { "geometry", 0, SceneGeometry },
+    { "tess", 0, SceneTessellation },
 };
 
 static
