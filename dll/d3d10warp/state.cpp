@@ -625,3 +625,122 @@ RxWarpBindStage(
     for (UINT Slot = 0; Slot < 16; Slot++)
         Bindings->Samplers[Slot] = State->Samplers[Slot] ? &State->Samplers[Slot]->State : nullptr;
 }
+
+VOID
+APIENTRY
+RxWarpDdi::CreateGeometryShader(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ const UINT *Code,
+    _In_ D3D10DDI_HSHADER Shader,
+    _In_ D3D10DDI_HRTSHADER RuntimeShader,
+    _In_ const D3D11_1DDIARG_STAGE_IO_SIGNATURES *Signatures)
+{
+    RxWarpLock Lock;
+
+    UNREFERENCED_PARAMETER(RuntimeShader);
+    UNREFERENCED_PARAMETER(Signatures);
+    RxWarpCreateShader(Device, Code, Shader);
+}
+
+/* A geometry shader that also writes stream output; without code it passes the vertex shader's output through */
+VOID
+APIENTRY
+RxWarpDdi::CreateGeometryShaderWithStreamOutput(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ const D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *Args,
+    _In_ D3D10DDI_HSHADER Shader,
+    _In_ D3D10DDI_HRTSHADER RuntimeShader,
+    _In_ const D3D11_1DDIARG_STAGE_IO_SIGNATURES *Signatures)
+{
+    RxWarpLock Lock;
+    RxWarpShader *Object = RxWarpNewObject<RxWarpShader>(Device, Shader);
+
+    UNREFERENCED_PARAMETER(RuntimeShader);
+    UNREFERENCED_PARAMETER(Signatures);
+    if (Object == nullptr)
+        return;
+    if (Args->pShaderCode != nullptr)
+    {
+        if (FAILED(Object->Initialize(Args->pShaderCode)))
+            RX_WARP_TRACE("WARP: geometry shader decode failed\n");
+    }
+    else
+    {
+        Object->PassThrough = TRUE;
+    }
+    if (Args->NumEntries != 0)
+        Object->StreamDecl.assign(Args->pOutputStreamDecl, Args->pOutputStreamDecl + Args->NumEntries);
+    for (UINT Index = 0; Index < Args->NumStrides && Index < 4; Index++)
+        Object->StreamStrides[Index] = Args->BufferStridesInBytes[Index];
+    Object->RasterizedStream = Args->RasterizedStream;
+}
+
+VOID
+APIENTRY
+RxWarpDdi::GsSetShader(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ D3D10DDI_HSHADER Shader)
+{
+    RxWarpSetShader(Device, RxWarpStageGeometry, Shader);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::GsSetConstantBuffers(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HRESOURCE *Buffers,
+    _In_reads_opt_(Count) const UINT *First,
+    _In_reads_opt_(Count) const UINT *Constants)
+{
+    RxWarpSetConstantBuffers(Device, RxWarpStageGeometry, StartSlot, Count, Buffers, First, Constants);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::GsSetShaderResources(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HSHADERRESOURCEVIEW *Views)
+{
+    RxWarpSetViews(Device, RxWarpStageGeometry, StartSlot, Count, Views);
+}
+
+VOID
+APIENTRY
+RxWarpDdi::GsSetSamplers(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT StartSlot,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D10DDI_HSAMPLER *Samplers)
+{
+    RxWarpSetSamplers(Device, RxWarpStageGeometry, StartSlot, Count, Samplers);
+}
+
+/* Binds stream output buffers; an offset of all ones continues where the buffer was left */
+VOID
+APIENTRY
+RxWarpDdi::SoSetTargets(
+    _In_ D3D10DDI_HDEVICE Device,
+    _In_ UINT Count,
+    _In_ UINT ClearCount,
+    _In_reads_(Count) const D3D10DDI_HRESOURCE *Buffers,
+    _In_reads_(Count) const UINT *Offsets)
+{
+    RxWarpLock Lock;
+    RX_WARP_PIPELINE *Pipeline = &RxWarpGetDevice(Device)->Pipeline;
+
+    UNREFERENCED_PARAMETER(ClearCount);
+    ZeroMemory(Pipeline->StreamTargets, sizeof(Pipeline->StreamTargets));
+    for (UINT Index = 0; Index < Count && Index < 4; Index++)
+    {
+        RxWarpResource *Target = RxWarpObject<RxWarpResource>(Buffers[Index]);
+
+        Pipeline->StreamTargets[Index] = Target;
+        if (Target != nullptr && Offsets != nullptr && Offsets[Index] != UINT_MAX)
+            Target->StreamFilled = Offsets[Index];
+    }
+}
+

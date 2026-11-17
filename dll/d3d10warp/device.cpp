@@ -272,6 +272,14 @@ RxWarpDevice::Create(
         Funcs.pfnDestroyElementLayout = RxWarpDdi::DestroyElementLayout;
         Funcs.pfnCreateVertexShader = RxWarpDdi::CreateVertexShader;
         Funcs.pfnCreatePixelShader = RxWarpDdi::CreatePixelShader;
+        Funcs.pfnCreateGeometryShader = RxWarpDdi::CreateGeometryShader;
+        Funcs.pfnCreateGeometryShaderWithStreamOutput = RxWarpDdi::CreateGeometryShaderWithStreamOutput;
+        Funcs.pfnGsSetShader = RxWarpDdi::GsSetShader;
+        Funcs.pfnGsSetConstantBuffers = RxWarpDdi::GsSetConstantBuffers;
+        Funcs.pfnGsSetShaderResources = RxWarpDdi::GsSetShaderResources;
+        Funcs.pfnGsSetSamplers = RxWarpDdi::GsSetSamplers;
+        Funcs.pfnSoSetTargets = RxWarpDdi::SoSetTargets;
+        Funcs.pfnDrawAuto = RxWarpDdi::DrawAuto;
         Funcs.pfnDestroyShader = RxWarpDdi::DestroyShader;
 
         Funcs.pfnIaSetInputLayout = RxWarpDdi::IaSetInputLayout;

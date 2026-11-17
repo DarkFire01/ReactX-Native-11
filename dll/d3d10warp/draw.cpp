@@ -123,6 +123,48 @@ private:
         _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
         _In_ UINT Count);
 
+    BOOLEAN
+    SelectViewport(
+        _In_ UINT Index);
+
+    VOID
+    Assemble(
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+        _In_ UINT Count,
+        _In_reads_(FullCount) const RX_WARP_VERTEX *const *Full,
+        _In_ UINT FullCount);
+
+    VOID
+    RunGeometry(
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Full,
+        _In_ UINT Count);
+
+    VOID
+    FlushStrip(
+        _In_ UINT Stream);
+
+    VOID
+    OutputPrimitive(
+        _In_ UINT Stream,
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+        _In_ UINT Count);
+
+    VOID
+    StreamOut(
+        _In_ UINT Stream,
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+        _In_ UINT Count);
+
+    static
+    VOID
+    GeometryEmit(
+        _In_ VOID *Context,
+        _In_ RxWarpInvocation *Source,
+        _In_ UINT Stream,
+        _In_ UINT Lane,
+        _In_ BOOLEAN Emit,
+        _In_ BOOLEAN Cut);
+
     VOID
     ToScreen(
         _In_ const RX_WARP_VERTEX *Vertex,
@@ -183,8 +225,22 @@ private:
     RX_WARP_PIPELINE *Pipeline;
     RxWarpShader *VertexShader = nullptr;
     RxWarpShader *PixelShader = nullptr;
+    RxWarpShader *GeometryShader = nullptr;
+    RxWarpShader *StreamShader = nullptr;
+    RxWarpShader *LastStage = nullptr;
     RX_WARP_STAGE_BINDINGS VertexBindings = {};
     RX_WARP_STAGE_BINDINGS PixelBindings = {};
+    RX_WARP_STAGE_BINDINGS GeometryBindings = {};
+    RxWarpInvocation GeometryInvocation;
+    std::vector<RX_WARP_VERTEX> Strips[4];
+    UINT Emitted = 0;
+    BOOLEAN CanRasterize = FALSE;
+    UINT RasterizedStream = 0;
+    UINT TargetWidth = 0;
+    UINT TargetHeight = 0;
+    UINT ViewportRegister = UINT_MAX;
+    UINT SliceRegister = UINT_MAX;
+    UINT TargetSlice = 0;
     D3DWDDM2_0DDI_RASTERIZER_DESC Raster = {};
     D3D10_DDI_DEPTH_STENCIL_DESC DepthState = {};
     const D3D11_1_DDI_BLEND_DESC *BlendState = nullptr;
@@ -219,22 +275,40 @@ RxWarpDraw::BindStage(
     RxWarpBindStage(&Pipeline->Stages[Stage], Bindings);
 }
 
-/* Gathers state for the draw; FALSE when nothing can be drawn */
+/* Gathers state for the draw; FALSE when there is nothing to run at all */
 BOOLEAN
 RxWarpDraw::Prepare(VOID)
 {
-    const D3D10_DDI_VIEWPORT *Viewport;
     UINT Width = UINT_MAX;
     UINT Height = UINT_MAX;
 
     VertexShader = Pipeline->Stages[RxWarpStageVertex].Shader;
     PixelShader = Pipeline->Stages[RxWarpStagePixel].Shader;
-    if (VertexShader == nullptr || VertexShader->PositionOutput == UINT_MAX || Pipeline->ViewportCount == 0)
+    GeometryShader = Pipeline->Stages[RxWarpStageGeometry].Shader;
+    if (VertexShader == nullptr)
         return FALSE;
-    PositionRegister = VertexShader->PositionOutput;
+
+    /* A stream output shader without code only captures what the vertex shader wrote */
+    StreamShader = GeometryShader;
+    if (GeometryShader != nullptr && GeometryShader->PassThrough)
+        GeometryShader = nullptr;
+    LastStage = (GeometryShader != nullptr) ? GeometryShader : VertexShader;
+    RasterizedStream = (StreamShader != nullptr) ? StreamShader->RasterizedStream : 0;
+    PositionRegister = LastStage->PositionOutput;
+
+    ViewportRegister = UINT_MAX;
+    SliceRegister = UINT_MAX;
+    for (UINT Register = 0; Register < LastStage->OutputCount; Register++)
+    {
+        if (LastStage->OutputName[Register] == D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX)
+            ViewportRegister = Register;
+        if (LastStage->OutputName[Register] == D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX)
+            SliceRegister = Register;
+    }
 
     BindStage(RxWarpStageVertex, &VertexBindings);
     BindStage(RxWarpStagePixel, &PixelBindings);
+    BindStage(RxWarpStageGeometry, &GeometryBindings);
 
     if (Pipeline->Rasterizer != nullptr)
     {
@@ -260,21 +334,6 @@ RxWarpDraw::Prepare(VOID)
     }
     BlendState = (Pipeline->Blend != nullptr) ? &Pipeline->Blend->Desc : &RxWarpDefaultBlend;
 
-    Viewport = &Pipeline->Viewports[0];
-    Scale[0] = Viewport->Width * 0.5f;
-    Bias[0] = Viewport->Width * 0.5f + Viewport->TopLeftX;
-    Scale[1] = -Viewport->Height * 0.5f;
-    Bias[1] = Viewport->Height * 0.5f + Viewport->TopLeftY;
-    Scale[2] = Viewport->MaxDepth - Viewport->MinDepth;
-    Bias[2] = Viewport->MinDepth;
-    MinDepth = (Viewport->MinDepth < Viewport->MaxDepth) ? Viewport->MinDepth : Viewport->MaxDepth;
-    MaxDepth = (Viewport->MinDepth < Viewport->MaxDepth) ? Viewport->MaxDepth : Viewport->MinDepth;
-
-    /* Pixels never leave the viewport, the bound targets or the scissor */
-    Left = (INT)floorf(Viewport->TopLeftX);
-    Top = (INT)floorf(Viewport->TopLeftY);
-    Right = (INT)ceilf(Viewport->TopLeftX + Viewport->Width);
-    Bottom = (INT)ceilf(Viewport->TopLeftY + Viewport->Height);
     for (UINT Index = 0; Index < Pipeline->RenderTargetCount; Index++)
     {
         RxWarpView *View = Pipeline->RenderTargets[Index];
@@ -301,16 +360,49 @@ RxWarpDraw::Prepare(VOID)
     }
     if (Width == UINT_MAX)
         Width = Height = 16384;
+    TargetWidth = Width;
+    TargetHeight = Height;
+
+    CanRasterize = (RasterizedStream != UINT_MAX && PositionRegister != UINT_MAX && Pipeline->ViewportCount != 0) &&
+                   SelectViewport(0);
+    return TRUE;
+}
+
+/* Viewport and scissor for one primitive; FALSE when they leave nothing to draw */
+BOOLEAN
+RxWarpDraw::SelectViewport(
+    _In_ UINT Index)
+{
+    const D3D10_DDI_VIEWPORT *Viewport;
+
+    if (Index >= Pipeline->ViewportCount)
+        Index = 0;
+    Viewport = &Pipeline->Viewports[Index];
+    Scale[0] = Viewport->Width * 0.5f;
+    Bias[0] = Viewport->Width * 0.5f + Viewport->TopLeftX;
+    Scale[1] = -Viewport->Height * 0.5f;
+    Bias[1] = Viewport->Height * 0.5f + Viewport->TopLeftY;
+    Scale[2] = Viewport->MaxDepth - Viewport->MinDepth;
+    Bias[2] = Viewport->MinDepth;
+    MinDepth = (Viewport->MinDepth < Viewport->MaxDepth) ? Viewport->MinDepth : Viewport->MaxDepth;
+    MaxDepth = (Viewport->MinDepth < Viewport->MaxDepth) ? Viewport->MaxDepth : Viewport->MinDepth;
+
+    /* Pixels never leave the viewport, the bound targets or the scissor */
+    Left = (INT)floorf(Viewport->TopLeftX);
+    Top = (INT)floorf(Viewport->TopLeftY);
+    Right = (INT)ceilf(Viewport->TopLeftX + Viewport->Width);
+    Bottom = (INT)ceilf(Viewport->TopLeftY + Viewport->Height);
     Left = (Left > 0) ? Left : 0;
     Top = (Top > 0) ? Top : 0;
-    Right = (Right < (INT)Width) ? Right : (INT)Width;
-    Bottom = (Bottom < (INT)Height) ? Bottom : (INT)Height;
+    Right = (Right < (INT)TargetWidth) ? Right : (INT)TargetWidth;
+    Bottom = (Bottom < (INT)TargetHeight) ? Bottom : (INT)TargetHeight;
     if (Raster.ScissorEnable)
     {
-        const D3D10_DDI_RECT *Scissor = &Pipeline->Scissors[0];
+        const D3D10_DDI_RECT *Scissor;
 
-        if (Pipeline->ScissorCount == 0)
+        if (Index >= Pipeline->ScissorCount)
             return FALSE;
+        Scissor = &Pipeline->Scissors[Index];
         Left = (Scissor->left > Left) ? Scissor->left : Left;
         Top = (Scissor->top > Top) ? Scissor->top : Top;
         Right = (Scissor->right < Right) ? Scissor->right : Right;
@@ -512,6 +604,12 @@ RxWarpDraw::ClipPrimitive(
     std::vector<RX_WARP_VERTEX> Next;
 
     Device->Counters[RxWarpCountClipInvocations]++;
+
+    /* The leading vertex picks the viewport and the render target slice */
+    TargetSlice = (SliceRegister != UINT_MAX) ? Corners[0]->Registers[SliceRegister][0] : 0;
+    if (ViewportRegister != UINT_MAX && !SelectViewport(Corners[0]->Registers[ViewportRegister][0]))
+        return;
+
     for (UINT Index = 0; Index < Count; Index++)
     {
         RxWarpClipDistances(Corners[Index]->Registers[PositionRegister], Raster.DepthClipEnable != FALSE, Distance);
@@ -1092,20 +1190,36 @@ RxWarpViewTexel(
     _In_ RxWarpView *View,
     _In_ INT X,
     _In_ INT Y,
+    _In_ UINT Slice,
     _Out_ UINT *Bytes)
 {
     RxWarpResource *Resource = View->Resource;
     const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(View->Format);
     RX_WARP_SUBRESOURCE *Sub;
+    SIZE_T Depth = 0;
 
     *Bytes = 0;
     if (Resource == nullptr || Info == nullptr || Resource->Memory == nullptr)
         return nullptr;
-    Sub = Resource->Subresource(View->FirstSlice * Resource->MipLevels + View->MipSlice);
+
+    /* Slices outside the view fall back to its first one */
+    if (Slice >= (View->SliceCount ? View->SliceCount : 1))
+        Slice = 0;
+    if (Resource->Dimension == D3D10DDIRESOURCE_TEXTURE3D)
+    {
+        Sub = Resource->Subresource(View->MipSlice);
+        if (Sub == nullptr || View->FirstSlice + Slice >= Sub->Depth)
+            return nullptr;
+        Depth = (SIZE_T)(View->FirstSlice + Slice) * Sub->DepthPitch;
+    }
+    else
+    {
+        Sub = Resource->Subresource((View->FirstSlice + Slice) * Resource->MipLevels + View->MipSlice);
+    }
     if (Sub == nullptr || X < 0 || Y < 0 || (UINT)X >= Sub->Width || (UINT)Y >= Sub->Height)
         return nullptr;
     *Bytes = Info->Bytes;
-    return Resource->Memory + Sub->Offset + (SIZE_T)Y * Sub->RowPitch + (SIZE_T)X * Info->Bytes;
+    return Resource->Memory + Sub->Offset + Depth + (SIZE_T)Y * Sub->RowPitch + (SIZE_T)X * Info->Bytes;
 }
 
 static
@@ -1188,7 +1302,7 @@ RxWarpDraw::DepthStencilTest(
 
     if (View == nullptr || (!DepthState.DepthEnable && !DepthState.StencilEnable))
         return TRUE;
-    Texel = RxWarpViewTexel(View, X, Y, &Bytes);
+    Texel = RxWarpViewTexel(View, X, Y, TargetSlice, &Bytes);
     if (Texel == nullptr)
         return TRUE;
 
@@ -1378,7 +1492,7 @@ RxWarpDraw::Blend(
 
     if (View == nullptr || WriteMask == 0)
         return;
-    Texel = RxWarpViewTexel(View, X, Y, &Bytes);
+    Texel = RxWarpViewTexel(View, X, Y, TargetSlice, &Bytes);
     if (Texel == nullptr)
         return;
     memcpy(Element, Texel, Bytes);
@@ -1518,6 +1632,204 @@ RxWarpTopologyOf(
     }
 }
 
+/* An input primitive: through the geometry shader when there is one, else to stream output and the rasterizer */
+VOID
+RxWarpDraw::Assemble(
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+    _In_ UINT Count,
+    _In_reads_(FullCount) const RX_WARP_VERTEX *const *Full,
+    _In_ UINT FullCount)
+{
+    if (GeometryShader != nullptr)
+    {
+        RunGeometry(Full, FullCount);
+        return;
+    }
+    if (StreamShader != nullptr)
+        StreamOut(0, Corners, Count);
+    if (CanRasterize && RasterizedStream == 0)
+        ClipPrimitive(Corners, Count);
+}
+
+VOID
+RxWarpDraw::GeometryEmit(
+    _In_ VOID *Context,
+    _In_ RxWarpInvocation *Source,
+    _In_ UINT Stream,
+    _In_ UINT Lane,
+    _In_ BOOLEAN Emit,
+    _In_ BOOLEAN Cut)
+{
+    RxWarpDraw *Draw = static_cast<RxWarpDraw *>(Context);
+
+    if (Stream >= 4)
+        return;
+    if (Emit && Draw->Emitted < Draw->GeometryShader->GsMaxVertices)
+    {
+        RX_WARP_VERTEX Vertex;
+
+        for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
+            memcpy(Vertex.Registers[Register], Source->Output(Register, Lane), 16);
+        Draw->Strips[Stream].push_back(Vertex);
+        Draw->Emitted++;
+    }
+    if (Cut)
+        Draw->FlushStrip(Stream);
+}
+
+VOID
+RxWarpDraw::RunGeometry(
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Full,
+    _In_ UINT Count)
+{
+    RxWarpShader *Shader = GeometryShader;
+
+    for (UINT Instance = 0; Instance < Shader->GsInstances; Instance++)
+    {
+        GeometryInvocation.Prepare(Shader);
+        GeometryInvocation.Live = 1;
+        GeometryInvocation.Helper = 0;
+        GeometryInvocation.PrimitiveId = Primitive;
+        GeometryInvocation.GsInstance = Instance;
+        GeometryInvocation.InputVertexCount = Count;
+        for (UINT Index = 0; Index < Count && Index < 32; Index++)
+            GeometryInvocation.InputVertex[Index] = Full[Index]->Registers[0];
+        GeometryInvocation.EmitRoutine = GeometryEmit;
+        GeometryInvocation.EmitContext = this;
+        Emitted = 0;
+        for (UINT Stream = 0; Stream < 4; Stream++)
+            Strips[Stream].clear();
+
+        GeometryInvocation.Run(Shader, &GeometryBindings);
+        Device->Counters[RxWarpCountGsInvocations]++;
+
+        /* Whatever was left open ends with the program */
+        for (UINT Stream = 0; Stream < 4; Stream++)
+            FlushStrip(Stream);
+    }
+}
+
+/* Turns the vertices emitted since the last cut into primitives of the declared output topology */
+VOID
+RxWarpDraw::FlushStrip(
+    _In_ UINT Stream)
+{
+    std::vector<RX_WARP_VERTEX> Strip;
+
+    Strip.swap(Strips[Stream]);
+    switch (GeometryShader->GsOutputTopology)
+    {
+        case D3D10_SB_PRIMITIVE_TOPOLOGY_POINTLIST:
+            for (SIZE_T Index = 0; Index < Strip.size(); Index++)
+            {
+                const RX_WARP_VERTEX *Corners[1] = { &Strip[Index] };
+
+                OutputPrimitive(Stream, Corners, 1);
+            }
+            break;
+        case D3D10_SB_PRIMITIVE_TOPOLOGY_LINESTRIP:
+            for (SIZE_T Index = 0; Index + 1 < Strip.size(); Index++)
+            {
+                const RX_WARP_VERTEX *Corners[2] = { &Strip[Index], &Strip[Index + 1] };
+
+                OutputPrimitive(Stream, Corners, 2);
+            }
+            break;
+        default:
+            for (SIZE_T Index = 0; Index + 2 < Strip.size(); Index++)
+            {
+                const RX_WARP_VERTEX *Corners[3] = { &Strip[Index], &Strip[Index + ((Index & 1) ? 2 : 1)], &Strip[Index + ((Index & 1) ? 1 : 2)] };
+
+                OutputPrimitive(Stream, Corners, 3);
+            }
+            break;
+    }
+}
+
+VOID
+RxWarpDraw::OutputPrimitive(
+    _In_ UINT Stream,
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+    _In_ UINT Count)
+{
+    if (Stream == 0)
+        Device->Counters[RxWarpCountGsPrimitives]++;
+    StreamOut(Stream, Corners, Count);
+    if (CanRasterize && Stream == RasterizedStream)
+        ClipPrimitive(Corners, Count);
+}
+
+/* Writes a whole primitive to the stream output buffers, or nothing when one of them would overflow */
+VOID
+RxWarpDraw::StreamOut(
+    _In_ UINT Stream,
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Corners,
+    _In_ UINT Count)
+{
+    UINT Strides[4] = {};
+    BOOLEAN Used[4] = {};
+
+    if (StreamShader == nullptr || StreamShader->StreamDecl.empty())
+        return;
+
+    for (const D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY &Entry : StreamShader->StreamDecl)
+    {
+        UINT Components = 0;
+
+        if (Entry.Stream != Stream || Entry.OutputSlot >= 4)
+            continue;
+        for (UINT Bit = 0; Bit < 4; Bit++)
+            Components += (Entry.RegisterMask >> Bit) & 1;
+        Strides[Entry.OutputSlot] += Components * 4;
+        Used[Entry.OutputSlot] = TRUE;
+    }
+
+    if (Stream == 0)
+        Device->Counters[RxWarpCountSoNeeded]++;
+    for (UINT Slot = 0; Slot < 4; Slot++)
+    {
+        RxWarpResource *Target = Pipeline->StreamTargets[Slot];
+
+        if (StreamShader->StreamStrides[Slot] != 0)
+            Strides[Slot] = StreamShader->StreamStrides[Slot];
+        if (Used[Slot] && Target != nullptr && (SIZE_T)Target->StreamFilled + (SIZE_T)Strides[Slot] * Count > Target->MemorySize)
+            return;
+    }
+
+    for (UINT Vertex = 0; Vertex < Count; Vertex++)
+    {
+        UINT Written[4] = {};
+
+        for (const D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY &Entry : StreamShader->StreamDecl)
+        {
+            RxWarpResource *Target;
+
+            if (Entry.Stream != Stream || Entry.OutputSlot >= 4)
+                continue;
+            Target = Pipeline->StreamTargets[Entry.OutputSlot];
+            for (UINT Bit = 0; Bit < 4; Bit++)
+            {
+                if (!((Entry.RegisterMask >> Bit) & 1))
+                    continue;
+                /* A register index of all ones is a gap that only moves the write position */
+                if (Target != nullptr && Entry.RegisterIndex < RxWarpMaxRegisters)
+                {
+                    memcpy(Target->Memory + Target->StreamFilled + Written[Entry.OutputSlot],
+                           &Corners[Vertex]->Registers[Entry.RegisterIndex][Bit], 4);
+                }
+                Written[Entry.OutputSlot] += 4;
+            }
+        }
+        for (UINT Slot = 0; Slot < 4; Slot++)
+        {
+            if (Used[Slot] && Pipeline->StreamTargets[Slot] != nullptr)
+                Pipeline->StreamTargets[Slot]->StreamFilled += Strides[Slot];
+        }
+    }
+    if (Stream == 0)
+        Device->Counters[RxWarpCountSoWritten]++;
+}
+
 VOID
 RxWarpDraw::Run(
     _In_ UINT VertexCount,
@@ -1568,11 +1880,14 @@ RxWarpDraw::Run(
                 if (Count == Width)
                 {
                     const RX_WARP_VERTEX *Corners[3];
+                    const RX_WARP_VERTEX *Full[6];
 
                     for (UINT Index = 0; Index < Shape.Size; Index++)
                         Corners[Index] = &Vertices[Run[Shape.Adjacency ? Index * ((Shape.Size == 2) ? 1 : 2) + ((Shape.Size == 2) ? 1 : 0) : Index]];
+                    for (UINT Index = 0; Index < Width; Index++)
+                        Full[Index] = &Vertices[Run[Index]];
                     Device->Counters[RxWarpCountIaPrimitives]++;
-                    ClipPrimitive(Corners, Shape.Size);
+                    Assemble(Corners, Shape.Size, Full, Width);
                     Primitive++;
                 }
                 Run.clear();
@@ -1590,7 +1905,16 @@ RxWarpDraw::Run(
                     const RX_WARP_VERTEX *Corners[2] = { &Vertices[Run[Index]], &Vertices[Run[Index + 1]] };
 
                     Device->Counters[RxWarpCountIaPrimitives]++;
-                    ClipPrimitive(Corners, 2);
+                    if (Shape.Adjacency)
+                    {
+                        const RX_WARP_VERTEX *Full[4] = { &Vertices[Run[Index - 1]], Corners[0], Corners[1], &Vertices[Run[Index + 2]] };
+
+                        Assemble(Corners, 2, Full, 4);
+                    }
+                    else
+                    {
+                        Assemble(Corners, 2, Corners, 2);
+                    }
                     Primitive++;
                 }
             }
@@ -1603,20 +1927,70 @@ RxWarpDraw::Run(
                                                          &Vertices[Run[Index + ((Index & 1) ? 1 : 2)]] };
 
                     Device->Counters[RxWarpCountIaPrimitives]++;
-                    ClipPrimitive(Corners, 3);
+                    Assemble(Corners, 3, Corners, 3);
                     Primitive++;
                 }
             }
             else
             {
-                for (SIZE_T Index = 0; Index * 2 + 4 < Count; Index++)
+                SIZE_T Triangles = (Count >= 6) ? (Count - 4) / 2 : 0;
+
+                for (SIZE_T Index = 0; Index < Triangles; Index++)
                 {
                     SIZE_T Base = Index * 2;
                     const RX_WARP_VERTEX *Corners[3] = { &Vertices[Run[Base]], &Vertices[Run[Base + ((Index & 1) ? 4 : 2)]],
                                                          &Vertices[Run[Base + ((Index & 1) ? 2 : 4)]] };
+                    SIZE_T Order[6];
+                    const RX_WARP_VERTEX *Full[6];
+
+                    /*
+                     * The geometry shader sees vertex, adjacent, vertex, adjacent, vertex, adjacent.
+                     * The ends of the strip take their missing neighbours from the far side.
+                     */
+                    if (Triangles == 1)
+                    {
+                        SIZE_T One[6] = { 0, 1, 2, 5, 4, 3 };
+
+                        memcpy(Order, One, sizeof(Order));
+                    }
+                    else if (Index == 0)
+                    {
+                        SIZE_T First[6] = { 0, 1, 2, 6, 4, 3 };
+
+                        memcpy(Order, First, sizeof(Order));
+                    }
+                    else if (Index == Triangles - 1)
+                    {
+                        if (Index & 1)
+                        {
+                            SIZE_T Last[6] = { Base + 2, Base - 2, Base, Base + 3, Base + 4, Base + 5 };
+
+                            memcpy(Order, Last, sizeof(Order));
+                        }
+                        else
+                        {
+                            SIZE_T Last[6] = { Base, Base - 2, Base + 2, Base + 5, Base + 4, Base + 3 };
+
+                            memcpy(Order, Last, sizeof(Order));
+                        }
+                    }
+                    else if (Index & 1)
+                    {
+                        SIZE_T Middle[6] = { Base + 2, Base - 2, Base, Base + 3, Base + 4, Base + 6 };
+
+                        memcpy(Order, Middle, sizeof(Order));
+                    }
+                    else
+                    {
+                        SIZE_T Middle[6] = { Base, Base - 2, Base + 2, Base + 6, Base + 4, Base + 3 };
+
+                        memcpy(Order, Middle, sizeof(Order));
+                    }
+                    for (UINT Slot = 0; Slot < 6; Slot++)
+                        Full[Slot] = &Vertices[Run[(Order[Slot] < Count) ? Order[Slot] : Count - 1]];
 
                     Device->Counters[RxWarpCountIaPrimitives]++;
-                    ClipPrimitive(Corners, 3);
+                    Assemble(Corners, 3, Full, 6);
                     Primitive++;
                 }
             }
@@ -1729,3 +2103,23 @@ RxWarpDdi::DrawIndexedInstancedIndirect(
     RxWarpDraw Work(RxWarpGetDevice(Device));
     Work.Run(Values[0], Values[2], TRUE, (INT)Values[3], Values[1], Values[4]);
 }
+
+/* Draws what stream output left in the buffer bound to the first vertex slot */
+VOID
+APIENTRY
+RxWarpDdi::DrawAuto(
+    _In_ D3D10DDI_HDEVICE Device)
+{
+    RxWarpLock Lock;
+    RxWarpDevice *Owner = RxWarpGetDevice(Device);
+    RX_WARP_BUFFER_BINDING *Binding = &Owner->Pipeline.VertexBuffers[0];
+    UINT Count;
+
+    if (Binding->Resource == nullptr || Binding->Stride == 0 || Binding->Resource->StreamFilled <= Binding->Offset)
+        return;
+    Count = (Binding->Resource->StreamFilled - Binding->Offset) / Binding->Stride;
+
+    RxWarpDraw Work(Owner);
+    Work.Run(Count, 0, FALSE, 0, 1, 0);
+}
+

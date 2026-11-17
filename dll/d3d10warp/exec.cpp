@@ -263,6 +263,16 @@ RxWarpMachine::Locate(
                 break;
             return &Invocation->Temps[((SIZE_T)First * RxWarpLanes + Lane) * 4];
         case D3D10_SB_OPERAND_TYPE_INPUT:
+            /* Geometry shaders read v[vertex][register] from the primitive's vertices */
+            if (Operand.Dimensions > 1 && Invocation->InputVertexCount != 0)
+            {
+                First = ResolveIndex(Operand.Index[0], Lane);
+                Second = ResolveIndex(Operand.Index[1], Lane);
+                if (First < 0 || (UINT)First >= Invocation->InputVertexCount || Second < 0 || (UINT)Second >= RxWarpMaxRegisters)
+                    break;
+                *Writable = FALSE;
+                return (UINT *)Invocation->InputVertex[First] + (SIZE_T)Second * 4;
+            }
             First = ResolveIndex(Operand.Index[Operand.Dimensions > 1 ? 1 : 0], Lane);
             if (First < 0 || (UINT)First >= RxWarpMaxRegisters)
                 break;
@@ -328,6 +338,10 @@ RxWarpMachine::Locate(
             *Writable = FALSE;
             memcpy(Scratch, Invocation->ThreadInGroup[Lane], 3 * sizeof(UINT));
             Scratch[3] = 0;
+            return Scratch;
+        case D3D11_SB_OPERAND_TYPE_INPUT_GS_INSTANCE_ID:
+            *Writable = FALSE;
+            Scratch[0] = Scratch[1] = Scratch[2] = Scratch[3] = Invocation->GsInstance;
             return Scratch;
         case D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID_IN_GROUP_FLATTENED:
             *Writable = FALSE;
@@ -655,6 +669,26 @@ RxWarpMachine::Execute(VOID)
                 if (Active != 0)
                     Texture(Instruction);
                 break;
+            case D3D10_SB_OPCODE_EMIT:
+            case D3D10_SB_OPCODE_CUT:
+            case D3D10_SB_OPCODE_EMITTHENCUT:
+            case D3D11_SB_OPCODE_EMIT_STREAM:
+            case D3D11_SB_OPCODE_CUT_STREAM:
+            case D3D11_SB_OPCODE_EMITTHENCUT_STREAM:
+            {
+                BOOLEAN Emit = (Instruction.Opcode != D3D10_SB_OPCODE_CUT && Instruction.Opcode != D3D11_SB_OPCODE_CUT_STREAM);
+                BOOLEAN Cut = (Instruction.Opcode != D3D10_SB_OPCODE_EMIT && Instruction.Opcode != D3D11_SB_OPCODE_EMIT_STREAM);
+                UINT Stream = (Instruction.OperandCount != 0) ? Instruction.Operands[0].Index[0].Immediate : 0;
+
+                if (Invocation->EmitRoutine == nullptr)
+                    break;
+                for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+                {
+                    if (Active & Invocation->Live & (1u << Lane))
+                        Invocation->EmitRoutine(Invocation->EmitContext, Invocation, Stream, Lane, Emit, Cut);
+                }
+                break;
+            }
             case D3D11_SB_OPCODE_SYNC:
                 if (DECODE_D3D11_SB_SYNC_FLAGS(Instruction.Control) & D3D11_SB_SYNC_THREADS_IN_GROUP)
                     return TRUE;

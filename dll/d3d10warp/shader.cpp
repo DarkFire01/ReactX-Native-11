@@ -288,7 +288,9 @@ RxWarpShader::Initialize(
                     return E_INVALIDARG;
                 if (Operand.Type != D3D10_SB_OPERAND_TYPE_INPUT)
                     break;
-                Register = Operand.Index[0].Immediate;
+
+                /* Geometry inputs are v[vertex][register] */
+                Register = Operand.Index[(Operand.Dimensions > 1) ? 1 : 0].Immediate;
                 if (Register >= RxWarpMaxRegisters)
                     return E_INVALIDARG;
                 InputMask[Register] |= Operand.Mask;
@@ -420,11 +422,19 @@ RxWarpShader::Initialize(
             case D3D10_SB_OPCODE_DCL_SAMPLER:
             case D3D10_SB_OPCODE_DCL_GLOBAL_FLAGS:
             case D3D10_SB_OPCODE_DCL_INDEX_RANGE:
-            case D3D10_SB_OPCODE_DCL_GS_INPUT_PRIMITIVE:
-            case D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
-            case D3D10_SB_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT:
             case D3D11_SB_OPCODE_DCL_STREAM:
+                break;
+            case D3D10_SB_OPCODE_DCL_GS_INPUT_PRIMITIVE:
+                GsInputPrimitive = DECODE_D3D10_SB_GS_INPUT_PRIMITIVE(Token);
+                break;
+            case D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
+                GsOutputTopology = DECODE_D3D10_SB_GS_OUTPUT_PRIMITIVE_TOPOLOGY(Token);
+                break;
+            case D3D10_SB_OPCODE_DCL_MAX_OUTPUT_VERTEX_COUNT:
+                GsMaxVertices = Code[Cursor];
+                break;
             case D3D11_SB_OPCODE_DCL_GS_INSTANCE_COUNT:
+                GsInstances = Code[Cursor] ? Code[Cursor] : 1;
                 break;
             default:
             {

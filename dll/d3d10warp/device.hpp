@@ -61,6 +61,7 @@ public:
     SIZE_T MemorySize = 0;
     UINT SubresourceCount = 0;
     RX_WARP_SUBRESOURCE *Subresources = nullptr;
+    UINT StreamFilled = 0;      /* bytes stream output has written, for DrawAuto */
 };
 
 /* Render target, depth stencil, shader resource and unordered access views share one shape */
@@ -167,6 +168,7 @@ typedef struct _RX_WARP_PIPELINE
     RxWarpView *RenderTargets[8];
     UINT RenderTargetCount;
     RxWarpView *DepthStencilView;
+    RxWarpResource *StreamTargets[4];
 } RX_WARP_PIPELINE;
 
 /* Running totals the queries sample, in the order of the pipeline statistics */
@@ -292,6 +294,13 @@ namespace RxWarpDdi
     VOID APIENTRY DestroyElementLayout(D3D10DDI_HDEVICE, D3D10DDI_HELEMENTLAYOUT);
     VOID APIENTRY CreateVertexShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const D3D11_1DDIARG_STAGE_IO_SIGNATURES *);
     VOID APIENTRY CreatePixelShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const D3D11_1DDIARG_STAGE_IO_SIGNATURES *);
+    VOID APIENTRY CreateGeometryShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const D3D11_1DDIARG_STAGE_IO_SIGNATURES *);
+    VOID APIENTRY CreateGeometryShaderWithStreamOutput(D3D10DDI_HDEVICE, const D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const D3D11_1DDIARG_STAGE_IO_SIGNATURES *);
+    VOID APIENTRY GsSetShader(D3D10DDI_HDEVICE, D3D10DDI_HSHADER);
+    VOID APIENTRY GsSetConstantBuffers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HRESOURCE *, const UINT *, const UINT *);
+    VOID APIENTRY GsSetShaderResources(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSHADERRESOURCEVIEW *);
+    VOID APIENTRY GsSetSamplers(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSAMPLER *);
+    VOID APIENTRY SoSetTargets(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HRESOURCE *, const UINT *);
     VOID APIENTRY DestroyShader(D3D10DDI_HDEVICE, D3D10DDI_HSHADER);
 
     VOID APIENTRY IaSetInputLayout(D3D10DDI_HDEVICE, D3D10DDI_HELEMENTLAYOUT);
@@ -338,6 +347,7 @@ namespace RxWarpDdi
 
     /* draw.cpp */
     VOID APIENTRY DrawInstancedIndirect(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT);
+    VOID APIENTRY DrawAuto(D3D10DDI_HDEVICE);
     VOID APIENTRY DrawIndexedInstancedIndirect(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT);
     VOID APIENTRY Draw(D3D10DDI_HDEVICE, UINT, UINT);
     VOID APIENTRY DrawIndexed(D3D10DDI_HDEVICE, UINT, UINT, INT);

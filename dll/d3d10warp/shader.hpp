@@ -82,6 +82,17 @@ typedef struct _RX_WARP_INDEXABLE
     UINT Offset;                /* into the invocation's indexable storage, in registers */
 } RX_WARP_INDEXABLE;
 
+class RxWarpInvocation;
+
+/* Called by emit and cut in geometry shaders, once per running lane */
+typedef VOID (*RX_WARP_EMIT_ROUTINE)(
+    _In_ VOID *Context,
+    _In_ RxWarpInvocation *Invocation,
+    _In_ UINT Stream,
+    _In_ UINT Lane,
+    _In_ BOOLEAN Emit,
+    _In_ BOOLEAN Cut);
+
 class RxWarpShader
 {
 public:
@@ -114,6 +125,16 @@ public:
     UINT GroupSize[3] = { 1, 1, 1 };
     std::vector<RX_WARP_SHARED> Shared;
     UINT SharedBytes = 0;
+
+    /* Geometry shaders, and the stream output that may come with them */
+    UINT GsInputPrimitive = 0;          /* D3D10_SB_PRIMITIVE */
+    UINT GsOutputTopology = 0;          /* D3D10_SB_PRIMITIVE_TOPOLOGY */
+    UINT GsMaxVertices = 0;
+    UINT GsInstances = 1;
+    BOOLEAN PassThrough = FALSE;        /* stream output with no program: the vertex shader's output */
+    std::vector<D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY> StreamDecl;
+    UINT StreamStrides[4] = {};
+    UINT RasterizedStream = 0;
     BOOLEAN WritesDepth = FALSE;
     BOOLEAN Discards = FALSE;
 };
@@ -185,6 +206,13 @@ public:
     UINT ThreadId[RxWarpLanes][3] = {};
     UINT Flattened[RxWarpLanes] = {};
     BYTE *SharedMemory = nullptr;
+
+    /* Geometry: the input primitive's vertices, each a block of registers, and where emits go */
+    const UINT *InputVertex[32] = {};
+    UINT InputVertexCount = 0;
+    UINT GsInstance = 0;
+    RX_WARP_EMIT_ROUTINE EmitRoutine = nullptr;
+    VOID *EmitContext = nullptr;
 
     /* Where the program stands, so it can stop at a barrier and continue */
     std::vector<RX_WARP_FRAME> Frames;
