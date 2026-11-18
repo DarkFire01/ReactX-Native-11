@@ -29,6 +29,14 @@ typedef struct _RX_WARP_SCREEN_VERTEX
     const RX_WARP_VERTEX *Source;
 } RX_WARP_SCREEN_VERTEX;
 
+/* How lines rasterize, from the multisample and antialiased line states */
+enum
+{
+    RxWarpLineAliased,
+    RxWarpLineAlpha,
+    RxWarpLineQuad,
+};
+
 /* a * x + b * y + c over the triangle, in the biased screen space */
 typedef struct _RX_WARP_PLANE
 {
@@ -259,6 +267,13 @@ private:
         _In_ const RX_WARP_VERTEX *C);
 
     VOID
+    SetupTriangle(
+        _In_ BOOLEAN FromLine);
+
+    VOID
+    RasterizeWideLine(VOID);
+
+    VOID
     RasterizeLine(
         _In_ const RX_WARP_VERTEX *A,
         _In_ const RX_WARP_VERTEX *B);
@@ -409,6 +424,9 @@ private:
     RX_WARP_PLANE RhwPlane = {};
     BOOLEAN FrontFacing = TRUE;
     BOOLEAN PointSprite = FALSE;
+    UINT LineMode = RxWarpLineAliased;
+    BOOLEAN AlphaLine = FALSE;          /* an alpha antialiased line, faded by its distance plane */
+    RX_WARP_PLANE LinePlane = {};       /* signed distance from the line, in pixels */
 };
 
 VOID
@@ -479,6 +497,12 @@ RxWarpDraw::Prepare(VOID)
         Raster.CullMode = D3D10_DDI_CULL_BACK;
         Raster.DepthClipEnable = TRUE;
     }
+    if (Raster.MultisampleEnable)
+        LineMode = RxWarpLineQuad;
+    else if (Raster.AntialiasedLineEnable)
+        LineMode = RxWarpLineAlpha;
+    else
+        LineMode = RxWarpLineAliased;
     if (Pipeline->DepthStencil != nullptr)
     {
         DepthState = Pipeline->DepthStencil->Desc;
@@ -1096,6 +1120,18 @@ RxWarpDraw::Rasterize(
     _In_ const RX_WARP_VERTEX *B,
     _In_ const RX_WARP_VERTEX *C)
 {
+    ToScreen(A, &Corner[0]);
+    ToScreen(B, &Corner[1]);
+    ToScreen(C, &Corner[2]);
+    AlphaLine = FALSE;
+    SetupTriangle(FALSE);
+}
+
+/* Sets up and covers the triangle in Corner; one made from a line is never culled and always faces front */
+VOID
+RxWarpDraw::SetupTriangle(
+    _In_ BOOLEAN FromLine)
+{
     RX_WARP_SCREEN_VERTEX Ordered[3];
     RX_WARP_EDGE Edges[3];
     INT64 Area;
@@ -1106,10 +1142,6 @@ RxWarpDraw::Rasterize(
     INT MaxX;
     INT MaxY;
 
-    ToScreen(A, &Corner[0]);
-    ToScreen(B, &Corner[1]);
-    ToScreen(C, &Corner[2]);
-
     Area = ((INT64)Corner[2].Y - Corner[0].Y) * ((INT64)Corner[1].X - Corner[0].X) -
            ((INT64)Corner[0].Y - Corner[1].Y) * ((INT64)Corner[0].X - Corner[2].X);
     if (Area == 0)
@@ -1118,9 +1150,11 @@ RxWarpDraw::Rasterize(
     /* Positive area winds clockwise on screen */
     Clockwise = (Area > 0);
     FrontFacing = Raster.FrontCounterClockwise ? !Clockwise : Clockwise;
-    if (Raster.CullMode == D3D10_DDI_CULL_BACK && !FrontFacing)
+    if (FromLine)
+        FrontFacing = TRUE;
+    else if (Raster.CullMode == D3D10_DDI_CULL_BACK && !FrontFacing)
         return;
-    if (Raster.CullMode == D3D10_DDI_CULL_FRONT && FrontFacing)
+    else if (Raster.CullMode == D3D10_DDI_CULL_FRONT && FrontFacing)
         return;
 
     InverseArea = 1.0f / ((FLOAT)Area * (1.0f / 65536.0f));
@@ -1173,7 +1207,7 @@ RxWarpDraw::Rasterize(
     }
     PointSprite = FALSE;
     Triangle = TRUE;
-    Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8, TRUE,
+    Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8, !AlphaLine,
           [&Edges](INT64 Sx, INT64 Sy)
           {
               return RxWarpInsideEdge(Edges[0], Sx, Sy) && RxWarpInsideEdge(Edges[1], Sx, Sy) && RxWarpInsideEdge(Edges[2], Sx, Sy);
@@ -1317,6 +1351,56 @@ RxWarpLineCovers(
     return AlongX || AlongY;
 }
 
+/* Quad and alpha antialiased lines: a rectangle along the line, drawn as two triangles */
+VOID
+RxWarpDraw::RasterizeWideLine(VOID)
+{
+    RX_WARP_SCREEN_VERTEX Start = Corner[0];
+    RX_WARP_SCREEN_VERTEX End = Corner[1];
+    FLOAT Dx = (FLOAT)(End.X - Start.X) * (1.0f / 256.0f);
+    FLOAT Dy = (FLOAT)(End.Y - Start.Y) * (1.0f / 256.0f);
+    FLOAT Nx = (FLOAT)(Start.X - End.X) * (1.0f / 256.0f);
+    FLOAT Length = sqrtf(Dy * Dy + Nx * Nx);
+    FLOAT Half;
+    FLOAT InverseLength;
+    INT OffsetX;
+    INT OffsetY;
+
+    if (Length == 0.0f)
+        return;
+    Half = (((LineMode == RxWarpLineAlpha) ? 4.0f : 1.4f) * 0.5f) / Length;
+    OffsetX = (INT)nearbyintf((Dy * Half) * 256.0f);
+    OffsetY = (INT)nearbyintf((Nx * Half) * 256.0f);
+
+    InverseLength = 1.0f / sqrtf((-Dx) * (-Dx) + Dy * Dy);
+    LinePlane.A = Dy * InverseLength;
+    LinePlane.B = -Dx * InverseLength;
+    LinePlane.C = InverseLength * (((FLOAT)Start.Y * (1.0f / 256.0f)) * Dx - ((FLOAT)Start.X * (1.0f / 256.0f)) * Dy);
+    AlphaLine = (LineMode == RxWarpLineAlpha);
+
+    Corner[0] = Start;
+    Corner[0].X = Start.X - OffsetX;
+    Corner[0].Y = Start.Y - OffsetY;
+    Corner[1] = Start;
+    Corner[1].X = Start.X + OffsetX;
+    Corner[1].Y = Start.Y + OffsetY;
+    Corner[2] = End;
+    Corner[2].X = End.X + OffsetX;
+    Corner[2].Y = End.Y + OffsetY;
+    SetupTriangle(TRUE);
+
+    Corner[0] = Start;
+    Corner[0].X = Start.X - OffsetX;
+    Corner[0].Y = Start.Y - OffsetY;
+    Corner[1] = End;
+    Corner[1].X = End.X + OffsetX;
+    Corner[1].Y = End.Y + OffsetY;
+    Corner[2] = End;
+    Corner[2].X = End.X - OffsetX;
+    Corner[2].Y = End.Y - OffsetY;
+    SetupTriangle(TRUE);
+}
+
 /* Aliased lines: the diamond exit rule, with the last pixel left for the next line */
 VOID
 RxWarpDraw::RasterizeLine(
@@ -1339,7 +1423,13 @@ RxWarpDraw::RasterizeLine(
 
     ToScreen(A, &Corner[0]);
     ToScreen(B, &Corner[1]);
+    if (LineMode != RxWarpLineAliased)
+    {
+        RasterizeWideLine();
+        return;
+    }
     Corner[2] = Corner[1];
+    AlphaLine = FALSE;
 
     X0 = (FLOAT)Corner[0].X * (1.0f / 256.0f);
     Y0 = (FLOAT)Corner[0].Y * (1.0f / 256.0f);
@@ -1405,6 +1495,7 @@ RxWarpDraw::RasterizePoint(
     ToScreen(A, &Corner[0]);
     Corner[1] = Corner[0];
     Corner[2] = Corner[0];
+    AlphaLine = FALSE;
     FrontFacing = TRUE;
 
     if (PixelShader != nullptr)
@@ -1716,6 +1807,21 @@ RxWarpDraw::ShadePass(
         Invocation.Run(PixelShader, &PixelBindings);
         Invocation.EvaluateRoutine = nullptr;
         Invocation.PreciseRoutine = nullptr;
+
+        /* Antialiased lines fade the first target's alpha with the distance at the pixel center */
+        if (AlphaLine && Pipeline->RenderTargetCount > 0 && Pipeline->RenderTargets[0] != nullptr &&
+            !RxWarpFormatIsInteger(Pipeline->RenderTargets[0]->Format))
+        {
+            for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            {
+                UINT *Color = Invocation.Output(0, Lane);
+                FLOAT Distance = RxWarpEvaluate(LinePlane, (FLOAT)(X + (INT)(Lane & 1)) + 0.5f, (FLOAT)(Y + (INT)(Lane >> 1)) + 0.5f);
+                FLOAT Fade = (1.5f - fabsf(Distance)) * 0.45f;
+
+                Fade = (Fade < 0.0f) ? 0.0f : ((Fade > 1.0f) ? 1.0f : Fade);
+                Color[3] = RxWarpFloatAsBits(RxWarpBitsAsFloat(Color[3]) * Fade);
+            }
+        }
 
         /* The reference counts every lane of a shaded quad, helpers included */
         Device->Counters[RxWarpCountPsInvocations] += RxWarpLanes;
