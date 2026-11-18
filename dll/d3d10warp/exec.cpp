@@ -1144,6 +1144,13 @@ RxWarpMachine::Evaluate(
         FetchAll(Instruction.Operands[2], TRUE, Parameter);
     Register = Source.Index[0].Immediate;
 
+    /* The reference takes a sample index held in a register as that register's number, not its contents */
+    if (Kind == RxWarpEvaluateSample && Instruction.OperandCount > 2 && Instruction.Operands[2].Type != D3D10_SB_OPERAND_TYPE_IMMEDIATE32)
+    {
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            Parameter[Lane][0] = Instruction.Operands[2].Index[0].Immediate;
+    }
+
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
     {
         UINT Raw[4] = {};

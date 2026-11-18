@@ -397,7 +397,7 @@ private:
     INT QuadX = 0;
     INT QuadY = 0;
     UINT EvaluatingLane = 0;
-    INT SortedOffset[16][2] = {};       /* the pattern ordered top to bottom, as the reference stores samples */
+    UINT PixelCoverage[RxWarpLanes] = {};   /* every sample a pixel covers, while its samples shade one at a time */
     FLOAT CentroidAt[RxWarpLanes][2] = {};
     BOOLEAN Triangle = FALSE;           /* the primitive being shaded has three distinct corners */
     D3DWDDM2_0DDI_RASTERIZER_DESC Raster = {};
@@ -550,21 +550,6 @@ RxWarpDraw::Prepare(VOID)
     else if (Pipeline->DepthStencilView != nullptr && Pipeline->DepthStencilView->Resource != nullptr)
         SampleCount = Pipeline->DepthStencilView->Resource->SampleCount;
     RxWarpSamplePattern(SampleCount, SampleOffset);
-    memcpy(SortedOffset, SampleOffset, sizeof(SortedOffset));
-    for (UINT Index = 1; Index < SampleCount && Index < 16; Index++)
-    {
-        INT Moving[2] = { SortedOffset[Index][0], SortedOffset[Index][1] };
-        UINT Place = Index;
-
-        while (Place > 0 && SortedOffset[Place - 1][1] > Moving[1])
-        {
-            SortedOffset[Place][0] = SortedOffset[Place - 1][0];
-            SortedOffset[Place][1] = SortedOffset[Place - 1][1];
-            Place--;
-        }
-        SortedOffset[Place][0] = Moving[0];
-        SortedOffset[Place][1] = Moving[1];
-    }
     TargetWidth = Width;
     TargetHeight = Height;
 
@@ -1611,11 +1596,11 @@ RxWarpDraw::EvaluateInput(
             Y = Y + (FLOAT)((INT)((UINT)Parameter[1] << 28) >> 28) * (1.0f / 16.0f);
             break;
         case RxWarpEvaluateSample:
-            /* The reference looks the index up in its top to bottom sample order */
+            /* Past the sample count it stays at the pixel center */
             if ((UINT)Parameter[0] < Draw->SampleCount)
             {
-                X = X + (FLOAT)Draw->SortedOffset[Parameter[0]][0] * (1.0f / 256.0f);
-                Y = Y + (FLOAT)Draw->SortedOffset[Parameter[0]][1] * (1.0f / 256.0f);
+                X = X + (FLOAT)Draw->SampleOffset[Parameter[0]][0] * (1.0f / 256.0f);
+                Y = Y + (FLOAT)Draw->SampleOffset[Parameter[0]][1] * (1.0f / 256.0f);
             }
             break;
         case RxWarpEvaluateCentroid:
@@ -1712,6 +1697,8 @@ RxWarpDraw::ShadeQuad(
     _In_ UINT Covered,
     _In_reads_(RxWarpLanes) const UINT *Samples)
 {
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        PixelCoverage[Lane] = Samples[Lane] & Pipeline->SampleMask;
     if (SampleCount <= 1 || PixelShader == nullptr || !PixelShader->SampleRate)
     {
         ShadePass(X, Y, Covered, Samples, UINT_MAX);
@@ -1781,11 +1768,11 @@ RxWarpDraw::ShadePass(
             /* Pixels the sample mask or the edges leave partly covered take centroid attributes at their first covered sample */
             CentroidAt[Lane][0] = Sx;
             CentroidAt[Lane][1] = Sy;
-            if (Invocation.CoverageIn[Lane] != 0 && Invocation.CoverageIn[Lane] != AllSamples)
+            if (PixelCoverage[Lane] != 0 && PixelCoverage[Lane] != AllSamples)
             {
                 ULONG First;
 
-                _BitScanForward(&First, Invocation.CoverageIn[Lane]);
+                _BitScanForward(&First, PixelCoverage[Lane]);
                 CentroidAt[Lane][0] = Sx + (FLOAT)SampleOffset[First][0] * (1.0f / 256.0f);
                 CentroidAt[Lane][1] = Sy + (FLOAT)SampleOffset[First][1] * (1.0f / 256.0f);
             }
