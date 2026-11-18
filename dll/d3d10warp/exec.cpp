@@ -1255,7 +1255,21 @@ RxWarpMachine::Arithmetic(
             RxWarpFloatOp(2, Source, Result, [](FLOAT A, FLOAT B, FLOAT) { return A * B; });
             break;
         case D3D10_SB_OPCODE_MAD:
-            RxWarpFloatOp(3, Source, Result, [](FLOAT A, FLOAT B, FLOAT C) { return fmaf(A, B, C); });
+            /* A negated addend, or one negated factor, makes the reference multiply and subtract apart */
+            if (Instruction.Operands[Destinations + 2].Negate ||
+                Instruction.Operands[Destinations].Negate != Instruction.Operands[Destinations + 1].Negate)
+            {
+                RxWarpFloatOp(3, Source, Result, [](FLOAT A, FLOAT B, FLOAT C)
+                              {
+                                  volatile FLOAT Product = A * B;
+
+                                  return Product + C;
+                              });
+            }
+            else
+            {
+                RxWarpFloatOp(3, Source, Result, [](FLOAT A, FLOAT B, FLOAT C) { return fmaf(A, B, C); });
+            }
             break;
         case D3D10_SB_OPCODE_DIV:
             RxWarpFloatOp(2, Source, Result, [](FLOAT A, FLOAT B, FLOAT) { return A / B; });
