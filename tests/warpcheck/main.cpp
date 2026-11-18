@@ -2704,6 +2704,209 @@ Exit:
     return hr;
 }
 
+static const char TcLineModeSource[] =
+    "struct VI { float4 p : POSITION; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
+    "VO vs(VI i) { VO o; o.p = i.p; o.c = i.c; return o; }\n"
+    "float4 ps(VO i) : SV_Target { return i.c; }\n"
+    "cbuffer C : register(b0) { uint Samples; };\n"
+    "Texture2DMS<float4> T : register(t0);\n"
+    "RWByteAddressBuffer Out : register(u0);\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void cs(uint3 i : SV_DispatchThreadID)\n"
+    "{\n"
+    "    for (uint s = 0; s < Samples; s++)\n"
+    "    {\n"
+    "        uint4 v = (uint4)round(saturate(T.Load(i.xy, s)) * 255);\n"
+    "        Out.Store(((i.y * 64 + i.x) * Samples + s) * 4, v.x | (v.y << 8) | (v.z << 16) | (v.w << 24));\n"
+    "    }\n"
+    "}\n";
+
+/* Lines under every multisample and antialiased line setting, read back per sample */
+static
+HRESULT
+SceneLineModes(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const D3D11_INPUT_ELEMENT_DESC Elements[] =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
+    static const UINT Counts[3] = { 1, 4, 8 };
+    std::vector<TcVertex> Vertices;
+    D3D11_VIEWPORT Viewport = { 0, 0, 64, 64, 0, 1 };
+    const FLOAT Clear[4] = {};
+    ID3DBlob *Blobs[3] = {};
+    ID3D11VertexShader *Vs = NULL;
+    ID3D11PixelShader *Ps = NULL;
+    ID3D11ComputeShader *Cs = NULL;
+    ID3D11InputLayout *Layout = NULL;
+    ID3D11Buffer *Input = NULL;
+    ID3D11Buffer *Constants = NULL;
+    ID3D11RasterizerState *Raster[4] = {};
+    UINT Stride = sizeof(TcVertex);
+    UINT Offset = 0;
+    UINT Seed = 4242;
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < 24; Index++)
+    {
+        FLOAT Corner[4];
+
+        for (FLOAT &Value : Corner)
+        {
+            Seed = Seed * 1103515245 + 12345;
+            Value = ((Seed >> 8) % 2201) / 1000.0f - 1.1f;
+        }
+        Vertices.push_back(TcMake(Corner[0], Corner[1], 0.5f, 1.0f, 0xFF4020FF));
+        Vertices.push_back(TcMake(Corner[2], Corner[3], 0.5f, 1.0f, 0x20C0FF80));
+    }
+    for (UINT Index = 0; Index < 8; Index++)
+    {
+        FLOAT A = (FLOAT)(Index * 8) / 32.0f - 1.0f;
+        FLOAT B = (FLOAT)(Index * 8 + 3) / 32.0f - 1.0f + ((Index & 1) ? 1.0f / 64.0f : 0.0f);
+        FLOAT C = (FLOAT)(Index * 6 + 7) / 32.0f - 1.0f;
+
+        Vertices.push_back(TcMake(A, B, 0.5f, 1.0f, 0xFFFFFFFF));
+        Vertices.push_back(TcMake(C, B, 0.5f, 1.0f, 0xFFFF00FF));
+        Vertices.push_back(TcMake(B, A, 0.5f, 1.0f, 0x00FFFFFF));
+        Vertices.push_back(TcMake(B, C, 0.5f, 1.0f, 0xFF00FFFF));
+    }
+
+    hr = TcCompileFrom(TcLineModeSource, "vs", "vs_5_0", &Blobs[0]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcLineModeSource, "ps", "ps_5_0", &Blobs[1]);
+    if (SUCCEEDED(hr))
+        hr = TcCompileFrom(TcLineModeSource, "cs", "cs_5_0", &Blobs[2]);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateVertexShader(Blobs[0]->GetBufferPointer(), Blobs[0]->GetBufferSize(), NULL, &Vs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreatePixelShader(Blobs[1]->GetBufferPointer(), Blobs[1]->GetBufferSize(), NULL, &Ps);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateComputeShader(Blobs[2]->GetBufferPointer(), Blobs[2]->GetBufferSize(), NULL, &Cs);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateInputLayout(Elements, ARRAYSIZE(Elements), Blobs[0]->GetBufferPointer(), Blobs[0]->GetBufferSize(), &Layout);
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC InputDesc = { (UINT)(Vertices.size() * sizeof(TcVertex)), D3D11_USAGE_DEFAULT, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA Data = { Vertices.data(), 0, 0 };
+
+        hr = Device->CreateBuffer(&InputDesc, &Data, &Input);
+    }
+    if (SUCCEEDED(hr))
+    {
+        D3D11_BUFFER_DESC ConstantDesc = { 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+
+        hr = Device->CreateBuffer(&ConstantDesc, NULL, &Constants);
+    }
+    for (UINT Mode = 0; Mode < 4 && SUCCEEDED(hr); Mode++)
+    {
+        D3D11_RASTERIZER_DESC RasterDesc = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0.0f, 0.0f, TRUE, FALSE, (Mode & 1) != 0, (Mode & 2) != 0 };
+
+        hr = Device->CreateRasterizerState(&RasterDesc, &Raster[Mode]);
+    }
+    if (FAILED(hr))
+        goto Exit;
+
+    for (UINT Count : Counts)
+    {
+        D3D11_TEXTURE2D_DESC ColorDesc = { 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { Count, 0 }, D3D11_USAGE_DEFAULT,
+                                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        D3D11_BUFFER_DESC OutDesc = { 64 * 64 * 4 * Count, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0 };
+        D3D11_UNORDERED_ACCESS_VIEW_DESC UavDesc = {};
+        D3D11_SHADER_RESOURCE_VIEW_DESC SrvDesc = {};
+        UINT CountData[4] = { Count, 0, 0, 0 };
+        UINT Levels = 0;
+        ID3D11Texture2D *Color = NULL;
+        ID3D11RenderTargetView *ColorView = NULL;
+        ID3D11ShaderResourceView *View = NULL;
+        ID3D11Buffer *Out = NULL;
+        ID3D11UnorderedAccessView *Uav = NULL;
+
+        if (Count > 1 && (FAILED(Device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, Count, &Levels)) || Levels == 0))
+            continue;
+        UavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        UavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        UavDesc.Buffer.NumElements = OutDesc.ByteWidth / 4;
+        UavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+        SrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        SrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+
+        hr = Device->CreateTexture2D(&ColorDesc, NULL, &Color);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateRenderTargetView(Color, NULL, &ColorView);
+        if (SUCCEEDED(hr) && Count > 1)
+            hr = Device->CreateShaderResourceView(Color, &SrvDesc, &View);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateBuffer(&OutDesc, NULL, &Out);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateUnorderedAccessView(Out, &UavDesc, &Uav);
+
+        for (UINT Mode = 0; Mode < 4 && SUCCEEDED(hr); Mode++)
+        {
+            ID3D11ShaderResourceView *NoView = NULL;
+            ID3D11UnorderedAccessView *NoUav = NULL;
+            ID3D11RenderTargetView *NoTarget = NULL;
+
+            Context->ClearRenderTargetView(ColorView, Clear);
+            Context->OMSetRenderTargets(1, &ColorView, NULL);
+            Context->OMSetBlendState(NULL, NULL, 0xFFFFFFFF);
+            Context->OMSetDepthStencilState(NULL, 0);
+            Context->RSSetViewports(1, &Viewport);
+            Context->RSSetState(Raster[Mode]);
+            Context->IASetInputLayout(Layout);
+            Context->IASetVertexBuffers(0, 1, &Input, &Stride, &Offset);
+            Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+            Context->VSSetShader(Vs, NULL, 0);
+            Context->PSSetShader(Ps, NULL, 0);
+            Context->Draw((UINT)Vertices.size(), 0);
+            Context->OMSetRenderTargets(1, &NoTarget, NULL);
+            if (Count == 1)
+            {
+                hr = TcReadBytes(Device, Context, Color, 4, Result);
+                continue;
+            }
+
+            Context->UpdateSubresource(Constants, 0, NULL, CountData, 0, 0);
+            Context->CSSetShader(Cs, NULL, 0);
+            Context->CSSetConstantBuffers(0, 1, &Constants);
+            Context->CSSetShaderResources(0, 1, &View);
+            Context->CSSetUnorderedAccessViews(0, 1, &Uav, NULL);
+            Context->Dispatch(8, 8, 1);
+            Context->CSSetShaderResources(0, 1, &NoView);
+            Context->CSSetUnorderedAccessViews(0, 1, &NoUav, NULL);
+            hr = TcReadBuffer(Device, Context, Out, Result);
+        }
+
+        ID3D11DeviceChild *Objects[] = { Color, ColorView, View, Out, Uav };
+        for (ID3D11DeviceChild *Object : Objects)
+        {
+            if (Object)
+                Object->Release();
+        }
+        if (FAILED(hr))
+            break;
+    }
+
+Exit:
+    ID3D11DeviceChild *Objects[] = { Vs, Ps, Cs, Layout, Input, Constants, Raster[0], Raster[1], Raster[2], Raster[3] };
+    for (ID3D11DeviceChild *Object : Objects)
+    {
+        if (Object)
+            Object->Release();
+    }
+    for (ID3DBlob *Blob : Blobs)
+    {
+        if (Blob)
+            Blob->Release();
+    }
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -2732,6 +2935,7 @@ static const TcScene Scenes[] =
     { "ops", 0, SceneOps },
     { "msaa", 0, SceneMsaa },
     { "a2c", 0, SceneAlphaCoverage },
+    { "linemodes", 0, SceneLineModes },
 };
 
 static
