@@ -774,6 +774,28 @@ RxWarpDraw::ClipDistances(
         Distance[6 + Index] = RxWarpBitsAsFloat(Vertex->Registers[ClipSlots[Index] / 4][ClipSlots[Index] % 4]);
 }
 
+/* The corner a triangle starts from: least clip space x, then least y, as the reference rotates them */
+static
+UINT
+RxWarpFirstCorner(
+    _In_reads_(3) const RX_WARP_VERTEX *const *Corners,
+    _In_ UINT PositionRegister)
+{
+    FLOAT X[3];
+    FLOAT Y[3];
+    UINT First;
+
+    for (UINT Index = 0; Index < 3; Index++)
+    {
+        X[Index] = RxWarpBitsAsFloat(Corners[Index]->Registers[PositionRegister][0]);
+        Y[Index] = RxWarpBitsAsFloat(Corners[Index]->Registers[PositionRegister][1]);
+    }
+    First = (X[1] >= X[0] && (X[1] != X[0] || Y[1] >= Y[0])) ? 0 : 1;
+    if (X[2] < X[First] || (X[2] == X[First] && Y[2] < Y[First]))
+        First = 2;
+    return First;
+}
+
 /* Interpolates every register from Inner toward Outer, stopping on the plane */
 static
 VOID
@@ -854,7 +876,11 @@ RxWarpDraw::ClipPrimitive(
         else if (Count == 2)
             RasterizeLine(Corners[0], Corners[1]);
         else
-            Rasterize(Corners[0], Corners[1], Corners[2]);
+        {
+            UINT First = RxWarpFirstCorner(Corners, PositionRegister);
+
+            Rasterize(Corners[First], Corners[(First + 1) % 3], Corners[(First + 2) % 3]);
+        }
         return;
     }
 
