@@ -146,7 +146,8 @@ DiRemoveForegroundDevice(
     {
         if (DiForegroundDevices[Index] == Device)
         {
-            DiForegroundDevices[Index] = DiForegroundDevices[--DiForegroundCount];
+            DiForegroundCount -= 1;
+            DiForegroundDevices[Index] = DiForegroundDevices[DiForegroundCount];
             Found = TRUE;
             break;
         }
@@ -236,7 +237,10 @@ DiDropExclusive(
     WaitForSingleObject(DiGlobalMutex, INFINITE);
     Owner = DiFindOwner(Device);
     if (Owner != nullptr && Owner->Window == Window && Owner->ProcessId == GetCurrentProcessId())
-        *Owner = DiShared->Owners[--DiShared->OwnerCount];
+    {
+        DiShared->OwnerCount -= 1;
+        *Owner = DiShared->Owners[DiShared->OwnerCount];
+    }
     ReleaseMutex(DiGlobalMutex);
 }
 
@@ -379,8 +383,9 @@ DiDevice::PlanStateCopy(VOID)
     DWORD First = static_cast<DWORD>(-1);
     DWORD End = 0;
 
-    for (DWORD Index = Native->ObjectCount; Index-- > 0;)
+    for (DWORD Remaining = Native->ObjectCount; Remaining > 0; Remaining -= 1)
     {
+        DWORD Index = Remaining - 1;
         const DI_OBJECT* Object = &Native->Objects[Index];
         LONG Delta;
 
@@ -827,8 +832,9 @@ DiDevice::GetDeviceState(
         const DI_FORMAT* Format = Backend->Format();
 
         ZeroMemory(Target, Size);
-        for (DWORD Index = Format->ObjectCount; Index-- > 0;)
+        for (DWORD Remaining = Format->ObjectCount; Remaining > 0; Remaining -= 1)
         {
+            DWORD Index = Remaining - 1;
             const DI_OBJECT* Object = &Format->Objects[Index];
 
             if (AppObjects[Index].Offset == -1)

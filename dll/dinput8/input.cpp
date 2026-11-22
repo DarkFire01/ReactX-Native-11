@@ -729,8 +729,12 @@ DiEmRelease(
             break;
         }
     }
-    if (Instance->HoldsThread && --DiEmThreadUsers == 0)
-        WakeThread = TRUE;
+    if (Instance->HoldsThread)
+    {
+        DiEmThreadUsers -= 1;
+        if (DiEmThreadUsers == 0)
+            WakeThread = TRUE;
+    }
     LeaveCriticalSection(&DiLock);
     if (WakeThread)
         DiEmWakeThread();

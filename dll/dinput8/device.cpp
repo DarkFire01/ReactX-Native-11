@@ -318,8 +318,10 @@ DiDevice::ResolveObject(
             *Index = static_cast<DWORD>(ObjectByOffset[Object]);
             return S_OK;
         case DIPH_BYID:
-            for (DWORD Candidate = Native->ObjectCount; Candidate-- > 0;)
+            for (DWORD Remaining = Native->ObjectCount; Remaining > 0; Remaining -= 1)
             {
+                DWORD Candidate = Remaining - 1;
+
                 if (((Native->Objects[Candidate].Type ^ Object) & 0xFFFFFF) == 0)
                 {
                     *Index = Candidate;
