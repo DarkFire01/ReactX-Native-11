@@ -486,6 +486,65 @@ Done:
     return Usable;
 }
 
+/* Gives every HID joystick a distinct id below 16, keeping the ids they already hold */
+static
+VOID
+DiHidAssignJoystickIds(VOID)
+{
+    BOOLEAN Used[16] = {};
+    BOOLEAN Pending = FALSE;
+
+    for (ULONG Index = 0; Index < DiHidCount && DiHidEntries[Index].Present; Index++)
+    {
+        RX_DI_HID_ENTRY* Entry = &DiHidEntries[Index];
+
+        if ((Entry->DevType & (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK)) != (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK))
+            continue;
+
+        if (Entry->JoystickId >= _countof(Used) || Used[Entry->JoystickId])
+        {
+            Entry->JoystickId = DI_HID_NO_JOYSTICK;
+            Pending = TRUE;
+        }
+        else
+        {
+            Used[Entry->JoystickId] = TRUE;
+        }
+    }
+
+    if (!Pending)
+        return;
+
+    for (ULONG Index = 0; Index < DiHidCount; Index++)
+    {
+        RX_DI_HID_ENTRY* Entry = &DiHidEntries[Index];
+        ULONG Free = 0;
+
+        if ((Entry->DevType & (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK)) != (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK) ||
+            Entry->JoystickId != DI_HID_NO_JOYSTICK)
+        {
+            continue;
+        }
+
+        while (Free < _countof(Used) && Used[Free])
+            Free++;
+        if (Free == _countof(Used))
+            continue;
+
+        Used[Free] = TRUE;
+        Entry->JoystickId = Free;
+        if (RegSetValueExW(Entry->Calibration, L"Joystick Id", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&Free),
+                           sizeof(Free)) != ERROR_SUCCESS)
+        {
+            DiTrace(L"cannot store joystick id %lu for %ls", Free, Entry->InstanceId);
+        }
+        else
+        {
+            DiTrace(L"HID device %ls is joystick %lu", Entry->InstanceId, Free);
+        }
+    }
+}
+
 VOID
 DiRefreshHidList(
     _In_ BOOLEAN Force)
@@ -511,6 +570,8 @@ DiRefreshHidList(
     if (Set == INVALID_HANDLE_VALUE)
     {
         DiTrace(L"HID device list unavailable, error %lu", GetLastError());
+        if (DiHidCount != 0)
+            DiHidAssignJoystickIds();
         DiHidBuilt = GetTickCount();
         LeaveCriticalSection(&DiLock);
         return;
@@ -582,6 +643,8 @@ DiRefreshHidList(
     }
 
     SetupDiDestroyDeviceInfoList(Set);
+    if (DiHidCount != 0)
+        DiHidAssignJoystickIds();
     DiHidBuilt = GetTickCount();
     LeaveCriticalSection(&DiLock);
 }
