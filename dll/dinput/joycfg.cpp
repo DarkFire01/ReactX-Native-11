@@ -11,6 +11,7 @@
 
 #define DI_JOY_OEM_ROOT     L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM"
 #define DI_JOY_CONFIG_ROOT  L"System\\CurrentControlSet\\Control\\MediaResources\\Joystick\\DINPUT.DLL"
+#define DI_JOY_PROP_ROOT    L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\DirectInput"
 #define DI_JOY_KEY_ACCESS   0x0003003F
 #define DI_JOY_COOP_LEVEL   (DISCL_EXCLUSIVE | DISCL_BACKGROUND)
 #define DI_JOY_HWS_ISHIDDEV 0x10000000
@@ -21,6 +22,15 @@
 #define DI_JOY_PREDEF_LAST  12
 
 static const GUID DiJoyConfigOwner = IID_IDirectInputJoyConfig;
+
+/* DirectInput 8 hands out its own revision of the interface, with the application status key last */
+#if DIRECTINPUT_VERSION >= 0x0800
+typedef IDirectInputJoyConfig8 RX_DI_JOY_CONFIG_FACE;
+#define DI_JOY_CONFIG_IID   IID_IDirectInputJoyConfig8
+#else
+typedef IDirectInputJoyConfig RX_DI_JOY_CONFIG_FACE;
+#define DI_JOY_CONFIG_IID   IID_IDirectInputJoyConfig
+#endif
 
 HRESULT
 DiOpenJoyTypeKey(
@@ -43,7 +53,7 @@ DiOpenJoyTypeKey(
     return hr;
 }
 
-class RxDiJoyConfig final : public RxDiUnknown, public IDirectInputJoyConfig
+class RxDiJoyConfig final : public RxDiUnknown, public RX_DI_JOY_CONFIG_FACE
 {
 public:
     explicit
@@ -192,7 +202,6 @@ public:
         LPDIJOYTYPEINFO Info,
         DWORD Flags) override
     {
-        HKEY Key;
         HRESULT hr;
 
         hr = CheckTypeArgs(Type, Info, Flags);
@@ -201,6 +210,11 @@ public:
 
         if (Type[0] == L'#')
             return GetPredefinedType(Type, Info, Flags);
+#if DIRECTINPUT_VERSION >= 0x0800
+        return ReadTypeInfo(Type, Info, Flags);
+#else
+        HKEY Key;
+
         if (Type[0] == L'\0')
             return DIERR_NOTFOUND;
 
@@ -229,6 +243,7 @@ public:
             RegCloseKey(Key);
         }
         return hr;
+#endif
     }
 
     HRESULT
@@ -236,11 +251,27 @@ public:
     SetTypeInfo(
         LPCWSTR Type,
         LPCDIJOYTYPEINFO Info,
+#if DIRECTINPUT_VERSION >= 0x0800
+        DWORD Flags,
+        LPWSTR NewName) override
+#else
         DWORD Flags) override
+#endif
     {
         HKEY TypeKey;
         HRESULT hr;
 
+#if DIRECTINPUT_VERSION >= 0x0800
+        UNREFERENCED_PARAMETER(NewName);
+
+        /* Only the top bit of the first flags may be set by a caller */
+        if (DiCheckString(Type, 256) == S_OK && Info != nullptr && Info->dwSize >= sizeof(DIJOYTYPEINFO_DX6) &&
+            (Info->dwSize == sizeof(DIJOYTYPEINFO_DX6) || Info->dwSize == sizeof(DIJOYTYPEINFO)) &&
+            (Info->dwFlags1 & 0x7FFFFFFF) != 0)
+        {
+            return E_INVALIDARG;
+        }
+#endif
         hr = CheckTypeArgs(Type, const_cast<LPDIJOYTYPEINFO>(Info), Flags);
         if (FAILED(hr))
             return hr;
@@ -302,11 +333,17 @@ public:
             return E_INVALIDARG;
         if (Flags & ~((Config->dwSize == sizeof(DIJOYCONFIG)) ? 0x1FUL : 0x0FUL))
             return E_INVALIDARG;
+#if DIRECTINPUT_VERSION >= 0x0800
+        /* DirectInput 8 reads the saved configuration, and none is kept for any id */
+        UNREFERENCED_PARAMETER(Id);
+        return DIERR_NOTFOUND;
+#else
         if (Id >= DI_JOY_LIMIT)
             return DIERR_NOMOREITEMS;
 
         /* No joystick is configured through the old gameport settings */
         return E_FAIL;
+#endif
     }
 
     HRESULT
@@ -419,6 +456,17 @@ public:
         return DiOpenJoyTypeKey(Type, Access, Key);
     }
 
+#if DIRECTINPUT_VERSION >= 0x0800
+    HRESULT
+    STDMETHODCALLTYPE
+    OpenAppStatusKey(
+        PHKEY Key) override
+    {
+        if (Key == nullptr)
+            return E_POINTER;
+        return DiOpenKey(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectInput", KEY_READ, 0, Key);
+    }
+#else
     HRESULT
     STDMETHODCALLTYPE
     OpenConfigKey(
@@ -433,6 +481,7 @@ public:
             return DIERR_NOTACQUIRED;
         return E_INVALIDARG;
     }
+#endif
 
 private:
     ~RxDiJoyConfig() override
@@ -442,14 +491,14 @@ private:
         DeleteCriticalSection(&Lock);
     }
 
-    PVOID PrimaryInterface(VOID) override { return static_cast<IDirectInputJoyConfig*>(this); }
+    PVOID PrimaryInterface(VOID) override { return static_cast<RX_DI_JOY_CONFIG_FACE*>(this); }
 
     PVOID
     QueryOwn(
         _In_ REFIID Iid) override
     {
-        if (IsEqualIID(Iid, IID_IDirectInputJoyConfig))
-            return static_cast<IDirectInputJoyConfig*>(this);
+        if (IsEqualIID(Iid, DI_JOY_CONFIG_IID))
+            return static_cast<RX_DI_JOY_CONFIG_FACE*>(this);
         return nullptr;
     }
 
@@ -475,13 +524,151 @@ private:
         LoadStringW(DiModule, 976 + Type[1], Info->wszDisplayName, _countof(Info->wszDisplayName));
         Info->wszCallout[0] = L'\0';
         ZeroMemory(&Info->clsidConfig, sizeof(Info->clsidConfig));
-        if (Info->dwSize >= sizeof(DIJOYTYPEINFO))
+        if (Info->dwSize >= sizeof(DIJOYTYPEINFO_DX6))
         {
+#if DIRECTINPUT_VERSION >= 0x0800
+            Info->dwFlags1 = 0;
+#endif
             if (Flags & DITC_HARDWAREID)
                 StringCchPrintfW(Info->wszHardwareId, _countof(Info->wszHardwareId), L"GAMEPORT\\VID_045E&PID_%04X", 0x0102 + Index);
         }
+#if DIRECTINPUT_VERSION >= 0x0800
+        if (Info->dwSize >= sizeof(DIJOYTYPEINFO))
+        {
+            Info->dwFlags2 = 0;
+            Info->wszMapFile[0] = L'\0';
+        }
+#endif
         return S_OK;
     }
+
+#if DIRECTINPUT_VERSION >= 0x0800
+    /* Reads a string value into a buffer of Count characters, the way the type reader expects */
+    static
+    LONG
+    ReadTypeString(
+        _In_ HKEY Key,
+        _In_z_ PCWSTR Name,
+        _Out_writes_(Count) PWSTR Buffer,
+        _In_ ULONG Count)
+    {
+        LONG Error;
+
+        Buffer[Count - 1] = L'\0';
+        Error = DiReadString(Key, Name, Buffer, Count - 1);
+        if (Error == ERROR_MORE_DATA)
+            Buffer[Count - 2] = L'\0';
+        else if (Error != ERROR_SUCCESS)
+            Buffer[0] = L'\0';
+        return Error;
+    }
+
+    /* The DirectInput 8 reader of a named type, which takes what it can and says when parts were missing */
+    static
+    HRESULT
+    ReadTypeInfo(
+        _In_z_ LPCWSTR Type,
+        _Inout_ LPDIJOYTYPEINFO Info,
+        _In_ DWORD Flags)
+    {
+        HRESULT Result = S_FALSE;
+        BOOLEAN Partial = FALSE;
+        HKEY Root;
+        HKEY Key;
+
+        ZeroMemory(&Info->clsidConfig, sizeof(Info->clsidConfig));
+        if (Flags & (DITC_FLAGS2 | DITC_MAPFILE))
+        {
+            Key = nullptr;
+            if (SUCCEEDED(DiOpenKey(HKEY_CURRENT_USER, DI_JOY_PROP_ROOT, KEY_QUERY_VALUE, 0, &Root)))
+            {
+                if (FAILED(DiOpenKey(Root, Type, KEY_QUERY_VALUE, 0, &Key)))
+                    Key = nullptr;
+                RegCloseKey(Root);
+            }
+            if (Key == nullptr)
+            {
+                Info->dwFlags2 = 0;
+                ZeroMemory(Info->wszMapFile, sizeof(Info->wszMapFile));
+                Partial = TRUE;
+            }
+            else
+            {
+                if (Flags & DITC_FLAGS2)
+                {
+                    HRESULT Read = DiReadValue(Key, L"Flags2", &Info->dwFlags2, sizeof(Info->dwFlags2));
+
+                    Info->dwFlags2 &= 0x01FFFFFF;
+                    if (FAILED(Read))
+                    {
+                        Info->dwFlags2 = 0;
+                        Partial = TRUE;
+                    }
+                }
+                if ((Flags & DITC_MAPFILE) && ReadTypeString(Key, L"OEMMapFile", Info->wszMapFile, MAX_JOYSTRING) != ERROR_SUCCESS)
+                {
+                    ZeroMemory(Info->wszMapFile, sizeof(Info->wszMapFile));
+                    Partial = TRUE;
+                }
+                RegCloseKey(Key);
+            }
+            Result = S_OK;
+        }
+        if ((Flags & 0x3F) == 0)
+            return (SUCCEEDED(Result) && Partial) ? S_FALSE : Result;
+
+        if (FAILED(DiOpenKey(HKEY_CURRENT_USER, DI_JOY_OEM_ROOT, KEY_QUERY_VALUE, 0, &Root)))
+            return DIERR_NOTFOUND;
+        Result = DiOpenKey(Root, Type, KEY_QUERY_VALUE, 0, &Key);
+        RegCloseKey(Root);
+        if (FAILED(Result))
+            return DIERR_NOTFOUND;
+
+        Result = S_OK;
+        if (Flags & DITC_REGHWSETTINGS)
+            Result = DiReadValue(Key, L"OEMData", &Info->hws, sizeof(Info->hws));
+        if (SUCCEEDED(Result))
+        {
+            if (Flags & DITC_CLSIDCONFIG)
+            {
+                WCHAR Text[39];
+
+                if (ReadTypeString(Key, L"ConfigCLSID", Text, _countof(Text)) != ERROR_SUCCESS ||
+                    !DiParseGuid(Text, &Info->clsidConfig))
+                {
+                    ZeroMemory(&Info->clsidConfig, sizeof(Info->clsidConfig));
+                }
+            }
+            if (Flags & DITC_DISPLAYNAME)
+            {
+                LONG Error = ReadTypeString(Key, L"OEMName", Info->wszDisplayName, MAX_JOYSTRING);
+
+                if (Error != ERROR_SUCCESS && Error != ERROR_FILE_NOT_FOUND)
+                {
+                    RegCloseKey(Key);
+                    return HRESULT_FROM_WIN32(Error);
+                }
+            }
+            if ((Flags & DITC_HARDWAREID) && ReadTypeString(Key, L"OEMHardwareID", Info->wszHardwareId, MAX_JOYSTRING) != ERROR_SUCCESS)
+            {
+                ZeroMemory(Info->wszHardwareId, sizeof(Info->wszHardwareId));
+                Partial = TRUE;
+            }
+            if (Flags & DITC_FLAGS1)
+            {
+                if (FAILED(DiReadValue(Key, L"Flags1", &Info->dwFlags1, sizeof(Info->dwFlags1))))
+                {
+                    Info->dwFlags1 = 0;
+                    Partial = TRUE;
+                }
+                Info->dwFlags1 &= 0x8000000F;
+            }
+            Result = S_OK;
+        }
+        RegCloseKey(Key);
+        return (SUCCEEDED(Result) && Partial) ? S_FALSE : Result;
+    }
+#endif
 
     /* A type is offered once it has a name and either a HID id or the HID flag */
     static
@@ -522,11 +709,24 @@ private:
             return hr;
         if (Info == nullptr)
             return E_POINTER;
+#if DIRECTINPUT_VERSION >= 0x0800
+        if (Info->dwSize != sizeof(DIJOYTYPEINFO_DX5) && Info->dwSize != sizeof(DIJOYTYPEINFO_DX6) &&
+            Info->dwSize != sizeof(DIJOYTYPEINFO))
+        {
+            return E_INVALIDARG;
+        }
+        if (Info->dwSize == sizeof(DIJOYTYPEINFO))
+            return (Flags & ~0xFFUL) ? E_INVALIDARG : S_OK;
+        if (Info->dwSize == sizeof(DIJOYTYPEINFO_DX6))
+            return (Flags & ~0x3FUL) ? E_INVALIDARG : S_OK;
+        return (Flags & ~0x0FUL) ? E_INVALIDARG : S_OK;
+#else
         if (Info->dwSize != sizeof(DIJOYTYPEINFO_DX5) && Info->dwSize != sizeof(DIJOYTYPEINFO))
             return E_INVALIDARG;
         if (Flags & ~((Info->dwSize == sizeof(DIJOYTYPEINFO)) ? 0xFFUL : 0x0FUL))
             return E_INVALIDARG;
         return S_OK;
+#endif
     }
 
     CRITICAL_SECTION Lock;
