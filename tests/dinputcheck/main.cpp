@@ -1246,8 +1246,9 @@ DcCheckDevice(
     {
         FillMemory(&InfoA, sizeof(InfoA), 0xCC);
         InfoA.dwSize = InfoSizesA[Index];
-        printf("  infoA %lu = %08lX '%s' '%s' %02X %02X\n", InfoSizesA[Index], DeviceA->GetDeviceInfo(&InfoA),
-               InfoA.tszInstanceName, InfoA.tszProductName, reinterpret_cast<PBYTE>(&InfoA)[560],
+        printf("  infoA %lu = %08lX '%.*s' '%.*s' %02X %02X\n", InfoSizesA[Index], DeviceA->GetDeviceInfo(&InfoA),
+               (int)sizeof(InfoA.tszInstanceName), InfoA.tszInstanceName,
+               (int)sizeof(InfoA.tszProductName), InfoA.tszProductName, reinterpret_cast<PBYTE>(&InfoA)[560],
                reinterpret_cast<PBYTE>(&InfoA)[579]);
     }
 
