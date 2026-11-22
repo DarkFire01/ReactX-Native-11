@@ -19,12 +19,25 @@
 #define DI_HID_AXIS_MAX         0xFFFF
 #define DI_IOCTL_POLL_FREQUENCY 0x000B019C
 
+#if DIRECTINPUT_VERSION >= 0x0800
+/* DirectInput 8 has a type per kind of game controller */
+#define DI_HID_TYPE_MOUSE       DI8DEVTYPE_MOUSE
+#define DI_HID_TYPE_KEYBOARD    DI8DEVTYPE_KEYBOARD
+#define DI_DEVTYPE_HID_DEVICE   (DIDEVTYPE_HID | DI8DEVTYPE_DEVICE)
+#define DI_DEVTYPE_HID_MOUSE    (DIDEVTYPE_HID | MAKEWORD(DI8DEVTYPE_MOUSE, DI8DEVTYPEMOUSE_UNKNOWN))
+#define DI_DEVTYPE_HID_JOYSTICK (DIDEVTYPE_HID | MAKEWORD(DI8DEVTYPE_JOYSTICK, DI8DEVTYPEJOYSTICK_STANDARD))
+#define DI_DEVTYPE_HID_GAMEPAD  (DIDEVTYPE_HID | MAKEWORD(DI8DEVTYPE_GAMEPAD, DI8DEVTYPEGAMEPAD_STANDARD))
+#define DI_DEVTYPE_HID_KEYBOARD (DIDEVTYPE_HID | DI8DEVTYPE_KEYBOARD)
+#else
+#define DI_HID_TYPE_MOUSE       DIDEVTYPE_MOUSE
+#define DI_HID_TYPE_KEYBOARD    DIDEVTYPE_KEYBOARD
 #define DI_DEVTYPE_HID_DEVICE   (DIDEVTYPE_HID | DIDEVTYPE_DEVICE)
 #define DI_DEVTYPE_HID_MOUSE    (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_MOUSE, DIDEVTYPEMOUSE_UNKNOWN))
 #define DI_DEVTYPE_HID_JOYSTICK (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_UNKNOWN))
 #define DI_DEVTYPE_HID_GAMEPAD  (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_GAMEPAD))
 #define DI_DEVTYPE_HID_KEYBOARD (DIDEVTYPE_HID | DIDEVTYPE_KEYBOARD)
 #define DI_DEVTYPE_HID_STICK    (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_TRADITIONAL))
+#endif
 
 /* Microsoft gameport adapters, which have no type key of their own */
 #define DI_HID_MS_VENDOR        0x045E
@@ -71,6 +84,19 @@ static WCHAR DiHidLastUnknown[MAX_PATH];
 static DWORD DiHidUnknownTick;
 
 static const GUID DiJoystickBase = { 0x6F1D2B70, 0xD5A0, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+
+/* Whether a HID device type is one the joystick numbering covers */
+static
+BOOLEAN
+DiHidIsJoystick(
+    _In_ ULONG DevType)
+{
+#if DIRECTINPUT_VERSION >= 0x0800
+    return (DevType & DIDEVTYPE_HID) != 0 && LOBYTE(DevType) >= DI8DEVTYPE_JOYSTICK;
+#else
+    return (DevType & (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK)) == (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK);
+#endif
+}
 
 static
 VOID
@@ -498,7 +524,7 @@ DiHidAssignJoystickIds(VOID)
     {
         RX_DI_HID_ENTRY* Entry = &DiHidEntries[Index];
 
-        if ((Entry->DevType & (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK)) != (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK))
+        if (!DiHidIsJoystick(Entry->DevType))
             continue;
 
         if (Entry->JoystickId >= _countof(Used) || Used[Entry->JoystickId])
@@ -520,8 +546,7 @@ DiHidAssignJoystickIds(VOID)
         RX_DI_HID_ENTRY* Entry = &DiHidEntries[Index];
         ULONG Free = 0;
 
-        if ((Entry->DevType & (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK)) != (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK) ||
-            Entry->JoystickId != DI_HID_NO_JOYSTICK)
+        if (!DiHidIsJoystick(Entry->DevType) || Entry->JoystickId != DI_HID_NO_JOYSTICK)
         {
             continue;
         }
@@ -1690,7 +1715,7 @@ public:
                 return S_OK;
 
             case 15:
-                if ((DevType & (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK)) != (DIDEVTYPE_HID | DIDEVTYPE_JOYSTICK))
+                if (!DiHidIsJoystick(DevType))
                     return E_NOTIMPL;
                 Value->dwData = Start.JoystickId;
                 return S_OK;
@@ -1900,8 +1925,10 @@ private:
         /* The gameport adapters stand for whatever stick is plugged into them */
         if (VendorId == DI_HID_MS_VENDOR && ProductId >= DI_HID_MS_GAMEPORT_LOW && ProductId <= DI_HID_MS_GAMEPORT_HIGH)
         {
+#if DIRECTINPUT_VERSION < 0x0800
             if (DevType == DI_DEVTYPE_HID_JOYSTICK)
                 DevType = DI_DEVTYPE_HID_STICK;
+#endif
             return;
         }
 
@@ -1913,6 +1940,7 @@ private:
     VOID
     ApplyTypeKind(VOID)
     {
+#if DIRECTINPUT_VERSION < 0x0800
         JOYREGHWSETTINGS Settings = {};
         UCHAR Kind;
 
@@ -1933,6 +1961,7 @@ private:
             return;
 
         DevType = DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, Kind);
+#endif
     }
 
     /* The type key can mark objects as actuators or triggers and override their aspect */
@@ -2015,8 +2044,8 @@ private:
         if (ReadOwnDescription(Name))
             return;
 
-        LoadStringW(DiModule, (LOBYTE(DevType) == DIDEVTYPE_MOUSE) ? IDS_MOUSE :
-                              (LOBYTE(DevType) == DIDEVTYPE_KEYBOARD) ? IDS_KEYBOARD : 0x2008, Name, MAX_PATH);
+        LoadStringW(DiModule, (LOBYTE(DevType) == DI_HID_TYPE_MOUSE) ? IDS_MOUSE :
+                              (LOBYTE(DevType) == DI_HID_TYPE_KEYBOARD) ? IDS_KEYBOARD : 0x2008, Name, MAX_PATH);
     }
 
     BOOLEAN
@@ -2522,6 +2551,7 @@ private:
         Group->Alias = Entry->IsAlias;
 
         /* Steering and rudder controls say what kind of joystick this is */
+#if DIRECTINPUT_VERSION < 0x0800
         if (Group->UsagePage == HID_USAGE_PAGE_SIMULATION)
         {
             if (Group->UsageMin == 0xC8)
@@ -2529,6 +2559,7 @@ private:
             else if (Group->UsageMin == 0xBA)
                 DevType = DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_RUDDER);
         }
+#endif
 
         Pov = Group->Count == 1 &&
               ((Group->UsagePage == HID_USAGE_PAGE_GENERIC && Group->UsageMin == HID_USAGE_GENERIC_HATSWITCH) ||
@@ -2560,7 +2591,7 @@ private:
             Slots[Index].Group = Group;
             Object = &Objects[Index];
 
-            if (LOBYTE(DevType) == DIDEVTYPE_MOUSE && Usage == HID_USAGE_GENERIC_WHEEL && Group->UsagePage == HID_USAGE_PAGE_GENERIC)
+            if (LOBYTE(DevType) == DI_HID_TYPE_MOUSE && Usage == HID_USAGE_GENERIC_WHEEL && Group->UsagePage == HID_USAGE_PAGE_GENERIC)
             {
                 Object->pguid = &GUID_ZAxis;
                 Group->Granularity = 0;
@@ -2971,7 +3002,7 @@ private:
                 return hr;
         }
 
-        if (LOBYTE(DevType) == DIDEVTYPE_KEYBOARD)
+        if (LOBYTE(DevType) == DI_HID_TYPE_KEYBOARD)
             MungeKeyboard();
         else
             MungeOther();
