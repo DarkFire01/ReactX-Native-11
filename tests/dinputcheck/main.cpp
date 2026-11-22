@@ -1052,6 +1052,28 @@ DcCheckForceFeedback(
     hr = Device->CreateEffect(GUID_ConstantForce, nullptr, &Effect, nullptr);
     printf("  createeffect = %08lX %s\n", hr, Effect ? "set" : "null");
     printf("  createeffect null = %08lX\n", Device->CreateEffect(GUID_ConstantForce, nullptr, nullptr, nullptr));
+
+    /* Argument shapes the effect object would reject, which a device without a driver never reaches */
+    {
+        DIEFFECT Params = {};
+        IUnknown* Outer = reinterpret_cast<IUnknown*>(Device);
+
+        Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(1);
+        hr = Device->CreateEffect(GUID_ConstantForce, nullptr, &Effect, Outer);
+        printf("  createeffect outer = %08lX %s\n", hr, Effect ? "set" : "null");
+        Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(1);
+        hr = Device->CreateEffect(DcBogusGuid, nullptr, &Effect, nullptr);
+        printf("  createeffect bogus = %08lX %s\n", hr, Effect ? "set" : "null");
+        Params.dwSize = 12;
+        Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(1);
+        hr = Device->CreateEffect(GUID_Sine, &Params, &Effect, nullptr);
+        printf("  createeffect badsize = %08lX %s\n", hr, Effect ? "set" : "null");
+        Params.dwSize = sizeof(DIEFFECT);
+        Params.dwFlags = DIEFF_CARTESIAN;
+        Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(1);
+        hr = Device->CreateEffect(GUID_Sine, &Params, &Effect, nullptr);
+        printf("  createeffect noaxes = %08lX %s\n", hr, Effect ? "set" : "null");
+    }
     printf("  enumeffects = %08lX\n", Device->EnumEffects([](LPCDIEFFECTINFOW, LPVOID) -> BOOL { return TRUE; }, nullptr, 0));
     printf("  enumeffects badtype = %08lX\n", Device->EnumEffects([](LPCDIEFFECTINFOW, LPVOID) -> BOOL { return TRUE; }, nullptr, 0x100));
     printf("  enumeffects null = %08lX\n", Device->EnumEffects(nullptr, nullptr, 0));
