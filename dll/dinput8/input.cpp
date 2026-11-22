@@ -621,8 +621,20 @@ DiEmHoldThread(
     }
     if (DiEmThread != nullptr)
     {
-        CloseHandle(DiEmThread);
+        HANDLE Exiting = DiEmThread;
+
+        /* The previous thread is on its way out; let it finish before a new one takes the window */
         DiEmThread = nullptr;
+        LeaveCriticalSection(&DiLock);
+        WaitForSingleObject(Exiting, INFINITE);
+        CloseHandle(Exiting);
+        EnterCriticalSection(&DiLock);
+        if (DiEmThread != nullptr && DiEmThreadUsers > 0)
+        {
+            DiEmThreadUsers++;
+            Instance->HoldsThread = TRUE;
+            goto Exit;
+        }
     }
     if (GetModuleFileNameW(DiInstance, Path, _countof(Path)) == 0 || LoadLibraryW(Path) != DiInstance)
     {
