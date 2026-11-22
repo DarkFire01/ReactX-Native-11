@@ -2788,6 +2788,164 @@ DcCheckVideoFill(
     Draw7->Release();
 }
 
+/* SetSurfaceDesc handing a surface the application's memory, and the lost surface answers */
+static
+VOID
+DcCheckSetDesc(
+    _Inout_ DrawCheck* Check)
+{
+    static DWORD Buffer[16 * 8];
+    static DWORD Second[16 * 8];
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Caps;
+        DWORD BitCount;
+    } Kinds[] =
+    {
+        { "sys_format", DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 32 },
+        { "sys_noformat", DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 0 },
+        { "video", DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 32 },
+        { "default", DDSCAPS_OFFSCREENPLAIN, 32 },
+    };
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAWSURFACE3 Old;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDSURFACEDESC OldDesc;
+    DDBLTFX Fx;
+    DWORD Value;
+    HRESULT hr;
+    HDC Dc;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (const auto& Kind : Kinds)
+    {
+        printf("[setdesc %s]\n", Kind.Name);
+        Surface = DcMakeSurface(Draw7, Kind.Caps, 8, 4, Kind.BitCount);
+        if (Surface == nullptr)
+        {
+            printf("create failed\n");
+            continue;
+        }
+        printf("is_lost = %08lX restore = %08lX\n", Surface->IsLost(), Surface->Restore());
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = DDSD_LPSURFACE;
+        Desc.lpSurface = Buffer;
+        printf("set_flags = %08lX\n", Surface->SetSurfaceDesc(&Desc, 1));
+        Desc.dwSize = sizeof(DDSURFACEDESC);
+        printf("set_size = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.dwSize = sizeof(Desc);
+        Desc.lpSurface = nullptr;
+        printf("set_null = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.dwFlags = 0;
+        Desc.lpSurface = Buffer;
+        printf("set_noflags = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.dwFlags = DDSD_LPSURFACE | DDSD_WIDTH;
+        Desc.dwWidth = 16;
+        printf("set_width_only = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.dwFlags = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_PITCH;
+        Desc.lPitch = 6;
+        printf("set_bad_pitch = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.dwFlags = DDSD_LPSURFACE | DDSD_CAPS;
+        Desc.ddsCaps.dwCaps = DDSCAPS_SYSTEMMEMORY;
+        printf("set_caps = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.ddsCaps.dwCaps = 0;
+        Desc.ddsCaps.dwCaps2 = DDSCAPS2_HINTSTATIC;
+        printf("set_caps2 = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        Desc.dwFlags = DDSD_LPSURFACE | DDSD_PIXELFORMAT;
+        Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+        Desc.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        Desc.ddpfPixelFormat.dwRGBBitCount = 16;
+        Desc.ddpfPixelFormat.dwRBitMask = 0xF800;
+        Desc.ddpfPixelFormat.dwGBitMask = 0x07E0;
+        Desc.ddpfPixelFormat.dwBBitMask = 0x001F;
+        printf("set_format = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+        DcSurfaceDesc("  desc", Surface);
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        if (SUCCEEDED(Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        {
+            Desc.dwFlags = DDSD_LPSURFACE;
+            Desc.lpSurface = Buffer;
+            printf("set_locked = %08lX\n", Surface->SetSurfaceDesc(&Desc, 0));
+            Surface->Unlock(nullptr);
+        }
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH;
+        Desc.dwWidth = 16;
+        Desc.dwHeight = 8;
+        Desc.lPitch = 64;
+        Desc.lpSurface = Buffer;
+        memset(Buffer, 0xAB, sizeof(Buffer));
+        hr = Surface->SetSurfaceDesc(&Desc, 0);
+        printf("set = %08lX\n", hr);
+        if (FAILED(hr))
+        {
+            Surface->Release();
+            continue;
+        }
+        DcSurfaceDesc("  desc", Surface);
+        Value = 0xCCCCCCCC;
+        Surface->GetUniquenessValue(&Value);
+        printf("  uniq=%lu is_lost=%08lX\n", Value, Surface->IsLost());
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        hr = Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL);
+        printf("  lock = %08lX same=%d pitch=%ld\n", hr, Desc.lpSurface == Buffer, Desc.lPitch);
+        if (SUCCEEDED(hr))
+            Surface->Unlock(nullptr);
+        Surface->GetUniquenessValue(&Value);
+        printf("  uniq_after_lock=%lu\n", Value);
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillColor = 0x00123456;
+        printf("  fill = %08lX\n", Surface->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+        DcBytes("  buffer", Buffer, 128);
+        hr = Surface->GetDC(&Dc);
+        printf("  get_dc = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            SetPixel(Dc, 1, 0, RGB(0x10, 0x20, 0x30));
+            printf("  release_dc = %08lX\n", Surface->ReleaseDC(Dc));
+            DcBytes("  buffer", Buffer, 128);
+        }
+
+        Old = nullptr;
+        Surface->QueryInterface(IID_IDirectDrawSurface3, reinterpret_cast<VOID**>(&Old));
+        if (Old != nullptr)
+        {
+            memset(&OldDesc, 0, sizeof(OldDesc));
+            OldDesc.dwSize = sizeof(OldDesc);
+            OldDesc.dwFlags = DDSD_LPSURFACE;
+            OldDesc.lpSurface = Second;
+            printf("set_old = %08lX\n", Old->SetSurfaceDesc(&OldDesc, 0));
+            OldDesc.dwSize = sizeof(DDSURFACEDESC2);
+            printf("set_old_size = %08lX\n", Old->SetSurfaceDesc(&OldDesc, 0));
+            memset(&OldDesc, 0, sizeof(OldDesc));
+            OldDesc.dwSize = sizeof(OldDesc);
+            Old->GetSurfaceDesc(&OldDesc);
+            printf("  old_desc same=%d width=%lu pitch=%ld\n", OldDesc.lpSurface == Second, OldDesc.dwWidth,
+                   OldDesc.lPitch);
+            Old->Release();
+        }
+        printf("release = %lu\n", Surface->Release());
+    }
+
+    printf("restore_all = %08lX\n", Draw7->RestoreAllSurfaces());
+    printf("test_coop = %08lX\n", Draw7->TestCooperativeLevel());
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -2815,6 +2973,7 @@ static const DrawCheckInfo DcChecks[] =
     { "attach", DcCheckAttach },
     { "flip", DcCheckFlip },
     { "video_fill", DcCheckVideoFill },
+    { "set_desc", DcCheckSetDesc },
 };
 
 static
