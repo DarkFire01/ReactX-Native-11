@@ -532,7 +532,7 @@ DiRefreshHidList(
         DiTrace(L"HID device %ls is gone", DiHidEntries[Index].InstanceId);
         DiHidFreeEntry(&DiHidEntries[Index]);
         MoveMemory(&DiHidEntries[Index], &DiHidEntries[Index + 1], sizeof(*DiHidEntries) * (DiHidCount - Index - 1));
-        DiHidCount--;
+        DiHidCount -= 1;
     }
 
     for (DWORD Index = 0; Index < DI_HID_INTERFACE_LIMIT; Index++)

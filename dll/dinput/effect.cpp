@@ -707,7 +707,8 @@ private:
         {
             if (Device->CreatedEffects[Index] == this)
             {
-                Device->CreatedEffects[Index] = Device->CreatedEffects[--Device->CreatedEffectCount];
+                Device->CreatedEffectCount -= 1;
+                Device->CreatedEffects[Index] = Device->CreatedEffects[Device->CreatedEffectCount];
                 Removed = TRUE;
                 break;
             }

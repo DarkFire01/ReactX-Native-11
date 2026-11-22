@@ -916,7 +916,7 @@ DiReleaseExclusive(
     Owner = DiFindOwner(Instance);
     if (Owner != nullptr && Owner->Window == Window && Owner->Process == GetCurrentProcessId())
     {
-        DiShared->OwnerCount--;
+        DiShared->OwnerCount -= 1;
         *Owner = DiShared->Owners[DiShared->OwnerCount];
     }
 

@@ -982,8 +982,9 @@ RxDiDevice::OptimizeFormat(VOID)
     ULONG ScratchSize;
 
     /* A layout that is the device layout shifted by a constant can be copied in one go */
-    for (ULONG Index = Native.dwNumObjs; Index-- > 0;)
+    for (ULONG Remaining = Native.dwNumObjs; Remaining > 0; Remaining -= 1)
     {
+        ULONG Index = Remaining - 1;
         const DIOBJECTDATAFORMAT* Have = &Native.rgodf[Index];
         LONG ThisDelta;
 
@@ -1084,8 +1085,9 @@ RxDiDevice::ReadState(
         return hr;
 
     ZeroMemory(App, AppDataSize);
-    for (ULONG Index = Native.dwNumObjs; Index-- > 0;)
+    for (ULONG Remaining = Native.dwNumObjs; Remaining > 0; Remaining -= 1)
     {
+        ULONG Index = Remaining - 1;
         const DIOBJECTDATAFORMAT* Have = &Native.rgodf[Index];
         ULONG Offset = ObjectToApp[Index];
 
@@ -1201,8 +1203,10 @@ RxDiDevice::MapHow(
             return S_OK;
 
         case DIPH_BYID:
-            for (ULONG Index = Native.dwNumObjs; Index-- > 0;)
+            for (ULONG Remaining = Native.dwNumObjs; Remaining > 0; Remaining -= 1)
             {
+                ULONG Index = Remaining - 1;
+
                 if (((Native.rgodf[Index].dwType ^ Object) & 0x00FFFFFF) == 0)
                 {
                     Target->Index = Index;
@@ -1960,7 +1964,8 @@ RxDiDevice::InternalUnacquire(VOID)
 
         if (Found >= 0)
         {
-            DiForegroundDevices[Found] = DiForegroundDevices[--DiForegroundCount];
+            DiForegroundCount -= 1;
+            DiForegroundDevices[Found] = DiForegroundDevices[DiForegroundCount];
             if (DiForegroundCount == 0)
             {
                 DiFree(reinterpret_cast<PVOID*>(&DiForegroundDevices));
