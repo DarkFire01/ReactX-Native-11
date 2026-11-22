@@ -1,0 +1,1768 @@
+/*
+ * PROJECT:     ReactX tests
+ * LICENSE:     MIT (https://spdx.org/licenses/MIT)
+ * PURPOSE:     DirectSound answers for every entry point and argument shape, printed for comparing runtimes
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
+ *
+ * dsoundcheck [-runtime system|reactx|<path>] [-section <name>]
+ */
+
+#define INITGUID
+#include <windows.h>
+#include <mmreg.h>
+#include <ks.h>
+#include <ksmedia.h>
+#include <dsound.h>
+
+#include <cstdio>
+#include <string>
+
+typedef HRESULT (WINAPI* PDC_CREATE)(LPCGUID, LPDIRECTSOUND*, LPUNKNOWN);
+typedef HRESULT (WINAPI* PDC_CREATE8)(LPCGUID, LPDIRECTSOUND8*, LPUNKNOWN);
+typedef HRESULT (WINAPI* PDC_CAPTURE_CREATE)(LPCGUID, LPDIRECTSOUNDCAPTURE*, LPUNKNOWN);
+typedef HRESULT (WINAPI* PDC_ENUMERATE_W)(LPDSENUMCALLBACKW, LPVOID);
+typedef HRESULT (WINAPI* PDC_ENUMERATE_A)(LPDSENUMCALLBACKA, LPVOID);
+typedef HRESULT (WINAPI* PDC_GET_DEVICE_ID)(LPCGUID, LPGUID);
+typedef HRESULT (WINAPI* PDC_GET_CLASS_OBJECT)(REFCLSID, REFIID, LPVOID*);
+typedef HRESULT (WINAPI* PDC_CAN_UNLOAD)(VOID);
+typedef HRESULT (WINAPI* PDC_FULL_DUPLEX)(LPCGUID, LPCGUID, LPCDSCBUFFERDESC, LPCDSBUFFERDESC, HWND, DWORD,
+                                          LPDIRECTSOUNDFULLDUPLEX*, LPDIRECTSOUNDCAPTUREBUFFER8*, LPDIRECTSOUNDBUFFER8*,
+                                          LPUNKNOWN);
+
+static HMODULE DcModule;
+static HWND DcWindow;
+static PCWSTR DcSection;
+
+static
+BOOLEAN
+DcWant(
+    _In_z_ PCWSTR Name)
+{
+    return DcSection == nullptr || _wcsicmp(DcSection, Name) == 0;
+}
+
+static
+VOID
+DcBytes(
+    _In_z_ PCSTR Name,
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ SIZE_T Size)
+{
+    printf("%s =", Name);
+    for (SIZE_T Index = 0; Index < Size; Index++)
+        printf(" %02X", static_cast<const BYTE*>(Data)[Index]);
+    printf("\n");
+}
+
+static
+VOID
+DcGuid(
+    _In_z_ PCSTR Name,
+    _In_opt_ const GUID* Guid)
+{
+    if (Guid == nullptr)
+    {
+        printf("%s = null\n", Name);
+        return;
+    }
+    printf("%s = {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}\n", Name, Guid->Data1, Guid->Data2, Guid->Data3,
+           Guid->Data4[0], Guid->Data4[1], Guid->Data4[2], Guid->Data4[3], Guid->Data4[4], Guid->Data4[5],
+           Guid->Data4[6], Guid->Data4[7]);
+}
+
+static
+std::wstring
+DcRuntimePath(
+    _In_ PCWSTR Runtime)
+{
+    WCHAR Module[MAX_PATH];
+    PWSTR Slash;
+
+    if (_wcsicmp(Runtime, L"system") == 0)
+        return L"dsound.dll";
+
+    if (_wcsicmp(Runtime, L"reactx") == 0)
+    {
+        GetModuleFileNameW(NULL, Module, _countof(Module));
+        Slash = wcsrchr(Module, L'\\');
+        if (Slash != nullptr)
+            *(Slash + 1) = L'\0';
+        return std::wstring(Module) + L"reactx\\dsound.dll";
+    }
+
+    return Runtime;
+}
+
+static
+VOID
+DcFormat(
+    _Out_ WAVEFORMATEX* Format,
+    _In_ WORD Tag,
+    _In_ WORD Channels,
+    _In_ DWORD Rate,
+    _In_ WORD Bits)
+{
+    Format->wFormatTag = Tag;
+    Format->nChannels = Channels;
+    Format->nSamplesPerSec = Rate;
+    Format->wBitsPerSample = Bits;
+    Format->nBlockAlign = static_cast<WORD>(Channels * Bits / 8);
+    Format->nAvgBytesPerSec = Rate * Format->nBlockAlign;
+    Format->cbSize = 0;
+}
+
+static
+VOID
+DcExtensible(
+    _Out_ WAVEFORMATEXTENSIBLE* Format,
+    _In_ const GUID& SubFormat,
+    _In_ WORD Channels,
+    _In_ DWORD Rate,
+    _In_ WORD Bits,
+    _In_ WORD ValidBits,
+    _In_ DWORD Mask)
+{
+    DcFormat(&Format->Format, WAVE_FORMAT_EXTENSIBLE, Channels, Rate, Bits);
+    Format->Format.cbSize = 22;
+    Format->Samples.wValidBitsPerSample = ValidBits;
+    Format->dwChannelMask = Mask;
+    Format->SubFormat = SubFormat;
+}
+
+static
+HRESULT
+DcCreate8(
+    _Out_ IDirectSound8** Sound)
+{
+    PDC_CREATE8 Create8 = reinterpret_cast<PDC_CREATE8>(GetProcAddress(DcModule, "DirectSoundCreate8"));
+
+    *Sound = nullptr;
+    return Create8(nullptr, Sound, nullptr);
+}
+
+static
+HRESULT
+DcCreate(
+    _Out_ IDirectSound** Sound)
+{
+    PDC_CREATE Create = reinterpret_cast<PDC_CREATE>(GetProcAddress(DcModule, "DirectSoundCreate"));
+
+    *Sound = nullptr;
+    return Create(nullptr, Sound, nullptr);
+}
+
+static
+BOOL
+CALLBACK
+DcEnumW(
+    _In_opt_ LPGUID Guid,
+    _In_z_ LPCWSTR Description,
+    _In_z_ LPCWSTR Module,
+    _In_opt_ LPVOID Context)
+{
+    ULONG* Count = static_cast<ULONG*>(Context);
+
+    printf("enumw[%lu]\n", *Count);
+    DcGuid("  guid", Guid);
+    printf("  description = %ls\n", Description);
+    printf("  module = %ls\n", Module);
+    (*Count)++;
+    return TRUE;
+}
+
+static
+BOOL
+CALLBACK
+DcEnumA(
+    _In_opt_ LPGUID Guid,
+    _In_z_ LPCSTR Description,
+    _In_z_ LPCSTR Module,
+    _In_opt_ LPVOID Context)
+{
+    ULONG* Count = static_cast<ULONG*>(Context);
+
+    printf("enuma[%lu]\n", *Count);
+    DcGuid("  guid", Guid);
+    printf("  description = %s\n", Description);
+    printf("  module = %s\n", Module);
+    (*Count)++;
+    return TRUE;
+}
+
+static
+BOOL
+CALLBACK
+DcEnumStop(
+    _In_opt_ LPGUID Guid,
+    _In_z_ LPCWSTR Description,
+    _In_z_ LPCWSTR Module,
+    _In_opt_ LPVOID Context)
+{
+    UNREFERENCED_PARAMETER(Guid);
+    UNREFERENCED_PARAMETER(Description);
+    UNREFERENCED_PARAMETER(Module);
+
+    (*static_cast<ULONG*>(Context))++;
+    return FALSE;
+}
+
+static
+VOID
+DcCheckEnumerate(VOID)
+{
+    static const PCSTR Names[] = { "DirectSoundEnumerate", "DirectSoundCaptureEnumerate" };
+
+    for (UINT Kind = 0; Kind < 2; Kind++)
+    {
+        CHAR Name[64];
+        ULONG Count = 0;
+        PDC_ENUMERATE_W EnumW;
+        PDC_ENUMERATE_A EnumA;
+
+        sprintf_s(Name, "%sW", Names[Kind]);
+        EnumW = reinterpret_cast<PDC_ENUMERATE_W>(GetProcAddress(DcModule, Name));
+        sprintf_s(Name, "%sA", Names[Kind]);
+        EnumA = reinterpret_cast<PDC_ENUMERATE_A>(GetProcAddress(DcModule, Name));
+
+        printf("%s\n", Names[Kind]);
+        { HRESULT Rc = EnumW(DcEnumW, &Count); printf("enumw = %08lX count %lu\n", Rc, Count); }
+        Count = 0;
+        { HRESULT Rc = EnumA(DcEnumA, &Count); printf("enuma = %08lX count %lu\n", Rc, Count); }
+        printf("enumw_null = %08lX\n", EnumW(nullptr, nullptr));
+        printf("enuma_null = %08lX\n", EnumA(nullptr, nullptr));
+        Count = 0;
+        { HRESULT Rc = EnumW(DcEnumStop, &Count); printf("enum_stop = %08lX count %lu\n", Rc, Count); }
+    }
+}
+
+static
+VOID
+DcCheckDeviceId(VOID)
+{
+    static const GUID* Ids[] =
+    {
+        &DSDEVID_DefaultPlayback, &DSDEVID_DefaultCapture, &DSDEVID_DefaultVoicePlayback,
+        &DSDEVID_DefaultVoiceCapture, &GUID_NULL, &IID_IDirectSound,
+    };
+    PDC_GET_DEVICE_ID GetDeviceID = reinterpret_cast<PDC_GET_DEVICE_ID>(GetProcAddress(DcModule, "GetDeviceID"));
+    GUID Result;
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Ids); Index++)
+    {
+        memset(&Result, 0xCC, sizeof(Result));
+        printf("getdeviceid[%u] = %08lX\n", Index, GetDeviceID(Ids[Index], &Result));
+        DcGuid("  id", &Result);
+    }
+    printf("getdeviceid_null_src = %08lX\n", GetDeviceID(nullptr, &Result));
+    printf("getdeviceid_null_dst = %08lX\n", GetDeviceID(&DSDEVID_DefaultPlayback, nullptr));
+}
+
+static
+VOID
+DcCheckInterfaces(
+    _In_z_ PCSTR Name,
+    _In_ IUnknown* Object)
+{
+    static const struct
+    {
+        const IID* Iid;
+        PCSTR Name;
+    } Iids[] =
+    {
+        { &IID_IUnknown, "IUnknown" },
+        { &IID_IDirectSound, "IDirectSound" },
+        { &IID_IDirectSound8, "IDirectSound8" },
+        { &IID_IDirectSoundBuffer, "IDirectSoundBuffer" },
+        { &IID_IDirectSoundBuffer8, "IDirectSoundBuffer8" },
+        { &IID_IDirectSound3DBuffer, "IDirectSound3DBuffer" },
+        { &IID_IDirectSound3DListener, "IDirectSound3DListener" },
+        { &IID_IDirectSoundNotify, "IDirectSoundNotify" },
+        { &IID_IKsPropertySet, "IKsPropertySet" },
+        { &IID_IDirectSoundCapture, "IDirectSoundCapture" },
+        { &IID_IDirectSoundCaptureBuffer, "IDirectSoundCaptureBuffer" },
+        { &IID_IDirectSoundCaptureBuffer8, "IDirectSoundCaptureBuffer8" },
+        { &IID_IDirectSoundFullDuplex, "IDirectSoundFullDuplex" },
+        { &IID_IClassFactory, "IClassFactory" },
+    };
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Iids); Index++)
+    {
+        IUnknown* Found = nullptr;
+        HRESULT hr = Object->QueryInterface(*Iids[Index].Iid, reinterpret_cast<void**>(&Found));
+
+        if (SUCCEEDED(hr))
+        {
+            ULONG Count = Found->AddRef();
+
+            printf("%s qi %s = %08lX same %d ref %lu\n", Name, Iids[Index].Name, hr, Found == Object, Count);
+            Found->Release();
+            Found->Release();
+        }
+        else
+        {
+            printf("%s qi %s = %08lX null %d\n", Name, Iids[Index].Name, hr, Found == nullptr);
+        }
+    }
+    printf("%s qi_null = %08lX\n", Name, Object->QueryInterface(IID_IUnknown, nullptr));
+}
+
+static
+VOID
+DcCheckCreate(VOID)
+{
+    PDC_CREATE Create = reinterpret_cast<PDC_CREATE>(GetProcAddress(DcModule, "DirectSoundCreate"));
+    PDC_CREATE8 Create8 = reinterpret_cast<PDC_CREATE8>(GetProcAddress(DcModule, "DirectSoundCreate8"));
+    static const GUID* Devices[] =
+    {
+        nullptr, &GUID_NULL, &DSDEVID_DefaultPlayback, &DSDEVID_DefaultVoicePlayback, &DSDEVID_DefaultCapture,
+        &IID_IDirectSound,
+    };
+    IDirectSound* Sound;
+    IDirectSound8* Sound8;
+    IUnknown* Outer = reinterpret_cast<IUnknown*>(1);
+
+    printf("create_null = %08lX\n", Create(nullptr, nullptr, nullptr));
+    Sound = reinterpret_cast<IDirectSound*>(1);
+    printf("create_outer = %08lX\n", Create(nullptr, &Sound, Outer));
+    printf("  out %d\n", Sound == reinterpret_cast<IDirectSound*>(1) ? 1 : Sound == nullptr ? 0 : 2);
+    printf("create8_null = %08lX\n", Create8(nullptr, nullptr, nullptr));
+    for (UINT Index = 0; Index < ARRAYSIZE(Devices); Index++)
+    {
+        Sound = reinterpret_cast<IDirectSound*>(1);
+        HRESULT hr = Create(Devices[Index], &Sound, nullptr);
+
+        printf("create[%u] = %08lX out %d\n", Index, hr, Sound == nullptr ? 0 : Sound == reinterpret_cast<IDirectSound*>(1) ? 1 : 2);
+        if (SUCCEEDED(hr))
+            printf("  release %lu\n", Sound->Release());
+        Sound8 = reinterpret_cast<IDirectSound8*>(1);
+        hr = Create8(Devices[Index], &Sound8, nullptr);
+        printf("create8[%u] = %08lX out %d\n", Index, hr, Sound8 == nullptr ? 0 : Sound8 == reinterpret_cast<IDirectSound8*>(1) ? 1 : 2);
+        if (SUCCEEDED(hr))
+            printf("  release %lu\n", Sound8->Release());
+    }
+
+    if (SUCCEEDED(DcCreate(&Sound)))
+    {
+        printf("ds addref %lu\n", Sound->AddRef());
+        printf("ds release %lu\n", Sound->Release());
+        DcCheckInterfaces("ds", Sound);
+        printf("ds initialize = %08lX\n", Sound->Initialize(nullptr));
+        printf("ds release %lu\n", Sound->Release());
+    }
+    if (SUCCEEDED(DcCreate8(&Sound8)))
+    {
+        IUnknown* Unknown = nullptr;
+
+        DcCheckInterfaces("ds8", Sound8);
+        printf("ds8 initialize = %08lX\n", Sound8->Initialize(nullptr));
+        printf("ds8 verify_null = %08lX\n", Sound8->VerifyCertification(nullptr));
+        {
+            DWORD Certified = 0xCCCCCCCC;
+
+            { HRESULT Rc = Sound8->VerifyCertification(&Certified); printf("ds8 verify = %08lX %08lX\n", Rc, Certified); }
+        }
+        Sound8->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&Unknown));
+        printf("ds8 unknown addref %lu\n", Unknown->AddRef());
+        printf("ds8 unknown release %lu\n", Unknown->Release());
+        printf("ds8 unknown release %lu\n", Unknown->Release());
+        printf("ds8 release %lu\n", Sound8->Release());
+    }
+}
+
+static
+VOID
+DcCheckClassFactory(VOID)
+{
+    PDC_GET_CLASS_OBJECT GetClassObject = reinterpret_cast<PDC_GET_CLASS_OBJECT>(GetProcAddress(DcModule, "DllGetClassObject"));
+    PDC_CAN_UNLOAD CanUnload = reinterpret_cast<PDC_CAN_UNLOAD>(GetProcAddress(DcModule, "DllCanUnloadNow"));
+    static const struct
+    {
+        const CLSID* Clsid;
+        PCSTR Name;
+    } Classes[] =
+    {
+        { &CLSID_DirectSound, "DirectSound" },
+        { &CLSID_DirectSound8, "DirectSound8" },
+        { &CLSID_DirectSoundCapture, "DirectSoundCapture" },
+        { &CLSID_DirectSoundCapture8, "DirectSoundCapture8" },
+        { &CLSID_DirectSoundFullDuplex, "DirectSoundFullDuplex" },
+        { &IID_IDirectSound, "bogus" },
+    };
+    IClassFactory* Factory;
+
+    printf("getclassobject_null = %08lX\n", GetClassObject(CLSID_DirectSound, IID_IClassFactory, nullptr));
+    for (UINT Index = 0; Index < ARRAYSIZE(Classes); Index++)
+    {
+        HRESULT hr;
+
+        Factory = reinterpret_cast<IClassFactory*>(1);
+        hr = GetClassObject(*Classes[Index].Clsid, IID_IClassFactory, reinterpret_cast<void**>(&Factory));
+        printf("getclassobject %s = %08lX null %d\n", Classes[Index].Name, hr, Factory == nullptr);
+        if (FAILED(hr))
+            continue;
+
+        printf("  addref %lu\n", Factory->AddRef());
+        printf("  release %lu\n", Factory->Release());
+        printf("  lock = %08lX\n", Factory->LockServer(TRUE));
+        printf("  canunload = %08lX\n", CanUnload());
+        printf("  unlock = %08lX\n", Factory->LockServer(FALSE));
+        {
+            IUnknown* Object = reinterpret_cast<IUnknown*>(1);
+
+            hr = Factory->CreateInstance(reinterpret_cast<IUnknown*>(1), IID_IUnknown, reinterpret_cast<void**>(&Object));
+            printf("  create_outer = %08lX null %d\n", hr, Object == nullptr);
+            printf("  create_null = %08lX\n", Factory->CreateInstance(nullptr, IID_IUnknown, nullptr));
+        }
+        if (Index < 2)
+        {
+            IDirectSound8* Sound = nullptr;
+
+            hr = Factory->CreateInstance(nullptr, Index == 0 ? IID_IDirectSound : IID_IDirectSound8, reinterpret_cast<void**>(&Sound));
+            printf("  create = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                DSCAPS Caps = {};
+                DWORD Config = 0;
+                IDirectSoundBuffer* Buffer = reinterpret_cast<IDirectSoundBuffer*>(1);
+                DSBUFFERDESC Desc = {};
+
+                Caps.dwSize = sizeof(Caps);
+                Desc.dwSize = sizeof(Desc);
+                Desc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+                printf("  uninit getcaps = %08lX\n", Sound->GetCaps(&Caps));
+                printf("  uninit getcaps_null = %08lX\n", Sound->GetCaps(nullptr));
+                printf("  uninit coop = %08lX\n", Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY));
+                printf("  uninit compact = %08lX\n", Sound->Compact());
+                printf("  uninit speaker = %08lX\n", Sound->GetSpeakerConfig(&Config));
+                printf("  uninit create = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+                printf("  uninit buffer %d\n", Buffer == nullptr ? 0 : Buffer == reinterpret_cast<IDirectSoundBuffer*>(1) ? 1 : 2);
+                if (Index == 1)
+                {
+                    DWORD Certified = 0;
+
+                    printf("  uninit verify = %08lX\n", Sound->VerifyCertification(&Certified));
+                }
+                DcCheckInterfaces("  uninit", Sound);
+                printf("  initialize = %08lX\n", Sound->Initialize(nullptr));
+                printf("  initialize_again = %08lX\n", Sound->Initialize(nullptr));
+                printf("  getcaps = %08lX\n", Sound->GetCaps(&Caps));
+                DcCheckInterfaces("  init", Sound);
+                printf("  release %lu\n", Sound->Release());
+            }
+        }
+        if (Index == 2 || Index == 3)
+        {
+            IDirectSoundCapture* Capture = nullptr;
+
+            hr = Factory->CreateInstance(nullptr, IID_IDirectSoundCapture, reinterpret_cast<void**>(&Capture));
+            printf("  create = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                DSCCAPS Caps = {};
+
+                Caps.dwSize = sizeof(Caps);
+                printf("  uninit getcaps = %08lX\n", Capture->GetCaps(&Caps));
+                printf("  initialize = %08lX\n", Capture->Initialize(nullptr));
+                printf("  initialize_again = %08lX\n", Capture->Initialize(nullptr));
+                printf("  release %lu\n", Capture->Release());
+            }
+        }
+        printf("  release %lu\n", Factory->Release());
+    }
+    printf("canunload = %08lX\n", CanUnload());
+}
+
+static
+VOID
+DcCheckDevice(VOID)
+{
+    IDirectSound8* Sound;
+    DSCAPS Caps;
+    DWORD Config;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+
+    for (DWORD Size = 0; Size < 2; Size++)
+    {
+        memset(&Caps, 0xCC, sizeof(Caps));
+        Caps.dwSize = Size == 0 ? sizeof(Caps) : sizeof(Caps) - 4;
+        printf("getcaps[%lu] = %08lX\n", Size, Sound->GetCaps(&Caps));
+        DcBytes("  caps", &Caps, sizeof(Caps));
+    }
+    printf("getcaps_null = %08lX\n", Sound->GetCaps(nullptr));
+
+    Config = 0xCCCCCCCC;
+    printf("getspeaker = %08lX\n", Sound->GetSpeakerConfig(&Config));
+    printf("  config = %08lX\n", Config);
+    printf("getspeaker_null = %08lX\n", Sound->GetSpeakerConfig(nullptr));
+    {
+        static const DWORD Bad[] = { 10, 0x100, 0x01000000, DSSPEAKER_COMBINED(DSSPEAKER_QUAD, 5),
+                                     DSSPEAKER_COMBINED(DSSPEAKER_STEREO, 0xB5), DSSPEAKER_COMBINED(DSSPEAKER_STEREO, 0xFF) };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Bad); Index++)
+            printf("setspeaker_bad[%u] = %08lX\n", Index, Sound->SetSpeakerConfig(Bad[Index]));
+    }
+    printf("setspeaker_same = %08lX\n", Sound->SetSpeakerConfig(Config));
+
+    printf("compact_nocoop = %08lX\n", Sound->Compact());
+    printf("coop_nullwnd = %08lX\n", Sound->SetCooperativeLevel(nullptr, DSSCL_NORMAL));
+    for (DWORD Level = 0; Level < 6; Level++)
+    {
+        printf("coop[%lu] = %08lX\n", Level, Sound->SetCooperativeLevel(DcWindow, Level));
+        printf("  compact = %08lX\n", Sound->Compact());
+    }
+    printf("coop_desktop = %08lX\n", Sound->SetCooperativeLevel(GetDesktopWindow(), DSSCL_PRIORITY));
+    printf("release %lu\n", Sound->Release());
+}
+
+static
+VOID
+DcDescribe(
+    _In_ IDirectSoundBuffer* Buffer)
+{
+    DSBCAPS Caps;
+    BYTE Format[64];
+    DWORD Size = 0;
+    DWORD Status = 0xCCCCCCCC;
+    LONG Value;
+    DWORD Frequency;
+    DWORD Play;
+    DWORD Write;
+    HRESULT hr;
+
+    memset(&Caps, 0xCC, sizeof(Caps));
+    Caps.dwSize = sizeof(Caps);
+    printf("  getcaps = %08lX\n", Buffer->GetCaps(&Caps));
+    DcBytes("    caps", &Caps, sizeof(Caps));
+    memset(Format, 0xCC, sizeof(Format));
+    hr = Buffer->GetFormat(nullptr, 0, &Size);
+    printf("  getformat_size = %08lX %lu\n", hr, Size);
+    Size = 0xCCCC;
+    hr = Buffer->GetFormat(reinterpret_cast<WAVEFORMATEX*>(Format), sizeof(Format), &Size);
+    printf("  getformat = %08lX %lu\n", hr, Size);
+    DcBytes("    format", Format, 40);
+    Size = 0xCCCC;
+    hr = Buffer->GetFormat(reinterpret_cast<WAVEFORMATEX*>(Format), 4, &Size);
+    printf("  getformat_small = %08lX %lu\n", hr, Size);
+    printf("  getformat_none = %08lX\n", Buffer->GetFormat(nullptr, 0, nullptr));
+    { HRESULT Rc = Buffer->GetStatus(&Status); printf("  getstatus = %08lX %08lX\n", Rc, Status); }
+    Value = 0x1234;
+    { HRESULT Rc = Buffer->GetVolume(&Value); printf("  getvolume = %08lX %ld\n", Rc, Value); }
+    Value = 0x1234;
+    { HRESULT Rc = Buffer->GetPan(&Value); printf("  getpan = %08lX %ld\n", Rc, Value); }
+    Frequency = 0x1234;
+    { HRESULT Rc = Buffer->GetFrequency(&Frequency); printf("  getfrequency = %08lX %lu\n", Rc, Frequency); }
+    Play = Write = 0xCCCC;
+    { HRESULT Rc = Buffer->GetCurrentPosition(&Play, &Write); printf("  getposition = %08lX %lu %lu\n", Rc, Play, Write); }
+}
+
+static
+HRESULT
+DcMakeBuffer(
+    _In_ IDirectSound8* Sound,
+    _In_ DWORD Flags,
+    _In_ DWORD Bytes,
+    _In_opt_ WAVEFORMATEX* Format,
+    _Out_ IDirectSoundBuffer** Buffer)
+{
+    DSBUFFERDESC Desc = {};
+
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = Flags;
+    Desc.dwBufferBytes = Bytes;
+    Desc.lpwfxFormat = Format;
+    *Buffer = nullptr;
+    return Sound->CreateSoundBuffer(&Desc, Buffer, nullptr);
+}
+
+static
+VOID
+DcCheckBufferDescs(VOID)
+{
+    IDirectSound8* Sound;
+    IDirectSound* Sound7;
+    WAVEFORMATEX Pcm16;
+    WAVEFORMATEXTENSIBLE Ext;
+    IDirectSoundBuffer* Buffer;
+    DSBUFFERDESC Desc;
+    HRESULT hr;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+
+    DcFormat(&Pcm16, WAVE_FORMAT_PCM, 2, 44100, 16);
+    printf("create_nocoop = %08lX\n", hr = DcMakeBuffer(Sound, 0, 4096, &Pcm16, &Buffer));
+    if (SUCCEEDED(hr))
+        printf("  release %lu\n", Buffer->Release());
+    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+
+    printf("create_nulldesc = %08lX\n", Sound->CreateSoundBuffer(nullptr, &Buffer, nullptr));
+    Desc = {};
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwBufferBytes = 4096;
+    Desc.lpwfxFormat = &Pcm16;
+    printf("create_nullout = %08lX\n", Sound->CreateSoundBuffer(&Desc, nullptr, nullptr));
+    Buffer = reinterpret_cast<IDirectSoundBuffer*>(1);
+    printf("create_outer = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, reinterpret_cast<IUnknown*>(1)));
+    printf("  out %d\n", Buffer == nullptr ? 0 : Buffer == reinterpret_cast<IDirectSoundBuffer*>(1) ? 1 : 2);
+
+    for (DWORD Size = 0; Size <= 44; Size += 4)
+    {
+        Desc.dwSize = Size;
+        Buffer = nullptr;
+        hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+        printf("create_size[%lu] = %08lX\n", Size, hr);
+        if (SUCCEEDED(hr))
+            Buffer->Release();
+    }
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwReserved = 1;
+    printf("create_reserved = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+    Desc.dwReserved = 0;
+
+    {
+        static const DWORD Sizes[] = { 0, 1, 3, 4, 5, 4095, 0x0FFFFFFF + 1, 0xFFFFFFFF };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Sizes); Index++)
+        {
+            Desc.dwBufferBytes = Sizes[Index];
+            Buffer = nullptr;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_bytes[%lu] = %08lX\n", Sizes[Index], hr);
+            if (SUCCEEDED(hr))
+            {
+                DSBCAPS Caps = { sizeof(Caps) };
+
+                Buffer->GetCaps(&Caps);
+                printf("  bytes %lu\n", Caps.dwBufferBytes);
+                Buffer->Release();
+            }
+        }
+        Desc.dwBufferBytes = 4096;
+    }
+
+    for (DWORD Bit = 0; Bit < 32; Bit++)
+    {
+        Desc.dwFlags = 1UL << Bit;
+        Buffer = nullptr;
+        hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+        printf("create_flag[%lu] = %08lX\n", Bit, hr);
+        if (SUCCEEDED(hr))
+        {
+            DSBCAPS Caps = { sizeof(Caps) };
+
+            Buffer->GetCaps(&Caps);
+            printf("  flags %08lX\n", Caps.dwFlags);
+            Buffer->Release();
+        }
+    }
+    {
+        static const DWORD Combos[] =
+        {
+            DSBCAPS_LOCHARDWARE | DSBCAPS_LOCSOFTWARE, DSBCAPS_LOCDEFER | DSBCAPS_LOCSOFTWARE,
+            DSBCAPS_MUTE3DATMAXDISTANCE, DSBCAPS_MUTE3DATMAXDISTANCE | DSBCAPS_CTRL3D, DSBCAPS_STATIC | DSBCAPS_CTRLFX,
+            DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN, DSBCAPS_CTRLFX | DSBCAPS_CTRLVOLUME, DSBCAPS_CTRLFX | DSBCAPS_CTRLFREQUENCY,
+            DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPOSITIONNOTIFY,
+            DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_STICKYFOCUS,
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Combos); Index++)
+        {
+            Desc.dwFlags = Combos[Index];
+            Buffer = nullptr;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_combo[%u] = %08lX\n", Index, hr);
+            if (SUCCEEDED(hr))
+            {
+                DSBCAPS Caps = { sizeof(Caps) };
+
+                Buffer->GetCaps(&Caps);
+                printf("  flags %08lX\n", Caps.dwFlags);
+                Buffer->Release();
+            }
+        }
+        Desc.dwFlags = 0;
+    }
+
+    {
+        static const struct
+        {
+            WORD Tag;
+            WORD Channels;
+            DWORD Rate;
+            WORD Bits;
+        } Formats[] =
+        {
+            { WAVE_FORMAT_PCM, 1, 8000, 8 }, { WAVE_FORMAT_PCM, 2, 11025, 16 }, { WAVE_FORMAT_PCM, 2, 48000, 24 },
+            { WAVE_FORMAT_PCM, 2, 48000, 32 }, { WAVE_FORMAT_PCM, 6, 48000, 16 }, { WAVE_FORMAT_PCM, 0, 48000, 16 },
+            { WAVE_FORMAT_PCM, 2, 48000, 12 }, { WAVE_FORMAT_PCM, 2, 99, 16 }, { WAVE_FORMAT_PCM, 2, 100, 16 },
+            { WAVE_FORMAT_PCM, 2, 200000, 16 }, { WAVE_FORMAT_PCM, 2, 200001, 16 }, { WAVE_FORMAT_IEEE_FLOAT, 2, 48000, 32 },
+            { WAVE_FORMAT_IEEE_FLOAT, 1, 44100, 32 }, { WAVE_FORMAT_IEEE_FLOAT, 2, 48000, 16 }, { WAVE_FORMAT_ADPCM, 2, 22050, 4 },
+            { 0x55, 2, 44100, 0 }, { WAVE_FORMAT_PCM, 3, 44100, 16 }, { WAVE_FORMAT_PCM, 1, 22050, 16 },
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Formats); Index++)
+        {
+            WAVEFORMATEX Format;
+
+            DcFormat(&Format, Formats[Index].Tag, Formats[Index].Channels, Formats[Index].Rate, Formats[Index].Bits);
+            Desc.lpwfxFormat = &Format;
+            Desc.dwBufferBytes = 4800;
+            for (UINT Ctrl = 0; Ctrl < 3; Ctrl++)
+            {
+                Desc.dwFlags = Ctrl == 0 ? 0 : Ctrl == 1 ? DSBCAPS_CTRL3D : DSBCAPS_CTRLFX;
+                /* The system divides by the block alignment here and faults on zero */
+                if (Ctrl == 2 && Format.nBlockAlign == 0)
+                    continue;
+                Buffer = nullptr;
+                hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+                printf("create_format[%u][%u] = %08lX\n", Index, Ctrl, hr);
+                if (SUCCEEDED(hr))
+                {
+                    if (Ctrl == 0)
+                        DcDescribe(Buffer);
+                    Buffer->Release();
+                }
+            }
+        }
+        Desc.dwFlags = 0;
+
+        {
+            WAVEFORMATEX Format;
+
+            DcFormat(&Format, WAVE_FORMAT_PCM, 2, 44100, 16);
+            Format.nBlockAlign = 3;
+            Desc.lpwfxFormat = &Format;
+            printf("create_badalign = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+            DcFormat(&Format, WAVE_FORMAT_PCM, 2, 44100, 16);
+            Format.nAvgBytesPerSec = 44100 * 4 * 21 / 20 + 4;
+            printf("create_badavg_high = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+            Format.nAvgBytesPerSec = 44100 * 4 * 21 / 20 - 4;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_okavg = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Format.nAvgBytesPerSec = 44100 * 4 * 19 / 20 - 4;
+            printf("create_badavg_low = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+            DcFormat(&Format, WAVE_FORMAT_PCM, 2, 44100, 16);
+            Desc.dwBufferBytes = 4097;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_oddbytes = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                DSBCAPS Caps = { sizeof(Caps) };
+
+                Buffer->GetCaps(&Caps);
+                printf("  bytes %lu\n", Caps.dwBufferBytes);
+                Buffer->Release();
+            }
+            Desc.dwBufferBytes = 4096;
+            Desc.dwFlags = DSBCAPS_CTRLFX;
+            Desc.dwBufferBytes = 44100 * 4 * 150 / 1000 - 4;
+            printf("create_fx_small = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+            Desc.dwBufferBytes = 44100 * 4 * 150 / 1000;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_fx_ok = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.dwFlags = DSBCAPS_CTRL3D;
+            Desc.guid3DAlgorithm = DS3DALG_HRTF_FULL;
+            Desc.dwBufferBytes = 4096;
+            DcFormat(&Format, WAVE_FORMAT_PCM, 1, 44100, 16);
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_hrtf = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.guid3DAlgorithm = DS3DALG_HRTF_LIGHT;
+            Desc.dwFlags = 0;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_alg_no3d = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.guid3DAlgorithm = IID_IUnknown;
+            Desc.dwFlags = DSBCAPS_CTRL3D;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_alg_bogus = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.guid3DAlgorithm = GUID_NULL;
+            Desc.dwFlags = 0;
+        }
+
+        {
+            static const struct
+            {
+                const GUID* SubFormat;
+                WORD Channels;
+                WORD Bits;
+                WORD Valid;
+                DWORD Mask;
+                WORD CbSize;
+            } Exts[] =
+            {
+                { &KSDATAFORMAT_SUBTYPE_PCM, 2, 16, 16, 3, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 2, 16, 16, 3, 20 },
+                { &KSDATAFORMAT_SUBTYPE_PCM, 2, 16, 17, 3, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 2, 16, 16, 7, 22 },
+                { &GUID_NULL, 2, 16, 16, 3, 22 }, { &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 2, 32, 32, 3, 22 },
+                { &KSDATAFORMAT_SUBTYPE_PCM, 6, 16, 16, 0x3F, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 6, 16, 16, 0, 22 },
+                { &KSDATAFORMAT_SUBTYPE_PCM, 2, 24, 20, 3, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 2, 32, 24, 3, 22 },
+                { &KSDATAFORMAT_SUBTYPE_PCM, 2, 32, 28, 3, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 2, 16, 0, 3, 22 },
+                { &KSDATAFORMAT_SUBTYPE_PCM, 1, 16, 16, 0, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 4, 16, 16, 0x33, 22 },
+                { &KSDATAFORMAT_SUBTYPE_PCM, 8, 16, 16, 0x63F, 22 }, { &KSDATAFORMAT_SUBTYPE_PCM, 3, 16, 16, 3, 22 },
+            };
+
+            for (UINT Index = 0; Index < ARRAYSIZE(Exts); Index++)
+            {
+                DcExtensible(&Ext, *Exts[Index].SubFormat, Exts[Index].Channels, 48000, Exts[Index].Bits,
+                             Exts[Index].Valid, Exts[Index].Mask);
+                Ext.Format.cbSize = Exts[Index].CbSize;
+                Desc.lpwfxFormat = &Ext.Format;
+                Desc.dwBufferBytes = 4800;
+                for (UINT Ctrl = 0; Ctrl < 2; Ctrl++)
+                {
+                    Desc.dwFlags = Ctrl == 0 ? 0 : DSBCAPS_CTRL3D;
+                    Buffer = nullptr;
+                    hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+                    printf("create_ext[%u][%u] = %08lX\n", Index, Ctrl, hr);
+                    if (SUCCEEDED(hr))
+                    {
+                        if (Ctrl == 0)
+                            DcDescribe(Buffer);
+                        Buffer->Release();
+                    }
+                }
+            }
+            Desc.dwFlags = 0;
+        }
+    }
+
+    Desc = {};
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+    {
+        static const DWORD Flags[] =
+        {
+            0, DSBCAPS_CTRLVOLUME, DSBCAPS_CTRLPAN, DSBCAPS_CTRL3D, DSBCAPS_CTRLFREQUENCY, DSBCAPS_STATIC,
+            DSBCAPS_CTRLPOSITIONNOTIFY, DSBCAPS_CTRLFX, DSBCAPS_GLOBALFOCUS, DSBCAPS_STICKYFOCUS, DSBCAPS_LOCSOFTWARE,
+            DSBCAPS_LOCHARDWARE, DSBCAPS_GETCURRENTPOSITION2, DSBCAPS_LOCDEFER, DSBCAPS_TRUEPLAYPOSITION,
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Flags); Index++)
+        {
+            Desc.dwFlags = DSBCAPS_PRIMARYBUFFER | Flags[Index];
+            Buffer = nullptr;
+            hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+            printf("create_primary[%u] = %08lX\n", Index, hr);
+            if (SUCCEEDED(hr))
+            {
+                DSBCAPS Caps = { sizeof(Caps) };
+
+                Buffer->GetCaps(&Caps);
+                printf("  flags %08lX bytes %lu\n", Caps.dwFlags, Caps.dwBufferBytes);
+                printf("  release %lu\n", Buffer->Release());
+            }
+        }
+    }
+    Desc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+    Desc.dwBufferBytes = 4;
+    printf("create_primary_bytes = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+    Desc.dwBufferBytes = 0;
+    Desc.lpwfxFormat = &Pcm16;
+    printf("create_primary_format = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+    Desc.lpwfxFormat = nullptr;
+    Desc.guid3DAlgorithm = DS3DALG_HRTF_FULL;
+    printf("create_primary_alg = %08lX\n", Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr));
+    Desc.guid3DAlgorithm = GUID_NULL;
+    printf("release %lu\n", Sound->Release());
+
+    /* The flags only DirectSound 8 takes */
+    if (SUCCEEDED(DcCreate(&Sound7)))
+    {
+        Sound7->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+        Desc = {};
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwBufferBytes = 44100;
+        Desc.lpwfxFormat = &Pcm16;
+        {
+            static const DWORD Flags[] = { DSBCAPS_CTRLFX, DSBCAPS_LOCDEFER, DSBCAPS_CTRL3D, DSBCAPS_TRUEPLAYPOSITION };
+
+            for (UINT Index = 0; Index < ARRAYSIZE(Flags); Index++)
+            {
+                Desc.dwFlags = Flags[Index];
+                hr = Sound7->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+                printf("ds7 create[%u] = %08lX\n", Index, hr);
+                if (SUCCEEDED(hr))
+                {
+                    DcCheckInterfaces("ds7 buffer", Buffer);
+                    Buffer->Release();
+                }
+            }
+        }
+        Desc.dwSize = sizeof(DSBUFFERDESC1);
+        Desc.dwFlags = 0;
+        hr = Sound7->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+        printf("ds7 create_desc1 = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+            Buffer->Release();
+        printf("ds7 release %lu\n", Sound7->Release());
+    }
+}
+
+static
+VOID
+DcCheckBufferMethods(VOID)
+{
+    IDirectSound8* Sound;
+    IDirectSoundBuffer* Buffer;
+    IDirectSoundBuffer* Other;
+    WAVEFORMATEX Format;
+    HRESULT hr;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+    DcFormat(&Format, WAVE_FORMAT_PCM, 2, 22050, 16);
+
+    for (UINT Ctrl = 0; Ctrl < 2; Ctrl++)
+    {
+        DWORD Flags = Ctrl == 0 ? 0 : DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPOSITIONNOTIFY;
+        static const LONG Volumes[] = { 1, 0, -1, -10000, -10001, LONG_MIN };
+        static const LONG Pans[] = { 10001, 10000, 0, -10000, -10001 };
+        static const DWORD Frequencies[] = { 0, 1, 99, 100, 22050, 200000, 200001 };
+
+        if (FAILED(DcMakeBuffer(Sound, Flags, 8820, &Format, &Buffer)))
+            continue;
+        printf("methods[%u]\n", Ctrl);
+        DcCheckInterfaces("  buffer", Buffer);
+        printf("  addref %lu\n", Buffer->AddRef());
+        printf("  release %lu\n", Buffer->Release());
+        for (UINT Index = 0; Index < ARRAYSIZE(Volumes); Index++)
+        {
+            LONG Value = 0x1234;
+
+            hr = Buffer->SetVolume(Volumes[Index]);
+            Buffer->GetVolume(&Value);
+            printf("  setvolume[%ld] = %08lX get %ld\n", Volumes[Index], hr, Value);
+        }
+        printf("  getvolume_null = %08lX\n", Buffer->GetVolume(nullptr));
+        for (UINT Index = 0; Index < ARRAYSIZE(Pans); Index++)
+        {
+            LONG Value = 0x1234;
+
+            hr = Buffer->SetPan(Pans[Index]);
+            Buffer->GetPan(&Value);
+            printf("  setpan[%ld] = %08lX get %ld\n", Pans[Index], hr, Value);
+        }
+        printf("  getpan_null = %08lX\n", Buffer->GetPan(nullptr));
+        for (UINT Index = 0; Index < ARRAYSIZE(Frequencies); Index++)
+        {
+            DWORD Value = 0x1234;
+
+            hr = Buffer->SetFrequency(Frequencies[Index]);
+            Buffer->GetFrequency(&Value);
+            printf("  setfrequency[%lu] = %08lX get %lu\n", Frequencies[Index], hr, Value);
+        }
+        printf("  getfrequency_null = %08lX\n", Buffer->GetFrequency(nullptr));
+        printf("  setformat = %08lX\n", Buffer->SetFormat(&Format));
+        printf("  setformat_null = %08lX\n", Buffer->SetFormat(nullptr));
+        printf("  getstatus_null = %08lX\n", Buffer->GetStatus(nullptr));
+        printf("  getcaps_null = %08lX\n", Buffer->GetCaps(nullptr));
+        {
+            DSBCAPS Caps = {};
+
+            Caps.dwSize = sizeof(Caps) + 4;
+            printf("  getcaps_big = %08lX\n", Buffer->GetCaps(&Caps));
+        }
+        printf("  initialize = %08lX\n", Buffer->Initialize(Sound, nullptr));
+        printf("  restore = %08lX\n", Buffer->Restore());
+
+        {
+            static const DWORD Positions[] = { 0, 1, 4, 8819, 8820, 0xFFFFFFFF };
+
+            for (UINT Index = 0; Index < ARRAYSIZE(Positions); Index++)
+            {
+                DWORD Play = 0xCCCC;
+                DWORD Write = 0xCCCC;
+
+                hr = Buffer->SetCurrentPosition(Positions[Index]);
+                Buffer->GetCurrentPosition(&Play, &Write);
+                printf("  setposition[%lu] = %08lX get %lu %lu\n", Positions[Index], hr, Play, Write);
+            }
+            printf("  getposition_none = %08lX\n", Buffer->GetCurrentPosition(nullptr, nullptr));
+            {
+                DWORD Write = 0xCCCC;
+
+                { HRESULT Rc = Buffer->GetCurrentPosition(nullptr, &Write); printf("  getposition_write = %08lX %lu\n", Rc, Write); }
+            }
+        }
+
+        {
+            static const struct
+            {
+                DWORD Offset;
+                DWORD Bytes;
+                DWORD Flags;
+            } Locks[] =
+            {
+                { 0, 100, 0 }, { 8800, 100, 0 }, { 8820, 1, 0 }, { 0, 8820, 0 }, { 0, 8821, 0 }, { 0, 0, 0 },
+                { 0, 0, DSBLOCK_ENTIREBUFFER }, { 100, 0, DSBLOCK_FROMWRITECURSOR }, { 0, 100, 4 }, { 1, 3, 0 },
+                { 8819, 8820, 0 }, { 0, 100, DSBLOCK_FROMWRITECURSOR | DSBLOCK_ENTIREBUFFER },
+            };
+
+            for (UINT Index = 0; Index < ARRAYSIZE(Locks); Index++)
+            {
+                VOID* Part1 = reinterpret_cast<VOID*>(1);
+                VOID* Part2 = reinterpret_cast<VOID*>(1);
+                DWORD Size1 = 0xCCCC;
+                DWORD Size2 = 0xCCCC;
+                BYTE* Base;
+
+                hr = Buffer->Lock(Locks[Index].Offset, Locks[Index].Bytes, &Part1, &Size1, &Part2, &Size2, Locks[Index].Flags);
+                Base = static_cast<BYTE*>(Part1);
+                printf("  lock[%u] = %08lX size %lu %lu part1 %d part2 %s\n", Index, hr, Size1, Size2, Part1 != nullptr,
+                       Part2 == nullptr ? "null" : Part2 == reinterpret_cast<VOID*>(1) ? "kept" : "set");
+                if (SUCCEEDED(hr))
+                {
+                    if (Part2 != nullptr && Part1 != nullptr)
+                        printf("    gap %lld\n", static_cast<long long>(static_cast<BYTE*>(Part1) - static_cast<BYTE*>(Part2)));
+                    printf("    first %02X\n", Base[0]);
+                    printf("    unlock = %08lX\n", Buffer->Unlock(Part1, Size1, Part2, Size2));
+                }
+            }
+        }
+
+        {
+            VOID* Part1;
+            VOID* Part2;
+            DWORD Size1;
+            DWORD Size2;
+            VOID* Other1;
+            DWORD OtherSize;
+
+            printf("  lock_null1 = %08lX\n", Buffer->Lock(0, 100, nullptr, &Size1, nullptr, nullptr, 0));
+            printf("  lock_nullsize1 = %08lX\n", Buffer->Lock(0, 100, &Part1, nullptr, nullptr, nullptr, 0));
+            hr = Buffer->Lock(0, 100, &Part1, &Size1, nullptr, nullptr, 0);
+            printf("  lock_onlypart1 = %08lX %lu\n", hr, Size1);
+            hr = Buffer->Lock(50, 100, &Other1, &OtherSize, nullptr, nullptr, 0);
+            printf("  lock_overlap = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Unlock(Other1, OtherSize, nullptr, 0);
+            hr = Buffer->Lock(100, 100, &Other1, &OtherSize, nullptr, nullptr, 0);
+            printf("  lock_adjacent = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                printf("  unlock_adjacent = %08lX\n", Buffer->Unlock(Other1, OtherSize, nullptr, 0));
+            hr = Buffer->Lock(8800, 100, &Other1, &OtherSize, &Part2, &Size2, 0);
+            printf("  lock_wrapping_overlap = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Unlock(Other1, OtherSize, Part2, Size2);
+            printf("  unlock_wrongptr = %08lX\n", Buffer->Unlock(static_cast<BYTE*>(Part1) + 4, Size1, nullptr, 0));
+            printf("  unlock_bigger = %08lX\n", Buffer->Unlock(Part1, Size1 + 100, nullptr, 0));
+            printf("  unlock_again = %08lX\n", Buffer->Unlock(Part1, Size1, nullptr, 0));
+            printf("  unlock_null = %08lX\n", Buffer->Unlock(nullptr, 0, nullptr, 0));
+            printf("  unlock_null_size = %08lX\n", Buffer->Unlock(nullptr, 4, nullptr, 0));
+            printf("  unlock_null2_size = %08lX\n", Buffer->Unlock(Part1, 4, nullptr, 4));
+        }
+
+        {
+            static const DWORD PlayFlags[] = { 0x40, DSBPLAY_LOCHARDWARE, DSBPLAY_TERMINATEBY_TIME, 0x18 };
+
+            for (UINT Index = 0; Index < ARRAYSIZE(PlayFlags); Index++)
+                printf("  play_flags[%u] = %08lX\n", Index, Buffer->Play(0, 0, PlayFlags[Index]));
+            printf("  play_reserved = %08lX\n", Buffer->Play(1, 0, 0));
+            printf("  play_priority = %08lX\n", Buffer->Play(0, 1, 0));
+        }
+
+        if (Ctrl == 1)
+        {
+            IDirectSoundNotify* Notify = nullptr;
+
+            hr = Buffer->QueryInterface(IID_IDirectSoundNotify, reinterpret_cast<void**>(&Notify));
+            printf("  notify = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                HANDLE Event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                DSBPOSITIONNOTIFY Positions[4];
+
+                printf("  notify_none = %08lX\n", Notify->SetNotificationPositions(0, nullptr));
+                printf("  notify_null = %08lX\n", Notify->SetNotificationPositions(1, nullptr));
+                Positions[0] = { 0, Event };
+                Positions[1] = { 4410, Event };
+                printf("  notify_two = %08lX\n", Notify->SetNotificationPositions(2, Positions));
+                Positions[1] = { 0, Event };
+                printf("  notify_dup = %08lX\n", Notify->SetNotificationPositions(2, Positions));
+                Positions[0] = { 8820, Event };
+                printf("  notify_past = %08lX\n", Notify->SetNotificationPositions(1, Positions));
+                Positions[0] = { 100, nullptr };
+                printf("  notify_nullevent = %08lX\n", Notify->SetNotificationPositions(1, Positions));
+                Positions[0] = { DSBPN_OFFSETSTOP, Event };
+                Positions[1] = { 100, Event };
+                printf("  notify_stop_first = %08lX\n", Notify->SetNotificationPositions(2, Positions));
+                Positions[0] = { 100, Event };
+                Positions[1] = { DSBPN_OFFSETSTOP, Event };
+                printf("  notify_stop_last = %08lX\n", Notify->SetNotificationPositions(2, Positions));
+                Positions[0] = { DSBPN_OFFSETSTOP, Event };
+                Positions[1] = { DSBPN_OFFSETSTOP, Event };
+                printf("  notify_stop_twice = %08lX\n", Notify->SetNotificationPositions(2, Positions));
+                Positions[0] = { 4411, Event };
+                Positions[1] = { 3, Event };
+                printf("  notify_unsorted = %08lX\n", Notify->SetNotificationPositions(2, Positions));
+                printf("  notify addref %lu\n", Notify->AddRef());
+                printf("  notify release %lu\n", Notify->Release());
+                printf("  notify release %lu\n", Notify->Release());
+                CloseHandle(Event);
+            }
+        }
+
+        {
+            IDirectSoundBuffer8* Buffer8 = nullptr;
+
+            if (SUCCEEDED(Buffer->QueryInterface(IID_IDirectSoundBuffer8, reinterpret_cast<void**>(&Buffer8))))
+            {
+                DSEFFECTDESC Effect = {};
+                DWORD Results[2] = { 0xCCCC, 0xCCCC };
+                IUnknown* Object = reinterpret_cast<IUnknown*>(1);
+
+                Effect.dwSize = sizeof(Effect);
+                Effect.guidDSFXClass = GUID_DSFX_STANDARD_ECHO;
+                printf("  setfx_none = %08lX\n", Buffer8->SetFX(0, nullptr, nullptr));
+                printf("  setfx_mismatch = %08lX\n", Buffer8->SetFX(1, nullptr, nullptr));
+                printf("  setfx_echo = %08lX %08lX\n", Buffer8->SetFX(1, &Effect, Results), Results[0]);
+                printf("  setfx_noctl_results = %08lX\n", Buffer8->SetFX(0, nullptr, Results));
+                printf("  acquire = %08lX\n", Buffer8->AcquireResources(0, 0, nullptr));
+                printf("  acquire_bad = %08lX\n", Buffer8->AcquireResources(0x40, 0, nullptr));
+                printf("  acquire_mismatch = %08lX\n", Buffer8->AcquireResources(0, 1, nullptr));
+                printf("  getobject = %08lX\n", Buffer8->GetObjectInPath(GUID_DSFX_STANDARD_ECHO, 0, IID_IUnknown, reinterpret_cast<void**>(&Object)));
+                printf("  getobject_null = %08lX\n", Buffer8->GetObjectInPath(GUID_DSFX_STANDARD_ECHO, 0, IID_IUnknown, nullptr));
+                Buffer8->Release();
+            }
+        }
+
+        hr = Sound->DuplicateSoundBuffer(Buffer, &Other);
+        printf("  duplicate = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            DcDescribe(Other);
+            DcCheckInterfaces("  duplicate", Other);
+            printf("  duplicate release %lu\n", Other->Release());
+        }
+        printf("  duplicate_null = %08lX\n", Sound->DuplicateSoundBuffer(Buffer, nullptr));
+        printf("  duplicate_nullsrc = %08lX\n", Sound->DuplicateSoundBuffer(nullptr, &Other));
+        printf("  release %lu\n", Buffer->Release());
+    }
+
+    {
+        WAVEFORMATEX Mono8;
+
+        DcFormat(&Mono8, WAVE_FORMAT_PCM, 1, 8000, 8);
+        if (SUCCEEDED(DcMakeBuffer(Sound, 0, 800, &Mono8, &Buffer)))
+        {
+            VOID* Part1;
+            DWORD Size1;
+
+            if (SUCCEEDED(Buffer->Lock(0, 0, &Part1, &Size1, nullptr, nullptr, DSBLOCK_ENTIREBUFFER)))
+            {
+                printf("silence8 %02X %02X\n", static_cast<BYTE*>(Part1)[0], static_cast<BYTE*>(Part1)[799]);
+                Buffer->Unlock(Part1, Size1, nullptr, 0);
+            }
+            Buffer->Release();
+        }
+    }
+
+    {
+        IDirectSoundBuffer* Primary = nullptr;
+        IDirectSoundBuffer* Primary2 = nullptr;
+        DSBUFFERDESC Desc = {};
+
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN;
+        if (SUCCEEDED(Sound->CreateSoundBuffer(&Desc, &Primary, nullptr)))
+        {
+            WAVEFORMATEX Wanted;
+            LONG Value;
+            DWORD Play;
+            DWORD Write;
+            VOID* Part1;
+            DWORD Size1;
+
+            printf("primary\n");
+            DcDescribe(Primary);
+            DcCheckInterfaces("  primary", Primary);
+            printf("  addref %lu\n", Primary->AddRef());
+            printf("  release %lu\n", Primary->Release());
+            hr = Sound->CreateSoundBuffer(&Desc, &Primary2, nullptr);
+            printf("  again = %08lX same %d\n", hr, Primary2 == Primary);
+            if (SUCCEEDED(hr))
+                printf("  again release %lu\n", Primary2->Release());
+            Desc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+            hr = Sound->CreateSoundBuffer(&Desc, &Primary2, nullptr);
+            printf("  again_other_flags = %08lX same %d\n", hr, Primary2 == Primary);
+            if (SUCCEEDED(hr))
+            {
+                DSBCAPS Caps = { sizeof(Caps) };
+
+                Primary2->GetCaps(&Caps);
+                printf("    flags %08lX\n", Caps.dwFlags);
+                printf("  again release %lu\n", Primary2->Release());
+            }
+            Value = 0x1234;
+            printf("  setvolume = %08lX\n", Primary->SetVolume(-100));
+            { HRESULT Rc = Primary->GetVolume(&Value); printf("  getvolume = %08lX %ld\n", Rc, Value); }
+            printf("  setvolume_back = %08lX\n", Primary->SetVolume(0));
+            printf("  setpan = %08lX\n", Primary->SetPan(0));
+            printf("  setfrequency = %08lX\n", Primary->SetFrequency(22050));
+            printf("  setposition = %08lX\n", Primary->SetCurrentPosition(0));
+            printf("  lock = %08lX\n", Primary->Lock(0, 4, &Part1, &Size1, nullptr, nullptr, 0));
+            printf("  unlock = %08lX\n", Primary->Unlock(nullptr, 0, nullptr, 0));
+            printf("  play_0 = %08lX\n", Primary->Play(0, 0, 0));
+            printf("  play = %08lX\n", Primary->Play(0, 0, DSBPLAY_LOOPING));
+            {
+                DWORD Status = 0;
+
+                { HRESULT Rc = Primary->GetStatus(&Status); printf("  status = %08lX %08lX\n", Rc, Status); }
+            }
+            printf("  stop = %08lX\n", Primary->Stop());
+            printf("  getposition = %08lX\n", Primary->GetCurrentPosition(&Play, &Write));
+            DcFormat(&Wanted, WAVE_FORMAT_PCM, 2, 44100, 16);
+            printf("  setformat = %08lX\n", Primary->SetFormat(&Wanted));
+            DcDescribe(Primary);
+            DcFormat(&Wanted, WAVE_FORMAT_PCM, 1, 11025, 8);
+            printf("  setformat_mono8 = %08lX\n", Primary->SetFormat(&Wanted));
+            DcDescribe(Primary);
+            DcFormat(&Wanted, WAVE_FORMAT_IEEE_FLOAT, 2, 48000, 32);
+            printf("  setformat_float = %08lX\n", Primary->SetFormat(&Wanted));
+            DcDescribe(Primary);
+            DcFormat(&Wanted, WAVE_FORMAT_PCM, 2, 99, 16);
+            printf("  setformat_bad = %08lX\n", Primary->SetFormat(&Wanted));
+            printf("  setformat_null = %08lX\n", Primary->SetFormat(nullptr));
+            Sound->SetCooperativeLevel(DcWindow, DSSCL_NORMAL);
+            DcFormat(&Wanted, WAVE_FORMAT_PCM, 2, 44100, 16);
+            printf("  setformat_normal = %08lX\n", Primary->SetFormat(&Wanted));
+            Sound->SetCooperativeLevel(DcWindow, DSSCL_WRITEPRIMARY);
+            DcDescribe(Primary);
+            hr = Primary->Lock(0, 0, &Part1, &Size1, nullptr, nullptr, DSBLOCK_ENTIREBUFFER);
+            printf("  writeprimary lock = %08lX %lu\n", hr, Size1);
+            if (SUCCEEDED(hr))
+                printf("  writeprimary unlock = %08lX\n", Primary->Unlock(Part1, Size1, nullptr, 0));
+            hr = DcMakeBuffer(Sound, 0, 8820, &Format, &Buffer);
+            printf("  writeprimary secondary = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                printf("    play = %08lX\n", Buffer->Play(0, 0, 0));
+                Buffer->Release();
+            }
+            Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+            printf("  release %lu\n", Primary->Release());
+        }
+    }
+    printf("release %lu\n", Sound->Release());
+}
+
+/* Plays silent buffers and reports cursor movement that does not depend on timing */
+static
+VOID
+DcCheckPlayback(VOID)
+{
+    IDirectSound8* Sound;
+    IDirectSoundBuffer* Buffer;
+    WAVEFORMATEX Format;
+    HRESULT hr;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+
+    for (UINT Rate = 0; Rate < 2; Rate++)
+    {
+        DWORD Bytes;
+
+        DcFormat(&Format, WAVE_FORMAT_PCM, 2, Rate == 0 ? 48000 : 22050, 16);
+        Bytes = Format.nAvgBytesPerSec;
+        hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_CTRLPOSITIONNOTIFY, Bytes, &Format, &Buffer);
+        if (FAILED(hr))
+            continue;
+
+        printf("loop[%u]\n", Rate);
+        Buffer->SetVolume(DSBVOLUME_MIN);
+        {
+            DWORD Play = 0;
+            DWORD Write = 0;
+            DWORD Status = 0;
+            DWORD LastPlay = 0;
+            BOOL Monotonic = TRUE;
+            DWORD MaxLead = 0;
+            DWORD MinLead = 0xFFFFFFFF;
+
+            Buffer->SetCurrentPosition(Bytes / 4);
+            printf("  play = %08lX\n", Buffer->Play(0, 0, DSBPLAY_LOOPING));
+            Buffer->GetStatus(&Status);
+            printf("  status %08lX\n", Status);
+            Buffer->GetCurrentPosition(&Play, &Write);
+            printf("  start play %lu write_ahead %d\n", Play, Write >= Play);
+            LastPlay = Play;
+            for (UINT Step = 0; Step < 30; Step++)
+            {
+                DWORD Lead;
+
+                Sleep(10);
+                Buffer->GetCurrentPosition(&Play, &Write);
+                if (Play < LastPlay)
+                    Monotonic = FALSE;
+                LastPlay = Play;
+                Lead = (Write + Bytes - Play) % Bytes;
+                if (Step >= 10)
+                {
+                    if (Lead > MaxLead)
+                        MaxLead = Lead;
+                    if (Lead < MinLead)
+                        MinLead = Lead;
+                }
+            }
+            printf("  moved %d monotonic %d\n", Play != Bytes / 4, Monotonic);
+            printf("  aligned %d %d\n", Play % Format.nBlockAlign == 0, Write % Format.nBlockAlign == 0);
+            printf("  lead_ms %lu %lu\n", MinLead * 1000 / Format.nAvgBytesPerSec, MaxLead * 1000 / Format.nAvgBytesPerSec);
+            {
+                VOID* Part1;
+                VOID* Part2;
+                DWORD Size1;
+                DWORD Size2;
+
+                hr = Buffer->Lock(0, 100, &Part1, &Size1, &Part2, &Size2, DSBLOCK_FROMWRITECURSOR);
+                printf("  lock_write = %08lX %lu\n", hr, Size1 + Size2);
+                if (SUCCEEDED(hr))
+                    Buffer->Unlock(Part1, Size1, Part2, Size2);
+            }
+            printf("  play_again = %08lX\n", Buffer->Play(0, 0, 0));
+            Buffer->GetStatus(&Status);
+            printf("  status_nonloop %08lX\n", Status);
+            printf("  stop = %08lX\n", Buffer->Stop());
+            Buffer->GetCurrentPosition(&Play, &Write);
+            printf("  stopped equal %d\n", Play == Write);
+            Buffer->GetStatus(&Status);
+            printf("  status %08lX\n", Status);
+            printf("  stop_again = %08lX\n", Buffer->Stop());
+            {
+                DWORD Play2;
+                DWORD Write2;
+
+                Sleep(50);
+                Buffer->GetCurrentPosition(&Play2, &Write2);
+                printf("  stopped still %d\n", Play2 == Play && Write2 == Write);
+            }
+            Buffer->SetCurrentPosition(0);
+            Buffer->GetCurrentPosition(&Play, &Write);
+            printf("  reset %lu %lu\n", Play, Write);
+        }
+        Buffer->Release();
+    }
+
+    /* A short one shot runs out, stops by itself and fires its notifications in order */
+    DcFormat(&Format, WAVE_FORMAT_PCM, 1, 48000, 16);
+    hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPOSITIONNOTIFY, 9600, &Format, &Buffer);
+    if (SUCCEEDED(hr))
+    {
+        IDirectSoundNotify* Notify;
+        HANDLE Events[4];
+        DSBPOSITIONNOTIFY Positions[4];
+        DWORD Status = 0;
+        DWORD Play;
+        DWORD Write;
+
+        for (UINT Index = 0; Index < 4; Index++)
+            Events[Index] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        Positions[0] = { 0, Events[0] };
+        Positions[1] = { 4800, Events[1] };
+        Positions[2] = { 9598, Events[2] };
+        Positions[3] = { DSBPN_OFFSETSTOP, Events[3] };
+        Buffer->SetVolume(DSBVOLUME_MIN);
+        Buffer->QueryInterface(IID_IDirectSoundNotify, reinterpret_cast<void**>(&Notify));
+        printf("oneshot notify = %08lX\n", Notify->SetNotificationPositions(4, Positions));
+        printf("oneshot play = %08lX\n", Buffer->Play(0, 0, 0));
+        printf("  notify_playing = %08lX\n", Notify->SetNotificationPositions(4, Positions));
+        for (UINT Index = 0; Index < 4; Index++)
+            printf("  event[%u] %s\n", Index, WaitForSingleObject(Events[Index], 2000) == WAIT_OBJECT_0 ? "fired" : "timeout");
+        Sleep(100);
+        Buffer->GetStatus(&Status);
+        printf("  status %08lX\n", Status);
+        Buffer->GetCurrentPosition(&Play, &Write);
+        printf("  position %lu %lu\n", Play, Write);
+        printf("  replay = %08lX\n", Buffer->Play(0, 0, 0));
+        printf("  stop = %08lX\n", Buffer->Stop());
+        printf("  stop_event %s\n", WaitForSingleObject(Events[3], 500) == WAIT_OBJECT_0 ? "fired" : "timeout");
+        Notify->Release();
+        for (UINT Index = 0; Index < 4; Index++)
+            CloseHandle(Events[Index]);
+        Buffer->Release();
+    }
+    printf("release %lu\n", Sound->Release());
+}
+
+static
+VOID
+DcCheck3d(VOID)
+{
+    IDirectSound8* Sound;
+    IDirectSoundBuffer* Buffer;
+    IDirectSoundBuffer* Primary;
+    WAVEFORMATEX Format;
+    DSBUFFERDESC Desc = {};
+    HRESULT hr;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+    DcFormat(&Format, WAVE_FORMAT_PCM, 1, 22050, 16);
+
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D;
+    if (SUCCEEDED(Sound->CreateSoundBuffer(&Desc, &Primary, nullptr)))
+    {
+        IDirectSound3DListener* Listener = nullptr;
+
+        hr = Primary->QueryInterface(IID_IDirectSound3DListener, reinterpret_cast<void**>(&Listener));
+        printf("listener = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            DS3DLISTENER All;
+            D3DVECTOR Vector;
+            D3DVALUE Value;
+
+            memset(&All, 0xCC, sizeof(All));
+            All.dwSize = sizeof(All);
+            printf("  getall = %08lX\n", Listener->GetAllParameters(&All));
+            DcBytes("    all", &All, sizeof(All));
+            All.dwSize = 0;
+            printf("  getall_size0 = %08lX\n", Listener->GetAllParameters(&All));
+            printf("  getall_null = %08lX\n", Listener->GetAllParameters(nullptr));
+            printf("  setdistance[0] = %08lX\n", Listener->SetDistanceFactor(0.0f, DS3D_IMMEDIATE));
+            printf("  setdistance[-1] = %08lX\n", Listener->SetDistanceFactor(-1.0f, DS3D_IMMEDIATE));
+            printf("  setdistance[2] = %08lX\n", Listener->SetDistanceFactor(2.0f, DS3D_IMMEDIATE));
+            printf("  setdistance_flags = %08lX\n", Listener->SetDistanceFactor(2.0f, 2));
+            Listener->GetDistanceFactor(&Value);
+            printf("  getdistance %g\n", Value);
+            printf("  setdoppler[11] = %08lX\n", Listener->SetDopplerFactor(11.0f, DS3D_IMMEDIATE));
+            printf("  setdoppler[10] = %08lX\n", Listener->SetDopplerFactor(10.0f, DS3D_IMMEDIATE));
+            printf("  setrolloff[11] = %08lX\n", Listener->SetRolloffFactor(11.0f, DS3D_IMMEDIATE));
+            printf("  setrolloff[-1] = %08lX\n", Listener->SetRolloffFactor(-1.0f, DS3D_IMMEDIATE));
+            printf("  setrolloff[3] = %08lX\n", Listener->SetRolloffFactor(3.0f, DS3D_DEFERRED));
+            Listener->GetRolloffFactor(&Value);
+            printf("  getrolloff_deferred %g\n", Value);
+            printf("  commit = %08lX\n", Listener->CommitDeferredSettings());
+            Listener->GetRolloffFactor(&Value);
+            printf("  getrolloff_committed %g\n", Value);
+            printf("  setposition = %08lX\n", Listener->SetPosition(1.0f, 2.0f, 3.0f, DS3D_IMMEDIATE));
+            Listener->GetPosition(&Vector);
+            printf("  getposition %g %g %g\n", Vector.x, Vector.y, Vector.z);
+            printf("  setorientation_zero = %08lX\n", Listener->SetOrientation(0, 0, 0, 0, 1, 0, DS3D_IMMEDIATE));
+            printf("  setorientation_parallel = %08lX\n", Listener->SetOrientation(0, 1, 0, 0, 2, 0, DS3D_IMMEDIATE));
+            printf("  setorientation = %08lX\n", Listener->SetOrientation(1, 0, 0, 0, 1, 0, DS3D_IMMEDIATE));
+            {
+                D3DVECTOR Front;
+                D3DVECTOR Top;
+
+                Listener->GetOrientation(&Front, &Top);
+                printf("  getorientation %g %g %g %g %g %g\n", Front.x, Front.y, Front.z, Top.x, Top.y, Top.z);
+            }
+            printf("  getposition_null = %08lX\n", Listener->GetPosition(nullptr));
+            memset(&All, 0, sizeof(All));
+            All.dwSize = sizeof(All);
+            printf("  setall_zero = %08lX\n", Listener->SetAllParameters(&All, DS3D_IMMEDIATE));
+            Listener->Release();
+        }
+        Primary->Release();
+    }
+
+    Desc.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY;
+    Desc.dwBufferBytes = 22050;
+    Desc.lpwfxFormat = &Format;
+    hr = Sound->CreateSoundBuffer(&Desc, &Buffer, nullptr);
+    printf("buffer3d = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        IDirectSound3DBuffer* Buffer3d = nullptr;
+
+        DcCheckInterfaces("  buffer3d", Buffer);
+        hr = Buffer->QueryInterface(IID_IDirectSound3DBuffer, reinterpret_cast<void**>(&Buffer3d));
+        if (SUCCEEDED(hr))
+        {
+            DS3DBUFFER All;
+            DWORD Inside;
+            DWORD Outside;
+            DWORD Mode;
+            D3DVALUE Value;
+
+            memset(&All, 0xCC, sizeof(All));
+            All.dwSize = sizeof(All);
+            printf("  getall = %08lX\n", Buffer3d->GetAllParameters(&All));
+            DcBytes("    all", &All, sizeof(All));
+            printf("  setcone[10,20] = %08lX\n", Buffer3d->SetConeAngles(10, 20, DS3D_IMMEDIATE));
+            printf("  setcone[20,10] = %08lX\n", Buffer3d->SetConeAngles(20, 10, DS3D_IMMEDIATE));
+            printf("  setcone[0,361] = %08lX\n", Buffer3d->SetConeAngles(0, 361, DS3D_IMMEDIATE));
+            Buffer3d->GetConeAngles(&Inside, &Outside);
+            printf("  getcone %lu %lu\n", Inside, Outside);
+            printf("  setconevolume[1] = %08lX\n", Buffer3d->SetConeOutsideVolume(1, DS3D_IMMEDIATE));
+            printf("  setconevolume[-10001] = %08lX\n", Buffer3d->SetConeOutsideVolume(-10001, DS3D_IMMEDIATE));
+            printf("  setmin[0] = %08lX\n", Buffer3d->SetMinDistance(0.0f, DS3D_IMMEDIATE));
+            printf("  setmin[-1] = %08lX\n", Buffer3d->SetMinDistance(-1.0f, DS3D_IMMEDIATE));
+            printf("  setmax[0] = %08lX\n", Buffer3d->SetMaxDistance(0.0f, DS3D_IMMEDIATE));
+            printf("  setmax[5] = %08lX\n", Buffer3d->SetMaxDistance(5.0f, DS3D_IMMEDIATE));
+            Buffer3d->GetMaxDistance(&Value);
+            printf("  getmax %g\n", Value);
+            for (DWORD Index = 0; Index < 4; Index++)
+                printf("  setmode[%lu] = %08lX\n", Index, Buffer3d->SetMode(Index, DS3D_IMMEDIATE));
+            Buffer3d->GetMode(&Mode);
+            printf("  getmode %lu\n", Mode);
+            printf("  setposition = %08lX\n", Buffer3d->SetPosition(1, 2, 3, DS3D_DEFERRED));
+            {
+                D3DVECTOR Vector;
+
+                Buffer3d->GetPosition(&Vector);
+                printf("  getposition %g %g %g\n", Vector.x, Vector.y, Vector.z);
+            }
+            {
+                DWORD Frequency = 0;
+
+                printf("  setfrequency = %08lX\n", Buffer->SetFrequency(44100));
+                Buffer->GetFrequency(&Frequency);
+                printf("  getfrequency %lu\n", Frequency);
+            }
+            memset(&All, 0, sizeof(All));
+            All.dwSize = sizeof(All);
+            printf("  setall_zero = %08lX\n", Buffer3d->SetAllParameters(&All, DS3D_IMMEDIATE));
+            printf("  addref %lu\n", Buffer3d->AddRef());
+            printf("  release %lu\n", Buffer3d->Release());
+            Buffer3d->Release();
+        }
+        Buffer->Release();
+    }
+    printf("release %lu\n", Sound->Release());
+}
+
+static
+VOID
+DcCheckCapture(VOID)
+{
+    PDC_CAPTURE_CREATE Create = reinterpret_cast<PDC_CAPTURE_CREATE>(GetProcAddress(DcModule, "DirectSoundCaptureCreate"));
+    PDC_CAPTURE_CREATE Create8 = reinterpret_cast<PDC_CAPTURE_CREATE>(GetProcAddress(DcModule, "DirectSoundCaptureCreate8"));
+    IDirectSoundCapture* Capture = nullptr;
+    HRESULT hr;
+
+    printf("capture_null = %08lX\n", Create(nullptr, nullptr, nullptr));
+    printf("capture_outer = %08lX\n", Create(nullptr, &Capture, reinterpret_cast<IUnknown*>(1)));
+    hr = Create(&DSDEVID_DefaultPlayback, &Capture, nullptr);
+    printf("capture_render = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+        Capture->Release();
+    for (UINT Kind = 0; Kind < 2; Kind++)
+    {
+        hr = (Kind == 0 ? Create : Create8)(nullptr, &Capture, nullptr);
+        printf("capture[%u] = %08lX\n", Kind, hr);
+        if (FAILED(hr))
+            continue;
+
+        DcCheckInterfaces("  capture", Capture);
+        {
+            DSCCAPS Caps;
+
+            memset(&Caps, 0xCC, sizeof(Caps));
+            Caps.dwSize = sizeof(Caps);
+            printf("  getcaps = %08lX\n", Capture->GetCaps(&Caps));
+            DcBytes("    caps", &Caps, sizeof(Caps));
+            Caps.dwSize = 0;
+            printf("  getcaps_size0 = %08lX\n", Capture->GetCaps(&Caps));
+        }
+        {
+            WAVEFORMATEX Format;
+            DSCBUFFERDESC Desc = {};
+            IDirectSoundCaptureBuffer* Buffer;
+
+            DcFormat(&Format, WAVE_FORMAT_PCM, 1, 44100, 16);
+            Desc.dwSize = sizeof(Desc);
+            Desc.dwBufferBytes = 44100;
+            Desc.lpwfxFormat = &Format;
+            printf("  createbuffer_null = %08lX\n", Capture->CreateCaptureBuffer(nullptr, &Buffer, nullptr));
+            printf("  createbuffer_nullout = %08lX\n", Capture->CreateCaptureBuffer(&Desc, nullptr, nullptr));
+            Desc.dwSize = sizeof(DSCBUFFERDESC1);
+            hr = Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr);
+            printf("  createbuffer_desc1 = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.dwSize = 12;
+            printf("  createbuffer_size12 = %08lX\n", Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr));
+            Desc.dwSize = sizeof(Desc);
+            Desc.dwBufferBytes = 0;
+            printf("  createbuffer_bytes0 = %08lX\n", Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr));
+            Desc.dwBufferBytes = 44101;
+            hr = Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr);
+            printf("  createbuffer_odd = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.dwBufferBytes = 44100;
+            Desc.dwFlags = 0x10;
+            printf("  createbuffer_badflag = %08lX\n", Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr));
+            Desc.dwFlags = DSCBCAPS_WAVEMAPPED;
+            hr = Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr);
+            printf("  createbuffer_wavemapped = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Buffer->Release();
+            Desc.dwFlags = 0;
+            Desc.lpwfxFormat = nullptr;
+            printf("  createbuffer_nullformat = %08lX\n", Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr));
+            Desc.lpwfxFormat = &Format;
+            hr = Capture->CreateCaptureBuffer(&Desc, &Buffer, nullptr);
+            printf("  createbuffer = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                IDirectSoundCaptureBuffer* Second = nullptr;
+                DSCBCAPS Caps;
+                BYTE Bytes[64];
+                DWORD Size = 0;
+                DWORD Status = 0xCCCC;
+                DWORD Capture1 = 0xCCCC;
+                DWORD Read = 0xCCCC;
+
+                DcCheckInterfaces("  buffer", Buffer);
+                hr = Capture->CreateCaptureBuffer(&Desc, &Second, nullptr);
+                printf("  createbuffer_second = %08lX\n", hr);
+                if (SUCCEEDED(hr))
+                    Second->Release();
+                memset(&Caps, 0xCC, sizeof(Caps));
+                Caps.dwSize = sizeof(Caps);
+                printf("  buffer getcaps = %08lX\n", Buffer->GetCaps(&Caps));
+                DcBytes("    caps", &Caps, sizeof(Caps));
+                printf("  buffer getformat_size = %08lX\n", Buffer->GetFormat(nullptr, 0, &Size));
+                printf("    size %lu\n", Size);
+                memset(Bytes, 0xCC, sizeof(Bytes));
+                printf("  buffer getformat = %08lX\n", Buffer->GetFormat(reinterpret_cast<WAVEFORMATEX*>(Bytes), sizeof(Bytes), &Size));
+                DcBytes("    format", Bytes, 24);
+                { HRESULT Rc = Buffer->GetStatus(&Status); printf("  buffer getstatus = %08lX %08lX\n", Rc, Status); }
+                { HRESULT Rc = Buffer->GetCurrentPosition(&Capture1, &Read); printf("  buffer getposition = %08lX %lu %lu\n", Rc, Capture1, Read); }
+                printf("  buffer initialize = %08lX\n", Buffer->Initialize(Capture, &Desc));
+                {
+                    VOID* Part1;
+                    DWORD Size1;
+                    VOID* Part2;
+                    DWORD Size2;
+
+                    hr = Buffer->Lock(44000, 200, &Part1, &Size1, &Part2, &Size2, 0);
+                    printf("  buffer lock = %08lX %lu %lu\n", hr, Size1, Size2);
+                    if (SUCCEEDED(hr))
+                        printf("  buffer unlock = %08lX\n", Buffer->Unlock(Part1, Size1, Part2, Size2));
+                    printf("  buffer lock_big = %08lX\n", Buffer->Lock(0, 44101, &Part1, &Size1, nullptr, nullptr, 0));
+                    printf("  buffer lock_badflag = %08lX\n", Buffer->Lock(0, 4, &Part1, &Size1, nullptr, nullptr, 2));
+                }
+                printf("  buffer start_bad = %08lX\n", Buffer->Start(2));
+                printf("  buffer start = %08lX\n", Buffer->Start(DSCBSTART_LOOPING));
+                Sleep(200);
+                Buffer->GetStatus(&Status);
+                printf("  buffer status %08lX\n", Status);
+                Buffer->GetCurrentPosition(&Capture1, &Read);
+                printf("  buffer moved %d aligned %d %d\n", Read != 0, Capture1 % 2 == 0, Read % 2 == 0);
+                printf("  buffer stop = %08lX\n", Buffer->Stop());
+                Buffer->GetStatus(&Status);
+                printf("  buffer status %08lX\n", Status);
+                printf("  buffer release %lu\n", Buffer->Release());
+            }
+        }
+        printf("  release %lu\n", Capture->Release());
+    }
+}
+
+static
+VOID
+DcCheckFullDuplex(VOID)
+{
+    PDC_FULL_DUPLEX Create = reinterpret_cast<PDC_FULL_DUPLEX>(GetProcAddress(DcModule, "DirectSoundFullDuplexCreate"));
+    WAVEFORMATEX Format;
+    DSCBUFFERDESC CaptureDesc = {};
+    DSBUFFERDESC RenderDesc = {};
+    IDirectSoundFullDuplex* Duplex = nullptr;
+    IDirectSoundCaptureBuffer8* CaptureBuffer = nullptr;
+    IDirectSoundBuffer8* RenderBuffer = nullptr;
+    HRESULT hr;
+
+    DcFormat(&Format, WAVE_FORMAT_PCM, 1, 44100, 16);
+    CaptureDesc.dwSize = sizeof(CaptureDesc);
+    CaptureDesc.dwBufferBytes = 44100;
+    CaptureDesc.lpwfxFormat = &Format;
+    RenderDesc.dwSize = sizeof(RenderDesc);
+    RenderDesc.dwBufferBytes = 44100;
+    RenderDesc.lpwfxFormat = &Format;
+    printf("duplex_nulldesc = %08lX\n", Create(nullptr, nullptr, nullptr, &RenderDesc, DcWindow, DSSCL_PRIORITY, &Duplex, &CaptureBuffer, &RenderBuffer, nullptr));
+    printf("duplex_nullwnd = %08lX\n", Create(nullptr, nullptr, &CaptureDesc, &RenderDesc, nullptr, DSSCL_PRIORITY, &Duplex, &CaptureBuffer, &RenderBuffer, nullptr));
+    printf("duplex_badlevel = %08lX\n", Create(nullptr, nullptr, &CaptureDesc, &RenderDesc, DcWindow, 0, &Duplex, &CaptureBuffer, &RenderBuffer, nullptr));
+    printf("duplex_nullout = %08lX\n", Create(nullptr, nullptr, &CaptureDesc, &RenderDesc, DcWindow, DSSCL_PRIORITY, nullptr, &CaptureBuffer, &RenderBuffer, nullptr));
+    printf("duplex_outer = %08lX\n", Create(nullptr, nullptr, &CaptureDesc, &RenderDesc, DcWindow, DSSCL_PRIORITY, &Duplex, &CaptureBuffer, &RenderBuffer, reinterpret_cast<IUnknown*>(1)));
+    RenderDesc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+    printf("duplex_primary = %08lX\n", Create(nullptr, nullptr, &CaptureDesc, &RenderDesc, DcWindow, DSSCL_PRIORITY, &Duplex, &CaptureBuffer, &RenderBuffer, nullptr));
+    RenderDesc.dwFlags = 0;
+    hr = Create(nullptr, nullptr, &CaptureDesc, &RenderDesc, DcWindow, DSSCL_PRIORITY, &Duplex, &CaptureBuffer, &RenderBuffer, nullptr);
+    printf("duplex = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        DcCheckInterfaces("  duplex", Duplex);
+        printf("  initialize = %08lX\n", Duplex->Initialize(nullptr, nullptr, &CaptureDesc, &RenderDesc, DcWindow, DSSCL_PRIORITY, &CaptureBuffer, &RenderBuffer));
+        printf("  render release %lu\n", RenderBuffer->Release());
+        printf("  capture release %lu\n", CaptureBuffer->Release());
+        printf("  release %lu\n", Duplex->Release());
+    }
+}
+
+int
+wmain(
+    _In_ int argc,
+    _In_reads_(argc) wchar_t** argv)
+{
+    PCWSTR Runtime = L"system";
+
+    for (int Index = 1; Index < argc; Index++)
+    {
+        if (_wcsicmp(argv[Index], L"-runtime") == 0 && Index + 1 < argc)
+            Runtime = argv[++Index];
+        else if (_wcsicmp(argv[Index], L"-section") == 0 && Index + 1 < argc)
+            DcSection = argv[++Index];
+    }
+
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    DcModule = LoadLibraryW(DcRuntimePath(Runtime).c_str());
+    if (DcModule == NULL)
+    {
+        fprintf(stderr, "error: cannot load the runtime (%lu)\n", GetLastError());
+        return 1;
+    }
+    {
+        WCHAR Path[MAX_PATH];
+
+        GetModuleFileNameW(DcModule, Path, _countof(Path));
+        fprintf(stderr, "runtime %ls\n", Path);
+    }
+    DcWindow = CreateWindowExW(0, L"STATIC", L"dsoundcheck", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, nullptr, nullptr);
+
+    if (DcWant(L"enumerate"))
+        DcCheckEnumerate();
+    if (DcWant(L"deviceid"))
+        DcCheckDeviceId();
+    if (DcWant(L"create"))
+        DcCheckCreate();
+    if (DcWant(L"factory"))
+        DcCheckClassFactory();
+    if (DcWant(L"device"))
+        DcCheckDevice();
+    if (DcWant(L"descs"))
+        DcCheckBufferDescs();
+    if (DcWant(L"methods"))
+        DcCheckBufferMethods();
+    if (DcWant(L"playback"))
+        DcCheckPlayback();
+    if (DcWant(L"3d"))
+        DcCheck3d();
+    if (DcWant(L"capture"))
+        DcCheckCapture();
+    if (DcWant(L"duplex"))
+        DcCheckFullDuplex();
+
+    DestroyWindow(DcWindow);
+    FreeLibrary(DcModule);
+    CoUninitialize();
+    return 0;
+}
