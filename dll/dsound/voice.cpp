@@ -286,7 +286,7 @@ DsVoice::SetAttenuation(
     CommitMatrix(Built);
 }
 
-/* New coefficients fade in over a few milliseconds from whatever was last in effect */
+/* New coefficients fade in over a few milliseconds from whatever was last in effect, once the voice has played */
 VOID
 DsVoice::CommitMatrix(
     _In_reads_(DS_MAX_CHANNELS * DS_MAX_CHANNELS) const float* Built)
@@ -296,7 +296,7 @@ DsVoice::CommitMatrix(
     if (!MatrixReady)
     {
         memcpy(Previous, Built, sizeof(Previous));
-        MatrixReady = TRUE;
+        memcpy(Mixed, Built, sizeof(Mixed));
         RampLeft = 0;
     }
     else
@@ -540,6 +540,7 @@ DsVoice::Mix(
 
     if (!(State & DS_VOICE_PLAYING) || Pass == DS_PASS_FINISHED)
         return;
+    MatrixReady = TRUE;
     if (Effects != nullptr)
         DsRunEffects(Effects, this, (static_cast<ULONG>(Frames * Ratio) + Taps + 2) * BlockAlign);
 

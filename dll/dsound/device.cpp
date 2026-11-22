@@ -489,6 +489,14 @@ DsDevice::StartStreaming(VOID)
         return E_OUTOFMEMORY;
     Client->SetEventHandle(Event);
 
+    /* The stream opens on silence, leaving one quantum of room for the first mix */
+    if (BufferFrames > Quantum)
+    {
+        BYTE* Target = nullptr;
+
+        if (SUCCEEDED(Render->GetBuffer(BufferFrames - Quantum, &Target)))
+            Render->ReleaseBuffer(BufferFrames - Quantum, AUDCLNT_BUFFERFLAGS_SILENT);
+    }
     Pump();
     hr = Client->Start();
     if (FAILED(hr))
