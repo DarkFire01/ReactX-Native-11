@@ -25,6 +25,7 @@ static constexpr UINT DdNewEntryPointsVersion = 0x4002;
 static constexpr UINT DdMarkerEntryPointsVersion = 0x4001;
 static constexpr UINT DdCreateResource2Version = 0x3002;
 static constexpr UINT DdAlwaysCreateResource2Version = 0x4000;
+static constexpr UINT DdMarkErrorVersion = 0x5002;
 
 RxKernelDevice&
 RxKernelDeviceFromHandle(
@@ -181,18 +182,7 @@ DdEscapeCb(
     return DdHresultFromStatus(RxGetKmtThunks()->Escape(&Escape));
 }
 
-/* Presenting and overlays have no DirectDraw path to the kernel yet */
-static
-HRESULT
-APIENTRY
-DdPresentCb(
-    _In_ HANDLE hDevice,
-    _Inout_ D3DDDICB_PRESENT* Args)
-{
-    DD_TRACE_ONCE(L"the driver asked to present, which is not implemented yet");
-    return E_NOTIMPL;
-}
-
+/* Overlays have no DirectDraw path to the kernel yet */
 static
 HRESULT
 APIENTRY
@@ -256,17 +246,6 @@ APIENTRY
 DdSubmitPresentBltToHwQueueCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDICB_SUBMITPRESENTBLTTOHWQUEUE* Args)
-{
-    DD_TRACE_ONCE(L"the driver asked to queue a present, which is not implemented yet");
-    return E_NOTIMPL;
-}
-
-static
-HRESULT
-APIENTRY
-DdSubmitPresentToHwQueueCb(
-    _In_ HANDLE hDevice,
-    _Inout_ D3DDDICB_SUBMITPRESENTTOHWQUEUE* Args)
 {
     DD_TRACE_ONCE(L"the driver asked to queue a present, which is not implemented yet");
     return E_NOTIMPL;
@@ -470,9 +449,33 @@ DdDestroyDriverDevice(
     if (Hardware->DriverDevice == NULL)
         return;
 
+    DdReleaseWindowSurface(Hardware);
     Hardware->DeviceFunctions.pfnDestroyDevice(Hardware->DriverDevice);
     Hardware->DriverDevice = NULL;
     ZeroMemory(&Hardware->DeviceFunctions, sizeof(Hardware->DeviceFunctions));
+}
+
+/* Marks the device as lost once; drivers from WDDM 1.3 on are told through the kernel */
+VOID
+DdMarkDeviceLost(
+    _Inout_ DdHardware* Hardware)
+{
+    static PFND3DKMT_MARKDEVICEASERROR MarkAsError = reinterpret_cast<PFND3DKMT_MARKDEVICEASERROR>(
+        GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTMarkDeviceAsError"));
+    D3DKMT_MARKDEVICEASERROR Mark = {};
+
+    if (Hardware->Lost)
+        return;
+
+    Hardware->Lost = TRUE;
+    DdState.DeviceLost = TRUE;
+    DdTrace(L"the display device was lost");
+    if (Hardware->DriverVersion >= DdMarkErrorVersion && MarkAsError != nullptr)
+    {
+        Mark.hDevice = Hardware->DeviceHandle;
+        Mark.Reason = D3DKMT_DEVICE_ERROR_REASON_GENERIC;
+        MarkAsError(&Mark);
+    }
 }
 
 VOID
@@ -850,6 +853,34 @@ DdUnlockSurfaceResource(
     Resource->LockCount -= 1;
     if (FAILED(hr))
         DdTrace(L"UMD Unlock failed 0x%08lX", hr);
+    return hr;
+}
+
+/* A short lived video memory resource the runtime copies through; nothing is charged for it */
+HRESULT
+DdCreateStagingResource(
+    _In_ DdHardware* Hardware,
+    _In_ D3DDDIFORMAT Format,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _Out_ DdResource* Resource)
+{
+    D3DDDI_SURFACEINFO Level = {};
+    HRESULT hr;
+
+    ZeroMemory(Resource, sizeof(*Resource));
+    Resource->Format = Format;
+    Resource->Pool = D3DDDIPOOL_VIDEOMEMORY;
+    Resource->SurfaceCount = 1;
+    Level.Width = Width;
+    Level.Height = Height;
+
+    hr = DdDriverCreateResource(Hardware, Resource, &Level);
+    if (FAILED(hr))
+    {
+        DdTrace(L"UMD CreateResource failed 0x%08lX for a %ux%u staging copy", hr, Width, Height);
+        Resource->DriverResource = NULL;
+    }
     return hr;
 }
 

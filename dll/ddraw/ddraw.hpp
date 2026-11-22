@@ -23,6 +23,7 @@ struct DdInterface;
 struct DdClipper;
 struct DdPalette;
 struct DdSurface;
+struct DdResource;
 
 /* Which interface an object pointer stands for */
 enum class DdKind : UCHAR
@@ -89,6 +90,14 @@ struct DdHardware : public RxKernelDevice
     D3DDDI_DEVICEFUNCS DeviceFunctions = {};
     HANDLE DriverDevice = NULL;
     BOOLEAN UsesFlush1 = FALSE;
+    BOOLEAN Lost = FALSE;
+
+    /* The present the runtime is building while the driver runs it; DdPresentCb finishes it */
+    D3DKMT_PRESENT Present = {};
+
+    /* The window redirection surface DWM shared last, opened on this device */
+    DdResource* WindowSurface = nullptr;
+    D3DKMT_HANDLE WindowShare = 0;
 
     D3DKMT_HANDLE
     KernelDevice() const override;
@@ -496,6 +505,14 @@ DdUnlockSurfaceResource(
     _Inout_ DdSurface* Surface);
 
 HRESULT
+DdCreateStagingResource(
+    _In_ DdHardware* Hardware,
+    _In_ D3DDDIFORMAT Format,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _Out_ DdResource* Resource);
+
+HRESULT
 DdCreateSystemResource(
     _In_ DdHardware* Hardware,
     _Inout_ DdSurface* Surface);
@@ -509,6 +526,38 @@ VOID
 DdWaitForDriver(
     _In_ DdHardware* Hardware,
     _Inout_ DdSurface* Surface);
+
+VOID
+DdMarkDeviceLost(
+    _Inout_ DdHardware* Hardware);
+
+/* present.cpp */
+HRESULT
+APIENTRY
+DdPresentCb(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDICB_PRESENT* Args);
+
+HRESULT
+APIENTRY
+DdSubmitPresentToHwQueueCb(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDICB_SUBMITPRESENTTOHWQUEUE* Args);
+
+VOID
+DdReleaseWindowSurface(
+    _Inout_ DdHardware* Hardware);
+
+HRESULT
+DdPresentThroughDwm(
+    _In_ DdSurface* Primary,
+    _In_ HWND Window,
+    _In_ const RECT* To,
+    _In_opt_ DdSurface* Source,
+    _In_opt_ const RECT* From,
+    _In_ BOOLEAN Fill,
+    _In_ DWORD FillValue,
+    _Out_ BOOLEAN* Handled);
 
 /* caps.cpp */
 BOOLEAN

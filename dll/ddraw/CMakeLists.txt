@@ -11,6 +11,7 @@ nt_add_usermode_dll(ddraw
         main.cpp
         object.cpp
         palette.cpp
+        present.cpp
         surface.cpp
         ddraw.rc)
 

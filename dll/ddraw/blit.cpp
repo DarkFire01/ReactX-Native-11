@@ -214,9 +214,18 @@ DdPresentToPrimary(
     HBRUSH Brush;
     RECT Local = *To;
     BYTE* Bits = nullptr;
+    BOOLEAN Handled;
     HDC Dc;
     int Lines;
     HRESULT hr;
+
+    /* A window clipper sends the pixels to the window's redirection surface, as the system does */
+    if (Window != NULL && Primary->Driver->Hardware != nullptr && Source != Primary)
+    {
+        hr = DdPresentThroughDwm(Primary, Window, To, Source, From, Fill, FillValue, &Handled);
+        if (Handled)
+            return hr;
+    }
 
     if (!Fill)
     {
