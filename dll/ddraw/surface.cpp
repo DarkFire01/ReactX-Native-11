@@ -2222,18 +2222,63 @@ DdSurfaceInitialize(
     return DDERR_ALREADYINITIALIZED;
 }
 
-/* BltBatch is not implemented yet */
+/* Blt flags that read the DDBLTFX, so an entry with any of them must carry one */
+static constexpr DWORD DdBltFlagsNeedingFx = DDBLT_ALPHADESTCONSTOVERRIDE | DDBLT_ALPHADESTSURFACEOVERRIDE |
+                                             DDBLT_ALPHASRCCONSTOVERRIDE | DDBLT_ALPHASRCSURFACEOVERRIDE |
+                                             DDBLT_COLORFILL | DDBLT_DDFX | DDBLT_DDROPS | DDBLT_KEYDESTOVERRIDE |
+                                             DDBLT_KEYSRCOVERRIDE | DDBLT_ROP | DDBLT_ROTATIONANGLE |
+                                             DDBLT_ZBUFFERDESTCONSTOVERRIDE | DDBLT_ZBUFFERDESTOVERRIDE |
+                                             DDBLT_ZBUFFERSRCCONSTOVERRIDE | DDBLT_ZBUFFERSRCOVERRIDE |
+                                             DDBLT_DEPTHFILL;
+
+/* Batches are checked entry by entry and then refused; no runtime ever carried them out */
 static
 HRESULT
 STDMETHODCALLTYPE
 DdSurfaceBltBatch(
     _In_ VOID* Com,
-    _In_opt_ VOID* First,
-    _In_opt_ VOID* Second,
-    _In_opt_ VOID* Third)
+    _In_reads_opt_(Count) LPDDBLTBATCH Batch,
+    _In_ DWORD Count,
+    _In_ DWORD Flags)
 {
-    DD_TRACE_ONCE(L"a surface method that is not implemented yet was called");
-    return DDERR_UNSUPPORTED;
+    DdSurface* Target = DdSurfaceFromCom(Com);
+    LONG Entries = static_cast<LONG>(Count);
+
+    DdLockScope Lock;
+
+    if (Target->Lost)
+        return DDERR_SURFACELOST;
+    if (DdSurfaceBusy(Target))
+        return DDERR_SURFACEBUSY;
+
+    for (LONG Index = 0; Index < Entries; Index++)
+    {
+        const DDBLTBATCH* Entry = &Batch[Index];
+        DdSurface* Source = DdSurfaceFromCom(Entry->lpDDSSrc);
+
+        if (Source != nullptr)
+        {
+            if (Source->Lost)
+                return DDERR_SURFACELOST;
+            if (DdSurfaceBusy(Source))
+                return DDERR_SURFACEBUSY;
+            if ((Source->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+                return DDERR_NOTONMIPMAPSUBLEVEL;
+        }
+        if ((Target->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+            return DDERR_NOTONMIPMAPSUBLEVEL;
+
+        if (Entry->lpDDBltFx != nullptr)
+        {
+            if (Entry->lpDDBltFx->dwSize != sizeof(DDBLTFX))
+                return E_INVALIDARG;
+        }
+        else if ((Entry->dwFlags & DdBltFlagsNeedingFx) != 0)
+        {
+            return E_INVALIDARG;
+        }
+    }
+    return E_NOTIMPL;
 }
 
 #define DD_SURFACE_SLOT(Function) reinterpret_cast<const VOID*>(&Function)
