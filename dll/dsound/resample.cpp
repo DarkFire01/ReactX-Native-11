@@ -287,26 +287,30 @@ DsResampler::Release(VOID)
     Taps = 0;
     Capacity = 0;
     Channels = 0;
+    SourceRate = 0.0f;
+    TargetRate = 0.0f;
     Polyphase = FALSE;
     Cubic = FALSE;
     Whole = FALSE;
     Leap = 0;
     Creep = 0.0f;
-    Phase = 0;
     Position = 0;
     Filled = 0;
     Made = 0;
+    Shift = 0;
+    TimeOffset = 0.0;
+    InOffset = 0.0;
+    FilterOffset = 0.0;
     Fraction = 0.0f;
 }
 
+/* Builds the filter for a rate pair and reports the history the pair needs; positions and history stay */
 HRESULT
-DsResampler::Configure(
-    _In_ ULONG InRate,
-    _In_ ULONG OutRate,
-    _In_ UINT Count)
+DsResampler::Design(
+    _In_ float In,
+    _In_ float Out,
+    _Out_ ULONG* Needed)
 {
-    float In = static_cast<float>(InRate);
-    float Out = static_cast<float>(OutRate);
     float Logarithm;
     float Shape;
     float Ratio;
@@ -314,6 +318,8 @@ DsResampler::Configure(
     double Span;
     double Relative;
     double Spacing;
+    ULONG InWhole;
+    ULONG OutWhole;
     ULONG Common;
     ULONG Phases;
     ULONG Lowest;
@@ -322,10 +328,12 @@ DsResampler::Configure(
     float Total;
     float Scale;
     ULONG Index;
+    BOOLEAN Integral;
 
-    InitOnceExecuteOnce(&DsTablesOnce, DsBuildTables, nullptr, nullptr);
-    Release();
-    Channels = Count;
+    HeapFree(GetProcessHeap(), 0, Coefficients);
+    Coefficients = nullptr;
+    SourceRate = In;
+    TargetRate = Out;
 
     /* Passband edge as a fraction of the lower Nyquist rate, fitted to the order */
     Logarithm = logf(static_cast<float>(DS_FILTER_ORDER));
@@ -338,56 +346,50 @@ DsResampler::Configure(
     Ratio = In / Out;
     Cutoff = (Ratio < 1.0f ? Ratio : 1.0f) * Shape;
 
-    Span = InRate <= OutRate ? static_cast<double>(DS_FILTER_ORDER) :
-                               static_cast<double>(In) / static_cast<double>(Out) * DS_FILTER_ORDER;
+    Span = In <= Out ? static_cast<double>(DS_FILTER_ORDER) :
+                       static_cast<double>(In) / static_cast<double>(Out) * DS_FILTER_ORDER;
     Relative = static_cast<double>(fmaxf(Out, In) / fmaxf(Out, In / Cutoff));
+    Stretch = Relative;
 
-    Common = InRate;
-    for (ULONG Other = OutRate; Other != 0;)
+    /* Rates with a fraction have no whole ratio and always read the interpolated table */
+    InWhole = static_cast<ULONG>(DsRound(In));
+    OutWhole = static_cast<ULONG>(DsRound(Out));
+    Integral = static_cast<float>(InWhole) == In && static_cast<float>(OutWhole) == Out;
+    Common = InWhole;
+    for (ULONG Rest = OutWhole; Rest != 0;)
     {
-        ULONG Rest = Common % Other;
+        ULONG Next = Common % Rest;
 
-        Common = Other;
-        Other = Rest;
+        Common = Rest;
+        Rest = Next;
     }
-    Down = InRate / Common;
-    Up = OutRate / Common;
+    Down = InWhole / Common;
+    Up = OutWhole / Common;
     Half = static_cast<ULONG>(ceil(Span / Relative));
-    Capacity = 2 * (static_cast<ULONG>(ceil((Span + Span) / Relative + 1.0)) + 5) + DS_RING_SLACK;
+    *Needed = 2 * (static_cast<ULONG>(ceil((Span + Span) / Relative + 1.0)) + 5) + DS_RING_SLACK;
     Taps = (2 * Half + 4) / 4 * 4;
 
+    Step = static_cast<double>(In) / static_cast<double>(Out);
+    Reach = Span / Relative;
     Phases = Up > Down ? Up : Down;
-    Polyphase = Phases <= DS_MAX_PHASES && Up + Half * Up < DS_MAX_DESIGN;
+    Polyphase = Integral && Phases <= DS_MAX_PHASES && Up + Half * Up < DS_MAX_DESIGN;
     if (!Polyphase)
     {
         double Shared = static_cast<double>(fminf(In, Out)) * Relative;
 
         /* Taps fall at arbitrary distances and read the interpolated filter table */
-        Step = static_cast<double>(In) / static_cast<double>(Out);
         InStep = Shared / static_cast<double>(In);
         OutStep = Shared / static_cast<double>(Out);
-        Reach = Span / Relative;
         Stride = static_cast<LONG>(fma(DsFilterScale, InStep, 0.5));
-        Gain = static_cast<float>(Relative) * (InRate >= OutRate ? Out / In : 1.0f);
+        Gain = static_cast<float>(Relative) * (In >= Out ? Out / In : 1.0f);
         Taps = static_cast<ULONG>(ceil(Reach)) * 2 + 8;
         Coefficients = static_cast<float*>(HeapAlloc(GetProcessHeap(), 0, Taps * sizeof(*Coefficients)));
+        return Coefficients != nullptr ? S_OK : E_OUTOFMEMORY;
     }
-    else
-    {
-        Coefficients = static_cast<float*>(HeapAlloc(GetProcessHeap(), 0, Up * Taps * sizeof(*Coefficients)));
-    }
-    Ring = static_cast<float*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Count * Capacity * sizeof(*Ring)));
-    if (Coefficients == nullptr || Ring == nullptr)
-    {
-        Release();
+
+    Coefficients = static_cast<float*>(HeapAlloc(GetProcessHeap(), 0, Up * Taps * sizeof(*Coefficients)));
+    if (Coefficients == nullptr)
         return E_OUTOFMEMORY;
-    }
-    if (!Polyphase)
-    {
-        Active = TRUE;
-        Reset();
-        return S_OK;
-    }
 
     /* Each phase row runs backwards over the prototype, and the near negative half mirrors the positive one */
     Spacing = Relative / Phases;
@@ -435,9 +437,102 @@ DsResampler::Configure(
         for (Index = 0; Index < Size; Index++)
             Coefficients[Index] = Coefficients[Index] * Scale;
     }
+    return S_OK;
+}
 
+HRESULT
+DsResampler::Configure(
+    _In_ ULONG InRate,
+    _In_ ULONG OutRate,
+    _In_ UINT Count)
+{
+    ULONG Needed;
+    HRESULT hr;
+
+    InitOnceExecuteOnce(&DsTablesOnce, DsBuildTables, nullptr, nullptr);
+    Release();
+    Channels = Count;
+    hr = Design(static_cast<float>(InRate), static_cast<float>(OutRate), &Needed);
+    if (SUCCEEDED(hr))
+    {
+        Capacity = Needed;
+        Ring = static_cast<float*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Count * Capacity * sizeof(*Ring)));
+        if (Ring == nullptr)
+            hr = E_OUTOFMEMORY;
+    }
+    if (FAILED(hr))
+    {
+        Release();
+        return hr;
+    }
     Active = TRUE;
     Reset();
+    return S_OK;
+}
+
+/*
+ * A new input rate during play keeps the history and the time of the next output: the next
+ * output's input position carries over, renumbered so it falls within one frame of the old one.
+ */
+HRESULT
+DsResampler::Rerate(
+    _In_ float In)
+{
+    double Old = SourceRate;
+    double New = In;
+    double Ahead = static_cast<double>(Made) / static_cast<double>(TargetRate) + TimeOffset;
+    double Scaled = Ahead * Old;
+    LONGLONG Last = Filled - 1 + Shift;
+    double Moment;
+    LONG Renumbered;
+    ULONG Needed;
+    HRESULT hr;
+
+    if (In == SourceRate)
+        return S_OK;
+
+    Moment = (static_cast<double>(Last) + 1.0 - Scaled) / New + Scaled / Old;
+    Renumbered = DsRound(New * Moment);
+    TimeOffset = 0.0 - (Moment - static_cast<double>(Renumbered) / New);
+    if (fabs(TimeOffset) > 1.0)
+    {
+        double Turns = floor(TimeOffset);
+
+        Made += static_cast<LONG>(Turns);
+        TimeOffset = TimeOffset - Turns;
+    }
+
+    hr = Design(In, TargetRate, &Needed);
+    if (FAILED(hr))
+    {
+        Release();
+        return hr;
+    }
+
+    /* The history only grows, keeping every frame it holds */
+    if (Needed > Capacity)
+    {
+        float* Larger = static_cast<float*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Channels * Needed * sizeof(*Larger)));
+        LONGLONG First = Filled > static_cast<LONGLONG>(Capacity) ? Filled - Capacity : 0;
+
+        if (Larger == nullptr)
+        {
+            Release();
+            return E_OUTOFMEMORY;
+        }
+        for (LONGLONG Frame = First; Frame < Filled; Frame++)
+        {
+            for (UINT Channel = 0; Channel < Channels; Channel++)
+                Larger[Channel * Needed + Frame % Needed] = Ring[Channel * Capacity + Slot(Frame)];
+        }
+        HeapFree(GetProcessHeap(), 0, Ring);
+        Ring = Larger;
+        Capacity = Needed;
+    }
+
+    InOffset = New * TimeOffset;
+    FilterOffset = static_cast<double>(fminf(In, TargetRate)) * TimeOffset * Stretch;
+    Shift += Renumbered - 1 - Last;
     return S_OK;
 }
 
@@ -446,10 +541,13 @@ DsResampler::Reset(VOID)
 {
     if (Ring != nullptr)
         ZeroMemory(Ring, Channels * Capacity * sizeof(*Ring));
-    Phase = 0;
     Position = 0;
     Filled = 0;
     Made = 0;
+    Shift = 0;
+    TimeOffset = 0.0;
+    InOffset = 0.0;
+    FilterOffset = 0.0;
     Fraction = 0.0f;
 }
 
@@ -498,15 +596,28 @@ DsResampler::Convolve(
     return Sum;
 }
 
+/* Last input frame the mixer has taken by the time a given output is made; one more than the filter reads */
+LONGLONG
+DsResampler::Taken(
+    _In_ LONGLONG Output) const
+{
+    double Where = fma(static_cast<double>(Output), Step, InOffset);
+    LONGLONG Edge;
+
+    if (Polyphase)
+        Edge = static_cast<LONGLONG>(floor(Where)) + Half;
+    else
+        Edge = static_cast<LONGLONG>(ceil(Reach + Where));
+    return Edge + 1 - Shift;
+}
+
 /* Last input frame the next output reads */
 LONGLONG
 DsResampler::Newest(VOID) const
 {
     if (Cubic)
         return Position;
-    if (Polyphase)
-        return Position + Half;
-    return DsRound(fma(Step, static_cast<double>(Made), 0.0) + Reach);
+    return Taken(Made);
 }
 
 ULONG
@@ -527,27 +638,26 @@ DsResampler::Pull(
     }
     if (Polyphase)
     {
-        ULONG Start = Slot(Position - static_cast<LONGLONG>(Taps - Half - 1));
-        const float* Row = Coefficients + Phase * Taps;
+        ULONGLONG Travel = static_cast<ULONGLONG>(Down) * static_cast<ULONGLONG>(Made);
+        LONGLONG Center = static_cast<LONGLONG>(Travel / Up) - Shift;
+        ULONG Start = Slot(Center - static_cast<LONGLONG>(Taps - Half - 1));
+        const float* Row = Coefficients + (Travel % Up) * Taps;
 
         for (UINT Channel = 0; Channel < Channels; Channel++)
             Frame[Channel] = Convolve(Row, Taps, Ring + Channel * Capacity, Start);
-
-        Phase += Down;
-        Position += Phase / Up;
-        Phase %= Up;
+        Made += 1;
         return;
     }
 
     {
-        double Where = fma(Step, static_cast<double>(Made), 0.0);
-        double Center = fma(OutStep, static_cast<double>(Made), 0.0);
+        double Where = fma(Step, static_cast<double>(Made), InOffset);
+        double Center = fma(OutStep, static_cast<double>(Made), FilterOffset);
         LONG High = DsRound(Where + Reach);
         LONG Low = DsRound(Where - Reach);
         LONG Before = High - ((High - Low + 4) & ~3);
         ULONG Count = static_cast<ULONG>(High - Before);
         LONG Place = static_cast<LONG>(fma(-InStep, static_cast<double>(Before + 1), Center) * DsFilterScale);
-        ULONG Start = Slot(Before + 1);
+        ULONG Start = Slot(Before + 1 - Shift);
 
         /* Taps walk the filter from the newest distance down, folding over its center */
         for (ULONG Tap = 0; Tap < Count; Tap++)
@@ -571,12 +681,12 @@ DsResampler::InputFor(
     LONGLONG Last;
     LONGLONG Need;
 
+    if (Outputs == 0)
+        return 0;
     if (Cubic)
         Last = Position + static_cast<LONGLONG>(Outputs * (Leap + Creep)) + 2;
-    else if (Polyphase)
-        Last = Position + static_cast<LONGLONG>((Phase + static_cast<ULONGLONG>(Down) * Outputs) / Up) + Half;
     else
-        Last = DsRound(Step * static_cast<double>(Made + Outputs) + Reach);
+        Last = Taken(Made + Outputs - 1);
     Need = Last + 1 - Filled;
     return Need > 0 ? static_cast<ULONG>(Need) : 0;
 }

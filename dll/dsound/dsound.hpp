@@ -335,6 +335,11 @@ public:
         _In_ ULONG InRate,
         _In_ ULONG OutRate);
 
+    /* Changes the input rate in place, as a small rate change during play does */
+    HRESULT
+    Rerate(
+        _In_ float In);
+
     VOID
     Release(VOID);
 
@@ -375,6 +380,16 @@ private:
         _In_ const float* Line,
         _In_ ULONG Slot) const;
 
+    HRESULT
+    Design(
+        _In_ float In,
+        _In_ float Out,
+        _Out_ ULONG* Needed);
+
+    LONGLONG
+    Taken(
+        _In_ LONGLONG Output) const;
+
     LONGLONG
     Newest(VOID) const;
 
@@ -391,9 +406,19 @@ private:
     UINT Channels;
     float* Coefficients;
     float* Ring;
-    ULONG Phase;
+    float SourceRate;
+    float TargetRate;
     LONGLONG Position;
     LONGLONG Filled;
+
+    /* Filter frame numbers run ahead of ring frame numbers by this much after rate changes */
+    LONGLONG Shift;
+
+    /* Time of the output clock origin after rate changes, as input frames and filter units */
+    double TimeOffset;
+    double InOffset;
+    double FilterOffset;
+    double Stretch;
 
     /* Interpolated table path: input frames per output, filter units per frame, reach and gain */
     double Step;

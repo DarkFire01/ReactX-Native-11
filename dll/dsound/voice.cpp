@@ -222,11 +222,26 @@ DsVoice::SetFrequency(
     Format->nAvgBytesPerSec = Frequency * Format->nBlockAlign;
     Ratio = static_cast<float>(Frequency) / static_cast<float>(Device->Rate);
     if (Resampler.Cubic)
+    {
         Resampler.Retune(Frequency, Device->Rate);
+    }
     else if (Frequency == Device->Rate)
+    {
         Resampler.Release();
-    else if (FAILED(Resampler.Configure(Frequency, Device->Rate, Channels)))
+    }
+    else if (Resampler.Active)
+    {
+        /* The converter takes the rate back from the ratio of the device rate to it */
+        float Out = static_cast<float>(Device->Rate);
+        float Scale = Out / static_cast<float>(Frequency);
+
+        if (FAILED(Resampler.Rerate(Out / Scale)))
+            DS_TRACE_ONCE(L"no memory for a %lu Hz rate converter", Frequency);
+    }
+    else if (Frequency != Device->Rate && FAILED(Resampler.Configure(Frequency, Device->Rate, Channels)))
+    {
         DS_TRACE_ONCE(L"no memory for a %lu Hz rate converter", Frequency);
+    }
     Device->Unlock();
 }
 
