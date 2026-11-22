@@ -16,8 +16,10 @@ static constexpr DWORD DdBltKnownFlags = DDBLT_ASYNC | DDBLT_COLORFILL | DDBLT_D
 struct DdBlitJob
 {
     DdSurface* Target;
+    BYTE* TargetBits;
     RECT To;
     DdSurface* Source;
+    BYTE* SourceBits;
     RECT From;
     BOOLEAN Keyed;
     DDCOLORKEY Key;
@@ -84,6 +86,7 @@ static
 VOID
 DdFillRect(
     _In_ DdSurface* Target,
+    _In_ BYTE* Bits,
     _In_ const RECT* To,
     _In_ DWORD Value)
 {
@@ -94,7 +97,7 @@ DdFillRect(
 
     for (Y = To->top; Y < To->bottom; Y++)
     {
-        Row = Target->Bits + Y * Target->Pitch + To->left * Size;
+        Row = Bits + Y * Target->Pitch + To->left * Size;
         for (X = To->left; X < To->right; X++, Row += Size)
             DdWritePixel(Row, Size, Value);
     }
@@ -112,7 +115,7 @@ DdCopyRect(
     LONG SourceWidth = Job.From.right - Job.From.left;
     LONG SourceHeight = Job.From.bottom - Job.From.top;
     BYTE* Copy = nullptr;
-    const BYTE* SourceBits = Job.Source->Bits;
+    const BYTE* SourceBits = Job.SourceBits;
     LONG SourcePitch = Job.Source->Pitch;
     const BYTE* SourceRow;
     BYTE* TargetRow;
@@ -128,7 +131,7 @@ DdCopyRect(
         Copy = static_cast<BYTE*>(LocalAlloc(LMEM_FIXED, static_cast<SIZE_T>(Job.Source->Pitch) * Job.Source->Height));
         if (Copy == nullptr)
             return;
-        memcpy(Copy, Job.Source->Bits, static_cast<SIZE_T>(Job.Source->Pitch) * Job.Source->Height);
+        memcpy(Copy, Job.SourceBits, static_cast<SIZE_T>(Job.Source->Pitch) * Job.Source->Height);
         SourceBits = Copy;
     }
 
@@ -138,7 +141,7 @@ DdCopyRect(
         if (Job.MirrorY)
             SourceY = SourceHeight - 1 - SourceY;
         SourceRow = SourceBits + (Job.From.top + SourceY) * SourcePitch;
-        TargetRow = Job.Target->Bits + (Job.To.top + Y) * Job.Target->Pitch;
+        TargetRow = Job.TargetBits + (Job.To.top + Y) * Job.Target->Pitch;
 
         for (X = 0; X < TargetWidth; X++)
         {
@@ -209,12 +212,25 @@ DdPresentToPrimary(
     POINT Origin = { 0, 0 };
     HBRUSH Brush;
     RECT Local = *To;
+    BYTE* Bits = nullptr;
     HDC Dc;
     int Lines;
+    HRESULT hr;
+
+    if (!Fill)
+    {
+        hr = DdMapSurface(Source, TRUE, &Bits);
+        if (FAILED(hr))
+            return hr;
+    }
 
     Dc = GetDC(Window);
     if (Dc == NULL)
+    {
+        if (!Fill)
+            DdUnmapSurface(Source);
         return DDERR_CANTCREATEDC;
+    }
 
     /* The rectangle is in screen space; a window clipper draws through that window's DC */
     if (Window != NULL)
@@ -248,14 +264,33 @@ DdPresentToPrimary(
 
     SetStretchBltMode(Dc, COLORONCOLOR);
     Lines = StretchDIBits(Dc, Local.left, Local.top, Local.right - Local.left, Local.bottom - Local.top, From->left,
-                          From->top, From->right - From->left, From->bottom - From->top, Source->Bits,
+                          From->top, From->right - From->left, From->bottom - From->top, Bits,
                           reinterpret_cast<BITMAPINFO*>(&Info), DIB_RGB_COLORS, SRCCOPY);
     ReleaseDC(Window, Dc);
+    DdUnmapSurface(Source);
     if (Lines == 0)
     {
         DD_TRACE_ONCE(L"StretchDIBits to the primary failed (%lu)", GetLastError());
         return DDERR_GENERIC;
     }
+    return S_OK;
+}
+
+static
+HRESULT
+DdFillSurface(
+    _In_ DdSurface* Target,
+    _In_ const RECT* To,
+    _In_ DWORD Value)
+{
+    BYTE* Bits;
+    HRESULT hr;
+
+    hr = DdMapSurface(Target, FALSE, &Bits);
+    if (FAILED(hr))
+        return hr;
+    DdFillRect(Target, Bits, To, Value);
+    DdUnmapSurface(Target);
     return S_OK;
 }
 
@@ -271,6 +306,7 @@ DdBlt(
     BOOLEAN Primary = (Target->Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0;
     DdBlitJob Job = {};
     DWORD Rop = SRCCOPY;
+    HRESULT hr;
 
     if (Target == nullptr || (Flags & ~DdBltKnownFlags) != 0)
         return E_INVALIDARG;
@@ -296,8 +332,7 @@ DdBlt(
     {
         if (Primary)
             return DdPresentToPrimary(Target, &Job.To, nullptr, nullptr, TRUE, Fx->dwFillColor);
-        DdFillRect(Target, &Job.To, Fx->dwFillColor);
-        return S_OK;
+        return DdFillSurface(Target, &Job.To, Fx->dwFillColor);
     }
 
     if ((Flags & DDBLT_ROP) != 0)
@@ -307,8 +342,7 @@ DdBlt(
         {
             if (Primary)
                 return DdPresentToPrimary(Target, &Job.To, nullptr, nullptr, TRUE, Rop == BLACKNESS ? 0 : 0xFFFFFFFF);
-            DdFillRect(Target, &Job.To, Rop == BLACKNESS ? 0 : 0xFFFFFFFF);
-            return S_OK;
+            return DdFillSurface(Target, &Job.To, Rop == BLACKNESS ? 0 : 0xFFFFFFFF);
         }
         if (Rop != SRCCOPY)
             return DDERR_NORASTEROPHW;
@@ -360,7 +394,28 @@ DdBlt(
         Job.MirrorY = (Fx->dwDDFX & DDBLTFX_MIRRORUPDOWN) != 0;
     }
 
+    hr = DdMapSurface(Target, FALSE, &Job.TargetBits);
+    if (FAILED(hr))
+        return hr;
+    if (Source == Target)
+    {
+        Job.SourceBits = Job.TargetBits;
+    }
+    else
+    {
+        hr = DdMapSurface(Source, TRUE, &Job.SourceBits);
+        if (FAILED(hr))
+        {
+            DdUnmapSurface(Target);
+            return hr;
+        }
+    }
+
     DdCopyRect(Job);
+
+    if (Source != Target)
+        DdUnmapSurface(Source);
+    DdUnmapSurface(Target);
     Target->Uniqueness += 1;
     return S_OK;
 }

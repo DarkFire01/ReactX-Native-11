@@ -460,6 +460,39 @@ VOID
 DdDestroyKernelDevice(
     _Inout_ DdHardware* Hardware);
 
+D3DDDIFORMAT
+DdDriverFormat(
+    _In_ const DDPIXELFORMAT* Format);
+
+BOOLEAN
+DdDriverCanCreate(
+    _In_ DdHardware* Hardware,
+    _In_ const DDSCAPS2* Caps,
+    _In_ const DDPIXELFORMAT* Format);
+
+HRESULT
+DdCreateSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface);
+
+VOID
+DdDestroySurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface);
+
+HRESULT
+DdLockSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface,
+    _In_opt_ const RECT* Rect,
+    _In_ DWORD Flags,
+    _Outptr_ BYTE** Bits);
+
+HRESULT
+DdUnlockSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface);
+
 /* caps.cpp */
 BOOLEAN
 DdBuildHardwareCaps(
@@ -582,6 +615,16 @@ DdSurfaceFromCom(
 BOOLEAN
 DdSurfaceBusy(
     _In_ const DdSurface* Surface);
+
+HRESULT
+DdMapSurface(
+    _Inout_ DdSurface* Surface,
+    _In_ BOOLEAN ReadOnly,
+    _Outptr_ BYTE** Bits);
+
+VOID
+DdUnmapSurface(
+    _Inout_ DdSurface* Surface);
 
 /* blit.cpp */
 HRESULT

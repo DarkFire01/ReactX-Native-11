@@ -23,6 +23,7 @@ static_assert(sizeof(DdResourceRecord) == 28);
 /* Driver interfaces from this one on must use the newer entry points the runtime checks for */
 static constexpr UINT DdNewEntryPointsVersion = 0x4002;
 static constexpr UINT DdMarkerEntryPointsVersion = 0x4001;
+static constexpr UINT DdCreateResource2Version = 0x3002;
 static constexpr UINT DdAlwaysCreateResource2Version = 0x4000;
 
 RxKernelDevice&
@@ -495,4 +496,344 @@ DdDestroyKernelDevice(
         Kmt->DestroyDevice(&Device);
         Hardware->DeviceHandle = 0;
     }
+}
+
+static
+D3DDDIFORMAT
+DdFormatFromMasks(
+    _In_ const DDPIXELFORMAT* Format)
+{
+    DWORD Red = Format->dwRBitMask;
+    DWORD Green = Format->dwGBitMask;
+    DWORD Blue = Format->dwBBitMask;
+    DWORD Alpha = (Format->dwFlags & DDPF_ALPHAPIXELS) != 0 ? Format->dwRGBAlphaBitMask : 0;
+
+    switch (Format->dwRGBBitCount)
+    {
+    case 32:
+        if (Red == 0xFF0000 && Green == 0xFF00 && Blue == 0xFF)
+            return Alpha == 0xFF000000 ? D3DDDIFMT_A8R8G8B8 : D3DDDIFMT_X8R8G8B8;
+        if (Red == 0xFF && Green == 0xFF00 && Blue == 0xFF0000)
+            return Alpha == 0xFF000000 ? D3DDDIFMT_A8B8G8R8 : D3DDDIFMT_X8B8G8R8;
+        if (Red == 0x3FF00000 && Green == 0xFFC00 && Blue == 0x3FF)
+            return D3DDDIFMT_A2R10G10B10;
+        if (Red == 0x3FF && Green == 0xFFC00 && Blue == 0x3FF00000)
+            return D3DDDIFMT_A2B10G10R10;
+        if (Red == 0xFFFF && Green == 0xFFFF0000 && Blue == 0)
+            return D3DDDIFMT_G16R16;
+        break;
+    case 24:
+        if (Red == 0xFF0000 && Green == 0xFF00 && Blue == 0xFF)
+            return D3DDDIFMT_R8G8B8;
+        break;
+    case 16:
+        if (Red == 0xF800 && Green == 0x7E0 && Blue == 0x1F)
+            return D3DDDIFMT_R5G6B5;
+        if (Red == 0x7C00 && Green == 0x3E0 && Blue == 0x1F)
+            return Alpha == 0x8000 ? D3DDDIFMT_A1R5G5B5 : D3DDDIFMT_X1R5G5B5;
+        if (Red == 0xF00 && Green == 0xF0 && Blue == 0xF)
+            return Alpha == 0xF000 ? D3DDDIFMT_A4R4G4B4 : D3DDDIFMT_X4R4G4B4;
+        if (Red == 0xE0 && Green == 0x1C && Blue == 0x3 && Alpha == 0xFF00)
+            return D3DDDIFMT_A8R3G3B2;
+        break;
+    case 8:
+        if (Red == 0xE0 && Green == 0x1C && Blue == 0x3)
+            return D3DDDIFMT_R3G3B2;
+        break;
+    }
+    return D3DDDIFMT_UNKNOWN;
+}
+
+/* The Direct3D format for a DirectDraw pixel format; unknown when the driver has no such format */
+D3DDDIFORMAT
+DdDriverFormat(
+    _In_ const DDPIXELFORMAT* Format)
+{
+    if ((Format->dwFlags & DDPF_FOURCC) != 0)
+        return static_cast<D3DDDIFORMAT>(Format->dwFourCC);
+    if ((Format->dwFlags & DDPF_PALETTEINDEXED8) != 0)
+        return D3DDDIFMT_P8;
+    if ((Format->dwFlags & (DDPF_PALETTEINDEXED1 | DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4)) != 0)
+        return D3DDDIFMT_UNKNOWN;
+    if ((Format->dwFlags & DDPF_RGB) != 0)
+        return DdFormatFromMasks(Format);
+    if ((Format->dwFlags & DDPF_ALPHA) != 0 && Format->dwAlphaBitDepth == 8)
+        return D3DDDIFMT_A8;
+    return D3DDDIFMT_UNKNOWN;
+}
+
+/* Whether the driver lists the surface's format for what the caps ask of it */
+BOOLEAN
+DdDriverCanCreate(
+    _In_ DdHardware* Hardware,
+    _In_ const DDSCAPS2* Caps,
+    _In_ const DDPIXELFORMAT* Format)
+{
+    D3DDDIFORMAT Wanted = DdDriverFormat(Format);
+    DWORD Needs = 0;
+    UINT Index;
+
+    if ((Caps->dwCaps2 & DDSCAPS2_CUBEMAP) != 0)
+        Needs = FORMATOP_CUBETEXTURE;
+    else if ((Caps->dwCaps & DDSCAPS_TEXTURE) != 0)
+        Needs = FORMATOP_TEXTURE;
+
+    if ((Caps->dwCaps & DDSCAPS_ZBUFFER) != 0)
+        Needs |= FORMATOP_ZSTENCIL;
+    else if ((Caps->dwCaps & DDSCAPS_3DDEVICE) != 0)
+        Needs |= FORMATOP_OFFSCREEN_RENDERTARGET;
+    else if ((Caps->dwCaps & DDSCAPS_OVERLAY) != 0)
+        Needs |= FORMATOP_OVERLAY;
+
+    if ((Caps->dwCaps & DDSCAPS_OFFSCREENPLAIN) != 0 && Needs == 0)
+        Needs = FORMATOP_OFFSCREENPLAIN;
+
+    if (!DdHardwareQueryFormats(Hardware))
+        return FALSE;
+    for (Index = 0; Index < Hardware->FormatCount; Index++)
+    {
+        if (Hardware->Formats[Index].Format == Wanted && (Needs & ~Hardware->Formats[Index].Operations) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static
+D3DDDI_POOL
+DdDriverPool(
+    _In_ DWORD Caps)
+{
+    if ((Caps & DDSCAPS_SYSTEMMEMORY) != 0)
+        return D3DDDIPOOL_SYSTEMMEM;
+    if ((Caps & DDSCAPS_LOCALVIDMEM) != 0)
+        return D3DDDIPOOL_LOCALVIDMEM;
+    if ((Caps & DDSCAPS_NONLOCALVIDMEM) != 0)
+        return D3DDDIPOOL_NONLOCALVIDMEM;
+    return D3DDDIPOOL_VIDEOMEMORY;
+}
+
+static
+D3DDDI_RESOURCEFLAGS
+DdDriverFlags(
+    _In_ const DDSCAPS2* Caps)
+{
+    D3DDDI_RESOURCEFLAGS Flags = {};
+
+    if ((Caps->dwCaps & DDSCAPS_ZBUFFER) != 0)
+        Flags.ZBuffer = TRUE;
+    else if ((Caps->dwCaps & DDSCAPS_3DDEVICE) != 0)
+        Flags.RenderTarget = TRUE;
+    if ((Caps->dwCaps2 & DDSCAPS2_HINTDYNAMIC) != 0)
+        Flags.Dynamic = TRUE;
+    if ((Caps->dwCaps2 & DDSCAPS2_HINTSTATIC) != 0)
+        Flags.HintStatic = TRUE;
+    if ((Caps->dwCaps & DDSCAPS_WRITEONLY) != 0)
+        Flags.WriteOnly = TRUE;
+    if ((Caps->dwCaps & DDSCAPS_OVERLAY) != 0)
+        Flags.Overlay = TRUE;
+
+    if ((Caps->dwCaps2 & DDSCAPS2_CUBEMAP) != 0)
+    {
+        Flags.Texture = TRUE;
+        Flags.CubeMap = TRUE;
+    }
+    else if ((Caps->dwCaps & DDSCAPS_TEXTURE) != 0)
+    {
+        Flags.Texture = TRUE;
+    }
+    return Flags;
+}
+
+/* Bytes the runtime charges against the adapter's memory: whole rows rounded to a DWORD */
+static
+ULONGLONG
+DdChargeFor(
+    _In_ const DdSurface* Surface)
+{
+    ULONGLONG Row = ((static_cast<ULONGLONG>(Surface->Width) * Surface->Format.dwRGBBitCount + 7) / 8 + 3) & ~3ull;
+
+    return Row * Surface->Height;
+}
+
+HRESULT
+DdCreateSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface)
+{
+    const D3DDDI_DEVICEFUNCS& Funcs = Hardware->DeviceFunctions;
+    D3DDDIARG_CREATERESOURCE2 Create = {};
+    D3DDDI_SURFACEINFO Level = {};
+    DdResource* Resource;
+    ULONGLONG Charge;
+    BOOLEAN MayUseShared;
+    BOOLEAN Shared;
+    HRESULT hr;
+
+    Resource = new (std::nothrow) DdResource;
+    if (Resource == nullptr)
+        return E_OUTOFMEMORY;
+    ZeroMemory(Resource, sizeof(*Resource));
+
+    Resource->Format = DdDriverFormat(&Surface->Format);
+    Resource->Pool = DdDriverPool(Surface->Caps.dwCaps);
+    Resource->Flags = DdDriverFlags(&Surface->Caps);
+    Resource->SurfaceCount = 1;
+    Resource->MipLevels = (Surface->Caps.dwCaps & DDSCAPS_TEXTURE) != 0 ? 1 : 0;
+
+    if (Resource->Format == D3DDDIFMT_UNKNOWN)
+    {
+        delete Resource;
+        return E_NOTIMPL;
+    }
+
+    /* Local memory first; plain video memory may spill into the shared pool */
+    Charge = DdChargeFor(Surface);
+    MayUseShared = Resource->Pool == D3DDDIPOOL_NONLOCALVIDMEM ||
+                   (Resource->Pool == D3DDDIPOOL_VIDEOMEMORY && !Resource->Flags.RenderTarget &&
+                    !Resource->Flags.ZBuffer && !Resource->Flags.DecodeRenderTarget &&
+                    !Resource->Flags.VideoProcessRenderTarget && !Resource->Flags.Overlay);
+    if (Resource->Pool != D3DDDIPOOL_NONLOCALVIDMEM && Hardware->LocalMemoryFree > Charge)
+    {
+        Shared = FALSE;
+    }
+    else if (MayUseShared && Hardware->NonLocalMemoryFree > Charge)
+    {
+        Shared = TRUE;
+    }
+    else
+    {
+        delete Resource;
+        return DDERR_OUTOFVIDEOMEMORY;
+    }
+
+    Level.Width = Surface->Width;
+    Level.Height = Surface->Height;
+
+    Create.Format = Resource->Format;
+    Create.Pool = Resource->Pool;
+    Create.pSurfList = &Level;
+    Create.SurfCount = Resource->SurfaceCount;
+    Create.MipLevels = Resource->MipLevels;
+    Create.hResource = Resource;
+    Create.Flags = Resource->Flags;
+    Create.Rotation = D3DDDI_ROTATION_IDENTITY;
+
+    if (Hardware->DriverVersion > DdAlwaysCreateResource2Version ||
+        (Funcs.pfnCreateResource2 != nullptr && Hardware->DriverVersion >= DdCreateResource2Version))
+    {
+        hr = Funcs.pfnCreateResource2(Hardware->DriverDevice, &Create);
+    }
+    else
+    {
+        hr = Funcs.pfnCreateResource(Hardware->DriverDevice, reinterpret_cast<D3DDDIARG_CREATERESOURCE*>(&Create));
+    }
+
+    if (FAILED(hr))
+    {
+        DdTrace(L"UMD CreateResource failed 0x%08lX for a %lux%lu surface of format %u", hr, Surface->Width,
+                Surface->Height, Resource->Format);
+        delete Resource;
+        return hr;
+    }
+
+    Resource->DriverResource = Create.hResource;
+    if (Resource->DriverResource != NULL)
+    {
+        Resource->Charged = static_cast<UINT>(Charge);
+        Resource->ChargedShared = Shared;
+        if (Shared)
+            Hardware->NonLocalMemoryFree -= Charge;
+        else
+            Hardware->LocalMemoryFree -= Charge;
+    }
+
+    Surface->Resource = Resource;
+    Surface->Pitch = 0;
+    return S_OK;
+}
+
+VOID
+DdDestroySurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface)
+{
+    DdResource* Resource = Surface->Resource;
+
+    if (Resource == nullptr)
+        return;
+
+    while (Resource->LockCount != 0)
+        DdUnlockSurfaceResource(Hardware, Surface);
+
+    if (Resource->DriverResource != NULL)
+        Hardware->DeviceFunctions.pfnDestroyResource(Hardware->DriverDevice, Resource->DriverResource);
+
+    if (Resource->ChargedShared)
+        Hardware->NonLocalMemoryFree += Resource->Charged;
+    else
+        Hardware->LocalMemoryFree += Resource->Charged;
+
+    delete Resource;
+    Surface->Resource = nullptr;
+}
+
+HRESULT
+DdLockSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface,
+    _In_opt_ const RECT* Rect,
+    _In_ DWORD Flags,
+    _Outptr_ BYTE** Bits)
+{
+    DdResource* Resource = Surface->Resource;
+    D3DDDIARG_LOCK Lock = {};
+    HRESULT hr;
+
+    *Bits = nullptr;
+    Lock.hResource = Resource->DriverResource;
+    if (Rect != nullptr)
+    {
+        Lock.Area = *Rect;
+        Lock.Flags.AreaValid = TRUE;
+    }
+    if ((Flags & DDLOCK_READONLY) != 0)
+        Lock.Flags.ReadOnly = TRUE;
+    else if ((Flags & DDLOCK_WRITEONLY) != 0)
+        Lock.Flags.WriteOnly = TRUE;
+    if ((Flags & DDLOCK_NOOVERWRITE) != 0)
+        Lock.Flags.NoOverwrite = TRUE;
+    if ((Flags & DDLOCK_DISCARDCONTENTS) != 0)
+        Lock.Flags.Discard = TRUE;
+
+    hr = Hardware->DeviceFunctions.pfnLock(Hardware->DriverDevice, &Lock);
+    if (FAILED(hr))
+    {
+        DdTrace(L"UMD Lock failed 0x%08lX", hr);
+        return hr;
+    }
+
+    Surface->Pitch = static_cast<LONG>(Lock.Pitch);
+    Resource->LockCount += 1;
+    *Bits = static_cast<BYTE*>(Lock.pSurfData);
+    return S_OK;
+}
+
+HRESULT
+DdUnlockSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface)
+{
+    DdResource* Resource = Surface->Resource;
+    D3DDDIARG_UNLOCK Unlock = {};
+    HRESULT hr;
+
+    if (Resource->LockCount == 0)
+        return S_OK;
+
+    Unlock.hResource = Resource->DriverResource;
+    hr = Hardware->DeviceFunctions.pfnUnlock(Hardware->DriverDevice, &Unlock);
+    Resource->LockCount -= 1;
+    if (FAILED(hr))
+        DdTrace(L"UMD Unlock failed 0x%08lX", hr);
+    return hr;
 }
