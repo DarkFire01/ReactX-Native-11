@@ -2008,10 +2008,10 @@ DdSurfaceMissing5(
     DD_SURFACE_SLOT(DdSurfaceQueryInterface), DD_SURFACE_SLOT(DdSurfaceAddRef), DD_SURFACE_SLOT(DdSurfaceRelease), \
     DD_SURFACE_SLOT(DdSurfaceAddAttached), DD_SURFACE_SLOT(DdSurfaceMissing1), DD_SURFACE_SLOT(DdSurfaceBlt), \
     DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceBltFast), DD_SURFACE_SLOT(DdSurfaceDeleteAttached), \
-    DD_SURFACE_SLOT(DdSurfaceEnumAttached), DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceMissing2), \
+    DD_SURFACE_SLOT(DdSurfaceEnumAttached), DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceFlip), \
     DD_SURFACE_SLOT(DdSurfaceGetAttached), DD_SURFACE_SLOT(DdSurfaceStatus), DD_SURFACE_SLOT(DdSurfaceGetCaps), \
     DD_SURFACE_SLOT(DdSurfaceGetClipper), DD_SURFACE_SLOT(DdSurfaceGetColorKey), DD_SURFACE_SLOT(DdSurfaceGetDC), \
-    DD_SURFACE_SLOT(DdSurfaceStatus), DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceGetPalette), \
+    DD_SURFACE_SLOT(DdSurfaceGetFlipStatus), DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceGetPalette), \
     DD_SURFACE_SLOT(DdSurfaceGetPixelFormat), DD_SURFACE_SLOT(DdSurfaceGetSurfaceDesc), \
     DD_SURFACE_SLOT(DdSurfaceInitialize), DD_SURFACE_SLOT(DdSurfaceIsLost), DD_SURFACE_SLOT(DdSurfaceLock), \
     DD_SURFACE_SLOT(DdSurfaceReleaseDC), DD_SURFACE_SLOT(DdSurfaceRestore), DD_SURFACE_SLOT(DdSurfaceSetClipper), \

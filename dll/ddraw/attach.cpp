@@ -458,6 +458,128 @@ DdSurfaceDeleteAttached(
     return S_OK;
 }
 
+/* Flags Flip knows about */
+static constexpr DWORD DdFlipFlags = DDFLIP_WAIT | DDFLIP_EVEN | DDFLIP_ODD | DDFLIP_NOVSYNC | DDFLIP_STEREO |
+                                     DDFLIP_DONOTWAIT | DDFLIP_INTERVAL2 | DDFLIP_INTERVAL3 | DDFLIP_INTERVAL4;
+
+static constexpr DWORD DdFlipIntervals = DDFLIP_INTERVAL2 | DDFLIP_INTERVAL3 | DDFLIP_INTERVAL4;
+
+template <typename T>
+static
+inline
+VOID
+DdTrade(
+    _Inout_ T& First,
+    _Inout_ T& Second)
+{
+    T Held = First;
+
+    First = Second;
+    Second = Held;
+}
+
+/* Trades the memory behind two surfaces; everything else stays with the surface */
+static
+VOID
+DdTradeMemory(
+    _Inout_ DdSurface* First,
+    _Inout_ DdSurface* Second)
+{
+    DdTrade(First->Bits, Second->Bits);
+    DdTrade(First->Section, Second->Section);
+    DdTrade(First->Resource, Second->Resource);
+    DdTrade(First->SystemResource, Second->SystemResource);
+    DdTrade(First->DriverPending, Second->DriverPending);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceFlip(
+    _In_ VOID* Com,
+    _In_opt_ VOID* Target,
+    _In_ DWORD Flags)
+{
+    DdSurface* Surface = DdSurfaceFromCom(Com);
+    DdSurface* Wanted = DdSurfaceFromCom(Target);
+    DdSurface* Partner = nullptr;
+    DdSurface* Member;
+    DdLink* Link;
+    DWORD Caps;
+
+    DdLockScope Lock;
+
+    if ((Flags & ~DdFlipFlags) != 0)
+        return E_INVALIDARG;
+    Caps = Surface->Caps.dwCaps;
+    if ((Flags & (DDFLIP_EVEN | DDFLIP_ODD)) != 0 && (Caps & DDSCAPS_OVERLAY) == 0)
+        return E_INVALIDARG;
+    if ((Flags & DDFLIP_NOVSYNC) != 0 && (Flags & DdFlipIntervals) != 0)
+        return E_INVALIDARG;
+    if ((Flags & DDFLIP_STEREO) != 0)
+        return E_INVALIDARG;
+    if ((Caps & DDSCAPS_FRONTBUFFER) == 0 || (Caps & DDSCAPS_FLIP) == 0)
+        return DDERR_NOTFLIPPABLE;
+    if (DdSurfaceBusy(Surface))
+        return DDERR_SURFACEBUSY;
+    if ((Caps & DDSCAPS_PRIMARYSURFACE) != 0 && Surface->Driver->ExclusiveOwner != Surface->Creator)
+        return DDERR_NOEXCLUSIVEMODE;
+
+    /* Every surface behind the front must be free, at least the ones this flip touches */
+    Link = DdNextInChain(Surface);
+    if (Link == nullptr)
+        return DDERR_NOTFLIPPABLE;
+    for (; Link != nullptr && Link->To != Surface; Link = DdNextInChain(Link->To))
+    {
+        Member = Link->To;
+        if (Partner == nullptr)
+            Partner = Member;
+        if (DdSurfaceBusy(Member) && (Wanted == nullptr || Wanted == Member))
+            return DDERR_SURFACEBUSY;
+        if (Wanted == Member)
+            Partner = Member;
+    }
+    if (Wanted != nullptr && Partner != Wanted)
+        return DDERR_NOTFLIPPABLE;
+    if (((Partner->Caps.dwCaps ^ Caps) & DDSCAPS_SYSTEMMEMORY) != 0)
+        return E_INVALIDARG;
+
+    if ((Caps & DDSCAPS_PRIMARYSURFACE) != 0)
+    {
+        DD_TRACE_ONCE(L"flipping the primary is not implemented yet");
+        return DDERR_UNSUPPORTED;
+    }
+
+    DdTouchSurface(Surface);
+    DdTouchSurface(Partner);
+
+    /* A named target trades with the front; otherwise the memory moves one step along the chain */
+    if (Wanted != nullptr)
+    {
+        DdTradeMemory(Surface, Wanted);
+        return S_OK;
+    }
+    for (Link = DdNextInChain(Surface); Link != nullptr && Link->To != Surface; Link = DdNextInChain(Link->To))
+        DdTradeMemory(Link->From, Link->To);
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceGetFlipStatus(
+    _In_ VOID* Com,
+    _In_ DWORD Flags)
+{
+    DdSurface* Surface = DdSurfaceFromCom(Com);
+
+    DdLockScope Lock;
+
+    if (Flags != DDGFS_CANFLIP && Flags != DDGFS_ISFLIPDONE)
+        return E_INVALIDARG;
+    if ((Surface->Caps.dwCaps & DDSCAPS_RESERVED2) != 0)
+        return DDERR_INVALIDSURFACETYPE;
+    return S_OK;
+}
+
 /* The interface version a caller of this version gets back for an attached surface */
 static
 UCHAR

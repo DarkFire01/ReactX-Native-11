@@ -811,6 +811,19 @@ DdSurfaceGetAttached(
     _In_opt_ VOID* Caps,
     _Out_opt_ VOID** Result);
 
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceFlip(
+    _In_ VOID* Com,
+    _In_opt_ VOID* Target,
+    _In_ DWORD Flags);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceGetFlipStatus(
+    _In_ VOID* Com,
+    _In_ DWORD Flags);
+
 /* blit.cpp */
 HRESULT
 DdBlt(
