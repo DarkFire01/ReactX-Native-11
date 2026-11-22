@@ -1305,6 +1305,28 @@ DcMakeSurface(
     return Surface;
 }
 
+/* Writes a known pattern into every byte of every row, whatever the pixel size */
+static
+VOID
+DcPatternBits(
+    _In_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ DWORD Seed)
+{
+    DDSURFACEDESC2 Desc = {};
+    BYTE* Row;
+
+    Desc.dwSize = sizeof(Desc);
+    if (FAILED(Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        return;
+    for (DWORD Y = 0; Y < Desc.dwHeight; Y++)
+    {
+        Row = static_cast<BYTE*>(Desc.lpSurface) + Y * Desc.lPitch;
+        for (DWORD X = 0; X < (Desc.dwWidth * Desc.ddpfPixelFormat.dwRGBBitCount + 7) / 8; X++)
+            Row[X] = static_cast<BYTE>(Seed + X * 7 + Y * 13);
+    }
+    Surface->Unlock(nullptr);
+}
+
 /* Writes a known pattern into every row, then reads the surface back as bytes */
 static
 VOID
@@ -1347,7 +1369,7 @@ DcDump(
 
         sprintf_s(Label, "  row%lu", Y);
         DcBytes(Label, static_cast<BYTE*>(Desc.lpSurface) + Y * Desc.lPitch,
-                Desc.dwWidth * (Desc.ddpfPixelFormat.dwRGBBitCount / 8));
+                (Desc.dwWidth * Desc.ddpfPixelFormat.dwRGBBitCount + 7) / 8);
     }
     Surface->Unlock(nullptr);
 }
@@ -1532,6 +1554,209 @@ DcCheckVideoOps(
     DcSurfaceOps(Check, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY);
 }
 
+/* A small surface of any pixel format, filled with a known pattern */
+static
+LPDIRECTDRAWSURFACE7
+DcMakeShaped(
+    _In_ LPDIRECTDRAW7 Draw7,
+    _In_ DWORD Caps,
+    _In_ DWORD BitCount,
+    _In_ DWORD PixelFlags,
+    _In_ DWORD Seed)
+{
+    DcSurfaceShape Shape = { "", DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, Caps, 8, 2, BitCount, PixelFlags };
+    LPDIRECTDRAWSURFACE7 Surface = nullptr;
+    DDSURFACEDESC2 Desc;
+
+    if (BitCount == 16)
+    {
+        Shape.Red = 0xF800;
+        Shape.Green = 0x07E0;
+        Shape.Blue = 0x001F;
+    }
+    else if (BitCount == 32)
+    {
+        Shape.Red = 0xFF0000;
+        Shape.Green = 0xFF00;
+        Shape.Blue = 0xFF;
+    }
+    DcFillDesc(Shape, &Desc);
+    if (FAILED(Draw7->CreateSurface(&Desc, &Surface, nullptr)))
+        return nullptr;
+    DcPatternBits(Surface, Seed);
+    return Surface;
+}
+
+/* Blits the emulation layer and the driver each have rules for: keys, conversions, ROPs and clip lists */
+static
+VOID
+DcBlitCase(
+    _In_ LPDIRECTDRAW7 Draw7,
+    _In_z_ PCSTR Name,
+    _In_ DWORD TargetCaps,
+    _In_ DWORD TargetBits,
+    _In_ DWORD TargetFlags,
+    _In_ DWORD SourceCaps,
+    _In_ DWORD SourceBits,
+    _In_ DWORD SourceFlags,
+    _In_ DWORD BltFlags,
+    _In_opt_ const DDBLTFX* Fx,
+    _In_opt_ const RECT* To)
+{
+    LPDIRECTDRAWSURFACE7 Target = DcMakeShaped(Draw7, TargetCaps, TargetBits, TargetFlags, 100);
+    LPDIRECTDRAWSURFACE7 Source = DcMakeShaped(Draw7, SourceCaps, SourceBits, SourceFlags, 1);
+    DDCOLORKEY Key;
+    char Label[64];
+
+    if (Target == nullptr || Source == nullptr)
+    {
+        printf("%s = make failed %d %d\n", Name, Target != nullptr, Source != nullptr);
+    }
+    else
+    {
+        Key.dwColorSpaceLowValue = TargetBits == 32 ? 0x00787F86 : TargetBits == 16 ? 0x7F78 : 0x6B;
+        Key.dwColorSpaceHighValue = Key.dwColorSpaceLowValue;
+        Target->SetColorKey(DDCKEY_DESTBLT, &Key);
+        Key.dwColorSpaceLowValue = SourceBits == 32 ? 0x001D150E : SourceBits == 16 ? 0x0F08 : 0x08;
+        Key.dwColorSpaceHighValue = Key.dwColorSpaceLowValue;
+        Source->SetColorKey(DDCKEY_SRCBLT, &Key);
+        printf("%s = %08lX\n", Name, Target->Blt(const_cast<LPRECT>(To), Source, nullptr, BltFlags,
+                                                   const_cast<LPDDBLTFX>(Fx)));
+        sprintf_s(Label, "  %s_after", Name);
+        DcDump(Label, Target);
+    }
+
+    if (Target != nullptr)
+        Target->Release();
+    if (Source != nullptr)
+        Source->Release();
+}
+
+static
+VOID
+DcCheckBlitRules(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Kinds[] = { DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, DDSCAPS_OFFSCREENPLAIN };
+    static const DWORD Rops[] = { SRCINVERT, SRCAND, SRCPAINT, NOTSRCCOPY, DSTINVERT, PATCOPY, WHITENESS, MERGECOPY };
+    PDC_CREATE_CLIPPER CreateClipper =
+        reinterpret_cast<PDC_CREATE_CLIPPER>(GetProcAddress(Check->Module, "DirectDrawCreateClipper"));
+    struct
+    {
+        RGNDATAHEADER Header;
+        RECT Rects[2];
+    } Region = {};
+    LPDIRECTDRAWCLIPPER Clipper = nullptr;
+    LPDIRECTDRAWSURFACE7 Target;
+    LPDIRECTDRAWSURFACE7 Source;
+    LPDIRECTDRAW7 Draw7;
+    DDBLTFX Fx;
+    RECT Wide;
+    char Name[64];
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    SetRect(&Wide, 0, 0, 8, 2);
+
+    for (DWORD To : Kinds)
+    {
+        for (DWORD From : Kinds)
+        {
+            PCSTR Pair = To == Kinds[0] ? (From == Kinds[0] ? "ss" : "sv") : (From == Kinds[0] ? "vs" : "vv");
+
+            sprintf_s(Name, "%s_copy32", Pair);
+            DcBlitCase(Draw7, Name, To, 32, DDPF_RGB, From, 32, DDPF_RGB, DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_keydest", Pair);
+            DcBlitCase(Draw7, Name, To, 32, DDPF_RGB, From, 32, DDPF_RGB, DDBLT_KEYDEST | DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_keydest16", Pair);
+            DcBlitCase(Draw7, Name, To, 16, DDPF_RGB, From, 16, DDPF_RGB, DDBLT_KEYDEST | DDBLT_WAIT, nullptr, nullptr);
+            memset(&Fx, 0, sizeof(Fx));
+            Fx.dwSize = sizeof(Fx);
+            Fx.ddckDestColorkey.dwColorSpaceLowValue = 0x00878E95;
+            Fx.ddckDestColorkey.dwColorSpaceHighValue = 0x00878E95;
+            sprintf_s(Name, "%s_keydest_override", Pair);
+            DcBlitCase(Draw7, Name, To, 32, DDPF_RGB, From, 32, DDPF_RGB, DDBLT_KEYDESTOVERRIDE | DDBLT_WAIT, &Fx,
+                       nullptr);
+            sprintf_s(Name, "%s_keyboth", Pair);
+            DcBlitCase(Draw7, Name, To, 32, DDPF_RGB, From, 32, DDPF_RGB, DDBLT_KEYDEST | DDBLT_KEYSRC | DDBLT_WAIT,
+                       nullptr, nullptr);
+            sprintf_s(Name, "%s_565_to_32", Pair);
+            DcBlitCase(Draw7, Name, To, 32, DDPF_RGB, From, 16, DDPF_RGB, DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_32_to_565", Pair);
+            DcBlitCase(Draw7, Name, To, 16, DDPF_RGB, From, 32, DDPF_RGB, DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_p8", Pair);
+            DcBlitCase(Draw7, Name, To, 8, DDPF_RGB | DDPF_PALETTEINDEXED8, From, 8, DDPF_RGB | DDPF_PALETTEINDEXED8,
+                       DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_p8_keyed", Pair);
+            DcBlitCase(Draw7, Name, To, 8, DDPF_RGB | DDPF_PALETTEINDEXED8, From, 8, DDPF_RGB | DDPF_PALETTEINDEXED8,
+                       DDBLT_KEYSRC | DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_p4", Pair);
+            DcBlitCase(Draw7, Name, To, 4, DDPF_RGB | DDPF_PALETTEINDEXED4, From, 4, DDPF_RGB | DDPF_PALETTEINDEXED4,
+                       DDBLT_WAIT, nullptr, nullptr);
+            sprintf_s(Name, "%s_p4_shift", Pair);
+            SetRect(&Wide, 1, 0, 6, 2);
+            DcBlitCase(Draw7, Name, To, 4, DDPF_RGB | DDPF_PALETTEINDEXED4, From, 4, DDPF_RGB | DDPF_PALETTEINDEXED4,
+                       DDBLT_WAIT, nullptr, &Wide);
+            SetRect(&Wide, 0, 0, 8, 2);
+
+            for (DWORD Rop : Rops)
+            {
+                memset(&Fx, 0, sizeof(Fx));
+                Fx.dwSize = sizeof(Fx);
+                Fx.dwROP = Rop;
+                sprintf_s(Name, "%s_rop_%08lX", Pair, Rop);
+                DcBlitCase(Draw7, Name, To, 32, DDPF_RGB, From, 32, DDPF_RGB, DDBLT_ROP | DDBLT_WAIT, &Fx, nullptr);
+            }
+        }
+
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillColor = 0x5;
+        Target = DcMakeShaped(Draw7, To, 4, DDPF_RGB | DDPF_PALETTEINDEXED4, 100);
+        if (Target != nullptr)
+        {
+            SetRect(&Wide, 1, 0, 6, 2);
+            printf("%s_fill_p4 = %08lX\n", To == Kinds[0] ? "s" : "v",
+                   Target->Blt(&Wide, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+            DcDump("  fill_p4_after", Target);
+            Target->Release();
+        }
+
+        /* An off screen surface with a clip list only takes the listed rectangles */
+        Target = DcMakeShaped(Draw7, To, 32, DDPF_RGB, 100);
+        Source = DcMakeShaped(Draw7, To, 32, DDPF_RGB, 1);
+        if (Target != nullptr && Source != nullptr && CreateClipper(0, &Clipper, nullptr) == S_OK)
+        {
+            Region.Header.dwSize = sizeof(Region.Header);
+            Region.Header.iType = RDH_RECTANGLES;
+            Region.Header.nCount = 2;
+            Region.Header.nRgnSize = sizeof(Region.Rects);
+            SetRect(&Region.Header.rcBound, 1, 0, 7, 2);
+            SetRect(&Region.Rects[0], 1, 0, 3, 1);
+            SetRect(&Region.Rects[1], 5, 1, 7, 2);
+            printf("clip_list = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&Region), 0));
+            printf("clip_attach = %08lX\n", Target->SetClipper(Clipper));
+            printf("%s_clipped = %08lX\n", To == Kinds[0] ? "s" : "v",
+                   Target->Blt(nullptr, Source, nullptr, DDBLT_WAIT, nullptr));
+            DcDump("  clipped_after", Target);
+            Fx.dwFillColor = 0x00ABCDEF;
+            printf("%s_clipped_fill = %08lX\n", To == Kinds[0] ? "s" : "v",
+                   Target->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+            DcDump("  clipped_fill_after", Target);
+            Target->SetClipper(nullptr);
+            Clipper->Release();
+        }
+        if (Target != nullptr)
+            Target->Release();
+        if (Source != nullptr)
+            Source->Release();
+    }
+
+    Draw7->Release();
+}
+
 /* Video memory surfaces charge the adapter's memory and give it back when released */
 static
 VOID
@@ -1685,6 +1910,7 @@ static const DrawCheckInfo DcChecks[] =
     { "surface_ops", DcCheckSurfaceOps },
     { "video_ops", DcCheckVideoOps },
     { "video_memory", DcCheckVideoMemory },
+    { "blit_rules", DcCheckBlitRules },
     { "present", DcCheckPresent },
 };
 
