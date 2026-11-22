@@ -412,6 +412,9 @@ struct DdGlobals
 
 extern DdGlobals DdState;
 
+/* The answer for optimized surfaces; the SDK headers have no name for this code */
+static constexpr HRESULT DdErrOptimizedSurface = MAKE_DDHRESULT(655);
+
 /* Takes the runtime lock and resets objects when the display changed underneath them */
 class DdLockScope
 {

@@ -447,7 +447,7 @@ DdSurfaceDeleteAttached(
     if (Surface->Lost || (Other != nullptr && Other->Lost))
         return DDERR_SURFACELOST;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
 
     if (Other != nullptr)
         return DdDetach(Surface, Version, Other, DdSurfaceVersionOf(Attach), TRUE, FALSE);

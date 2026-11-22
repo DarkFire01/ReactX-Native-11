@@ -1284,7 +1284,7 @@ DdRestoreSurface(
     if (!Surface->Lost)
         return S_OK;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     if ((Surface->ChainFlags & DdChainImplicit) != 0)
         return DDERR_IMPLICITLYCREATED;
     if (memcmp(&Surface->CreatedMode, &Driver->ModeKey, sizeof(Driver->ModeKey)) != 0 ||
@@ -2191,7 +2191,7 @@ DdSurfaceSetSurfaceDesc(
     DdLockScope Lock;
 
     if ((Interface->Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     if (Flags != 0 || Given == nullptr)
         return E_INVALIDARG;
 
@@ -2263,10 +2263,10 @@ DdSurfaceBltBatch(
             if (DdSurfaceBusy(Source))
                 return DDERR_SURFACEBUSY;
             if ((Source->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-                return DDERR_NOTONMIPMAPSUBLEVEL;
+                return DdErrOptimizedSurface;
         }
         if ((Target->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-            return DDERR_NOTONMIPMAPSUBLEVEL;
+            return DdErrOptimizedSurface;
 
         if (Entry->lpDDBltFx != nullptr)
         {

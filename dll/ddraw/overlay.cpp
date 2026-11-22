@@ -64,7 +64,7 @@ DdSurfaceSetOverlayPosition(
     if (Surface->Lost)
         return DDERR_SURFACELOST;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     if ((Surface->Caps.dwCaps & DDSCAPS_OVERLAY) == 0)
         return DDERR_NOTAOVERLAYSURFACE;
     return DDERR_OVERLAYNOTVISIBLE;
@@ -84,7 +84,7 @@ DdSurfaceGetOverlayPosition(
     if (Surface->Lost)
         return DDERR_SURFACELOST;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     if ((Surface->Caps.dwCaps & DDSCAPS_OVERLAY) == 0)
         return DDERR_NOTAOVERLAYSURFACE;
     return DDERR_OVERLAYNOTVISIBLE;
@@ -118,7 +118,7 @@ DdSurfaceUpdateOverlayZOrder(
     DdLockScope Lock;
 
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     if ((Surface->Caps.dwCaps & DDSCAPS_OVERLAY) == 0)
         return DDERR_NOTAOVERLAYSURFACE;
     return DDERR_UNSUPPORTED;
@@ -139,7 +139,7 @@ DdSurfaceAddOverlayDirtyRect(
     if (Rect == nullptr || Rect->left < 0 || Rect->top < 0 || Rect->right < Rect->left || Rect->bottom < Rect->top)
         return E_INVALIDARG;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     return DdEmulatedOnly(Surface) ? DDERR_UNSUPPORTED : S_OK;
 }
 
@@ -158,6 +158,6 @@ DdSurfaceUpdateOverlayDisplay(
     if ((Surface->Caps.dwCaps & DDSCAPS_RESERVED2) != 0)
         return DDERR_INVALIDSURFACETYPE;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
-        return DDERR_NOTONMIPMAPSUBLEVEL;
+        return DdErrOptimizedSurface;
     return DdEmulatedOnly(Surface) ? DDERR_UNSUPPORTED : S_OK;
 }
