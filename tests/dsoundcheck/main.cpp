@@ -40,6 +40,7 @@ typedef HRESULT (WINAPI* PDC_FULL_DUPLEX)(LPCGUID, LPCGUID, LPCDSCBUFFERDESC, LP
 static HMODULE DcModule;
 static HWND DcWindow;
 static PCWSTR DcSection;
+static UINT DcFirstMixCase;
 
 static
 BOOLEAN
@@ -2031,6 +2032,55 @@ DcSetScene(
     Primary->Release();
 }
 
+/* A new device object with its stream already running on a silent warm up */
+static
+HRESULT
+DcOpenMixDevice(
+    _Out_ IDirectSound8** Sound)
+{
+    WAVEFORMATEX Format;
+    IDirectSoundBuffer* Buffer;
+    HRESULT hr;
+
+    hr = DcCreate8(Sound);
+    if (FAILED(hr))
+        return hr;
+    (*Sound)->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+
+    DcFormat(&Format, WAVE_FORMAT_PCM, 2, 48000, 16);
+    if (SUCCEEDED(DcMakeBuffer(*Sound, DSBCAPS_GLOBALFOCUS, 9600, &Format, &Buffer)))
+    {
+        Buffer->Play(0, 0, 0);
+        Sleep(300);
+        Buffer->Release();
+    }
+    return S_OK;
+}
+
+/* Waits until the mixer has moved the write cursor the given number of times, right after the last move */
+static
+DWORD
+DcWaitForPasses(
+    _In_ IDirectSoundBuffer* Buffer,
+    _In_ UINT Passes)
+{
+    ULONGLONG End = GetTickCount64() + 1000;
+    DWORD Last = 0;
+    DWORD Write = 0;
+
+    Buffer->GetCurrentPosition(nullptr, &Last);
+    while (Passes > 0 && GetTickCount64() < End)
+    {
+        Buffer->GetCurrentPosition(nullptr, &Write);
+        if (Write != Last)
+        {
+            Last = Write;
+            Passes -= 1;
+        }
+    }
+    return Last;
+}
+
 /* Plays short quiet buffers and compares what reaches the endpoint, sample for sample */
 static
 VOID
@@ -2087,29 +2137,24 @@ DcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
         { WAVE_FORMAT_IEEE_FLOAT, 2, FALSE, 32000, 32, 0, 0, DSBCAPS_GLOBALFOCUS, 61 },
         { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 62 },
+        /* Rate changes during play, each on a new device that has not left the polyphase converter */
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 63 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 63 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 64 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 65 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 65 },
     };
     IDirectSound8* Sound;
 
-    if (FAILED(DcCreate8(&Sound)))
-        return;
-    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
-
     /* A silent warm up gets the stream running, so its start does not land in a measurement */
-    {
-        WAVEFORMATEX Format;
-        IDirectSoundBuffer* Buffer;
+    if (FAILED(DcOpenMixDevice(&Sound)))
+        return;
 
-        DcFormat(&Format, WAVE_FORMAT_PCM, 2, 48000, 16);
-        if (SUCCEEDED(DcMakeBuffer(Sound, DSBCAPS_GLOBALFOCUS, 9600, &Format, &Buffer)))
-        {
-            Buffer->Play(0, 0, 0);
-            Sleep(300);
-            Buffer->Release();
-        }
-    }
-
-    for (UINT Case = 0; Case < ARRAYSIZE(Cases); Case++)
+    for (UINT Case = DcFirstMixCase; Case < ARRAYSIZE(Cases); Case++)
     {
+        UINT Scene = Cases[Case].Scene;
+        BOOLEAN Later = Scene >= 63 && Scene <= 65;
+        size_t Shown = Later ? 1800 : 200;
         DcLoopback Loopback;
         WAVEFORMATEX Format;
         IDirectSoundBuffer* Buffer;
@@ -2121,6 +2166,12 @@ DcCheckMix(VOID)
         size_t Onset;
         size_t Frames;
 
+        if (Later)
+        {
+            Sound->Release();
+            if (FAILED(DcOpenMixDevice(&Sound)))
+                return;
+        }
         hr = Loopback.Start();
         if (FAILED(hr))
         {
@@ -2133,7 +2184,7 @@ DcCheckMix(VOID)
         Bytes = Format.nAvgBytesPerSec / 4 / Format.nBlockAlign * Format.nBlockAlign;
         hr = DcMakeBuffer(Sound,
                           DSBCAPS_CTRLVOLUME | Cases[Case].Focus |
-                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
+                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 || Later ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
                                Cases[Case].Scene >= 50 && Cases[Case].Scene < 60 ? DSBCAPS_CTRLFX :
                                Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
                           Bytes, &Format, &Buffer);
@@ -2176,6 +2227,16 @@ DcCheckMix(VOID)
         hr = Buffer->Play(0, 0, 0);
         if (FAILED(hr))
             fprintf(stderr, "mix[%u] play = %08lX\n", Case, hr);
+        if (Later)
+        {
+            /* The change lands between two mixer passes, a few passes into play */
+            DWORD Rate = Format.nSamplesPerSec;
+            DWORD Write = DcWaitForPasses(Buffer, 3);
+            DWORD NewRate = Scene == 63 ? Rate + Rate / 1000 : Scene == 64 ? Rate + Rate / 500 : Rate * 3 / 2;
+
+            hr = Buffer->SetFrequency(NewRate);
+            printf("  setfrequency %lu after write %lu = %08lX\n", NewRate, Write, hr);
+        }
         Loopback.Collect(500);
         {
             float Peak = 0.0f;
@@ -2217,7 +2278,7 @@ DcCheckMix(VOID)
             }
             for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
                 printf("  channel %u sum %.9g power %.9g\n", Channel, Sum[Channel], Power[Channel]);
-            for (size_t Frame = 0; Frame < 200 && Frame < Count; Frame++)
+            for (size_t Frame = 0; Frame < Shown && Frame < Frames; Frame++)
             {
                 printf("  frame %2zu", Frame);
                 for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
@@ -2242,6 +2303,8 @@ wmain(
             Runtime = argv[++Index];
         else if (_wcsicmp(argv[Index], L"-section") == 0 && Index + 1 < argc)
             DcSection = argv[++Index];
+        else if (_wcsicmp(argv[Index], L"-from") == 0 && Index + 1 < argc)
+            DcFirstMixCase = static_cast<UINT>(_wtoi(argv[++Index]));
     }
 
     setvbuf(stdout, nullptr, _IONBF, 0);
