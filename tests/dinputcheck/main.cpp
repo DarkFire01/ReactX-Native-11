@@ -30,6 +30,7 @@ static PDC_CAN_UNLOAD DcCanUnloadNow;
 static HINSTANCE DcSelf;
 static HWND DcWindow;
 static HWND DcChild;
+static PCWSTR DcScratch;
 
 typedef struct _DC_NAMED_IID
 {
@@ -1218,6 +1219,168 @@ DcCheckDevices(VOID)
     }
 }
 
+static
+VOID
+DcDumpFile(
+    _In_z_ PCSTR Path)
+{
+    BYTE Data[4096];
+    DWORD Read = 0;
+    HANDLE File = CreateFileA(Path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        printf("    file missing\n");
+        return;
+    }
+    ReadFile(File, Data, sizeof(Data), &Read, nullptr);
+    CloseHandle(File);
+    printf("    file size %lu\n", Read);
+    for (DWORD Offset = 0; Offset < Read; Offset += 32)
+        DcBytes("     ", Data + Offset, (Read - Offset < 32) ? Read - Offset : 32);
+}
+
+static
+BOOL
+CALLBACK
+DcEnumFileEffects(
+    _In_ LPCDIFILEEFFECT Entry,
+    _In_ LPVOID Context)
+{
+    const DIEFFECT* Effect = Entry->lpDiEffect;
+    ULONG* Count = static_cast<ULONG*>(Context);
+
+    printf("    effect %lu size %lu guid %s name '%.64s'\n", *Count, Entry->dwSize, DcGuid(Entry->GuidEffect).c_str(),
+           Entry->szFriendlyName);
+    printf("      size %lu flags %08lX dur %lu period %lu gain %lu trig %08lX rep %lu axes %lu cb %lu start %lu tsp %s\n",
+           Effect->dwSize, Effect->dwFlags, Effect->dwDuration, Effect->dwSamplePeriod, Effect->dwGain,
+           Effect->dwTriggerButton, Effect->dwTriggerRepeatInterval, Effect->cAxes, Effect->cbTypeSpecificParams,
+           Effect->dwStartDelay, Effect->lpvTypeSpecificParams ? "set" : "null");
+    for (DWORD Axis = 0; Axis < Effect->cAxes && Axis < 4; Axis++)
+        printf("      axis %lu ofs %lu dir %ld\n", Axis, Effect->rgdwAxes[Axis], Effect->rglDirection[Axis]);
+    if (Effect->lpEnvelope != nullptr)
+        DcBytes("      envelope", Effect->lpEnvelope, sizeof(DIENVELOPE));
+    if (Effect->cbTypeSpecificParams != 0 && Effect->cbTypeSpecificParams < 64 && Effect->lpvTypeSpecificParams != nullptr)
+        DcBytes("      params", Effect->lpvTypeSpecificParams, Effect->cbTypeSpecificParams);
+    return ++*Count < 3 ? DIENUM_CONTINUE : DIENUM_STOP;
+}
+
+/* Effect files under the scratch folder, written and read back with the keyboard device */
+static
+VOID
+DcCheckEffectFiles(VOID)
+{
+    static const GUID Custom = { 0x11223344, 0x5566, 0x7788, { 9, 10, 11, 12, 13, 14, 15, 16 } };
+    IDirectInput7W* Input = nullptr;
+    IDirectInputDevice7W* Device = nullptr;
+    IDirectInputDevice7A* DeviceA = nullptr;
+    DWORD Axes[2] = { DIJOFS_X, DIJOFS_Y };
+    LONG Directions[2] = { 4500, -100 };
+    DIENVELOPE Envelope = { sizeof(DIENVELOPE), 100, 200, 300, 400 };
+    DICONSTANTFORCE Constant = { 5000 };
+    DIPERIODIC Periodic = { 1000, -200, 9000, 50000 };
+    DIEFFECT Effects[4] = {};
+    DIFILEEFFECT Entries[4] = {};
+    CHAR Path[MAX_PATH];
+    CHAR Other[MAX_PATH];
+    WCHAR WidePath[MAX_PATH];
+    ULONG Count;
+    HRESULT hr;
+
+    DcCreateEx(DcSelf, 0x0700, IID_IDirectInput7W, reinterpret_cast<PVOID*>(&Input), nullptr);
+    Input->CreateDeviceEx(GUID_SysKeyboard, IID_IDirectInputDevice7W, reinterpret_cast<PVOID*>(&Device), nullptr);
+    Device->QueryInterface(IID_IDirectInputDevice7A, reinterpret_cast<PVOID*>(&DeviceA));
+
+    for (ULONG Index = 0; Index < _countof(Effects); Index++)
+    {
+        Effects[Index].dwSize = sizeof(DIEFFECT);
+        Effects[Index].dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
+        Effects[Index].dwDuration = 1000000 + Index;
+        Effects[Index].dwSamplePeriod = 10 + Index;
+        Effects[Index].dwGain = 9000;
+        Effects[Index].dwTriggerButton = DIEB_NOTRIGGER;
+        Effects[Index].dwTriggerRepeatInterval = 7;
+        Effects[Index].cAxes = 2;
+        Effects[Index].rgdwAxes = Axes;
+        Effects[Index].rglDirection = Directions;
+        Effects[Index].dwStartDelay = 33;
+        Entries[Index].dwSize = sizeof(DIFILEEFFECT);
+        Entries[Index].lpDiEffect = &Effects[Index];
+        sprintf_s(Entries[Index].szFriendlyName, "effect number %lu", Index);
+    }
+    Entries[0].GuidEffect = GUID_ConstantForce;
+    Effects[0].lpEnvelope = &Envelope;
+    Effects[0].cbTypeSpecificParams = sizeof(Constant);
+    Effects[0].lpvTypeSpecificParams = &Constant;
+    Entries[1].GuidEffect = Custom;
+    Entries[2].GuidEffect = GUID_Sine;
+    Effects[2].cbTypeSpecificParams = sizeof(Periodic);
+    Effects[2].lpvTypeSpecificParams = &Periodic;
+    Effects[2].cAxes = 1;
+    Entries[3].GuidEffect = GUID_Spring;
+    Effects[3].rgdwAxes = nullptr;
+    Effects[3].rglDirection = nullptr;
+
+    for (ULONG Flags = 0; Flags < 2; Flags++)
+    {
+        sprintf_s(Path, "%ls\\dinputcheck_effects_%lu.ffe", DcScratch, Flags);
+        DeleteFileA(Path);
+        hr = DeviceA->WriteEffectToFile(Path, _countof(Entries), Entries, Flags);
+        printf("  writeeffects flags %lu = %08lX\n", Flags, hr);
+        DcDumpFile(Path);
+
+        for (DWORD EnumFlags = 0; EnumFlags <= DIFEF_MODIFYIFNEEDED; EnumFlags += (EnumFlags == 0) ? 1 : 15)
+        {
+            Count = 0;
+            hr = DeviceA->EnumEffectsInFile(Path, DcEnumFileEffects, &Count, EnumFlags);
+            printf("  enumeffectsinfile flags %lu = %08lX count %lu\n", EnumFlags, hr, Count);
+        }
+    }
+
+    MultiByteToWideChar(CP_ACP, 0, Path, -1, WidePath, _countof(WidePath));
+    Count = 0;
+    printf("  enumeffectsinfileW = %08lX\n", Device->EnumEffectsInFile(WidePath, DcEnumFileEffects, &Count, DIFEF_INCLUDENONSTANDARD));
+
+    /* A long friendly name is refused, a long path is refused, and so are odd flags */
+    memset(Entries[0].szFriendlyName, 'x', 259);
+    Entries[0].szFriendlyName[259] = '\0';
+    sprintf_s(Other, "%ls\\dinputcheck_longname.ffe", DcScratch);
+    DeleteFileA(Other);
+    printf("  writeeffects longname = %08lX\n", DeviceA->WriteEffectToFile(Other, 1, Entries, 0));
+    DcDumpFile(Other);
+    sprintf_s(Entries[0].szFriendlyName, "renamed");
+
+    printf("  writeeffects null effects = %08lX\n", DeviceA->WriteEffectToFile(Other, 0, nullptr, 0));
+    printf("  writeeffects badflags = %08lX\n", DeviceA->WriteEffectToFile(Other, 1, Entries, 2));
+    printf("  writeeffects null name = %08lX\n", DeviceA->WriteEffectToFile(nullptr, 1, Entries, 0));
+    printf("  writeeffects empty name = %08lX\n", DeviceA->WriteEffectToFile("", 1, Entries, 0));
+    DeleteFileA(Other);
+    printf("  writeeffects none = %08lX\n", DeviceA->WriteEffectToFile(Other, 0, Entries, 0));
+    DcDumpFile(Other);
+    printf("  writeeffectsW = %08lX\n", Device->WriteEffectToFile(L"", 1, Entries, 0));
+
+    Count = 0;
+    printf("  enumeffectsinfile missing = %08lX\n", DeviceA->EnumEffectsInFile("C:\\nonexistent\\nothing.ffe", DcEnumFileEffects, &Count, 0));
+    printf("  enumeffectsinfile null callback = %08lX\n", DeviceA->EnumEffectsInFile(Path, nullptr, nullptr, 0));
+    printf("  enumeffectsinfile badflags = %08lX\n", DeviceA->EnumEffectsInFile(Path, DcEnumFileEffects, &Count, 2));
+    printf("  enumeffectsinfile null name = %08lX\n", DeviceA->EnumEffectsInFile(nullptr, DcEnumFileEffects, &Count, 0));
+
+    /* A file that is not an effect file */
+    sprintf_s(Other, "%ls\\dinputcheck_notriff.ffe", DcScratch);
+    {
+        HANDLE File = CreateFileA(Other, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        DWORD Written;
+
+        WriteFile(File, "RIFF\x10\x00\x00\x00WAVEjunkjunkjunk", 24, &Written, nullptr);
+        CloseHandle(File);
+    }
+    printf("  enumeffectsinfile notriff = %08lX\n", DeviceA->EnumEffectsInFile(Other, DcEnumFileEffects, &Count, 0));
+
+    DeviceA->Release();
+    Device->Release();
+    Input->Release();
+}
+
 int
 __cdecl
 wmain(
@@ -1232,6 +1395,8 @@ wmain(
     {
         if (_wcsicmp(argv[Index], L"-runtime") == 0 && Index + 1 < argc)
             Runtime = argv[++Index];
+        else if (_wcsicmp(argv[Index], L"-scratch") == 0 && Index + 1 < argc)
+            DcScratch = argv[++Index];
     }
 
     Module = LoadLibraryW(DcRuntimePath(Runtime).c_str());
@@ -1267,6 +1432,8 @@ wmain(
     DcCheckEnumDevices(0x0700);
     DcCheckInputObject();
     DcCheckDevices();
+    if (DcScratch != nullptr)
+        DcCheckEffectFiles();
     printf("cancanunload end = %08lX\n", DcCanUnloadNow());
 
     DestroyWindow(DcChild);
