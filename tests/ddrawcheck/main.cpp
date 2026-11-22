@@ -1176,6 +1176,24 @@ DcCheckSurfaceCreate(
         { "sys_332", Size, Sys, 13, 7, 8, DDPF_RGB, 0xE0, 0x1C, 0x03 },
         { "video_565", Size, Plain, 13, 7, 16, DDPF_RGB, 0xF800, 0x07E0, 0x001F },
         { "video_p8", Size, Plain, 13, 7, 8, DDPF_RGB | DDPF_PALETTEINDEXED8 },
+        { "video_555", Size, Plain, 13, 7, 16, DDPF_RGB, 0x7C00, 0x03E0, 0x001F },
+        { "video_1555", Size, Plain, 13, 7, 16, DDPF_RGB | DDPF_ALPHAPIXELS, 0x7C00, 0x03E0, 0x001F, 0x8000 },
+        { "video_4444", Size, Plain, 13, 7, 16, DDPF_RGB | DDPF_ALPHAPIXELS, 0x0F00, 0x00F0, 0x000F, 0xF000 },
+        { "video_24", Size, Plain, 13, 7, 24, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "video_32", Size, Plain, 13, 7, 32, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "video_8888", Size, Plain, 13, 7, 32, DDPF_RGB | DDPF_ALPHAPIXELS, 0xFF0000, 0xFF00, 0xFF, 0xFF000000 },
+        { "video_bgr", Size, Plain, 13, 7, 32, DDPF_RGB, 0xFF, 0xFF00, 0xFF0000 },
+        { "video_332", Size, Plain, 13, 7, 8, DDPF_RGB, 0xE0, 0x1C, 0x03 },
+        { "video_p4", Size, Plain, 13, 7, 4, DDPF_RGB | DDPF_PALETTEINDEXED4 },
+        { "video_local", Size, Plain | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM, 64, 32 },
+        { "video_nonlocal", Size, Plain | DDSCAPS_VIDEOMEMORY | DDSCAPS_NONLOCALVIDMEM, 64, 32 },
+        { "video_wide", Size, Plain, 1000, 3 },
+        { "vidmem_24", Size, Plain | DDSCAPS_VIDEOMEMORY, 13, 7, 24, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "vidmem_bgr", Size, Plain | DDSCAPS_VIDEOMEMORY, 13, 7, 32, DDPF_RGB, 0xFF, 0xFF00, 0xFF0000 },
+        { "vidmem_p4", Size, Plain | DDSCAPS_VIDEOMEMORY, 13, 7, 4, DDPF_RGB | DDPF_PALETTEINDEXED4 },
+        { "local_24", Size, Plain | DDSCAPS_LOCALVIDMEM, 13, 7, 24, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "nocaps_24", DDSD_WIDTH | DDSD_HEIGHT, 0, 13, 7, 24, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "video_zero_alpha", Size, Plain, 13, 7, 32, DDPF_RGB | DDPF_ALPHAPIXELS, 0xFF0000, 0xFF00, 0xFF, 0 },
         { "no_caps", DDSD_WIDTH | DDSD_HEIGHT, 0, 64, 32 },
         { "caps_zero", Size, 0, 64, 32 },
         { "no_size", DDSD_CAPS, Sys, 0, 0 },
@@ -1191,6 +1209,9 @@ DcCheckSurfaceCreate(
     LPDIRECTDRAWSURFACE7 Surface;
     LPDIRECTDRAW7 Draw7;
     DDSURFACEDESC2 Desc;
+    BYTE* Whole;
+    RECT Part;
+    HDC Dc;
     HRESULT hr;
 
     Draw7 = DcCreate7(Check);
@@ -1223,11 +1244,26 @@ DcCheckSurfaceCreate(
         printf("  lock = %08lX pitch=%ld flags=%08lX\n", hr, Desc.lPitch, Desc.dwFlags);
         if (SUCCEEDED(hr))
         {
+            Whole = static_cast<BYTE*>(Desc.lpSurface);
             Desc.lpSurface = nullptr;
             DcBytes("  lock_desc", &Desc, sizeof(Desc));
             printf("  unlock = %08lX\n", Surface->Unlock(nullptr));
+
+            SetRect(&Part, 2, 1, 5, 3);
+            hr = Surface->Lock(&Part, &Desc, DDLOCK_WAIT, NULL);
+            printf("  lock_part = %08lX offset=%Id pitch=%ld\n", hr,
+                   SUCCEEDED(hr) ? static_cast<BYTE*>(Desc.lpSurface) - Whole : 0, Desc.lPitch);
+            if (SUCCEEDED(hr))
+                printf("  unlock_part = %08lX\n", Surface->Unlock(&Part));
         }
         printf("  unlock_again = %08lX\n", Surface->Unlock(nullptr));
+        hr = Surface->GetDC(&Dc);
+        printf("  get_dc = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            printf("  lock_in_dc = %08lX\n", Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL));
+            printf("  release_dc = %08lX\n", Surface->ReleaseDC(Dc));
+        }
         printf("  release = %lu\n", Surface->Release());
     }
 
@@ -1318,10 +1354,10 @@ DcDump(
 
 static
 VOID
-DcCheckSurfaceOps(
-    _Inout_ DrawCheck* Check)
+DcSurfaceOps(
+    _Inout_ DrawCheck* Check,
+    _In_ DWORD Sys)
 {
-    static const DWORD Sys = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
     LPDIRECTDRAWSURFACE7 Target;
     LPDIRECTDRAWSURFACE7 Source;
     LPDIRECTDRAWSURFACE7 Wide;
@@ -1480,6 +1516,81 @@ DcCheckSurfaceOps(
     Draw7->Release();
 }
 
+static
+VOID
+DcCheckSurfaceOps(
+    _Inout_ DrawCheck* Check)
+{
+    DcSurfaceOps(Check, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY);
+}
+
+static
+VOID
+DcCheckVideoOps(
+    _Inout_ DrawCheck* Check)
+{
+    DcSurfaceOps(Check, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY);
+}
+
+/* Video memory surfaces charge the adapter's memory and give it back when released */
+static
+VOID
+DcCheckVideoMemory(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Kinds[] = { DDSCAPS_VIDEOMEMORY, DDSCAPS_LOCALVIDMEM, DDSCAPS_NONLOCALVIDMEM };
+    LPDIRECTDRAWSURFACE7 Surfaces[2];
+    LPDIRECTDRAW7 Draw7;
+    DWORD Before[_countof(Kinds)];
+    DWORD Total;
+    DWORD Free;
+    DDSCAPS2 Caps;
+    DWORD Index;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (Index = 0; Index < _countof(Kinds); Index++)
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = Kinds[Index];
+        Before[Index] = 0;
+        Draw7->GetAvailableVidMem(&Caps, &Total, &Before[Index]);
+    }
+
+    Surfaces[0] = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 256, 64, 32);
+    Surfaces[1] = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 13, 7, 16);
+    printf("made = %d %d\n", Surfaces[0] != nullptr, Surfaces[1] != nullptr);
+
+    for (Index = 0; Index < _countof(Kinds); Index++)
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = Kinds[Index];
+        Free = 0;
+        printf("vidmem %08lX = %08lX", Kinds[Index], Draw7->GetAvailableVidMem(&Caps, &Total, &Free));
+        printf(" used=%ld\n", static_cast<LONG>(Before[Index] - Free));
+    }
+
+    for (LPDIRECTDRAWSURFACE7 Surface : Surfaces)
+    {
+        if (Surface != nullptr)
+            Surface->Release();
+    }
+
+    for (Index = 0; Index < _countof(Kinds); Index++)
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = Kinds[Index];
+        Free = 0;
+        Draw7->GetAvailableVidMem(&Caps, &Total, &Free);
+        printf("vidmem_after %08lX used=%ld\n", Kinds[Index], static_cast<LONG>(Before[Index] - Free));
+    }
+
+    Draw7->Release();
+}
+
 /* Draws to the primary through a window clipper and reads the window back through GDI */
 static
 VOID
@@ -1572,6 +1683,8 @@ static const DrawCheckInfo DcChecks[] =
     { "palette", DcCheckPalette },
     { "surface_create", DcCheckSurfaceCreate },
     { "surface_ops", DcCheckSurfaceOps },
+    { "video_ops", DcCheckVideoOps },
+    { "video_memory", DcCheckVideoMemory },
     { "present", DcCheckPresent },
 };
 
