@@ -107,6 +107,10 @@ RxWarpDecodeTexel(
     _In_reads_bytes_(16) const BYTE *Element,
     _Out_writes_(4) UINT *Value);
 
+UINT
+RxWarpLinearToSrgbByte(
+    _In_ FLOAT Value);
+
 BOOLEAN
 RxWarpFormatIsInteger(
     _In_ DXGI_FORMAT Format);

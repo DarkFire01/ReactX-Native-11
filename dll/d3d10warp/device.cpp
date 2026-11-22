@@ -70,8 +70,30 @@ RxWarpDestroyDevice(
     _In_ D3D10DDI_HDEVICE Device)
 {
     RxWarpLock Lock;
+    RxWarpDevice *This = RxWarpGetDevice(Device);
 
-    delete RxWarpGetDevice(Device);
+    if (This != nullptr && This->ContextAllocation != 0)
+    {
+        D3DDDICB_UNLOCK Unlock = {};
+        D3DDDICB_DEALLOCATE Deallocate = {};
+
+        Unlock.NumAllocations = 1;
+        Unlock.phAllocations = &This->ContextAllocation;
+        This->KernelCallbacks->pfnUnlockCb(This->RuntimeDevice.handle, &Unlock);
+        Deallocate.NumAllocations = 1;
+        Deallocate.HandleList = &This->ContextAllocation;
+        This->KernelCallbacks->pfnDeallocateCb(This->RuntimeDevice.handle, &Deallocate);
+    }
+    if (This != nullptr && This->KernelContext != nullptr && This->KernelCallbacks->pfnDestroyContextCb != nullptr)
+    {
+        D3DDDICB_DESTROYCONTEXT Destroy = {};
+
+        Destroy.hContext = This->KernelContext;
+        This->KernelCallbacks->pfnDestroyContextCb(This->RuntimeDevice.handle, &Destroy);
+    }
+    if (This != nullptr && This->ContextPage != nullptr)
+        VirtualFree(This->ContextPage, 0, MEM_RELEASE);
+    delete This;
     *static_cast<RxWarpDevice **>(Device.pDrvPrivate) = nullptr;
 }
 
@@ -182,17 +204,285 @@ RxWarpRotateResourceIdentities(
     RxWarpLock Lock;
     RxWarpResource *First;
     BYTE *Memory;
+    D3DKMT_HANDLE Allocation;
+    BOOLEAN Locked;
 
     if (Args->Resources < 2)
         return S_OK;
 
-    /* Each buffer takes the next one's storage; the first's goes to the last */
+    /* Each buffer takes the next one's storage and allocation; the first's go to the last */
     First = RxWarpDxgiResource(Args->pResources[0]);
     Memory = First->Memory;
+    Allocation = First->Allocation;
+    Locked = First->Locked;
     for (UINT Index = 0; Index + 1 < Args->Resources; Index++)
-        RxWarpDxgiResource(Args->pResources[Index])->Memory = RxWarpDxgiResource(Args->pResources[Index + 1])->Memory;
+    {
+        RxWarpResource *This = RxWarpDxgiResource(Args->pResources[Index]);
+        RxWarpResource *Next = RxWarpDxgiResource(Args->pResources[Index + 1]);
+
+        This->Memory = Next->Memory;
+        This->Allocation = Next->Allocation;
+        This->Locked = Next->Locked;
+    }
     RxWarpDxgiResource(Args->pResources[Args->Resources - 1])->Memory = Memory;
+    RxWarpDxgiResource(Args->pResources[Args->Resources - 1])->Allocation = Allocation;
+    RxWarpDxgiResource(Args->pResources[Args->Resources - 1])->Locked = Locked;
     return S_OK;
+}
+
+/* Whether every channel of a format is floating point */
+static
+BOOLEAN
+RxWarpFormatIsFloat(
+    _In_ DXGI_FORMAT Format)
+{
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Format);
+
+    return Info != nullptr && Info->Kind == RxKindPlain && Info->ChannelCount != 0 && Info->Channels[0].Type == RxChannelFloat;
+}
+
+/* Present and format conversion copies: the source scales onto the destination rectangle */
+static
+HRESULT
+APIENTRY
+RxWarpBlt(
+    _In_ DXGI_DDI_ARG_BLT *Args)
+{
+    RxWarpLock Lock;
+    RxWarpResource *Source = RxWarpDxgiResource(Args->hSrcResource);
+    RxWarpResource *Target = RxWarpDxgiResource(Args->hDstResource);
+    RX_WARP_SUBRESOURCE *From;
+    RX_WARP_SUBRESOURCE *To;
+    const RX_WARP_FORMAT_INFO *FromInfo;
+    const RX_WARP_FORMAT_INFO *ToInfo;
+    BOOLEAN Encode;
+    UINT Width;
+    UINT Height;
+
+    if (Source == nullptr || Target == nullptr)
+        return E_INVALIDARG;
+    From = Source->Subresource(Args->SrcSubresource);
+    To = Target->Subresource(Args->DstSubresource);
+    FromInfo = RxWarpFormatInfo(Source->Format);
+    ToInfo = RxWarpFormatInfo(Target->Format);
+    if (From == nullptr || To == nullptr || FromInfo == nullptr || ToInfo == nullptr)
+        return E_INVALIDARG;
+    if (Args->DstLeft > Args->DstRight || Args->DstTop > Args->DstBottom || Args->DstRight > To->Width || Args->DstBottom > To->Height)
+        return E_INVALIDARG;
+
+    /* Float sources are linear light and go out sRGB encoded to normalized targets */
+    Encode = RxWarpFormatIsFloat(Source->Format) && !RxWarpFormatIsFloat(Target->Format);
+    Width = Args->DstRight - Args->DstLeft;
+    Height = Args->DstBottom - Args->DstTop;
+
+    for (UINT Y = 0; Y < Height; Y++)
+    {
+        UINT Sy = (UINT)(((UINT64)Y * From->Height + From->Height / 2) / Height);
+        BYTE *Row = Target->Data(Args->DstSubresource) + (SIZE_T)(Args->DstTop + Y) * To->RowPitch;
+
+        Sy = (Sy < From->Height) ? Sy : From->Height - 1;
+        for (UINT X = 0; X < Width; X++)
+        {
+            UINT Sx = (UINT)(((UINT64)X * From->Width + From->Width / 2) / Width);
+            const BYTE *Texel;
+            UINT Raw[4];
+            FLOAT Color[4];
+            BYTE Element[16];
+
+            Sx = (Sx < From->Width) ? Sx : From->Width - 1;
+            Texel = Source->Data(Args->SrcSubresource) + (SIZE_T)Sy * From->RowPitch + (SIZE_T)Sx * FromInfo->Bytes;
+            if (!RxWarpDecodeTexel(Source->Format, Texel, Raw))
+                return E_INVALIDARG;
+            memcpy(Color, Raw, sizeof(Color));
+            if (Encode)
+            {
+                for (UINT Component = 0; Component < 3; Component++)
+                    Color[Component] = (FLOAT)RxWarpLinearToSrgbByte(Color[Component]) * (1.0f / 255.0f);
+            }
+            if (!RxWarpEncodeColor(Target->Format, Color, Element))
+                return E_INVALIDARG;
+            memcpy(Row + (SIZE_T)(Args->DstLeft + X) * ToInfo->Bytes, Element, ToInfo->Bytes);
+        }
+    }
+    return S_OK;
+}
+
+/* Talks to the Basic Render kernel driver through its escape interface */
+static
+HRESULT
+RxWarpEscape(
+    _In_ RxWarpDevice *Device,
+    _Inout_updates_bytes_(Size) VOID *Data,
+    _In_ UINT Size,
+    _In_opt_ HANDLE Context)
+{
+    D3DDDICB_ESCAPE Escape = {};
+
+    if (Device->KernelCallbacks == nullptr || Device->KernelCallbacks->pfnEscapeCb == nullptr)
+        return E_NOTIMPL;
+    Escape.hDevice = Device->RuntimeDevice.handle;
+    Escape.pPrivateDriverData = Data;
+    Escape.PrivateDriverDataSize = Size;
+    Escape.hContext = Context;
+    return Device->KernelCallbacks->pfnEscapeCb(Device->Adapter->RuntimeAdapter.handle, &Escape);
+}
+
+/*
+ * Presents are submitted to a kernel context on the engine node the kernel driver reports.
+ * The driver first takes the protocol revision, then answers which node and engine to use.
+ */
+static
+VOID
+RxWarpCreateKernelContext(
+    _In_ RxWarpDevice *Device)
+{
+    const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS *Core;
+    D3DWDDM2_0DDICB_CREATECONTEXTVIRTUAL Create = {};
+    UINT Revision[2] = { 3, 2 };
+    UINT Engine[4] = { 1, 0, 0, 0 };
+    UINT64 Values[2] = { 0, 8 };
+    UINT64 *Private[2] = { &Values[0], &Values[1] };
+
+    if (Device->Interface < D3DWDDM2_0_DDI_INTERFACE_VERSION || Device->CoreCallbacks == nullptr)
+        return;
+    Core = reinterpret_cast<const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS *>(Device->CoreCallbacks);
+    if (Core->pfnCreateContextVirtualCb == nullptr)
+        return;
+    if (FAILED(RxWarpEscape(Device, Revision, sizeof(Revision), nullptr)) || FAILED(RxWarpEscape(Device, Engine, sizeof(Engine), nullptr)))
+        return;
+
+    Create.NodeOrdinal = Engine[2];
+    Create.EngineAffinity = Engine[3];
+    Create.ContextTypeFlags = 7;
+    Create.pPrivateDriverData = Private;
+    Create.PrivateDriverDataSize = sizeof(Private);
+    if (FAILED(Core->pfnCreateContextVirtualCb(Device->RuntimeCoreLayer, &Create)))
+        return;
+    Device->KernelContext = Create.hContext;
+
+    /*
+     * The context gets a page of its own the kernel driver knows, which sizes a kernel buffer
+     * made next; then the device is registered with the same page.
+     */
+    Device->ContextPage = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (Device->ContextPage != nullptr)
+    {
+        UINT64 ContextData[6] = { 7, (UINT64)Device, (UINT64)Device->ContextPage, 4096, 0, 0 };
+        UINT64 DeviceData[7] = { 0, (UINT64)Device, (UINT64)Device->ContextPage, 4096, 0, 0, 0 };
+        /* The answer comes back in the last field */
+        if (SUCCEEDED(RxWarpEscape(Device, ContextData, sizeof(ContextData), Create.hContext)) &&
+            SUCCEEDED(RxWarpAllocateRaw(Device, (UINT)ContextData[5], &Device->ContextAllocation, &Device->ContextBuffer)))
+        {
+            RxWarpEscape(Device, DeviceData, sizeof(DeviceData), nullptr);
+        }
+    }
+}
+
+/* The eight bit shadow a non BGRA8 back buffer is converted into before DXGI presents it */
+static
+RxWarpResource *
+RxWarpPresentShadow(
+    _In_ RxWarpDevice *Device,
+    _In_ RxWarpResource *Source,
+    _In_ UINT Subresource)
+{
+    RX_WARP_SUBRESOURCE *From = Source->Subresource(Subresource);
+    D3D10DDI_MIPINFO Mip = {};
+    D3D11DDIARG_CREATERESOURCE Create = {};
+    RxWarpResource *Shadow = Source->Shadow;
+
+    if (From == nullptr)
+        return nullptr;
+    if (Shadow != nullptr && Shadow->Subresources[0].Width == From->Width && Shadow->Subresources[0].Height == From->Height)
+        return Shadow;
+    if (Shadow != nullptr)
+    {
+        RxWarpReleaseForPresent(Device, Shadow);
+        delete Shadow;
+        Source->Shadow = nullptr;
+    }
+
+    Mip.TexelWidth = From->Width;
+    Mip.TexelHeight = From->Height;
+    Mip.TexelDepth = 1;
+    Mip.PhysicalWidth = From->Width;
+    Mip.PhysicalHeight = From->Height;
+    Mip.PhysicalDepth = 1;
+    Create.pMipInfoList = &Mip;
+    Create.ResourceDimension = D3D10DDIRESOURCE_TEXTURE2D;
+    Create.Usage = D3D10_DDI_USAGE_STAGING;
+    Create.BindFlags = Source->BindFlags & ~D3D10_DDI_BIND_PRESENT;
+    Create.MiscFlags = Source->MiscFlags & ~D3D10_DDI_RESOURCE_MISC_SHARED;
+    Create.Format = DXGI_FORMAT_B8G8R8X8_UNORM;
+    Create.SampleDesc.Count = 1;
+    Create.MipLevels = 1;
+    Create.ArraySize = 1;
+    Shadow = new (std::nothrow) RxWarpResource();
+    if (Shadow == nullptr)
+        return nullptr;
+    if (FAILED(Shadow->Initialize(&Create)) || FAILED(RxWarpAllocateForPresent(Device, Shadow, &Create, nullptr)) || Shadow->Allocation == 0)
+    {
+        RxWarpReleaseForPresent(Device, Shadow);
+        delete Shadow;
+        return nullptr;
+    }
+    Source->Shadow = Shadow;
+    return Shadow;
+}
+
+/* Windowed presents hand DXGI an allocation in B8G8R8X8 or B8G8R8A8; other formats go through the shadow. Older tables take a prefix of this argument */
+static
+HRESULT
+APIENTRY
+RxWarpPresent1(
+    _In_ DXGI1_6_1_DDI_ARG_PRESENT *Args)
+{
+    RxWarpLock Lock;
+    RxWarpDevice *Device = RxWarpObject<RxWarpDevice>(*reinterpret_cast<D3D10DDI_HDEVICE *>(&Args->hDevice));
+    HRESULT hr = S_OK;
+
+    if (Device == nullptr || Device->DxgiCallbacks == nullptr || Device->DxgiCallbacks->pfnPresentCb == nullptr)
+        return E_INVALIDARG;
+    if (Args->hDstResource != 0)
+        return E_NOTIMPL;
+
+    for (UINT Index = 0; Index < Args->SurfacesToPresent && SUCCEEDED(hr); Index++)
+    {
+        RxWarpResource *Source = RxWarpDxgiResource(Args->phSurfacesToPresent[Index].hSurface);
+        UINT Subresource = Args->phSurfacesToPresent[Index].SubResourceIndex;
+        DXGIDDICB_PRESENT Present = {};
+
+        if (Source == nullptr)
+            return E_INVALIDARG;
+        Present.hSrcAllocation = Source->Allocation;
+        if ((Source->Format != DXGI_FORMAT_B8G8R8A8_UNORM && Source->Format != DXGI_FORMAT_B8G8R8X8_UNORM) ||
+            Source->SampleCount > 1 || Subresource != 0)
+        {
+            RxWarpResource *Shadow = RxWarpPresentShadow(Device, Source, Subresource);
+            RX_WARP_SUBRESOURCE *From = Source->Subresource(Subresource);
+            DXGI_DDI_ARG_BLT Blt = {};
+
+            if (Shadow == nullptr || From == nullptr)
+                return E_OUTOFMEMORY;
+            Blt.hDstResource = reinterpret_cast<DXGI_DDI_HRESOURCE>(&Shadow);
+            Blt.hSrcResource = Args->phSurfacesToPresent[Index].hSurface;
+            Blt.SrcSubresource = Subresource;
+            Blt.DstRight = From->Width;
+            Blt.DstBottom = From->Height;
+            hr = RxWarpBlt(&Blt);
+            Present.hSrcAllocation = Shadow->Allocation;
+        }
+        if (Present.hSrcAllocation == 0)
+            return E_INVALIDARG;
+        Present.pDXGIContext = Args->pDXGIContext;
+
+        if (Device->KernelContext == nullptr)
+            RxWarpCreateKernelContext(Device);
+        Present.hContext = Device->KernelContext;
+        if (SUCCEEDED(hr))
+            hr = Device->DxgiCallbacks->pfnPresentCb(Device->RuntimeDevice.handle, &Present);
+    }
+    return hr;
 }
 
 HRESULT
@@ -363,6 +653,8 @@ RxWarpDevice::Create(
         Dxgi.pfnGetGammaCaps = RxWarpGetGammaCaps;
         Dxgi.pfnQueryResourceResidency = RxWarpQueryResourceResidency;
         Dxgi.pfnRotateResourceIdentities = RxWarpRotateResourceIdentities;
+        Dxgi.pfnBlt = RxWarpBlt;
+        Dxgi.pfnPresent1 = RxWarpPresent1;
         Dxgi.pfnGetMultiplaneOverlayCaps = nullptr;
         Dxgi.pfnGetMultiplaneOverlayGroupCaps = nullptr;
         Dxgi.pfnReserved1 = nullptr;
@@ -404,6 +696,7 @@ RxWarpDevice::Create(
     Device->RuntimeDevice = Args->hRTDevice;
     Device->RuntimeCoreLayer = Args->hRTCoreLayer;
     Device->KernelCallbacks = Args->pKTCallbacks;
+    Device->DxgiCallbacks = Args->DXGIBaseDDI.pDXGIBaseCallbacks;
     Device->CoreCallbacks = Args->p11UMCallbacks;
     Device->Interface = Args->Interface;
     Device->Version = Args->Version;

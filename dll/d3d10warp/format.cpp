@@ -344,7 +344,6 @@ RxWarpLinearToSrgb(
 }
 
 /* Eight bit sRGB from linear: the value scaled to 4095 steps picks from a table of rounded sRGB codes */
-static
 UINT
 RxWarpLinearToSrgbByte(
     _In_ FLOAT Value)

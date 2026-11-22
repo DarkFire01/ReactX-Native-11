@@ -13,7 +13,8 @@
 
 RxWarpResource::~RxWarpResource()
 {
-    if (Memory != nullptr)
+    delete Shadow;
+    if (Memory != nullptr && !Locked)
         VirtualFree(Memory, 0, MEM_RELEASE);
     delete[] Subresources;
 }
@@ -117,6 +118,189 @@ RxWarpResource::Initialize(
     return S_OK;
 }
 
+/* What the Basic Render kernel driver needs to place an allocation: the resource shape and its byte size */
+typedef struct _RX_WARP_ALLOCATION_DATA
+{
+    UINT Dimension;
+    UINT Width;
+    UINT Height;
+    UINT Depth;
+    UINT Format;
+    UINT RowPitch;
+    UINT Size;
+    UINT ArraySize;
+    UINT MipLevels;
+    UINT Usage;
+    UINT BindFlags;
+    UINT SampleCount;
+    UINT SampleQuality;
+    UINT RefreshNumerator;
+    UINT RefreshDenominator;
+    UINT Rotation;
+    UINT VidPnSourceId;
+    UINT Reserved[5];
+    UINT Flags;
+    UINT Reserved2;
+} RX_WARP_ALLOCATION_DATA;
+
+static_assert(sizeof(RX_WARP_ALLOCATION_DATA) == 96, "the kernel driver reads 96 bytes");
+
+#define RX_WARP_ALLOCATION_PRIMARY          0x00000010
+#define RX_WARP_ALLOCATION_ROTATED          0x00000100
+#define RX_WARP_ALLOCATION_CROSS_ADAPTER    0x00000200
+#define RX_WARP_ALLOCATION_TILE_POOL        0x00000400
+#define RX_WARP_ALLOCATION_LINEAR           0x00000080
+#define RX_WARP_ALLOCATION_SYSTEM           0x00200000
+#define RX_WARP_ALLOCATION_SHARED           0x00080000
+#define RX_WARP_ALLOCATION_STEREO           0x10000000
+
+/* DXGI presents kernel allocations, so present targets keep their storage in one */
+HRESULT
+RxWarpAllocateForPresent(
+    _In_ RxWarpDevice *Device,
+    _Inout_ RxWarpResource *Resource,
+    _In_ const D3D11DDIARG_CREATERESOURCE *Args,
+    _In_opt_ HANDLE RuntimeResource)
+{
+    RX_WARP_ALLOCATION_DATA Data = {};
+    D3DDDI_ALLOCATIONINFO Info = {};
+    D3DDDICB_ALLOCATE Allocate = {};
+    D3DDDICB_LOCK Lock = {};
+    HRESULT hr;
+
+    if (Device->KernelCallbacks == nullptr || Device->KernelCallbacks->pfnAllocateCb == nullptr || Device->KernelCallbacks->pfnLockCb == nullptr)
+        return S_OK;
+
+    Data.Dimension = Args->ResourceDimension;
+    Data.Width = Args->pMipInfoList[0].PhysicalWidth;
+    Data.Height = Args->pMipInfoList[0].PhysicalHeight;
+    Data.Depth = Args->pMipInfoList[0].PhysicalDepth;
+    Data.Format = Args->Format;
+    Data.RowPitch = Resource->Subresources[0].RowPitch;
+    Data.Size = (UINT)Resource->MemorySize;
+    Data.ArraySize = Args->ArraySize;
+    Data.MipLevels = Args->MipLevels;
+    Data.Usage = Args->Usage;
+    Data.BindFlags = Args->BindFlags;
+    Data.SampleCount = Args->SampleDesc.Count;
+    Data.SampleQuality = Args->SampleDesc.Quality;
+    Data.Flags = RX_WARP_ALLOCATION_SYSTEM | RX_WARP_ALLOCATION_LINEAR;
+    if (Args->MiscFlags & D3DWDDM1_3DDI_RESOURCE_MISC_CROSS_ADAPTER)
+        Data.Flags |= RX_WARP_ALLOCATION_CROSS_ADAPTER;
+    if (Args->MiscFlags & D3DWDDM1_3DDI_RESOURCE_MISC_TILE_POOL)
+        Data.Flags |= RX_WARP_ALLOCATION_TILE_POOL;
+    if (Args->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)
+        Data.Flags |= RX_WARP_ALLOCATION_SHARED;
+    if (Args->pPrimaryDesc != nullptr)
+    {
+        Data.Flags |= RX_WARP_ALLOCATION_PRIMARY;
+        Data.Rotation = Args->pPrimaryDesc->ModeDesc.Rotation;
+        Data.VidPnSourceId = Args->pPrimaryDesc->VidPnSourceId;
+        Data.RefreshNumerator = Args->pPrimaryDesc->ModeDesc.RefreshRate.Numerator;
+        Data.RefreshDenominator = Args->pPrimaryDesc->ModeDesc.RefreshRate.Denominator;
+        if (!(Args->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_NONPREROTATED) && Data.Rotation > DXGI_DDI_MODE_ROTATION_IDENTITY)
+            Data.Flags |= RX_WARP_ALLOCATION_ROTATED;
+        if (Args->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_STEREO)
+            Data.Flags |= RX_WARP_ALLOCATION_STEREO;
+        Info.VidPnSourceId = Data.VidPnSourceId;
+        Info.Flags.Primary = 1;
+    }
+
+    Info.pPrivateDriverData = &Data;
+    Info.PrivateDriverDataSize = sizeof(Data);
+    Allocate.hResource = RuntimeResource;
+    Allocate.NumAllocations = 1;
+    Allocate.pAllocationInfo = &Info;
+    hr = Device->KernelCallbacks->pfnAllocateCb(Device->RuntimeDevice.handle, &Allocate);
+    if (FAILED(hr))
+        return hr;
+    Resource->Allocation = Info.hAllocation;
+
+    /* The allocation's memory replaces the resource's own, keeping what is already in it */
+    Lock.hAllocation = Info.hAllocation;
+    Lock.Flags.DonotWait = 1;
+    Lock.Flags.IgnoreSync = 1;
+    hr = Device->KernelCallbacks->pfnLockCb(Device->RuntimeDevice.handle, &Lock);
+    if (FAILED(hr))
+        return hr;
+    memcpy(Lock.pData, Resource->Memory, Resource->MemorySize);
+    VirtualFree(Resource->Memory, 0, MEM_RELEASE);
+    Resource->Memory = (BYTE *)Lock.pData;
+    Resource->Locked = TRUE;
+    return S_OK;
+}
+
+/* A plain kernel buffer the context hands the kernel driver for its own bookkeeping */
+HRESULT
+RxWarpAllocateRaw(
+    _In_ RxWarpDevice *Device,
+    _In_ UINT Size,
+    _Out_ D3DKMT_HANDLE *Allocation,
+    _Out_ VOID **Memory)
+{
+    RX_WARP_ALLOCATION_DATA Data = {};
+    D3DDDI_ALLOCATIONINFO Info = {};
+    D3DDDICB_ALLOCATE Allocate = {};
+    D3DDDICB_LOCK Lock = {};
+    HRESULT hr;
+
+    *Allocation = 0;
+    *Memory = nullptr;
+    Data.Dimension = D3D10DDIRESOURCE_BUFFER;
+    Data.Width = Size;
+    Data.Height = 1;
+    Data.Depth = 1;
+    Data.RowPitch = Size;
+    Data.Size = Size;
+    Data.ArraySize = 1;
+    Data.MipLevels = 1;
+    Data.Flags = RX_WARP_ALLOCATION_LINEAR;
+    Info.pPrivateDriverData = &Data;
+    Info.PrivateDriverDataSize = sizeof(Data);
+    Allocate.NumAllocations = 1;
+    Allocate.pAllocationInfo = &Info;
+    hr = Device->KernelCallbacks->pfnAllocateCb(Device->RuntimeDevice.handle, &Allocate);
+    if (FAILED(hr))
+        return hr;
+    *Allocation = Info.hAllocation;
+    Lock.hAllocation = Info.hAllocation;
+    Lock.Flags.DonotWait = 1;
+    Lock.Flags.IgnoreSync = 1;
+    hr = Device->KernelCallbacks->pfnLockCb(Device->RuntimeDevice.handle, &Lock);
+    if (SUCCEEDED(hr))
+        *Memory = Lock.pData;
+    return hr;
+}
+
+VOID
+RxWarpReleaseForPresent(
+    _In_ RxWarpDevice *Device,
+    _Inout_ RxWarpResource *Resource)
+{
+    D3DDDICB_UNLOCK Unlock = {};
+    D3DDDICB_DEALLOCATE Deallocate = {};
+
+    if (Resource->Shadow != nullptr)
+        RxWarpReleaseForPresent(Device, Resource->Shadow);
+    if (Resource->Allocation == 0 || Device == nullptr || Device->KernelCallbacks == nullptr)
+        return;
+    if (Resource->Locked && Device->KernelCallbacks->pfnUnlockCb != nullptr)
+    {
+        Unlock.NumAllocations = 1;
+        Unlock.phAllocations = &Resource->Allocation;
+        Device->KernelCallbacks->pfnUnlockCb(Device->RuntimeDevice.handle, &Unlock);
+    }
+    Resource->Memory = nullptr;
+    Resource->Locked = FALSE;
+    if (Device->KernelCallbacks->pfnDeallocateCb != nullptr)
+    {
+        Deallocate.NumAllocations = 1;
+        Deallocate.HandleList = &Resource->Allocation;
+        Device->KernelCallbacks->pfnDeallocateCb(Device->RuntimeDevice.handle, &Deallocate);
+    }
+    Resource->Allocation = 0;
+}
+
 VOID
 APIENTRY
 RxWarpDdi::CreateResource(
@@ -141,8 +325,11 @@ RxWarpDdi::CreateResource(
     }
 
     hr = Object->Initialize(Args);
+    if (SUCCEEDED(hr) && (Args->BindFlags & D3D10_DDI_BIND_PRESENT))
+        hr = RxWarpAllocateForPresent(This, Object, Args, RuntimeResource.handle);
     if (FAILED(hr))
     {
+        RxWarpReleaseForPresent(This, Object);
         delete Object;
         Object = nullptr;
         This->SetError(hr);
@@ -174,9 +361,13 @@ RxWarpDdi::DestroyResource(
     _In_ D3D10DDI_HRESOURCE Resource)
 {
     RxWarpLock Lock;
+    RxWarpResource *Object = RxWarpObject<RxWarpResource>(Resource);
 
-    UNREFERENCED_PARAMETER(Device);
-    delete RxWarpObject<RxWarpResource>(Resource);
+    if (Object != nullptr)
+    {
+        RxWarpReleaseForPresent(RxWarpObject<RxWarpDevice>(Device), Object);
+        delete Object;
+    }
     RxWarpBind(Resource, (RxWarpResource *)nullptr);
 }
 

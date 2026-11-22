@@ -62,6 +62,9 @@ public:
     UINT SubresourceCount = 0;
     RX_WARP_SUBRESOURCE *Subresources = nullptr;
     UINT StreamFilled = 0;      /* bytes stream output has written, for DrawAuto */
+    D3DKMT_HANDLE Allocation = 0;   /* the kernel allocation holding Memory, for resources DXGI presents */
+    BOOLEAN Locked = FALSE;         /* Memory is the allocation's locked view, not our own pages */
+    RxWarpResource *Shadow = nullptr;   /* eight bit copy presented in place of other formats */
 };
 
 /* Render target, depth stencil, shader resource and unordered access views share one shape */
@@ -223,6 +226,11 @@ public:
     D3D10DDI_HRTDEVICE RuntimeDevice = {};
     D3D10DDI_HRTCORELAYER RuntimeCoreLayer = {};
     const D3DDDI_DEVICECALLBACKS *KernelCallbacks = nullptr;
+    const DXGI_DDI_BASE_CALLBACKS *DxgiCallbacks = nullptr;
+    HANDLE KernelContext = nullptr;     /* the kernel context presents are submitted to */
+    VOID *ContextPage = nullptr;        /* the page registered with the kernel driver beside the context */
+    D3DKMT_HANDLE ContextAllocation = 0;
+    VOID *ContextBuffer = nullptr;
     const D3D11DDI_CORELAYER_DEVICECALLBACKS *CoreCallbacks = nullptr;
     UINT Interface = 0;
     UINT Version = 0;
@@ -233,6 +241,25 @@ public:
 };
 
 /* What a stage's shader sees, gathered from its bound state */
+HRESULT
+RxWarpAllocateForPresent(
+    _In_ RxWarpDevice *Device,
+    _Inout_ RxWarpResource *Resource,
+    _In_ const D3D11DDIARG_CREATERESOURCE *Args,
+    _In_opt_ HANDLE RuntimeResource);
+
+HRESULT
+RxWarpAllocateRaw(
+    _In_ RxWarpDevice *Device,
+    _In_ UINT Size,
+    _Out_ D3DKMT_HANDLE *Allocation,
+    _Out_ VOID **Memory);
+
+VOID
+RxWarpReleaseForPresent(
+    _In_ RxWarpDevice *Device,
+    _Inout_ RxWarpResource *Resource);
+
 VOID
 RxWarpBindStage(
     _In_ const RX_WARP_STAGE_STATE *State,
