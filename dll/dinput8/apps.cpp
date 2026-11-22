@@ -193,7 +193,7 @@ DiRegisterApplication(
             goto Close;
         }
         DiSetString(Key, L"Name", FileName);
-        RegSetValueExW(Key, L"UsesMapper", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&UsesMapper), sizeof(UsesMapper));
+        RegSetValueExW(Key, L"UsesMapper", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&UsesMapper), sizeof(UsesMapper));
         RegCloseKey(Key);
         Key = nullptr;
         if (UsesMapper != 0)
@@ -213,7 +213,7 @@ DiRegisterApplication(
         DiLastNotice = State;
         DiSetString(Key, L"Name", FileName);
         DiSetString(Key, L"Id", Id);
-        RegSetValueExW(Key, L"Version", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&Version), sizeof(Version));
+        RegSetValueExW(Key, L"Version", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&Version), sizeof(Version));
         RegSetValueExW(Key, L"MostRecentStart", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&Now), sizeof(Now));
         RegCloseKey(Key);
     }
