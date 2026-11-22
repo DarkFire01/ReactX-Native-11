@@ -344,6 +344,16 @@ DsVoice::SetMute(
     Device->Unlock();
 }
 
+/* A buffer whose application is out of focus keeps its cursors moving in silence */
+VOID
+DsVoice::SetFocusMute(
+    _In_ BOOLEAN Mute)
+{
+    Device->Lock();
+    FocusMuted = Mute;
+    Device->Unlock();
+}
+
 HRESULT
 DsVoice::SetNotifications(
     _In_ ULONG Count,
@@ -516,7 +526,7 @@ DsVoice::ApplyMatrix(
         memcpy(Mixed, Matrix, OutChannels * Channels * sizeof(float));
     }
 
-    if (Muted)
+    if (Muted || FocusMuted)
         return;
     for (UINT Out = 0; Out < OutChannels; Out++)
     {

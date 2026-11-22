@@ -27,6 +27,7 @@ DsBuffer::DsBuffer(
     Bytes = 0;
     Format = nullptr;
     StatusFlags = 0;
+    Active = FALSE;
     Face.Link.Object = this;
     Face.Link.Count = 0;
     Face.Self = this;
@@ -531,8 +532,7 @@ DsSecondary::Initialize(
 
     NextBuffer = Owner->Buffers;
     Owner->Buffers = this;
-    if (Owner->Level == DSSCL_WRITEPRIMARY)
-        Lose();
+    DsApplyBufferFocus(this);
     InitStatus = S_OK;
     return S_OK;
 }
@@ -959,7 +959,7 @@ DsSecondary::Restore(VOID)
         return DSERR_INVALIDCALL;
     if (StatusFlags & DS_STATUS_LOST_INTERNAL)
     {
-        if (Owner->Level == DSSCL_WRITEPRIMARY)
+        if (DsBufferFocus(this) == 2)
             return DSERR_BUFFERLOST;
         StatusFlags &= ~DS_STATUS_LOST_INTERNAL;
     }

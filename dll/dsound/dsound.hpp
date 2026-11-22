@@ -355,6 +355,10 @@ public:
         _In_ BOOLEAN Mute);
 
     VOID
+    SetFocusMute(
+        _In_ BOOLEAN Mute);
+
+    VOID
     SetSpeakerVolumes(
         _In_ LONG Volume,
         _In_ UINT Count,
@@ -398,6 +402,7 @@ public:
     LONG Pass;
     BOOLEAN Finished;
     BOOLEAN Muted;
+    BOOLEAN FocusMuted;
     DsNotifyPoint* Points;
     ULONG PointCount;
     ULONG NotifyPlay;
@@ -633,8 +638,31 @@ public:
     DsDevice* Device;
     DsPrimary* Primary;
     DsSecondary* Buffers;
+    DsSound* NextSound;
     DsSoundFace Face;
 };
+
+/* focus.cpp */
+
+VOID
+DsRegisterSound(
+    _In_ DsSound* Sound);
+
+VOID
+DsUnregisterSound(
+    _In_ DsSound* Sound);
+
+VOID
+DsUpdateFocus(
+    _In_ BOOLEAN Force);
+
+ULONG
+DsBufferFocus(
+    _In_ DsBuffer* Buffer);
+
+VOID
+DsApplyBufferFocus(
+    _In_ DsSecondary* Buffer);
 
 /* IDirectSoundBuffer8, shared by primary and secondary buffers */
 class DsBufferFace final : public IDirectSoundBuffer8
@@ -968,6 +996,7 @@ public:
     ULONG Bytes;
     WAVEFORMATEX* Format;
     ULONG StatusFlags;
+    BOOLEAN Active;
     DsBufferFace Face;
     DsPropertyFace PropertyFace;
 };

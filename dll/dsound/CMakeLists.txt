@@ -5,6 +5,7 @@ nt_add_usermode_dll(dsound
         capture.cpp
         device.cpp
         effects.cpp
+        focus.cpp
         format.cpp
         main.cpp
         matrix.cpp

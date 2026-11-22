@@ -35,14 +35,20 @@ DsSound::DsSound()
     Device = nullptr;
     Primary = nullptr;
     Buffers = nullptr;
+    NextSound = nullptr;
     Face.Link.Object = this;
     Face.Link.Count = 0;
     Face.Self = this;
     Expose(IID_IDirectSound, &Face, &Face.Link);
+    DsRegisterSound(this);
 }
 
+/* Buffers die with the object that made them */
 DsSound::~DsSound()
 {
+    while (Buffers != nullptr)
+        delete Buffers;
+    DsUnregisterSound(this);
     if (Primary != nullptr)
         delete Primary;
     delete Device;
@@ -117,11 +123,7 @@ DsSound::SetLevel(
         Level = OldLevel;
         return hr;
     }
-    if (NewLevel == DSSCL_WRITEPRIMARY && OldLevel != DSSCL_WRITEPRIMARY)
-    {
-        for (DsSecondary* Buffer = Buffers; Buffer != nullptr; Buffer = Buffer->NextBuffer)
-            Buffer->Lose();
-    }
+    DsUpdateFocus(TRUE);
     return S_OK;
 }
 
