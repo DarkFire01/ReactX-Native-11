@@ -2218,53 +2218,15 @@ DdSurfaceInitialize(
     return DDERR_ALREADYINITIALIZED;
 }
 
-/* Flipping and overlays are not implemented yet */
+/* BltBatch is not implemented yet */
 static
 HRESULT
 STDMETHODCALLTYPE
-DdSurfaceMissing1(
-    _In_ VOID* Com,
-    _In_opt_ VOID* First)
-{
-    DD_TRACE_ONCE(L"a surface method that is not implemented yet was called");
-    return DDERR_UNSUPPORTED;
-}
-
-static
-HRESULT
-STDMETHODCALLTYPE
-DdSurfaceMissing2(
-    _In_ VOID* Com,
-    _In_opt_ VOID* First,
-    _In_opt_ VOID* Second)
-{
-    DD_TRACE_ONCE(L"a surface method that is not implemented yet was called");
-    return DDERR_UNSUPPORTED;
-}
-
-static
-HRESULT
-STDMETHODCALLTYPE
-DdSurfaceMissing3(
+DdSurfaceBltBatch(
     _In_ VOID* Com,
     _In_opt_ VOID* First,
     _In_opt_ VOID* Second,
     _In_opt_ VOID* Third)
-{
-    DD_TRACE_ONCE(L"a surface method that is not implemented yet was called");
-    return DDERR_UNSUPPORTED;
-}
-
-static
-HRESULT
-STDMETHODCALLTYPE
-DdSurfaceMissing5(
-    _In_ VOID* Com,
-    _In_opt_ VOID* First,
-    _In_opt_ VOID* Second,
-    _In_opt_ VOID* Third,
-    _In_opt_ VOID* Fourth,
-    _In_opt_ VOID* Fifth)
 {
     DD_TRACE_ONCE(L"a surface method that is not implemented yet was called");
     return DDERR_UNSUPPORTED;
@@ -2275,18 +2237,18 @@ DdSurfaceMissing5(
 /* The IDirectDrawSurface slots every version starts with, Unlock passed in */
 #define DD_SURFACE_SLOTS(UnlockSlot) \
     DD_SURFACE_SLOT(DdSurfaceQueryInterface), DD_SURFACE_SLOT(DdSurfaceAddRef), DD_SURFACE_SLOT(DdSurfaceRelease), \
-    DD_SURFACE_SLOT(DdSurfaceAddAttached), DD_SURFACE_SLOT(DdSurfaceMissing1), DD_SURFACE_SLOT(DdSurfaceBlt), \
-    DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceBltFast), DD_SURFACE_SLOT(DdSurfaceDeleteAttached), \
-    DD_SURFACE_SLOT(DdSurfaceEnumAttached), DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceFlip), \
+    DD_SURFACE_SLOT(DdSurfaceAddAttached), DD_SURFACE_SLOT(DdSurfaceAddOverlayDirtyRect), DD_SURFACE_SLOT(DdSurfaceBlt), \
+    DD_SURFACE_SLOT(DdSurfaceBltBatch), DD_SURFACE_SLOT(DdSurfaceBltFast), DD_SURFACE_SLOT(DdSurfaceDeleteAttached), \
+    DD_SURFACE_SLOT(DdSurfaceEnumAttached), DD_SURFACE_SLOT(DdSurfaceEnumOverlayZOrders), DD_SURFACE_SLOT(DdSurfaceFlip), \
     DD_SURFACE_SLOT(DdSurfaceGetAttached), DD_SURFACE_SLOT(DdSurfaceStatus), DD_SURFACE_SLOT(DdSurfaceGetCaps), \
     DD_SURFACE_SLOT(DdSurfaceGetClipper), DD_SURFACE_SLOT(DdSurfaceGetColorKey), DD_SURFACE_SLOT(DdSurfaceGetDC), \
-    DD_SURFACE_SLOT(DdSurfaceGetFlipStatus), DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceGetPalette), \
+    DD_SURFACE_SLOT(DdSurfaceGetFlipStatus), DD_SURFACE_SLOT(DdSurfaceGetOverlayPosition), DD_SURFACE_SLOT(DdSurfaceGetPalette), \
     DD_SURFACE_SLOT(DdSurfaceGetPixelFormat), DD_SURFACE_SLOT(DdSurfaceGetSurfaceDesc), \
     DD_SURFACE_SLOT(DdSurfaceInitialize), DD_SURFACE_SLOT(DdSurfaceIsLost), DD_SURFACE_SLOT(DdSurfaceLock), \
     DD_SURFACE_SLOT(DdSurfaceReleaseDC), DD_SURFACE_SLOT(DdSurfaceRestore), DD_SURFACE_SLOT(DdSurfaceSetClipper), \
-    DD_SURFACE_SLOT(DdSurfaceSetColorKey), DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceSetPalette), \
-    DD_SURFACE_SLOT(UnlockSlot), DD_SURFACE_SLOT(DdSurfaceMissing5), DD_SURFACE_SLOT(DdSurfaceMissing1), \
-    DD_SURFACE_SLOT(DdSurfaceMissing2)
+    DD_SURFACE_SLOT(DdSurfaceSetColorKey), DD_SURFACE_SLOT(DdSurfaceSetOverlayPosition), DD_SURFACE_SLOT(DdSurfaceSetPalette), \
+    DD_SURFACE_SLOT(UnlockSlot), DD_SURFACE_SLOT(DdSurfaceUpdateOverlay), DD_SURFACE_SLOT(DdSurfaceUpdateOverlayDisplay), \
+    DD_SURFACE_SLOT(DdSurfaceUpdateOverlayZOrder)
 
 #define DD_SURFACE2_SLOTS \
     DD_SURFACE_SLOT(DdSurfaceGetDDInterface), DD_SURFACE_SLOT(DdSurfacePageLock), DD_SURFACE_SLOT(DdSurfacePageLock)

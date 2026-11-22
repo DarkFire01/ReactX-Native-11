@@ -839,6 +839,58 @@ DdSurfaceGetFlipStatus(
     _In_ VOID* Com,
     _In_ DWORD Flags);
 
+/* overlay.cpp */
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceUpdateOverlay(
+    _In_ VOID* Com,
+    _In_opt_ LPRECT SourceRect,
+    _In_opt_ VOID* Target,
+    _In_opt_ LPRECT TargetRect,
+    _In_ DWORD Flags,
+    _In_opt_ LPDDOVERLAYFX Fx);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceSetOverlayPosition(
+    _In_ VOID* Com,
+    _In_ LONG X,
+    _In_ LONG Y);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceGetOverlayPosition(
+    _In_ VOID* Com,
+    _Out_opt_ LPLONG X,
+    _Out_opt_ LPLONG Y);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceEnumOverlayZOrders(
+    _In_ VOID* Com,
+    _In_ DWORD Flags,
+    _In_opt_ VOID* Context,
+    _In_opt_ VOID* Callback);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceUpdateOverlayZOrder(
+    _In_ VOID* Com,
+    _In_ DWORD Flags,
+    _In_opt_ VOID* Reference);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceAddOverlayDirtyRect(
+    _In_ VOID* Com,
+    _In_opt_ LPRECT Rect);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceUpdateOverlayDisplay(
+    _In_ VOID* Com,
+    _In_ DWORD Flags);
+
 /* blit.cpp */
 HRESULT
 DdBlt(
