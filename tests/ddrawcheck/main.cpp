@@ -3021,6 +3021,248 @@ DcCheckOverlay(
     Draw7->Release();
 }
 
+/* BltBatch only checks its entries before refusing the batch */
+static
+VOID
+DcCheckBltBatch(
+    _Inout_ DrawCheck* Check)
+{
+    LPDIRECTDRAWSURFACE7 Target;
+    LPDIRECTDRAWSURFACE7 Source;
+    LPDIRECTDRAWSURFACE7 Depth;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDBLTBATCH Batch[2];
+    DDBLTFX Fx;
+    RECT Rect = { 0, 0, 4, 2 };
+    HDC Dc;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Kind : { DWORD(DDSCAPS_SYSTEMMEMORY), DWORD(DDSCAPS_VIDEOMEMORY) })
+    {
+        printf("[batch %08lX]\n", Kind);
+        Target = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 8, 4, 32);
+        Source = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 8, 4, 32);
+        if (Target == nullptr || Source == nullptr)
+        {
+            printf("create failed\n");
+            if (Target != nullptr)
+                Target->Release();
+            if (Source != nullptr)
+                Source->Release();
+            continue;
+        }
+
+        memset(Batch, 0, sizeof(Batch));
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillColor = 0x00112233;
+        printf("none = %08lX\n", Target->BltBatch(Batch, 0, 0));
+        printf("negative = %08lX\n", Target->BltBatch(nullptr, 0x80000000, 0));
+        printf("plain = %08lX\n", Target->BltBatch(Batch, 1, 0));
+        Batch[0].lpDDSSrc = reinterpret_cast<LPDIRECTDRAWSURFACE>(Source);
+        Batch[0].lprDest = &Rect;
+        Batch[0].lprSrc = &Rect;
+        printf("copy = %08lX\n", Target->BltBatch(Batch, 1, 0x12345678));
+        Batch[0].dwFlags = DDBLT_COLORFILL;
+        printf("fill_nofx = %08lX\n", Target->BltBatch(Batch, 1, 0));
+        Batch[0].lpDDBltFx = &Fx;
+        printf("fill = %08lX\n", Target->BltBatch(Batch, 1, 0));
+        Batch[0].dwFlags = DDBLT_WAIT | DDBLT_KEYSRC | DDBLT_ASYNC;
+        Batch[0].lpDDBltFx = nullptr;
+        printf("keyed_nofx = %08lX\n", Target->BltBatch(Batch, 1, 0));
+        Batch[0].dwFlags = 0x80000000;
+        printf("unknown_flag = %08lX\n", Target->BltBatch(Batch, 1, 0));
+        Batch[0].dwFlags = 0;
+        Batch[0].lpDDBltFx = &Fx;
+        Fx.dwSize = 0;
+        printf("badfx = %08lX\n", Target->BltBatch(Batch, 1, 0));
+        Fx.dwSize = sizeof(Fx);
+        Batch[1] = Batch[0];
+        Batch[1].dwFlags = DDBLT_ROP;
+        Batch[1].lpDDBltFx = nullptr;
+        printf("second_bad = %08lX\n", Target->BltBatch(Batch, 2, 0));
+        printf("second_ignored = %08lX\n", Target->BltBatch(Batch, 1, 0));
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        if (SUCCEEDED(Source->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        {
+            printf("source_locked = %08lX\n", Target->BltBatch(Batch, 1, 0));
+            printf("source_locked_none = %08lX\n", Target->BltBatch(Batch, 0, 0));
+            Source->Unlock(nullptr);
+        }
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        if (SUCCEEDED(Target->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        {
+            printf("target_locked = %08lX\n", Target->BltBatch(Batch, 0, 0));
+            Target->Unlock(nullptr);
+        }
+        if (SUCCEEDED(Source->GetDC(&Dc)))
+        {
+            printf("source_dc = %08lX\n", Target->BltBatch(Batch, 1, 0));
+            Source->ReleaseDC(Dc);
+        }
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        Desc.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | Kind;
+        Desc.dwWidth = 8;
+        Desc.dwHeight = 4;
+        Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+        Desc.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER;
+        Desc.ddpfPixelFormat.dwZBufferBitDepth = 16;
+        Desc.ddpfPixelFormat.dwZBitMask = 0xFFFF;
+        Depth = nullptr;
+        if (SUCCEEDED(Draw7->CreateSurface(&Desc, &Depth, nullptr)))
+        {
+            Batch[0].lpDDSSrc = reinterpret_cast<LPDIRECTDRAWSURFACE>(Depth);
+            Batch[0].dwFlags = DDBLT_DEPTHFILL;
+            printf("depth_source = %08lX\n", Target->BltBatch(Batch, 1, 0));
+            printf("depth_target = %08lX\n", Depth->BltBatch(Batch, 1, 0));
+            Depth->Release();
+        }
+
+        Target->Release();
+        Source->Release();
+    }
+
+    Draw7->Release();
+}
+
+/* DEPTHFILL and the other fills of Z buffers, read back where the buffer can be locked */
+static
+VOID
+DcCheckDepthFill(
+    _Inout_ DrawCheck* Check)
+{
+    struct DcDepthShape
+    {
+        PCSTR Name;
+        DWORD Caps;
+        DWORD Flags;
+        DWORD Depth;
+        DWORD Stencil;
+        DWORD Mask;
+        DWORD StencilMask;
+    };
+    static const DcDepthShape Shapes[] =
+    {
+        { "z16_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 16, 0, 0xFFFF, 0 },
+        { "z16_video", DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY, DDPF_ZBUFFER, 16, 0, 0xFFFF, 0 },
+        { "z32_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 32, 0, 0xFFFFFFFF, 0 },
+        { "z24_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 32, 0, 0xFFFFFF, 0 },
+        { "z24_video", DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY, DDPF_ZBUFFER, 32, 0, 0xFFFFFF, 0 },
+        { "z24s8_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER | DDPF_STENCILBUFFER, 32, 8, 0xFFFFFF00,
+          0xFF },
+        { "z24s8_video", DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY, DDPF_ZBUFFER | DDPF_STENCILBUFFER, 32, 8, 0xFFFFFF00,
+          0xFF },
+        { "z15_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 15, 0, 0x7FFF, 0 },
+        { "z8_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 8, 0, 0xFF, 0 },
+        { "z24p_sys", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 24, 0, 0xFFFFFF, 0 },
+        { "z8_video", DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY, DDPF_ZBUFFER, 8, 0, 0xFF, 0 },
+        { "z24p_video", DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY, DDPF_ZBUFFER, 24, 0, 0xFFFFFF, 0 },
+        { "z24p_any", DDSCAPS_ZBUFFER, DDPF_ZBUFFER, 24, 0, 0xFFFFFF, 0 },
+        { "z16_mask", DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, DDPF_ZBUFFER, 16, 0, 0x0FF0, 0 },
+    };
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAWSURFACE7 Other;
+    LPDIRECTDRAWSURFACE7 Plain;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDBLTFX Fx;
+    RECT Rect = { 1, 0, 3, 1 };
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (const DcDepthShape& Shape : Shapes)
+    {
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        Desc.ddsCaps.dwCaps = Shape.Caps;
+        Desc.dwWidth = 4;
+        Desc.dwHeight = 2;
+        Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+        Desc.ddpfPixelFormat.dwFlags = Shape.Flags;
+        Desc.ddpfPixelFormat.dwZBufferBitDepth = Shape.Depth;
+        Desc.ddpfPixelFormat.dwStencilBitDepth = Shape.Stencil;
+        Desc.ddpfPixelFormat.dwZBitMask = Shape.Mask;
+        Desc.ddpfPixelFormat.dwStencilBitMask = Shape.StencilMask;
+        Surface = nullptr;
+        hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+        printf("depth %s = %08lX\n", Shape.Name, hr);
+        if (FAILED(hr))
+            continue;
+        DcPatternBits(Surface, 3);
+        Other = nullptr;
+        if (SUCCEEDED(Draw7->CreateSurface(&Desc, &Other, nullptr)))
+            DcPatternBits(Other, 40);
+
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillDepth = 0x89ABCDEF;
+        printf("  fill = %08lX\n", Surface->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL | DDBLT_WAIT, &Fx));
+        DcDump("  fill_after", Surface);
+        Fx.dwFillDepth = 0x00012345;
+        printf("  fill_rect = %08lX\n", Surface->Blt(&Rect, nullptr, nullptr, DDBLT_DEPTHFILL, &Fx));
+        DcDump("  fill_rect_after", Surface);
+        printf("  fill_nofx = %08lX\n", Surface->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL, nullptr));
+        if (Other != nullptr)
+            printf("  fill_source = %08lX\n", Surface->Blt(nullptr, Other, nullptr, DDBLT_DEPTHFILL, &Fx));
+        printf("  fill_both = %08lX\n",
+               Surface->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL | DDBLT_COLORFILL, &Fx));
+        Fx.dwZDestConstBitDepth = 16;
+        Fx.dwFillDepth = 0x00FEDCBA;
+        printf("  fill_zconst = %08lX\n", Surface->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL, &Fx));
+        DcDump("  fill_zconst_after", Surface);
+        Fx.dwZDestConstBitDepth = 0;
+        Fx.dwFillColor = 0x00ABCDEF;
+        printf("  color = %08lX\n", Surface->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL, &Fx));
+        Fx.dwROP = WHITENESS;
+        printf("  rop = %08lX\n", Surface->Blt(nullptr, nullptr, nullptr, DDBLT_ROP, &Fx));
+        DcDump("  rop_after", Surface);
+        Fx.dwROP = BLACKNESS;
+        printf("  rop_black = %08lX\n", Surface->Blt(&Rect, nullptr, nullptr, DDBLT_ROP, &Fx));
+        DcDump("  rop_black_after", Surface);
+        if (Other != nullptr)
+        {
+            printf("  copy = %08lX\n", Surface->Blt(&Rect, Other, nullptr, DDBLT_WAIT, nullptr));
+            DcDump("  copy_after", Surface);
+            DcPatternBits(Surface, 3);
+            printf("  zblt = %08lX\n", Surface->Blt(nullptr, Other, nullptr, DDBLT_ZBUFFER, &Fx));
+            DcDump("  zblt_after", Surface);
+            Other->Release();
+        }
+        Surface->Release();
+    }
+
+    for (DWORD Kind : { DWORD(DDSCAPS_SYSTEMMEMORY), DWORD(DDSCAPS_VIDEOMEMORY) })
+    {
+        Plain = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 4, 2, 32);
+        if (Plain == nullptr)
+            continue;
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillDepth = 0x1234;
+        printf("plain %08lX fill = %08lX\n", Kind,
+               Plain->Blt(nullptr, nullptr, nullptr, DDBLT_DEPTHFILL | DDBLT_WAIT, &Fx));
+        Plain->Release();
+    }
+
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -3050,6 +3292,8 @@ static const DrawCheckInfo DcChecks[] =
     { "video_fill", DcCheckVideoFill },
     { "set_desc", DcCheckSetDesc },
     { "overlay", DcCheckOverlay },
+    { "blt_batch", DcCheckBltBatch },
+    { "depth_fill", DcCheckDepthFill },
 };
 
 static
