@@ -9,6 +9,20 @@
 
 static const GUID* DcDataDevices[] = { &GUID_SysKeyboard, &GUID_SysMouse, &GUID_SysKeyboardEm2, &GUID_SysMouseEm2 };
 
+/* Output reports would reach real hardware, so only the system devices are sent data */
+static
+BOOLEAN
+DcIsSystemDevice(
+    _In_ const GUID* Guid)
+{
+    for (const GUID* System : DcDataDevices)
+    {
+        if (IsEqualGUID(*Guid, *System))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* The system devices and every HID device, for the checks that only read or set per process state */
 static
 const std::vector<const GUID*>&
@@ -509,7 +523,8 @@ DcCheckAcquire(VOID)
 
             printf("  data zero = %08lX count %lu\n", Status, Count);
         }
-        printf("  send = %08lX\n", Device->SendDeviceData(sizeof(Data[0]), Data, &Count, 0));
+        if (DcIsSystemDevice(Guid))
+            printf("  send = %08lX\n", Device->SendDeviceData(sizeof(Data[0]), Data, &Count, 0));
         printf("  unacquire = %08lX\n", Device->Unacquire());
         printf("  unacquire again = %08lX\n", Device->Unacquire());
         printf("  poll after = %08lX\n", Device->Poll());
@@ -834,7 +849,7 @@ DcCheckMisc(VOID)
 
     if (Wide == nullptr)
         return;
-    for (const GUID* Guid : DcDataDevices)
+    for (const GUID* Guid : DcReadDevices())
     {
         IDirectInputDevice8W* Device = DcOpen(Wide, Guid);
         IDirectInputEffect* Effect = reinterpret_cast<IDirectInputEffect*>(DC_SENTINEL);
@@ -861,7 +876,8 @@ DcCheckMisc(VOID)
         printf("  enum created = %08lX\n", Device->EnumCreatedEffectObjects(
             [](LPDIRECTINPUTEFFECT, VOID*) -> BOOL { return DIENUM_CONTINUE; }, nullptr, 0));
         printf("  escape = %08lX\n", Device->Escape(&Escape));
-        printf("  send = %08lX\n", Device->SendDeviceData(sizeof(DIDEVICEOBJECTDATA), nullptr, &Count, 0));
+        if (DcIsSystemDevice(Guid))
+            printf("  send = %08lX\n", Device->SendDeviceData(sizeof(DIDEVICEOBJECTDATA), nullptr, &Count, 0));
         printf("  enum file = %08lX\n", Device->EnumEffectsInFile(L"c:\\nonexistent\\file.ffe",
             [](LPCDIFILEEFFECT, VOID*) -> BOOL { return DIENUM_CONTINUE; }, nullptr, 0));
         Device->Release();
