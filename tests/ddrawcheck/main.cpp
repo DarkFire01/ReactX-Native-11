@@ -2519,6 +2519,275 @@ DcCheckAttach(
     printf("release_draw = %lu\n", Draw->Release());
 }
 
+/* The first pixel of each chain member, and which original memory each one now shows */
+static
+VOID
+DcShowChain(
+    _In_z_ PCSTR Name,
+    _In_reads_(Count) LPDIRECTDRAWSURFACE7* Members,
+    _In_ DWORD Count,
+    _In_reads_(Count) VOID* const* Memory)
+{
+    DDSURFACEDESC2 Desc;
+    DWORD Value;
+    int Which;
+    HRESULT hr;
+
+    printf("  %s:", Name);
+    for (DWORD Index = 0; Index < Count; Index++)
+    {
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        hr = Members[Index]->Lock(nullptr, &Desc, DDLOCK_WAIT | DDLOCK_READONLY, NULL);
+        if (FAILED(hr))
+        {
+            printf(" %08lX", hr);
+            continue;
+        }
+        Value = *static_cast<DWORD*>(Desc.lpSurface);
+        Which = -1;
+        for (DWORD Other = 0; Memory != nullptr && Other < Count; Other++)
+        {
+            if (Memory[Other] == Desc.lpSurface)
+                Which = static_cast<int>(Other);
+        }
+        printf(" %08lX@%d", Value, Which);
+        Members[Index]->Unlock(nullptr);
+    }
+    printf("\n");
+}
+
+static
+VOID
+DcCheckFlip(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Fills[] = { 0x11111111, 0x22222222, 0x33333333 };
+    LPDIRECTDRAWSURFACE7 Members[3];
+    LPDIRECTDRAWSURFACE7 Plain;
+    LPDIRECTDRAWSURFACE Old;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    VOID* Memory[3];
+    DDSCAPS2 Caps;
+    DDBLTFX Fx;
+    DWORD Value;
+    HRESULT hr;
+    HDC Dc;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Kind : { DWORD(DDSCAPS_SYSTEMMEMORY), DWORD(DDSCAPS_VIDEOMEMORY) })
+    {
+        printf("[flip %08lX]\n", Kind);
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_BACKBUFFERCOUNT | DDSD_PIXELFORMAT;
+        Desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_FLIP | DDSCAPS_COMPLEX | Kind;
+        Desc.dwWidth = 16;
+        Desc.dwHeight = 8;
+        Desc.dwBackBufferCount = 2;
+        Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+        Desc.ddpfPixelFormat.dwFlags = DDPF_RGB;
+        Desc.ddpfPixelFormat.dwRGBBitCount = 32;
+        Desc.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+        Desc.ddpfPixelFormat.dwGBitMask = 0xFF00;
+        Desc.ddpfPixelFormat.dwBBitMask = 0xFF;
+        hr = Draw7->CreateSurface(&Desc, &Members[0], nullptr);
+        printf("create = %08lX\n", hr);
+        if (FAILED(hr))
+            continue;
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = DDSCAPS_FLIP;
+        Members[0]->GetAttachedSurface(&Caps, &Members[1]);
+        Members[1]->GetAttachedSurface(&Caps, &Members[2]);
+        Plain = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 16, 8, 32);
+
+        for (DWORD Index = 0; Index < 3; Index++)
+        {
+            memset(&Fx, 0, sizeof(Fx));
+            Fx.dwSize = sizeof(Fx);
+            Fx.dwFillColor = Fills[Index];
+            Members[Index]->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx);
+            memset(&Desc, 0, sizeof(Desc));
+            Desc.dwSize = sizeof(Desc);
+            Memory[Index] = nullptr;
+            if (Kind == DDSCAPS_SYSTEMMEMORY && SUCCEEDED(Members[Index]->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+            {
+                Memory[Index] = Desc.lpSurface;
+                Members[Index]->Unlock(nullptr);
+            }
+        }
+        DcShowChain("start", Members, 3, Memory);
+
+        printf("flip = %08lX\n", Members[0]->Flip(nullptr, 0));
+        DcShowChain("after", Members, 3, Memory);
+        for (DWORD Index = 0; Index < 3; Index++)
+        {
+            memset(&Caps, 0, sizeof(Caps));
+            Members[Index]->GetCaps(&Caps);
+            Members[Index]->GetUniquenessValue(&Value);
+            printf("  member %lu caps=%08lX uniq=%lu\n", Index, Caps.dwCaps, Value);
+        }
+        for (DWORD Flags : { DWORD(DDFLIP_WAIT), DWORD(DDFLIP_DONOTWAIT), DWORD(DDFLIP_NOVSYNC),
+                             DWORD(DDFLIP_INTERVAL2), DWORD(DDFLIP_INTERVAL4), DWORD(DDFLIP_NOVSYNC | DDFLIP_INTERVAL2),
+                             DWORD(DDFLIP_EVEN), DWORD(DDFLIP_ODD), DWORD(DDFLIP_STEREO), DWORD(0x40),
+                             DWORD(0x08000000), DWORD(DDFLIP_WAIT | DDFLIP_DONOTWAIT) })
+        {
+            printf("flip_flags %08lX = %08lX\n", Flags, Members[0]->Flip(nullptr, Flags));
+        }
+        DcShowChain("after_flags", Members, 3, Memory);
+
+        printf("flip_target = %08lX\n", Members[0]->Flip(Members[2], 0));
+        DcShowChain("after_target", Members, 3, Memory);
+        printf("flip_target_first = %08lX\n", Members[0]->Flip(Members[1], 0));
+        DcShowChain("after_target_first", Members, 3, Memory);
+        printf("flip_target_self = %08lX\n", Members[0]->Flip(Members[0], 0));
+        printf("flip_target_self_even = %08lX\n", Members[0]->Flip(Members[0], DDFLIP_EVEN));
+        if (Plain != nullptr)
+        {
+            printf("flip_target_plain = %08lX\n", Members[0]->Flip(Plain, 0));
+            printf("flip_plain = %08lX\n", Plain->Flip(nullptr, 0));
+        }
+        printf("flip_back = %08lX\n", Members[1]->Flip(nullptr, 0));
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        if (SUCCEEDED(Members[0]->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        {
+            printf("flip_front_locked = %08lX\n", Members[0]->Flip(nullptr, 0));
+            Members[0]->Unlock(nullptr);
+        }
+        if (SUCCEEDED(Members[2]->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        {
+            printf("flip_last_locked = %08lX\n", Members[0]->Flip(nullptr, 0));
+            printf("flip_last_locked_target = %08lX\n", Members[0]->Flip(Members[1], 0));
+            printf("flip_last_locked_target_last = %08lX\n", Members[0]->Flip(Members[2], 0));
+            Members[2]->Unlock(nullptr);
+        }
+        DcShowChain("after_locks", Members, 3, Memory);
+        if (SUCCEEDED(Members[1]->GetDC(&Dc)))
+        {
+            printf("flip_dc = %08lX\n", Members[0]->Flip(nullptr, 0));
+            printf("flip_dc_target = %08lX\n", Members[0]->Flip(Members[2], 0));
+            Members[1]->ReleaseDC(Dc);
+        }
+
+        for (DWORD Flags : { 0ul, 1ul, 2ul, 3ul, 4ul })
+        {
+            printf("flip_status %lu = %08lX back=%08lX", Flags, Members[0]->GetFlipStatus(Flags),
+                   Members[1]->GetFlipStatus(Flags));
+            if (Plain != nullptr)
+                printf(" plain=%08lX", Plain->GetFlipStatus(Flags));
+            printf("\n");
+        }
+
+        Old = nullptr;
+        Members[0]->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<VOID**>(&Old));
+        if (Old != nullptr)
+        {
+            printf("flip_old = %08lX\n", Old->Flip(nullptr, DDFLIP_WAIT));
+            printf("flip_old_donotwait = %08lX\n", Old->Flip(nullptr, DDFLIP_DONOTWAIT));
+            Old->Release();
+        }
+        DcShowChain("end", Members, 3, Memory);
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Members[0]->GetSurfaceDesc(&Desc);
+        printf("front_pitch = %ld\n", Desc.lPitch);
+
+        if (Plain != nullptr)
+            Plain->Release();
+        Members[2]->Release();
+        Members[1]->Release();
+        printf("release = %lu\n", Members[0]->Release());
+    }
+
+    Draw7->Release();
+}
+
+/* What a fill leaves in video memory, for each format and fill kind */
+static
+VOID
+DcCheckVideoFill(
+    _Inout_ DrawCheck* Check)
+{
+    static const DcSurfaceShape Shapes[] =
+    {
+        { "x8r8g8b8", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 32, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "a8r8g8b8", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 32, DDPF_RGB | DDPF_ALPHAPIXELS, 0xFF0000,
+          0xFF00, 0xFF, 0xFF000000 },
+        { "r5g6b5", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 16, DDPF_RGB, 0xF800, 0x07E0, 0x001F },
+        { "x1r5g5b5", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 16, DDPF_RGB, 0x7C00, 0x03E0, 0x001F },
+        { "a1r5g5b5", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 16, DDPF_RGB | DDPF_ALPHAPIXELS, 0x7C00,
+          0x03E0, 0x001F, 0x8000 },
+        { "a4r4g4b4", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 16, DDPF_RGB | DDPF_ALPHAPIXELS, 0x0F00,
+          0x00F0, 0x000F, 0xF000 },
+        { "x8b8g8r8", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 32, DDPF_RGB, 0xFF, 0xFF00, 0xFF0000 },
+        { "p8", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 8, DDPF_RGB | DDPF_PALETTEINDEXED8 },
+        { "r8g8b8", 0, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 24, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+    };
+    static const DWORD Values[] = { 0x12345678, 0xFFFFFFFF, 0x80008001, 0x0000F81F };
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDBLTFX Fx;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Memory : { DWORD(DDSCAPS_VIDEOMEMORY), DWORD(DDSCAPS_SYSTEMMEMORY) })
+    for (const DcSurfaceShape& Shape : Shapes)
+    {
+        DcFillDesc(Shape, &Desc);
+        Desc.dwFlags |= DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        Desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | Memory;
+        Surface = nullptr;
+        hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+        printf("fill %s %08lX = %08lX\n", Shape.Name, Memory, hr);
+        if (FAILED(hr))
+            continue;
+
+        for (DWORD Pass = 0; Pass < _countof(Values) + 2; Pass++)
+        {
+            memset(&Fx, 0, sizeof(Fx));
+            Fx.dwSize = sizeof(Fx);
+            if (Pass < _countof(Values))
+            {
+                Fx.dwFillColor = Values[Pass];
+                hr = Surface->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx);
+            }
+            else
+            {
+                Fx.dwROP = Pass == _countof(Values) ? WHITENESS : BLACKNESS;
+                hr = Surface->Blt(nullptr, nullptr, nullptr, DDBLT_ROP | DDBLT_WAIT, &Fx);
+            }
+            printf("  pass %lu = %08lX", Pass, hr);
+            memset(&Desc, 0, sizeof(Desc));
+            Desc.dwSize = sizeof(Desc);
+            if (SUCCEEDED(Surface->Lock(nullptr, &Desc, DDLOCK_WAIT | DDLOCK_READONLY, NULL)))
+            {
+                const BYTE* Bits = static_cast<const BYTE*>(Desc.lpSurface);
+
+                for (DWORD Index = 0; Index < 8; Index++)
+                    printf(" %02X", Bits[Index]);
+                Surface->Unlock(nullptr);
+            }
+            printf("\n");
+        }
+        Surface->Release();
+    }
+
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -2544,6 +2813,8 @@ static const DrawCheckInfo DcChecks[] =
     { "private_data", DcCheckPrivateData },
     { "complex", DcCheckComplex },
     { "attach", DcCheckAttach },
+    { "flip", DcCheckFlip },
+    { "video_fill", DcCheckVideoFill },
 };
 
 static
