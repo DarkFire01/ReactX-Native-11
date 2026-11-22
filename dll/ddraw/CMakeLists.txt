@@ -2,11 +2,13 @@ nt_add_usermode_dll(ddraw
     DEF ddraw.def
     SOURCES
         caps.cpp
+        clipper.cpp
         driver.cpp
         globals.cpp
         hardware.cpp
         main.cpp
         object.cpp
+        palette.cpp
         ddraw.rc)
 
 target_link_libraries(ddraw PRIVATE rxcommon user32 gdi32 advapi32 ole32 dxguid)

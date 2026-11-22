@@ -174,6 +174,7 @@ DdDestroyDriver(
     _In_ DdDriver* Driver)
 {
     DdUnlinkDriver(Driver);
+    DdOrphanClippers(Driver);
     DdCloseHardware(Driver->Hardware);
     delete[] Driver->FourCC;
     delete Driver;
@@ -474,8 +475,13 @@ DdRetireLocal(
 {
     DdDriver* Driver = Local->Driver;
 
-    if (Driver != nullptr && Driver->ExclusiveOwner == Local)
-        Driver->ExclusiveOwner = nullptr;
+    if (Driver != nullptr)
+    {
+        DdReleaseLocalPalettes(Local);
+        DdReleaseLocalClippers(Local);
+        if (Driver->ExclusiveOwner == Local)
+            Driver->ExclusiveOwner = nullptr;
+    }
 
     if ((Local->Flags & DDRAWILCL_CREATEDWINDOW) != 0 && IsWindow(Local->Window))
     {

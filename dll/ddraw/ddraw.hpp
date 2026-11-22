@@ -19,6 +19,8 @@
 struct DdDriver;
 struct DdLocal;
 struct DdInterface;
+struct DdClipper;
+struct DdPalette;
 
 /* Which interface an object pointer stands for */
 enum class DdKind : UCHAR
@@ -156,6 +158,9 @@ struct DdDriver
 
     /* The adapter an emulated driver reports memory for */
     LUID AdapterLuid;
+
+    DdClipper* Clippers;
+    DdPalette* Palettes;
 };
 
 /* One DirectDraw object as the application created it */
@@ -183,6 +188,37 @@ struct DdInterface
     ULONG RefCount;
     DdKind Kind;
     BOOLEAN Initialized;
+};
+
+/* An IDirectDrawClipper; clippers have a single interface */
+struct DdClipper
+{
+    const VOID* Vtbl;
+    ULONG RefCount;
+    BOOLEAN Initialized;
+    DWORD ProcessId;
+    DdDriver* Driver;
+    DdLocal* Creator;
+    DdInterface* Owner;
+    BOOLEAN MadeByFirstDraw;
+    HWND Window;
+    RGNDATA* ClipList;
+    DdClipper* Next;
+};
+
+/* An IDirectDrawPalette */
+struct DdPalette
+{
+    const VOID* Vtbl;
+    ULONG RefCount;
+    ULONG Flags;
+    DWORD ProcessId;
+    BOOLEAN OnPrimary;
+    DdDriver* Driver;
+    DdLocal* Creator;
+    DdInterface* Owner;
+    BYTE* Entries;
+    DdPalette* Next;
 };
 
 /* Process wide runtime state */
@@ -379,6 +415,45 @@ DdReleaseInterface(
 ULONG
 DdAddRefInterface(
     _In_ DdInterface* Interface);
+
+/* clipper.cpp */
+HRESULT
+DdNewClipper(
+    _In_opt_ DdDriver* Driver,
+    _In_ DWORD Flags,
+    _Out_ LPDIRECTDRAWCLIPPER* Result,
+    _In_opt_ IUnknown* Outer,
+    _In_ BOOLEAN Initialized,
+    _In_opt_ DdInterface* Owner);
+
+ULONG
+DdReleaseClipper(
+    _In_ DdClipper* Clipper);
+
+VOID
+DdReleaseLocalClippers(
+    _In_ DdLocal* Local);
+
+VOID
+DdOrphanClippers(
+    _In_ DdDriver* Driver);
+
+/* palette.cpp */
+HRESULT
+DdNewPalette(
+    _In_ DdInterface* This,
+    _In_ DWORD Flags,
+    _In_ LPPALETTEENTRY Initial,
+    _Out_ LPDIRECTDRAWPALETTE* Result,
+    _In_opt_ IUnknown* Outer);
+
+ULONG
+DdReleasePalette(
+    _In_ DdPalette* Palette);
+
+VOID
+DdReleaseLocalPalettes(
+    _In_ DdLocal* Local);
 
 /* object.cpp */
 const VOID*

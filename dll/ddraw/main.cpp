@@ -266,8 +266,9 @@ DirectDrawCreateClipper(
     _Out_ LPDIRECTDRAWCLIPPER* Clipper,
     _In_opt_ IUnknown* Outer)
 {
-    DD_TRACE_ONCE(L"DirectDrawCreateClipper is not implemented yet");
-    return DDERR_UNSUPPORTED;
+    DdLockScope Lock;
+
+    return DdNewClipper(nullptr, Flags, Clipper, Outer, TRUE, nullptr);
 }
 
 /* The class factory DllGetClassObject hands out */
@@ -407,8 +408,15 @@ DdFactoryCreateInstance(
 
     if (IsEqualGUID(Factory->Clsid, CLSID_DirectDrawClipper))
     {
-        DD_TRACE_ONCE(L"clipper objects are not implemented yet");
-        return E_NOINTERFACE;
+        LPDIRECTDRAWCLIPPER Clipper;
+
+        hr = DdNewClipper(nullptr, 0, &Clipper, nullptr, FALSE, nullptr);
+        if (FAILED(hr))
+            return hr;
+
+        hr = Clipper->QueryInterface(Iid, Object);
+        Clipper->Release();
+        return hr;
     }
 
     /* The second factory class has no objects of its own */

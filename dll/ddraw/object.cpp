@@ -141,8 +141,11 @@ DdCreateClipper(
     _Out_ LPDIRECTDRAWCLIPPER* Clipper,
     _In_opt_ IUnknown* Outer)
 {
-    DD_TRACE_ONCE(L"CreateClipper is not implemented yet");
-    return DDERR_UNSUPPORTED;
+    DdInterface* This = DdFromCom(Com);
+
+    DdLockScope Lock;
+
+    return DdNewClipper(This->Local->Driver, Flags, Clipper, Outer, TRUE, This);
 }
 
 static
@@ -155,8 +158,7 @@ DdCreatePalette(
     _Out_ LPDIRECTDRAWPALETTE* Palette,
     _In_opt_ IUnknown* Outer)
 {
-    DD_TRACE_ONCE(L"CreatePalette is not implemented yet");
-    return DDERR_UNSUPPORTED;
+    return DdNewPalette(DdFromCom(Com), Flags, Entries, Palette, Outer);
 }
 
 static
