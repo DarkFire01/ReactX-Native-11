@@ -1845,6 +1845,93 @@ DcFillNoise(
     }
 }
 
+/* Puts the listener and a 3D buffer into one of the measured arrangements */
+static
+VOID
+DcSetScene(
+    _In_ IDirectSound8* Sound,
+    _In_ IDirectSoundBuffer* Buffer,
+    _In_ UINT Scene)
+{
+    IDirectSoundBuffer* Primary = nullptr;
+    IDirectSound3DListener* Listener = nullptr;
+    IDirectSound3DBuffer* Spatial = nullptr;
+    DSBUFFERDESC Desc = {};
+
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D;
+    if (FAILED(Sound->CreateSoundBuffer(&Desc, &Primary, nullptr)))
+        return;
+    Primary->QueryInterface(IID_IDirectSound3DListener, reinterpret_cast<void**>(&Listener));
+    Buffer->QueryInterface(IID_IDirectSound3DBuffer, reinterpret_cast<void**>(&Spatial));
+    if (Listener == nullptr || Spatial == nullptr)
+    {
+        printf("  scene interfaces missing\n");
+        if (Listener != nullptr)
+            Listener->Release();
+        if (Spatial != nullptr)
+            Spatial->Release();
+        Primary->Release();
+        return;
+    }
+
+    Listener->SetPosition(0.0f, 0.0f, 0.0f, DS3D_DEFERRED);
+    Listener->SetVelocity(0.0f, 0.0f, 0.0f, DS3D_DEFERRED);
+    Listener->SetOrientation(0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, DS3D_DEFERRED);
+    Listener->SetRolloffFactor(1.0f, DS3D_DEFERRED);
+    Listener->SetDopplerFactor(1.0f, DS3D_DEFERRED);
+    Listener->SetDistanceFactor(1.0f, DS3D_DEFERRED);
+
+    switch (Scene)
+    {
+        case 1:
+            break;
+        case 2:
+            Spatial->SetPosition(3.0f, 0.0f, 4.0f, DS3D_DEFERRED);
+            break;
+        case 3:
+            Spatial->SetPosition(-1.2f, 0.5f, 0.8f, DS3D_DEFERRED);
+            break;
+        case 4:
+            Listener->SetOrientation(1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, DS3D_DEFERRED);
+            Listener->SetPosition(1.0f, 0.0f, -1.0f, DS3D_DEFERRED);
+            Spatial->SetPosition(0.0f, 0.0f, 2.0f, DS3D_DEFERRED);
+            break;
+        case 5:
+            Spatial->SetMode(DS3DMODE_HEADRELATIVE, DS3D_DEFERRED);
+            Spatial->SetPosition(0.5f, 0.0f, -2.0f, DS3D_DEFERRED);
+            Spatial->SetConeAngles(90, 180, DS3D_DEFERRED);
+            Spatial->SetConeOutsideVolume(-1500, DS3D_DEFERRED);
+            Spatial->SetConeOrientation(0.0f, 0.0f, 1.0f, DS3D_DEFERRED);
+            break;
+        case 6:
+            Spatial->SetMode(DS3DMODE_DISABLE, DS3D_DEFERRED);
+            Spatial->SetPosition(5.0f, 0.0f, 0.0f, DS3D_DEFERRED);
+            Buffer->SetVolume(-800);
+            break;
+        case 7:
+            Listener->SetRolloffFactor(2.0f, DS3D_DEFERRED);
+            Spatial->SetMinDistance(2.0f, DS3D_DEFERRED);
+            Spatial->SetPosition(0.0f, 3.0f, 6.0f, DS3D_DEFERRED);
+            Spatial->SetConeAngles(30, 120, DS3D_DEFERRED);
+            Spatial->SetConeOrientation(0.0f, 0.0f, -1.0f, DS3D_DEFERRED);
+            Spatial->SetConeOutsideVolume(-2000, DS3D_DEFERRED);
+            break;
+        case 8:
+            Listener->SetOrientation(0.3f, -0.2f, -0.9f, 0.1f, 0.9f, -0.2f, DS3D_DEFERRED);
+            Spatial->SetPosition(-4.0f, 1.0f, -7.0f, DS3D_DEFERRED);
+            break;
+        case 9:
+            Spatial->SetPosition(0.2f, 0.0f, 0.0f, DS3D_DEFERRED);
+            Spatial->SetMaxDistance(0.1f, DS3D_DEFERRED);
+            break;
+    }
+    Listener->CommitDeferredSettings();
+    Spatial->Release();
+    Listener->Release();
+    Primary->Release();
+}
+
 /* Plays short quiet buffers and compares what reaches the endpoint, sample for sample */
 static
 VOID
@@ -1860,20 +1947,30 @@ DcCheckMix(VOID)
         LONG Volume;
         LONG Pan;
         DWORD Focus;
+        UINT Scene;
     } Cases[] =
     {
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -1234, 2500, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -300, -7000, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, -500, 1500, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 8, 0, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 24, 0, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_IEEE_FLOAT, 2, TRUE, 0, 32, -600, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, 0 },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_STICKYFOCUS },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -1234, 2500, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -300, -7000, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, -500, 1500, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 8, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 24, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, TRUE, 0, 32, -600, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, 0, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_STICKYFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 1 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 2 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 3 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 4 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 5 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 6 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 7 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 8 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 9 },
     };
     IDirectSound8* Sound;
 
@@ -1918,7 +2015,10 @@ DcCheckMix(VOID)
         DcFormat(&Format, Cases[Case].Tag, Cases[Case].Channels,
                  Cases[Case].NativeRate ? Loopback.Format->nSamplesPerSec : Cases[Case].Rate, Cases[Case].Bits);
         Bytes = Format.nAvgBytesPerSec / 4 / Format.nBlockAlign * Format.nBlockAlign;
-        hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | Cases[Case].Focus, Bytes, &Format, &Buffer);
+        hr = DcMakeBuffer(Sound,
+                          DSBCAPS_CTRLVOLUME | Cases[Case].Focus |
+                              (Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
+                          Bytes, &Format, &Buffer);
         if (FAILED(hr))
         {
             printf("mix[%u] create = %08lX\n", Case, hr);
@@ -1928,7 +2028,10 @@ DcCheckMix(VOID)
         DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format);
         Buffer->Unlock(Part1, Size1, nullptr, 0);
         Buffer->SetVolume(Cases[Case].Volume);
-        Buffer->SetPan(Cases[Case].Pan);
+        if (Cases[Case].Scene != 0)
+            DcSetScene(Sound, Buffer, Cases[Case].Scene);
+        else
+            Buffer->SetPan(Cases[Case].Pan);
 
         Loopback.Collect(100);
         hr = Buffer->Play(0, 0, 0);
@@ -1951,8 +2054,8 @@ DcCheckMix(VOID)
         }
         Onset -= Onset % Channels;
         Frames = (Loopback.Samples.size() - Onset) / Channels;
-        printf("mix[%u] format %u/%u/%lu/%u volume %ld pan %ld\n", Case, Format.wFormatTag, Format.nChannels,
-               Format.nSamplesPerSec, Format.wBitsPerSample, Cases[Case].Volume, Cases[Case].Pan);
+        printf("mix[%u] format %u/%u/%lu/%u volume %ld pan %ld scene %u\n", Case, Format.wFormatTag, Format.nChannels,
+               Format.nSamplesPerSec, Format.wBitsPerSample, Cases[Case].Volume, Cases[Case].Pan, Cases[Case].Scene);
         if (Onset >= Loopback.Samples.size())
         {
             fprintf(stderr, "mix[%u] heard nothing in %zu samples\n", Case, Loopback.Samples.size());
