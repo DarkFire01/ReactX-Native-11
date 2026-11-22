@@ -82,6 +82,17 @@ DdKeyMask(
     return Mask;
 }
 
+/* WHITENESS sets every bit of a pixel, alpha included, except the top byte of 32 bit pixels */
+static
+DWORD
+DdWhiteFor(
+    _In_ const DdSurface* Surface)
+{
+    DWORD Bits = Surface->Format.dwRGBBitCount;
+
+    return Bits >= 32 ? 0x00FFFFFF : (1u << Bits) - 1;
+}
+
 static
 VOID
 DdFillRect(
@@ -474,12 +485,118 @@ DdBusCopy(
     return DdDriverCopy(Target, To, Source, From, Flags, Fx);
 }
 
+/* Widens one channel of Bits bits to eight */
+static
+DWORD
+DdWiden(
+    _In_ DWORD Value,
+    _In_ DWORD Shift,
+    _In_ DWORD Bits)
+{
+    DWORD Top = (1u << Bits) - 1;
+
+    return 255 * ((Value >> Shift) & Top) / Top;
+}
+
+/* The driver fills with a D3DCOLOR, so the surface's own pixel value is spread out to ARGB first */
+static
+D3DCOLOR
+DdFillColorFor(
+    _In_ D3DDDIFORMAT Format,
+    _In_ DWORD Value)
+{
+    DWORD Alpha = 0;
+    DWORD Red;
+    DWORD Green;
+    DWORD Blue;
+
+    switch (Format)
+    {
+    case D3DDDIFMT_A8R8G8B8:
+        Alpha = (Value >> 24) & 0xFF;
+        __fallthrough;
+    case D3DDDIFMT_R8G8B8:
+    case D3DDDIFMT_X8R8G8B8:
+        Red = (Value >> 16) & 0xFF;
+        Green = (Value >> 8) & 0xFF;
+        Blue = Value & 0xFF;
+        break;
+    case D3DDDIFMT_A8B8G8R8:
+        Alpha = (Value >> 24) & 0xFF;
+        __fallthrough;
+    case D3DDDIFMT_X8B8G8R8:
+        Red = Value & 0xFF;
+        Green = (Value >> 8) & 0xFF;
+        Blue = (Value >> 16) & 0xFF;
+        break;
+    case D3DDDIFMT_R5G6B5:
+        Red = DdWiden(Value, 11, 5);
+        Green = DdWiden(Value, 5, 6);
+        Blue = DdWiden(Value, 0, 5);
+        break;
+    case D3DDDIFMT_A1R5G5B5:
+        Alpha = DdWiden(Value, 15, 1);
+        __fallthrough;
+    case D3DDDIFMT_X1R5G5B5:
+        Red = DdWiden(Value, 10, 5);
+        Green = DdWiden(Value, 5, 5);
+        Blue = DdWiden(Value, 0, 5);
+        break;
+    case D3DDDIFMT_A4R4G4B4:
+        Alpha = DdWiden(Value, 12, 4);
+        __fallthrough;
+    case D3DDDIFMT_X4R4G4B4:
+        Red = DdWiden(Value, 8, 4);
+        Green = DdWiden(Value, 4, 4);
+        Blue = DdWiden(Value, 0, 4);
+        break;
+    case D3DDDIFMT_A8R3G3B2:
+        Alpha = DdWiden(Value, 8, 8);
+        __fallthrough;
+    case D3DDDIFMT_R3G3B2:
+        Red = DdWiden(Value, 5, 3);
+        Green = DdWiden(Value, 2, 3);
+        Blue = DdWiden(Value, 0, 2);
+        break;
+    default:
+        return Value;
+    }
+    return (Alpha << 24) | (Red << 16) | (Green << 8) | Blue;
+}
+
+/* Video memory fills are the driver's ColorFill, one call per visible piece */
+static
+HRESULT
+DdDriverFill(
+    _In_ DdSurface* Target,
+    _In_ const DdClipPieces* Pieces,
+    _In_ DWORD Value)
+{
+    DdHardware* Hardware = Target->Driver->Hardware;
+    D3DDDIARG_COLORFILL Fill = {};
+    DWORD Index;
+    HRESULT hr = S_OK;
+
+    Fill.hResource = Target->Resource->DriverResource;
+    Fill.Color = DdFillColorFor(Target->Resource->Format, Value);
+    for (Index = 0; Index < Pieces->Count && SUCCEEDED(hr); Index++)
+    {
+        Fill.DstRect = Pieces->Rects[Index];
+        hr = Hardware->DeviceFunctions.pfnColorFill(Hardware->DriverDevice, &Fill);
+    }
+    if (FAILED(hr))
+        DdTrace(L"UMD ColorFill failed 0x%08lX", hr);
+    return hr;
+}
+
+/* Color fills of video memory go to the driver; raster operation fills are always written by hand */
 static
 HRESULT
 DdFillSurface(
     _In_ DdSurface* Target,
     _In_ const RECT* To,
-    _In_ DWORD Value)
+    _In_ DWORD Value,
+    _In_ BOOLEAN ColorFill)
 {
     DdClipPieces Pieces;
     BYTE* Bits;
@@ -490,6 +607,13 @@ DdFillSurface(
         return DDERR_UNSUPPORTED;
     if (!DdClipTarget(Target, To, &Pieces))
         return E_OUTOFMEMORY;
+
+    if (ColorFill && Target->Resource != nullptr && Target->Driver->Hardware->DeviceFunctions.pfnColorFill != nullptr)
+    {
+        hr = DdDriverFill(Target, &Pieces, Value);
+        DdFreeClipPieces(&Pieces);
+        return hr;
+    }
 
     hr = DdMapSurface(Target, FALSE, &Bits);
     if (SUCCEEDED(hr))
@@ -549,7 +673,7 @@ DdBlt(
     {
         if (Primary)
             return DdPresentToPrimary(Target, &Job.To, nullptr, nullptr, TRUE, Fx->dwFillColor);
-        return DdFillSurface(Target, &Job.To, Fx->dwFillColor);
+        return DdFillSurface(Target, &Job.To, Fx->dwFillColor, TRUE);
     }
 
     if ((Flags & DDBLT_ROP) != 0)
@@ -559,7 +683,7 @@ DdBlt(
         {
             if (Primary)
                 return DdPresentToPrimary(Target, &Job.To, nullptr, nullptr, TRUE, Rop == BLACKNESS ? 0 : 0xFFFFFFFF);
-            return DdFillSurface(Target, &Job.To, Rop == BLACKNESS ? 0 : DdKeyMask(Target));
+            return DdFillSurface(Target, &Job.To, Rop == BLACKNESS ? 0 : DdWhiteFor(Target), FALSE);
         }
         if (Rop != SRCCOPY)
             return DDERR_NORASTEROPHW;
