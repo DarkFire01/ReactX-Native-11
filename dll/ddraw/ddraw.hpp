@@ -284,6 +284,21 @@ struct DdResource
     USHORT LockCount;
 };
 
+/* One SetPrivateData entry; small copies or an IUnknown the surface holds a reference on */
+struct DdPrivateData
+{
+    GUID Tag;
+    DWORD Size;
+    DWORD Flags;
+    DWORD Stamp;
+    union
+    {
+        BYTE* Bytes;
+        IUnknown* Object;
+    };
+    DdPrivateData* Next;
+};
+
 /* A DirectDraw surface; video memory surfaces keep their pixels in a driver resource */
 struct DdSurface
 {
@@ -308,6 +323,7 @@ struct DdSurface
     DDCOLORKEY SourceOverlayKey;
     DDCOLORKEY DestOverlayKey;
     BOOLEAN Locked;
+    BOOLEAN LockedReadOnly;
     RECT LockRect;
     HDC Dc;
     HBITMAP Bitmap;
@@ -320,6 +336,7 @@ struct DdSurface
     DWORD Priority;
     DWORD Lod;
     DdSurfaceInterface* Interfaces;
+    DdPrivateData* PrivateData;
 };
 
 /* Process wide runtime state */
@@ -690,6 +707,10 @@ DdMapSurface(
 
 VOID
 DdUnmapSurface(
+    _Inout_ DdSurface* Surface);
+
+VOID
+DdTouchSurface(
     _Inout_ DdSurface* Surface);
 
 /* blit.cpp */

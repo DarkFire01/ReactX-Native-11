@@ -214,6 +214,32 @@ DdAllocateSystemBits(
 
 static
 VOID
+DdFreePrivateEntry(
+    _In_ DdPrivateData* Entry)
+{
+    if ((Entry->Flags & DDSPD_IUNKNOWNPOINTER) != 0)
+        Entry->Object->Release();
+    else
+        delete[] Entry->Bytes;
+    delete Entry;
+}
+
+static
+VOID
+DdFreeAllPrivateData(
+    _Inout_ DdSurface* Surface)
+{
+    DdPrivateData* Entry;
+
+    while ((Entry = Surface->PrivateData) != nullptr)
+    {
+        Surface->PrivateData = Entry->Next;
+        DdFreePrivateEntry(Entry);
+    }
+}
+
+static
+VOID
 DdDestroySurface(
     _In_ DdSurface* Surface)
 {
@@ -228,6 +254,7 @@ DdDestroySurface(
     if (Surface->Clipper != nullptr)
         DdReleaseClipper(Surface->Clipper);
     DdFreeSurfaceMemory(Surface);
+    DdFreeAllPrivateData(Surface);
 
     while ((Interface = Surface->Interfaces) != nullptr)
     {
@@ -653,6 +680,7 @@ DdLockSurface(
     }
 
     Surface->Locked = TRUE;
+    Surface->LockedReadOnly = (Flags & DDLOCK_READONLY) != 0;
     Surface->LockRect = Rect != nullptr ? *Rect : Whole;
     DdDescribe(Surface, Desc, Desc->dwSize);
     Desc->lpSurface = Bits;
@@ -686,7 +714,8 @@ DdUnlockSurface(
         return DDERR_NOTLOCKED;
 
     Surface->Locked = FALSE;
-    Surface->Uniqueness += 1;
+    if (!Surface->LockedReadOnly)
+        DdTouchSurface(Surface);
     if (Surface->Resource != nullptr)
         return DdUnlockSurfaceResource(Surface->Driver->Hardware, Surface);
     return S_OK;
@@ -1114,7 +1143,7 @@ DdSurfaceReleaseDC(
         return DDERR_NODC;
 
     DdDropSurfaceDc(Surface);
-    Surface->Uniqueness += 1;
+    DdTouchSurface(Surface);
     return S_OK;
 }
 
@@ -1295,6 +1324,160 @@ DdSurfacePageLock(
     return S_OK;
 }
 
+/* Moves the contents stamp on; a stamp of zero never moves, and wrapping skips zero */
+VOID
+DdTouchSurface(
+    _Inout_ DdSurface* Surface)
+{
+    if (Surface->Uniqueness == 0)
+        return;
+    Surface->Uniqueness += 1;
+    if (Surface->Uniqueness == 0)
+        Surface->Uniqueness = 1;
+}
+
+_Ret_maybenull_
+static
+DdPrivateData*
+DdFindPrivateData(
+    _In_ DdSurface* Surface,
+    _In_ REFGUID Tag,
+    _Out_opt_ DdPrivateData*** Link)
+{
+    DdPrivateData** Slot;
+
+    for (Slot = &Surface->PrivateData; *Slot != nullptr; Slot = &(*Slot)->Next)
+    {
+        if (IsEqualGUID((*Slot)->Tag, Tag))
+        {
+            if (Link != nullptr)
+                *Link = Slot;
+            return *Slot;
+        }
+    }
+    return nullptr;
+}
+
+static
+HRESULT
+DdDropPrivateData(
+    _In_ DdSurface* Surface,
+    _In_ REFGUID Tag)
+{
+    DdPrivateData** Link;
+    DdPrivateData* Entry;
+
+    Entry = DdFindPrivateData(Surface, Tag, &Link);
+    if (Entry == nullptr)
+        return DDERR_NOTFOUND;
+    *Link = Entry->Next;
+    DdFreePrivateEntry(Entry);
+    return S_OK;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceSetPrivateData(
+    _In_ VOID* Com,
+    _In_ REFGUID Tag,
+    _In_ LPVOID Data,
+    _In_ DWORD Size,
+    _In_ DWORD Flags)
+{
+    DdSurface* Surface = DdSurfaceFromCom(Com);
+    DdPrivateData* Entry;
+
+    DdLockScope Lock;
+
+    if (Size == 0 || (Flags & ~(DDSPD_IUNKNOWNPOINTER | DDSPD_VOLATILE)) != 0)
+        return E_INVALIDARG;
+
+    /* Whatever was stored under the tag goes, even when the new data is refused */
+    DdDropPrivateData(Surface, Tag);
+    if ((Flags & DDSPD_IUNKNOWNPOINTER) != 0 && Size != sizeof(IUnknown*))
+        return E_INVALIDARG;
+
+    Entry = new (std::nothrow) DdPrivateData;
+    if (Entry == nullptr)
+        return E_OUTOFMEMORY;
+
+    if ((Flags & DDSPD_IUNKNOWNPOINTER) != 0)
+    {
+        Entry->Object = static_cast<IUnknown*>(Data);
+        Entry->Object->AddRef();
+    }
+    else
+    {
+        Entry->Bytes = new (std::nothrow) BYTE[Size];
+        if (Entry->Bytes == nullptr)
+        {
+            delete Entry;
+            return E_OUTOFMEMORY;
+        }
+        memcpy(Entry->Bytes, Data, Size);
+    }
+
+    Entry->Tag = Tag;
+    Entry->Size = Size;
+    Entry->Flags = Flags;
+    Entry->Stamp = Surface->Uniqueness;
+    Entry->Next = Surface->PrivateData;
+    Surface->PrivateData = Entry;
+    return S_OK;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceGetPrivateData(
+    _In_ VOID* Com,
+    _In_ REFGUID Tag,
+    _Out_writes_bytes_opt_(*Size) LPVOID Data,
+    _Inout_ LPDWORD Size)
+{
+    DdSurface* Surface = DdSurfaceFromCom(Com);
+    DdPrivateData* Entry;
+
+    DdLockScope Lock;
+
+    Entry = DdFindPrivateData(Surface, Tag, nullptr);
+    if (Entry == nullptr)
+        return DDERR_NOTFOUND;
+
+    /* Volatile data lasts only while the contents stay as they were when it was set */
+    if ((Entry->Flags & DDSPD_VOLATILE) != 0 && (Surface->Uniqueness == 0 || Entry->Stamp != Surface->Uniqueness))
+    {
+        *Size = 0;
+        return DDERR_EXPIRED;
+    }
+
+    if (*Size < Entry->Size)
+    {
+        *Size = Entry->Size;
+        return DDERR_MOREDATA;
+    }
+
+    if ((Entry->Flags & DDSPD_IUNKNOWNPOINTER) != 0)
+        memcpy(Data, &Entry->Object, Entry->Size);
+    else
+        memcpy(Data, Entry->Bytes, Entry->Size);
+    *Size = Entry->Size;
+    return S_OK;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceFreePrivateData(
+    _In_ VOID* Com,
+    _In_ REFGUID Tag)
+{
+    DdLockScope Lock;
+
+    return DdDropPrivateData(DdSurfaceFromCom(Com), Tag);
+}
+
 static
 HRESULT
 STDMETHODCALLTYPE
@@ -1318,7 +1501,7 @@ DdSurfaceChangeUniqueness(
 {
     DdLockScope Lock;
 
-    DdSurfaceFromCom(Com)->Uniqueness += 1;
+    DdTouchSurface(DdSurfaceFromCom(Com));
     return S_OK;
 }
 
@@ -1445,8 +1628,8 @@ DdSurfaceMissing5(
     DD_SURFACE_SLOT(DdSurfaceGetDDInterface), DD_SURFACE_SLOT(DdSurfacePageLock), DD_SURFACE_SLOT(DdSurfacePageLock)
 
 #define DD_SURFACE4_SLOTS \
-    DD_SURFACE_SLOT(DdSurfaceMissing4), DD_SURFACE_SLOT(DdSurfaceMissing3), \
-    DD_SURFACE_SLOT(DdSurfaceMissing1), DD_SURFACE_SLOT(DdSurfaceGetUniqueness), \
+    DD_SURFACE_SLOT(DdSurfaceSetPrivateData), DD_SURFACE_SLOT(DdSurfaceGetPrivateData), \
+    DD_SURFACE_SLOT(DdSurfaceFreePrivateData), DD_SURFACE_SLOT(DdSurfaceGetUniqueness), \
     DD_SURFACE_SLOT(DdSurfaceChangeUniqueness)
 
 const VOID* const DdSurfaceVtbl1[] =

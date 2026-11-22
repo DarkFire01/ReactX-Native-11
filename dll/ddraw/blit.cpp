@@ -435,7 +435,6 @@ DdDriverCopy(
         Target->DriverPending = TRUE;
     if (Source->SystemResource != nullptr)
         Source->DriverPending = TRUE;
-    Target->Uniqueness += 1;
     return S_OK;
 }
 
@@ -544,6 +543,7 @@ DdBlt(
 
     if (DdSurfaceBusy(Target) || (Source != nullptr && DdSurfaceBusy(Source)))
         return DDERR_SURFACEBUSY;
+    DdTouchSurface(Target);
 
     if ((Flags & DDBLT_COLORFILL) != 0)
     {
@@ -641,7 +641,6 @@ DdBlt(
     if (Source != Target)
         DdUnmapSurface(Source);
     DdUnmapSurface(Target);
-    Target->Uniqueness += 1;
     return S_OK;
 }
 
