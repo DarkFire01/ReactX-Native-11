@@ -12,6 +12,8 @@
 #include <devpkey.h>
 #include <xinput.h>
 
+#include "trace.hpp"
+
 /* Controllers the API addresses by user index */
 #define XI_USER_COUNT       4
 

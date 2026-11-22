@@ -157,10 +157,15 @@ XiIoctl(
 {
     DWORD Returned = 0;
 
+    DWORD Error;
+
     if (DeviceIoControl(Handle, Code, Input, InputSize, Output, OutputSize, &Returned, Overlapped))
         return S_OK;
 
-    switch (GetLastError())
+    Error = GetLastError();
+    if (Error != ERROR_IO_PENDING || Overlapped == nullptr)
+        XI_TRACE(L"driver request %08lX failed (%lu)", Code, Error);
+    switch (Error)
     {
         case ERROR_IO_PENDING:
             return (Overlapped != nullptr) ? E_PENDING : E_FAIL;
@@ -536,7 +541,10 @@ XiWaitForGuide(
 
     Overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (Overlapped.hEvent == nullptr)
+    {
+        XI_TRACE(L"guide wait: no event (%lu)", GetLastError());
         return E_OUTOFMEMORY;
+    }
 
     State.Status = 5;
     hr = XiIoctl(Handle, XI_IOCTL_WAIT_FOR_GUIDE, &Request, sizeof(Request), &State, sizeof(State), &Overlapped);
@@ -548,6 +556,7 @@ XiWaitForGuide(
     }
 
     Result->Status = ERROR_IO_PENDING;
+    XI_TRACE(L"guide wait started for controller %u", Index);
     if (!GetOverlappedResult(Handle, &Overlapped, &Returned, TRUE))
     {
         DWORD Error = GetLastError();
@@ -574,6 +583,7 @@ XiWaitForGuide(
         Result->State.Gamepad.sThumbRY = (SHORT)XiWord(&State.Thumbs[6]);
         Result->State.Gamepad.wButtons = XiWord(State.Buttons);
     }
+    XI_TRACE(L"guide wait for controller %u ended (%lu)", Index, Result->Status);
     CloseHandle(Overlapped.hEvent);
     return S_OK;
 }

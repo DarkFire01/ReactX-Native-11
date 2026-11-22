@@ -8,6 +8,10 @@
 #include <windows.h>
 #include <xinput.h>
 
+#include "../xinput/trace.hpp"
+
+extern const WCHAR XiTraceModule[] = L"xinput9_1_0";
+
 typedef DWORD (WINAPI* PX9_GET_STATE)(DWORD, XINPUT_STATE*);
 typedef DWORD (WINAPI* PX9_SET_STATE)(DWORD, XINPUT_VIBRATION*);
 typedef DWORD (WINAPI* PX9_GET_CAPABILITIES)(DWORD, DWORD, XINPUT_CAPABILITIES*);
@@ -35,7 +39,10 @@ X9Load(VOID)
 
     X9Module = LoadLibraryExW(L"XInput1_4.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (X9Module == nullptr)
+    {
+        XI_TRACE(L"XInput1_4.dll did not load (%lu)", GetLastError());
         return ERROR_MOD_NOT_FOUND;
+    }
 
     X9GetCapabilities = reinterpret_cast<PX9_GET_CAPABILITIES>(GetProcAddress(X9Module, "XInputGetCapabilities"));
     X9GetState = reinterpret_cast<PX9_GET_STATE>(GetProcAddress(X9Module, "XInputGetState"));
@@ -43,6 +50,7 @@ X9Load(VOID)
     if (X9GetCapabilities != nullptr && X9GetState != nullptr && X9SetState != nullptr)
         return ERROR_SUCCESS;
 
+    XI_TRACE(L"XInput1_4.dll lacks an entry point this API forwards to");
     X9GetCapabilities = nullptr;
     X9GetState = nullptr;
     X9SetState = nullptr;

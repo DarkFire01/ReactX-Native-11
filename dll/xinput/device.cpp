@@ -152,7 +152,11 @@ XiPowerOff(
     UNREFERENCED_PARAMETER(Context);
 
     if (!(Device->Flags & XI_DEVICE_CONNECTED) || Device->Version < 0x102)
+    {
+        XI_TRACE(L"controller %u cannot be powered off, protocol %X", Device->Index, Device->Version);
         return E_FAIL;
+    }
+    XI_TRACE(L"powering off controller %u", Device->Index);
     return XiSendPowerOff(Device);
 }
 
@@ -201,7 +205,10 @@ XiStartGuideWait(
     {
         Device->GuideWait = XiOpenDevice(Device->Path, FILE_FLAG_OVERLAPPED | FILE_ATTRIBUTE_NORMAL);
         if (Device->GuideWait == INVALID_HANDLE_VALUE)
+        {
+            XI_TRACE(L"guide wait: cannot open %s for overlapped requests (%lu)", Device->Path, GetLastError());
             return E_FAIL;
+        }
     }
 
     Wait = static_cast<XI_GUIDE_WAIT*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Wait)));
@@ -219,6 +226,7 @@ XiStartGuideWait(
     {
         if (CreateThread(nullptr, 0, XiGuideWaitThread, Wait, 0, nullptr) == nullptr)
         {
+            XI_TRACE(L"guide wait: no thread (%lu)", GetLastError());
             HeapFree(GetProcessHeap(), 0, Wait);
             Request->Result->Status = GetLastError();
             return E_FAIL;

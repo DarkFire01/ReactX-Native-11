@@ -84,12 +84,16 @@ XiInitialize(VOID)
     XiPortCount = 0;
     XiPorts = static_cast<PXI_DEVICE*>(XiAllocate(8 * sizeof(PXI_DEVICE)));
     if (XiPorts == nullptr)
+    {
+        XI_TRACE(L"no memory for the port table");
         return FALSE;
+    }
     XiPortCount = 8;
 
     XiBuses = static_cast<PXI_DEVICE*>(XiAllocate(XI_BUS_COUNT * sizeof(PXI_DEVICE)));
     if (XiBuses == nullptr)
     {
+        XI_TRACE(L"no memory for the interface table");
         XiPortCount = 0;
         XiFree(XiPorts);
         XiPorts = nullptr;
@@ -100,6 +104,7 @@ XiInitialize(VOID)
     XiDetailSize = 0;
     if (FAILED(XiLoadOverrides()))
     {
+        XI_TRACE(L"app container without a usable XInputUap.dll, refusing to load");
         XiUnloadOverrides();
         return FALSE;
     }
@@ -180,6 +185,8 @@ XiEnableCommunications(
 {
     if (XiEnabled == Enable && XiGetStateRoutine != nullptr)
         return;
+    if (XiGetStateRoutine != nullptr)
+        XI_TRACE(L"communications %s", Enable ? L"enabled" : L"disabled, motors stopped and state frozen");
     XiEnabled = Enable;
     XiSetHandlers(Enable);
 
@@ -257,6 +264,7 @@ XiRemoveBus(
     if (Bus >= XI_BUS_COUNT || XiBuses[Bus] == nullptr)
         return;
 
+    XI_TRACE(L"interface %u removed", Bus);
     for (UINT Index = 0; Index < XiPortCount; Index++)
     {
         PXI_DEVICE Device = XiPorts[Index];
@@ -285,6 +293,7 @@ XiRemovePort(
     Device = XiPorts[Slot];
     if (Device == nullptr)
         return;
+    XI_TRACE(L"port %u: controller %u of %s gone", Port, Device->Index, Device->Path);
 
     /* The embedded controller leaving hands port 0 to another embedded one, if any */
     if (Slot == XiEmbeddedPort)
@@ -298,6 +307,7 @@ XiRemovePort(
                 break;
             }
         }
+        XI_TRACE(L"embedded controller left; port %u now answers as user 0", XiEmbeddedPort);
     }
     XiDestroyDevice(Device);
     XiPorts[Slot] = nullptr;
@@ -335,6 +345,7 @@ XiPlaceDevice(
         Port = XiLedPort[Led];
         if (Port != XI_NONE && Port < XiPortCount && XiPorts[Port] != nullptr)
         {
+            XI_TRACE(L"controller %u LEDs (%u) point at port %u, which is taken", Device->Index, Led, Port);
             Port = XI_NONE;
             XiSendLedState(Device, 13);
         }
@@ -350,11 +361,20 @@ XiPlaceDevice(
             Port = Index;
     }
     if (Port >= XI_USER_COUNT)
+    {
+        XI_TRACE(L"controller %u of %s found no free port", Device->Index, Device->Path);
         return S_FALSE;
+    }
 
     hr = XiSetDeviceOnPort(Port, Device);
     if (FAILED(hr))
+    {
+        XI_TRACE(L"port %u refused controller %u (0x%08lX)", Port, Device->Index, hr);
         return hr;
+    }
+    XI_TRACE(L"port %u: controller %u of %s, VID %04X PID %04X, protocol %X%s", Port, Device->Index, Device->Path,
+             Device->VendorId, Device->ProductId, Device->Version,
+             (Device->Flags & XI_DEVICE_EMBEDDED) ? L", embedded" : L"");
     if ((XiSettings & XI_SETTING_ASSIGN_LEDS) && !(Device->Flags & XI_DEVICE_EMBEDDED))
         XiSendLedState(Device, XiPortLed[Port & 3]);
     return S_OK;
@@ -377,7 +397,14 @@ XiEnumerateInterface(
     HRESULT hr;
 
     hr = XiQueryInformation(Handle, &Information);
-    if (FAILED(hr) || Information.DeviceCount == 0)
+    if (FAILED(hr))
+    {
+        XI_TRACE(L"%s does not answer the information request (0x%08lX)", Path, hr);
+        goto Exit;
+    }
+    XI_TRACE(L"interface %s: protocol %X, %u controllers, VID %04X PID %04X", Path, Information.Version,
+             Information.DeviceCount, Information.VendorId, Information.ProductId);
+    if (Information.DeviceCount == 0)
         goto Exit;
 
     Bus = XiCreateDevice(Handle, Path, List, DeviceData);
@@ -410,6 +437,7 @@ XiEnumerateInterface(
         for (Slot = 0; Slot < XI_BUS_COUNT && XiBuses[Slot] != nullptr; Slot++);
         if (Slot == XI_BUS_COUNT)
         {
+            XI_TRACE(L"all %u interface slots are taken, ignoring %s", XI_BUS_COUNT, Path);
             XiDestroyDevice(Bus);
             hr = E_FAIL;
             goto Exit;
@@ -507,10 +535,14 @@ XiEnumerateDevices(VOID)
 
     List = SetupDiCreateDeviceInfoList(nullptr, nullptr);
     if (List == INVALID_HANDLE_VALUE || List == nullptr)
+    {
+        XI_TRACE(L"SetupDiCreateDeviceInfoList failed (%lu)", GetLastError());
         return E_FAIL;
+    }
     if (SetupDiGetClassDevsExW(&XiInterfaceClass, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE, List, nullptr,
                                nullptr) == INVALID_HANDLE_VALUE)
     {
+        XI_TRACE(L"no controller interfaces could be listed (%lu)", GetLastError());
         SetupDiDestroyDeviceInfoList(List);
         return E_FAIL;
     }
@@ -525,16 +557,24 @@ XiEnumerateDevices(VOID)
         if (!SetupDiEnumDeviceInterfaces(List, nullptr, &XiInterfaceClass, Index, &Interface))
             break;
         if (!XiFetchDetail(List, &Interface, &XiDetail, &XiDetailSize))
+        {
+            XI_TRACE(L"no path for controller interface %lu (%lu)", Index, GetLastError());
             continue;
+        }
 
         Handle = XiOpenDevice(XiDetail->DevicePath, FILE_ATTRIBUTE_NORMAL);
         if (Handle == INVALID_HANDLE_VALUE)
+        {
+            XI_TRACE(L"cannot open %s (%lu)", XiDetail->DevicePath, GetLastError());
             continue;
+        }
 
         /* The device that goes with the interface is looked up by the same index */
         DeviceData.cbSize = sizeof(DeviceData);
         if (SetupDiEnumDeviceInfo(List, Index, &DeviceData))
             XiEnumerateInterface(Handle, XiDetail->DevicePath, List, &DeviceData);
+        else
+            XI_TRACE(L"no device for interface %lu, skipping it (%lu)", Index, GetLastError());
         CloseHandle(Handle);
     }
 
@@ -606,6 +646,7 @@ XiProcessRequest(
             return S_OK;
         if (FAILED(hr))
         {
+            XI_TRACE(L"%s %u failed a request (0x%08lX), dropping it", ByBus ? L"interface" : L"port", Port, hr);
             Device->Flags &= ~XI_DEVICE_CONNECTED;
             if (!ByBus)
                 XiRemoveBus(Device->Bus);
@@ -627,6 +668,7 @@ XiProcessRequest(
             hr = S_FALSE;
             break;
         }
+        XI_TRACE(L"%s %u disconnected, looking for it once more", ByBus ? L"interface" : L"port", Port);
         Retried = TRUE;
     }
 
@@ -650,7 +692,10 @@ XiCreateDevice(
     Device->GuideWait = INVALID_HANDLE_VALUE;
     Device->Bus = XI_NONE;
     if (!DuplicateHandle(Process, Handle, Process, &Device->Device, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        XI_TRACE(L"cannot duplicate the handle of %s (%lu)", Path, GetLastError());
         goto Fail;
+    }
 
     Device->PathLength = wcslen(Path) + 1;
     Device->Path = static_cast<PWSTR>(XiAllocate(Device->PathLength * sizeof(WCHAR)));

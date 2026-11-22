@@ -88,11 +88,17 @@ XiQueryEndpoint(
         HMODULE Module = LoadLibraryExW(L"cfgmgr32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
         if (Module == nullptr)
+        {
+            XI_TRACE(L"cfgmgr32.dll did not load (%lu), no audio endpoints", GetLastError());
             return E_FAIL;
+        }
         CreateQuery = reinterpret_cast<PXI_CREATE_QUERY>(GetProcAddress(Module, "DevCreateObjectQuery"));
         CloseQuery = reinterpret_cast<PXI_CLOSE_QUERY>(GetProcAddress(Module, "DevCloseObjectQuery"));
         if (CreateQuery == nullptr || CloseQuery == nullptr)
+        {
+            XI_TRACE(L"cfgmgr32.dll has no device queries, no audio endpoints");
             return E_FAIL;
+        }
     }
 
     Filters[0].Operator = DEVPROP_OPERATOR_AND_OPEN;
@@ -117,6 +123,8 @@ XiQueryEndpoint(
                      Filters, XiEndpointCallback, Endpoint, &Query);
     if (SUCCEEDED(hr))
         hr = (WaitForSingleObject(Endpoint->Done, 10000) == WAIT_OBJECT_0) ? S_OK : E_FAIL;
+    if (FAILED(hr))
+        XI_TRACE(L"audio endpoint query failed or timed out (0x%08lX)", hr);
     if (Query != nullptr)
         CloseQuery(Query);
     Endpoint->Id = nullptr;
@@ -170,12 +178,15 @@ XiFindContainer(
             }
             else
             {
+                XI_TRACE(L"%s has no container", Prefix);
                 hr = E_FAIL;
             }
             break;
         }
     }
 
+    if (SUCCEEDED(hr) && IsEqualGUID(*Container, GUID{}))
+        XI_TRACE(L"no audio function matches %s", Prefix);
     SetupDiDestroyDeviceInfoList(List);
     return hr;
 }

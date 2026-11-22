@@ -7,6 +7,8 @@
 
 #include "xinput.hpp"
 
+extern const WCHAR XiTraceModule[] = L"xinput1_4";
+
 /* XInputEnable is marked deprecated by the header that declares it */
 #pragma warning(disable: 4995)
 
@@ -52,13 +54,20 @@ XiLoadOverrides(VOID)
 
     XiUapModule = LoadLibraryExW(L"XInputUap.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (XiUapModule == nullptr)
+    {
+        XI_TRACE(L"app container but XInputUap.dll did not load (%lu)", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
+    }
     for (UINT Index = 0; Index < ARRAYSIZE(Names); Index++)
     {
         Found[Index] = GetProcAddress(XiUapModule, Names[Index]);
         if (Found[Index] == nullptr)
+        {
+            XI_TRACE(L"XInputUap.dll has no %S", Names[Index]);
             return HRESULT_FROM_WIN32(GetLastError());
+        }
     }
+    XI_TRACE(L"app container: requests go to XInputUap.dll");
 
     XiUapGetState = reinterpret_cast<PXI_GET_STATE>(Found[0]);
     XiUapSetState = reinterpret_cast<PXI_SET_STATE>(Found[1]);
@@ -115,6 +124,7 @@ XiApplySetting(
         XiSettings |= Bit;
     else
         XiSettings &= ~Bit;
+    XI_TRACE(L"setting %lX %s by the host", Bit, (Value != nullptr) ? L"on" : L"off");
     return TRUE;
 }
 
@@ -163,7 +173,10 @@ XInputGetState(
     DWORD Result;
 
     if (dwUserIndex >= XI_USER_COUNT || pState == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetState: user %lu, state %p rejected", dwUserIndex, pState);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetState != nullptr)
         return XiUapGetState(dwUserIndex, pState);
 
@@ -181,7 +194,10 @@ XInputGetStateEx(
     _Out_ XINPUT_STATE* pState)
 {
     if (dwUserIndex >= XI_USER_COUNT || pState == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetStateEx: user %lu, state %p rejected", dwUserIndex, pState);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetState != nullptr)
         return XiUapGetState(dwUserIndex, pState);
     return XiStateRequest(dwUserIndex, pState);
@@ -195,7 +211,10 @@ XInputSetState(
     _In_ XINPUT_VIBRATION* pVibration) WIN_NOEXCEPT
 {
     if (dwUserIndex >= XI_USER_COUNT || pVibration == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputSetState: user %lu, vibration %p rejected", dwUserIndex, pVibration);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapSetState != nullptr)
         return XiUapSetState(dwUserIndex, pVibration);
     return XiReturnCode(XiProcessRequest(dwUserIndex, XiSetVibrationRoutine, pVibration, FALSE));
@@ -214,9 +233,15 @@ XInputGetCapabilitiesEx(
     DWORD Result;
 
     if (dwUserIndex >= XI_USER_COUNT || dwFlags > XINPUT_FLAG_GAMEPAD || pCapabilities == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetCapabilitiesEx: user %lu, flags %lX, caps %p rejected", dwUserIndex, dwFlags, pCapabilities);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (dwRevision != 1)
+    {
+        XI_TRACE_ONCE(L"XInputGetCapabilitiesEx: revision %lu is not known", dwRevision);
         return ERROR_INVALID_DATA;
+    }
 
     Result = XiReturnCode(XiProcessRequest(dwUserIndex, XiGetCapabilities, pCapabilities, FALSE));
     if (Result == ERROR_SUCCESS)
@@ -271,7 +296,10 @@ XInputGetKeystroke(
     HRESULT hr;
 
     if ((dwUserIndex != XUSER_INDEX_ANY && dwUserIndex >= XI_USER_COUNT) || pKeystroke == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetKeystroke: user %lu, keystroke %p rejected", dwUserIndex, pKeystroke);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetKeystroke != nullptr)
         return XiUapGetKeystroke(dwUserIndex, dwReserved, pKeystroke);
 
@@ -314,7 +342,10 @@ XInputGetBatteryInformation(
     XI_BATTERY_REQUEST Request = { devType, pBatteryInformation };
 
     if (dwUserIndex >= XI_USER_COUNT || pBatteryInformation == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetBatteryInformation: user %lu, battery %p rejected", dwUserIndex, pBatteryInformation);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetBatteryInformation != nullptr)
         return XiUapGetBatteryInformation(dwUserIndex, devType, pBatteryInformation);
 
@@ -364,17 +395,23 @@ XInputGetAudioDeviceIds(
     OSVERSIONINFOW Version = {};
     XiInterfaceWalk Walk;
 
-    if (dwUserIndex >= XI_USER_COUNT || (pRenderCount == nullptr && pCaptureCount == nullptr))
+    if (dwUserIndex >= XI_USER_COUNT || (pRenderCount == nullptr && pCaptureCount == nullptr) ||
+        (pRenderDeviceId != nullptr && pRenderCount == nullptr) || (pCaptureDeviceId != nullptr && pCaptureCount == nullptr))
+    {
+        XI_TRACE_ONCE(L"XInputGetAudioDeviceIds: user %lu, render %p/%p, capture %p/%p rejected", dwUserIndex,
+                      pRenderDeviceId, pRenderCount, pCaptureDeviceId, pCaptureCount);
         return ERROR_BAD_ARGUMENTS;
-    if ((pRenderDeviceId != nullptr && pRenderCount == nullptr) || (pCaptureDeviceId != nullptr && pCaptureCount == nullptr))
-        return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetAudioDeviceIds != nullptr)
         return XiUapGetAudioDeviceIds(dwUserIndex, pRenderDeviceId, pRenderCount, pCaptureDeviceId, pCaptureCount);
 
     Version.dwOSVersionInfoSize = sizeof(Version);
 #pragma warning(suppress: 4996)
     if (GetVersionExW(&Version) && Version.dwMajorVersion < 6)
+    {
+        XI_TRACE(L"XInputGetAudioDeviceIds needs Windows 6 or later, this reports %lu", Version.dwMajorVersion);
         return ERROR_NOT_SUPPORTED;
+    }
 
     if (Walk.Restart())
     {
@@ -410,7 +447,10 @@ XInputGetBaseBusInformation(
     _Out_ XI_BASE_BUS_INFORMATION* pInformation)
 {
     if (dwBusIndex >= XI_BUS_COUNT || pInformation == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetBaseBusInformation: interface %lu, information %p rejected", dwBusIndex, pInformation);
         return ERROR_BAD_ARGUMENTS;
+    }
     return XiReturnCode(XiProcessRequest(dwBusIndex, XiGetBaseBus, pInformation, TRUE));
 }
 
@@ -436,7 +476,10 @@ XInputWaitForGuideButton(
     XI_GUIDE_REQUEST Request = { hEvent, pResult };
 
     if (dwUserIndex >= XI_USER_COUNT || pResult == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputWaitForGuideButton: user %lu, result %p rejected", dwUserIndex, pResult);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetState != nullptr)
         return ERROR_ACCESS_DENIED;
     if (hEvent == INVALID_HANDLE_VALUE)
@@ -465,7 +508,10 @@ XInputGetSystemButtons(
     _Out_ XI_SYSTEM_BUTTONS* pButtons)
 {
     if (dwUserIndex >= XI_USER_COUNT || pButtons == nullptr)
+    {
+        XI_TRACE_ONCE(L"XInputGetSystemButtons: user %lu, buttons %p rejected", dwUserIndex, pButtons);
         return ERROR_BAD_ARGUMENTS;
+    }
     if (XiUapGetState != nullptr)
         return ERROR_ACCESS_DENIED;
     return XiReturnCode(XiProcessRequest(dwUserIndex, XiGetSystemButtonsRoutine, pButtons, FALSE));
