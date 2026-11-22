@@ -45,6 +45,20 @@ public:
         return RuntimeVersion;
     }
 
+    /* The newest D3D11 interface the driver lists, which Windows would drive it at */
+    UINT
+    GetNewestDriverInterface() const
+    {
+        return NewestDriverInterface;
+    }
+
+    /* TRUE for the kernel's software adapter, which WARP drives */
+    BOOLEAN
+    IsSoftware() const
+    {
+        return IsSoftwareAdapter;
+    }
+
     const LUID&
     GetLuid() const
     {
@@ -141,5 +155,7 @@ private:
     BOOLEAN IsDriverAdapterOpen = FALSE;
     const DdiRevision* Revision = nullptr;
     UINT RuntimeVersion = 0;
+    UINT NewestDriverInterface = 0;
     UINT PipelineCaps = 0;
+    BOOLEAN IsSoftwareAdapter = FALSE;
 };

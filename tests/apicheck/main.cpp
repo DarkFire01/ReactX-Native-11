@@ -4,7 +4,7 @@
  * PURPOSE:     Runs API behavior checks against one Direct3D 11 runtime
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  *
- * apicheck [-runtime system|reactx|<path>] [check ...]
+ * apicheck [-runtime system|reactx|<path>] [-level 9_1..11_1] [check ...]
  * apicheck -list
  */
 
@@ -101,7 +101,10 @@ wmain(
     _In_ int argc,
     _In_reads_(argc) wchar_t** argv)
 {
-    static const D3D_FEATURE_LEVEL Levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    D3D_FEATURE_LEVEL Levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+    UINT LevelCount = _countof(Levels);
+    UINT Major;
+    UINT Minor;
     std::vector<CheckInfo> Checks = AcAllChecks();
     std::vector<std::string> Wanted;
     PFN_D3D11_CREATE_DEVICE CreateDevice;
@@ -130,6 +133,15 @@ wmain(
             continue;
         }
 
+        /* One feature level only, such as 10_1 */
+        if (_wcsicmp(argv[Index], L"-level") == 0 && Index + 1 < argc &&
+            swscanf_s(argv[++Index], L"%u_%u", &Major, &Minor) == 2)
+        {
+            Levels[0] = (D3D_FEATURE_LEVEL)((Major << 12) | (Minor << 8));
+            LevelCount = 1;
+            continue;
+        }
+
         WideCharToMultiByte(CP_UTF8, 0, argv[Index], -1, Name, sizeof(Name), nullptr, nullptr);
         Wanted.push_back(Name);
     }
@@ -155,7 +167,7 @@ wmain(
         if (!IsWanted)
             continue;
 
-        if (FAILED(CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, Levels, _countof(Levels),
+        if (FAILED(CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, Levels, LevelCount,
                                 D3D11_SDK_VERSION, &Device, nullptr, &Context)))
         {
             fprintf(stderr, "error: D3D11CreateDevice failed\n");

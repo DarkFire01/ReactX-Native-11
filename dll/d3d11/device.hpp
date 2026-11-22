@@ -900,6 +900,11 @@ private:
     HRESULT
     BuildStockStates();
 
+    /* The driver's own caps for a format, asked once */
+    UINT
+    GetDriverFormatCaps(
+        _In_ DXGI_FORMAT Format);
+
     LONG RefCount = 1;
     UmdAdapter* Adapter;
     D3D_FEATURE_LEVEL FeatureLevel;
