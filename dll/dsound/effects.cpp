@@ -222,7 +222,8 @@ DsRunEffects(
             if (Chain->Media[Index] != nullptr)
                 Chain->Media[Index]->Flush();
         }
-        Chain->ProcessedTo = Voice->ReadPosition;
+        /* Processing starts 32 frames behind the read position, wrapping to the end of the buffer */
+        Chain->ProcessedTo = (Voice->Size - 32 * Voice->BlockAlign + Voice->ReadPosition) % Voice->Size;
         Chain->Primed = TRUE;
     }
 
