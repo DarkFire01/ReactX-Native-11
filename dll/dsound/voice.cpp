@@ -578,19 +578,18 @@ DsVoice::Mix(
         DsRunEffects(Effects, this, Ahead * BlockAlign);
     }
 
+    /* Once a one shot runs out the converter reads silence to the end of the pass, and the voice stops after it */
     if (Resampler.Active)
     {
         for (ULONG Index = 0; Index < Frames; Index++)
         {
-            while (Resampler.WantsInput() && Pass != DS_PASS_FINISHED)
+            while (Resampler.WantsInput())
             {
                 float Fresh[DS_MAX_CHANNELS];
 
                 ReadFrame(Fresh);
                 Resampler.Push(Fresh);
             }
-            if (Pass == DS_PASS_FINISHED)
-                break;
             Resampler.Pull(Frame);
             ApplyMatrix(Frame, Output + Index * OutChannels, OutChannels);
         }
