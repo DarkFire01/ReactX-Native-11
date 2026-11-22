@@ -691,6 +691,7 @@ typedef struct _RX_DI_HID_START
     WCHAR InstanceId[MAX_PATH];
     USHORT VendorId;
     USHORT ProductId;
+    HKEY CalTypeKey;
 } RX_DI_HID_START;
 
 /* Copies the values of one key that the target does not have yet */
@@ -844,31 +845,122 @@ DiHidLookup(
         Start->ProductId = Entry->ProductId;
         StringCchCopyW(Start->Path, _countof(Start->Path), Entry->Detail->DevicePath);
         StringCchCopyW(Start->InstanceId, _countof(Start->InstanceId), Entry->InstanceId);
+
+        /* Saved calibrations live in the Type key under the device's calibration slot */
+        Start->CalTypeKey = nullptr;
+        if (Entry->Calibration == nullptr ||
+            FAILED(DiOpenKey(Entry->Calibration, L"Type", DI_HID_KEY_ACCESS, 0, &Start->CalTypeKey)))
+        {
+            Start->CalTypeKey = nullptr;
+        }
         Found = TRUE;
     }
     LeaveCriticalSection(&DiLock);
     return Found;
 }
 
-/* One object of a HID device and where its data comes from */
-typedef struct _RX_DI_HID_OBJECT
+/* Link collections are filed after the three HID report kinds */
+#define DI_HID_REPORT_COLLECTION 3
+#define DI_HID_REPORT_KINDS      4
+
+/* Size of the point list form of the calibration property */
+#define DI_HID_PROPCALPOV_BYTES  56
+
+/* HID usage page whose usages are keyboard keys */
+#define DI_HID_PAGE_KEYBOARD     0x07
+
+/* Table that turns keyboard usages into DIK_ codes */
+#define DI_HID_KEY_TABLE         9
+
+/* A run of usages that came from one HID caps entry */
+typedef struct _RX_DI_HID_GROUP
 {
+    ULONG Report;
+    ULONG Count;
     USHORT UsagePage;
-    USHORT Usage;
-    USHORT Collection;
-    BOOLEAN Value;
-    BOOLEAN Input;
-    USHORT Number;
+    USHORT UsageMin;
+    USHORT StringMin;
+    USHORT StringMax;
+    USHORT DesignatorMin;
+    USHORT DesignatorMax;
+    USHORT DataIndexMin;
+    USHORT Granularity;
+    LONG SignMask;
+    USHORT LinkCollection;
     UCHAR ReportId;
-    ULONG Units;
-    USHORT Exponent;
     LONG LogicalMin;
     LONG LogicalMax;
+    LONG PhysicalMin;
+    LONG PhysicalMax;
+    ULONG Units;
+    USHORT Exponent;
+    BOOLEAN Absolute;
+    BOOLEAN Value;
+    BOOLEAN Alias;
+    BOOLEAN Signed;
+    BOOLEAN PovPoints;
+    BOOLEAN Disabled;
+} RX_DI_HID_GROUP;
+
+/* Calibration of one input value, the Low and High fields are derived from the rest */
+typedef struct _RX_DI_HID_CAL
+{
+    ULONG Raw;
+    LONG LowStart;
+    LONG LowBase;
+    LONG LowSpan;
+    LONG LowOut;
+    LONG HighStart;
+    LONG HighBase;
+    LONG HighSpan;
+    LONG HighOut;
+    LONG Min;
+    LONG Max;
+    LONG Center;
     LONG RangeMin;
     LONG RangeMax;
+    LONG RangeCenter;
     ULONG DeadZone;
     ULONG Saturation;
-} RX_DI_HID_OBJECT;
+    ULONG LegacyRaw;
+    BOOLEAN PovPoints;
+    LONG PovLow[5];
+    LONG PovHigh[5];
+} RX_DI_HID_CAL;
+
+typedef struct _RX_DI_HID_SLOT
+{
+    RX_DI_HID_GROUP* Group;
+    RX_DI_HID_CAL* Cal;
+} RX_DI_HID_SLOT;
+
+/* Usages that DirectInput gives a fixed axis slot, searched in this order */
+typedef struct _RX_DI_USAGE_SLOT
+{
+    ULONG Usage;
+    ULONG Slot;
+    const GUID* Guid;
+} RX_DI_USAGE_SLOT;
+
+static const RX_DI_USAGE_SLOT DiUsageSlots[] =
+{
+    { 0x00010030, 0, &GUID_XAxis },
+    { 0x00010031, 1, &GUID_YAxis },
+    { 0x00010032, 2, &GUID_ZAxis },
+    { 0x00010038, 2, &GUID_ZAxis },
+    { 0x00010033, 3, &GUID_RxAxis },
+    { 0x00010034, 4, &GUID_RyAxis },
+    { 0x00010035, 5, &GUID_RzAxis },
+    { 0x00010039, 7, &GUID_POV },
+    { 0x00010036, 6, &GUID_Slider },
+    { 0x00010037, 6, &GUID_Slider },
+    { 0x000200C8, 0, &GUID_XAxis },
+    { 0x000200C4, 1, &GUID_YAxis },
+    { 0x000200C5, 5, &GUID_RzAxis },
+    { 0x000200BA, 5, &GUID_RzAxis },
+    { 0x000200BB, 6, &GUID_Slider },
+    { 0x00050020, 7, &GUID_POV },
+};
 
 /* First string of each usage page's names, zero for pages without names */
 static const USHORT DiUsageNameBase[16] =
@@ -877,30 +969,437 @@ static const USHORT DiUsageNameBase[16] =
 };
 
 static
-const GUID*
-DiHidUsageGuid(
-    _In_ USHORT Page,
-    _In_ USHORT Usage)
+const RX_DI_USAGE_SLOT*
+DiHidFindUsageSlot(
+    _In_ ULONG Usage)
 {
-    if (Page == HID_USAGE_PAGE_GENERIC)
+    for (ULONG Index = 0; Index < _countof(DiUsageSlots); Index++)
     {
-        switch (Usage)
-        {
-            case HID_USAGE_GENERIC_X: return &GUID_XAxis;
-            case HID_USAGE_GENERIC_Y: return &GUID_YAxis;
-            case HID_USAGE_GENERIC_Z: return &GUID_ZAxis;
-            case HID_USAGE_GENERIC_RX: return &GUID_RxAxis;
-            case HID_USAGE_GENERIC_RY: return &GUID_RyAxis;
-            case HID_USAGE_GENERIC_RZ: return &GUID_RzAxis;
-            case HID_USAGE_GENERIC_SLIDER:
-            case HID_USAGE_GENERIC_DIAL:
-            case HID_USAGE_GENERIC_WHEEL:
-                return &GUID_Slider;
-            case HID_USAGE_GENERIC_HATSWITCH:
-                return &GUID_POV;
-        }
+        if (DiUsageSlots[Index].Usage == Usage)
+            return &DiUsageSlots[Index];
     }
-    return &GUID_Unknown;
+    return nullptr;
+}
+
+/* Joins a page and a usage the way the usage table stores them */
+static
+ULONG
+DiHidUsageKey(
+    _In_ USHORT Page,
+    _In_ ULONG Usage)
+{
+    return static_cast<USHORT>(Usage) | (static_cast<ULONG>(Page) << 16);
+}
+
+/* Orders caps by data index, keeping the real usage ahead of its aliases */
+template <typename CAPS>
+static
+VOID
+DiHidSortCaps(
+    _Inout_updates_(Count) CAPS* List,
+    _In_ ULONG Count)
+{
+    for (ULONG Next = 1; Next < Count; Next++)
+    {
+        CAPS Held = List[Next];
+        ULONG Hole = Next;
+
+        while (Hole > 0)
+        {
+            const CAPS* Before = &List[Hole - 1];
+
+            if (Before->Range.DataIndexMin < Held.Range.DataIndexMin)
+                break;
+            if (Before->Range.DataIndexMin == Held.Range.DataIndexMin && !Before->IsAlias)
+                break;
+            List[Hole] = *Before;
+            Hole -= 1;
+        }
+        List[Hole] = Held;
+    }
+}
+
+/* What a value's units say about it, or what its usages imply when it has none */
+static
+ULONG
+DiHidValueAspect(
+    _In_ const HIDP_VALUE_CAPS* Caps)
+{
+    const RX_DI_USAGE_SLOT* First;
+    const RX_DI_USAGE_SLOT* Last;
+    ULONG Units = Caps->Units;
+
+    if (Units == 0)
+    {
+        First = DiHidFindUsageSlot(DiHidUsageKey(Caps->UsagePage, Caps->Range.UsageMin));
+        if (First == nullptr || First->Slot > 6)
+            return 0;
+        Last = DiHidFindUsageSlot(DiHidUsageKey(Caps->UsagePage, Caps->Range.UsageMax));
+        if (Last == nullptr)
+            return 0;
+        return (Last->Slot > 6) ? 0 : DIDOI_ASPECTPOSITION;
+    }
+
+    /* Only first powers of a length or an angle are understood */
+    if ((Units & 0xFFFF0000) != 0 || static_cast<UCHAR>(Units) < 0x11 || static_cast<UCHAR>(Units) > 0x14)
+        return 0;
+
+    switch (Units & 0xFF00)
+    {
+        case 0x0000:
+            return DIDOI_ASPECTPOSITION;
+        case 0xF000:
+            return DIDOI_ASPECTVELOCITY;
+        case 0xE000:
+            return DIDOI_ASPECTACCEL;
+        case 0xE100:
+            return DIDOI_ASPECTFORCE;
+    }
+    return 0;
+}
+
+/* Splits the calibrated range into the parts below and above the center */
+static
+VOID
+DiHidRecalc(
+    _Inout_ RX_DI_HID_CAL* Cal)
+{
+    ULONG Edge = (Cal->Saturation > Cal->DeadZone) ? Cal->Saturation : Cal->DeadZone;
+    LONG Below = Cal->Center - Cal->Min;
+    LONG Above = Cal->Max - Cal->Center;
+
+    Cal->LowStart = Cal->Center - MulDiv(Below, Edge, 10000);
+    Cal->LowBase = Cal->RangeMin;
+    Cal->LowSpan = Cal->Center - Cal->LowStart - MulDiv(Below, Cal->DeadZone, 10000);
+    Cal->LowOut = Cal->RangeCenter - Cal->RangeMin;
+
+    Cal->HighStart = Cal->Center + MulDiv(Above, Cal->DeadZone, 10000);
+    if (static_cast<ULONG>(Cal->Max) > static_cast<ULONG>(Cal->Center + 1))
+        Cal->HighStart += 1;
+    Cal->HighSpan = Cal->Center - Cal->HighStart + MulDiv(Above, Edge, 10000);
+
+    Cal->HighBase = Cal->RangeCenter;
+    if (Cal->RangeMax > Cal->RangeCenter && static_cast<ULONG>(Cal->Max) > static_cast<ULONG>(Cal->Center + 1))
+        Cal->HighBase += 1;
+    Cal->HighOut = Cal->RangeMax - Cal->HighBase;
+}
+
+/* Maps a raw reading through the calibration, a no op in raw mode */
+static
+VOID
+DiHidCook(
+    _In_ const RX_DI_HID_CAL* Cal,
+    _Inout_ PLONG Value)
+{
+    LONG Reading = *Value;
+
+    if (Cal->Raw != 0)
+        return;
+
+    if (Cal->LegacyRaw != 0)
+    {
+        if (Cal->Min >= 0)
+            return;
+        *Value = Reading - Cal->Min;
+        return;
+    }
+
+    if (Cal->PovPoints)
+    {
+        static const LONG Directions[4] = { 0, 18000, 27000, 9000 };
+
+        *Value = -1;
+        for (ULONG Index = 0; Index < _countof(Directions); Index++)
+        {
+            if (Reading > Cal->PovLow[Index] && Reading < Cal->PovHigh[Index])
+            {
+                *Value = Directions[Index];
+                break;
+            }
+        }
+        return;
+    }
+
+    {
+        BOOLEAN Upper = Reading >= Cal->HighStart;
+        LONG Start = Upper ? Cal->HighStart : Cal->LowStart;
+        LONG Span = Upper ? Cal->HighSpan : Cal->LowSpan;
+        LONG Out = Upper ? Cal->HighOut : Cal->LowOut;
+        LONG Moved = 0;
+
+        if (Reading > Start)
+        {
+            ULONG Past = static_cast<ULONG>(Reading - Start);
+
+            Moved = Out;
+            if (Past < static_cast<ULONG>(Span))
+                Moved = MulDiv(static_cast<LONG>(Past), Out, Span);
+        }
+        *Value = (Upper ? Cal->HighBase : Cal->LowBase) + Moved;
+    }
+}
+
+static
+BOOLEAN
+DiHidModernVersion(
+    _In_ DWORD Version)
+{
+    return Version >= 0x0700 || Version == 0x05B2;
+}
+
+/* Opens the type key branch of one object, as Axes, Buttons, POVs or Actuators */
+static
+HRESULT
+DiHidOpenObjectKey(
+    _In_opt_ HKEY Root,
+    _In_ ULONG Type,
+    _In_ REGSAM Access,
+    _Out_ HKEY* Key)
+{
+    WCHAR Path[32];
+    PCWSTR Kind;
+
+    *Key = nullptr;
+    if (Root == nullptr)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    if (Type & DIDFT_AXIS)
+        Kind = L"Axes";
+    else if (Type & DIDFT_BUTTON)
+        Kind = L"Buttons";
+    else if (Type & DIDFT_POV)
+        Kind = L"POVs";
+    else if (Type & DIDFT_NODATA)
+        Kind = L"Actuators";
+    else
+        return E_NOTIMPL;
+
+    StringCchPrintfW(Path, _countof(Path), L"%s\\%u", Kind, DIDFT_GETINSTANCE(Type));
+    return DiOpenKey(Root, Path, Access, 0, Key);
+}
+
+/* Reads a string value, reporting a missing terminator the way the registry does */
+static
+LONG
+DiHidReadString(
+    _In_ HKEY Key,
+    _In_opt_z_ PCWSTR Name,
+    _Out_writes_(Length) PWSTR Text,
+    _In_ ULONG Length)
+{
+    DWORD Size = Length * sizeof(WCHAR);
+    DWORD Type = 0;
+    ULONG Count;
+    LONG Error;
+
+    Error = RegQueryValueExW(Key, Name, nullptr, &Type, reinterpret_cast<PBYTE>(Text), &Size);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Type != REG_SZ)
+        return ERROR_INVALID_DATA;
+
+    Count = Size / sizeof(WCHAR);
+    if (Count == 0)
+    {
+        Text[0] = L'\0';
+        return ERROR_SUCCESS;
+    }
+    if (Text[Count - 1] != L'\0')
+    {
+        if (Count >= Length)
+            return ERROR_MORE_DATA;
+        Text[Count] = L'\0';
+    }
+    return ERROR_SUCCESS;
+}
+
+static
+HRESULT
+DiHidSetCalibration(
+    _Inout_ RX_DI_HID_CAL* Cal,
+    _In_ ULONG Type,
+    _In_ LPCDIPROPHEADER Header,
+    _In_opt_ HKEY Key)
+{
+    HKEY Object = nullptr;
+    HRESULT hr = S_FALSE;
+
+    if (Type != DIDFT_POV)
+    {
+        const DIPROPCAL* Points = reinterpret_cast<const DIPROPCAL*>(Header);
+
+        if (Key != nullptr)
+        {
+            hr = DiHidOpenObjectKey(Key, Type, DI_HID_KEY_ACCESS, &Object);
+            if (FAILED(hr))
+                return hr;
+
+            /* An all zero calibration means none */
+            if (Points->lMin == Points->lMax && Points->lCenter == Points->lMax && Points->lMax == 0)
+                RegDeleteValueW(Object, L"Calibration");
+            else if (RegSetValueExW(Object, L"Calibration", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&Points->lMin),
+                                    3 * sizeof(LONG)) != ERROR_SUCCESS)
+                hr = E_FAIL;
+            RegCloseKey(Object);
+            if (FAILED(hr))
+                return hr;
+        }
+
+        Cal->Min = Points->lMin;
+        Cal->Max = Points->lMax;
+        Cal->Center = Points->lCenter;
+        DiHidRecalc(Cal);
+        return hr;
+    }
+
+    {
+        const LONG* Points = reinterpret_cast<const LONG*>(reinterpret_cast<const BYTE*>(Header) + sizeof(DIPROPHEADER));
+
+        if (!Cal->PovPoints)
+            return E_NOTIMPL;
+
+        if (Key != nullptr)
+        {
+            LONG Chain;
+
+            hr = DiHidOpenObjectKey(Key, DIDFT_POV, DI_HID_KEY_ACCESS, &Object);
+            if (FAILED(hr))
+                return hr;
+
+            /* Each point is compared against the truth of the comparisons before it */
+            Chain = (Points[0] == Points[1]);
+            for (ULONG Index = 2; Index < 10; Index++)
+                Chain = (Chain == Points[Index]);
+
+            if (Chain != 0)
+                hr = (RegSetValueExW(Object, L"Calibration", 0, REG_BINARY, reinterpret_cast<const BYTE*>(Points),
+                                     10 * sizeof(LONG)) != ERROR_SUCCESS) ? E_FAIL : S_OK;
+            else
+                RegDeleteValueW(Object, L"Calibration");
+            RegCloseKey(Object);
+            if (FAILED(hr))
+                return hr;
+        }
+
+        CopyMemory(Cal->PovLow, Points, sizeof(Cal->PovLow));
+        CopyMemory(Cal->PovHigh, Points + 5, sizeof(Cal->PovHigh));
+        return hr;
+    }
+}
+
+static
+HRESULT
+DiHidSetCalProperty(
+    _Inout_ RX_DI_HID_CAL* Cal,
+    _In_ const RX_DI_PROP_TARGET* Target,
+    _In_ LPCDIPROPHEADER Header,
+    _In_opt_ HKEY Key,
+    _In_ DWORD Version)
+{
+    const DIPROPDWORD* Value = reinterpret_cast<const DIPROPDWORD*>(Header);
+
+    switch (Target->Property)
+    {
+        case 4:
+        {
+            const DIPROPRANGE* Range = reinterpret_cast<const DIPROPRANGE*>(Header);
+
+            if (Range->lMin > Range->lMax)
+                return E_INVALIDARG;
+            Cal->RangeMin = Range->lMin;
+            Cal->RangeMax = Range->lMax;
+            Cal->RangeCenter = Range->lMin + static_cast<LONG>(static_cast<ULONG>(Range->lMax - Range->lMin + 1) >> 1);
+            DiHidRecalc(Cal);
+            return S_OK;
+        }
+
+        case 5:
+        case 6:
+            if (Value->dwData > 10000)
+                return E_INVALIDARG;
+            if (Target->Property == 5)
+                Cal->DeadZone = Value->dwData;
+            else
+                Cal->Saturation = Value->dwData;
+            DiHidRecalc(Cal);
+            return S_OK;
+
+        case 10:
+            if (Value->dwData & ~1UL)
+                return E_INVALIDARG;
+            if (DiHidModernVersion(Version) || (Cal->Min & 0x8000) == 0)
+                Cal->Raw = Value->dwData;
+            else
+                Cal->LegacyRaw = Value->dwData;
+            return S_OK;
+
+        case 11:
+            return DiHidSetCalibration(Cal, Target->Type, Header, Key);
+    }
+    return E_NOTIMPL;
+}
+
+static
+HRESULT
+DiHidGetCalProperty(
+    _In_ const RX_DI_HID_CAL* Cal,
+    _In_ ULONG_PTR Property,
+    _Inout_ LPDIPROPHEADER Header,
+    _In_ DWORD Version)
+{
+    LPDIPROPDWORD Value = reinterpret_cast<LPDIPROPDWORD>(Header);
+    LPDIPROPRANGE Range = reinterpret_cast<LPDIPROPRANGE>(Header);
+    LPDIPROPCAL Points = reinterpret_cast<LPDIPROPCAL>(Header);
+
+    switch (Property)
+    {
+        case 4:
+            Range->lMin = Cal->RangeMin;
+            Range->lMax = Cal->RangeMax;
+            return S_OK;
+        case 5:
+            Value->dwData = Cal->DeadZone;
+            return S_OK;
+        case 6:
+            Value->dwData = Cal->Saturation;
+            return S_OK;
+        case 10:
+            Value->dwData = DiHidModernVersion(Version) ? Cal->Raw : Cal->LegacyRaw;
+            return S_OK;
+        case 11:
+            /* Old applications saw calibrations that start below zero moved up to it */
+            if (DiHidModernVersion(Version) || (Cal->Min & 0x8000) == 0)
+            {
+                Points->lMin = Cal->Min;
+                Points->lMax = Cal->Max;
+                Points->lCenter = Cal->Center;
+            }
+            else
+            {
+                Points->lMin = 0;
+                Points->lMax = Cal->Max - Cal->Min;
+                Points->lCenter = static_cast<LONG>(static_cast<ULONG>(Points->lMax + 1) >> 1);
+            }
+            return S_OK;
+    }
+    return E_NOTIMPL;
+}
+
+/* Signed and unsigned limits of a field, with shifts wrapping like the hardware does */
+static
+VOID
+DiHidFieldLimits(
+    _In_ USHORT Bits,
+    _Out_ PLONG SignMask,
+    _Out_ PLONG SignedMax,
+    _Out_ PLONG UnsignedMax)
+{
+    ULONG Half = 1UL << ((Bits - 1) & 31);
+    LONG Full = static_cast<LONG>((1UL << (Bits & 31)) - 1);
+
+    *SignMask = static_cast<LONG>(0 - Half);
+    *SignedMax = static_cast<LONG>(Half - 1);
+    *UnsignedMax = (Full < 1) ? 1 : Full;
 }
 
 class RxDiHid final : public RxDiBackend
@@ -937,20 +1436,12 @@ public:
         ProductId = Attributes.ProductID;
         OpenTypeKey();
 
-        /* Devices that report effects in output reports get the PID driver */
-        if (Caps.NumberOutputValueCaps != 0 && Caps.NumberOutputButtonCaps != 0)
-        {
-            USHORT Length = 0;
-
-            PidDevice = HidP_GetSpecificButtonCaps(HidP_Output, DI_HID_PAGE_PID, 0, 0, nullptr, &Length, Data) ==
-                        HIDP_STATUS_BUFFER_TOO_SMALL && Length > 2;
-        }
-
         hr = BuildObjects();
         if (FAILED(hr))
+        {
+            DiTrace(L"HID device %ls has objects DirectInput cannot describe, 0x%08lx", Start.InstanceId, hr);
             return hr;
-        ApplyTypeAttributes();
-        ApplyTypeKind();
+        }
 
         Source.State = State;
         Source.Types = nullptr;
@@ -971,16 +1462,34 @@ public:
         StopReader();
         if (TypeKey != nullptr)
             RegCloseKey(TypeKey);
+        if (Start.CalTypeKey != nullptr)
+            RegCloseKey(Start.CalTypeKey);
         DiCloseSink(Sink);
         if (Data != nullptr)
             HidD_FreePreparsedData(Data);
+        for (ULONG Kind = 0; Kind < _countof(Enabled); Kind++)
+            DiFree(reinterpret_cast<PVOID*>(&Enabled[Kind]));
         DiFree(reinterpret_cast<PVOID*>(&Objects));
-        DiFree(reinterpret_cast<PVOID*>(&Info));
+        DiFree(reinterpret_cast<PVOID*>(&Slots));
+        DiFree(reinterpret_cast<PVOID*>(&Groups));
+        DiFree(reinterpret_cast<PVOID*>(&Cals));
+        DiFree(reinterpret_cast<PVOID*>(&MaskRows));
+        DiFree(reinterpret_cast<PVOID*>(&MaskData));
+        DiFree(reinterpret_cast<PVOID*>(&DataList));
         DiFree(reinterpret_cast<PVOID*>(&State));
         DiFree(reinterpret_cast<PVOID*>(&Report));
     }
 
     PRX_DI_SINK GetSink(VOID) override { return Sink; }
+
+    HRESULT
+    SetDIData(
+        _In_ DWORD AppVersion,
+        _In_ RX_DI_APP_HACKS* Hacks) override
+    {
+        Version = AppVersion;
+        return S_OK;
+    }
 
     HRESULT
     GetDataFormat(
@@ -995,52 +1504,49 @@ public:
         _In_ const RX_DI_PROP_TARGET* Target,
         _Inout_ LPDIDEVICEOBJECTINSTANCEW Object) override
     {
-        const RX_DI_HID_OBJECT* Hid;
-        WCHAR Pattern[64];
+        const RX_DI_HID_GROUP* Group;
+        ULONG Offset;
         UINT Id;
 
-        if (Target->Index >= Format.dwNumObjs)
+        if (Target->Index >= ObjectCount || Slots[Target->Index].Group == nullptr)
             return E_INVALIDARG;
 
-        Hid = &Info[Target->Index];
-        if (Object->dwSize >= sizeof(DIDEVICEOBJECTINSTANCEW))
-        {
-            Object->wCollectionNumber = Hid->Number;
-            Object->wUsagePage = Hid->UsagePage;
-            Object->wUsage = Hid->Usage;
-            Object->dwDimension = Hid->Units;
-            Object->wExponent = Hid->Exponent;
-            Object->wReportId = Hid->ReportId;
-        }
+        Group = Slots[Target->Index].Group;
+        ReadOemObjectInfo(Target->Type, Object);
 
         if (Target->Type & DIDFT_COLLECTION)
-            Id = 31;
-        else if (Target->Type & DIDFT_BUTTON)
-            Id = 28;
-        else if (Target->Type & DIDFT_AXIS)
-            Id = 29;
-        else if (Target->Type & DIDFT_POV)
-            Id = 30;
-        else
-            Id = 35;
-
-        /* Known usage pages have a name for each usage */
-        if (Hid->UsagePage < _countof(DiUsageNameBase) && DiUsageNameBase[Hid->UsagePage] != 0 && Hid->Usage < 0x200 &&
-            LoadStringW(DiModule, DiUsageNameBase[Hid->UsagePage] + Hid->Usage, Object->tszName, MAX_PATH) != 0)
         {
-            if (Target->Type & DIDFT_COLLECTION)
-            {
-                WCHAR Usage[MAX_PATH];
-
-                StringCchCopyW(Usage, _countof(Usage), Object->tszName);
-                LoadStringW(DiModule, 32, Pattern, _countof(Pattern));
-                StringCchPrintfW(Object->tszName, _countof(Object->tszName), Pattern, DIDFT_GETINSTANCE(Target->Type), Usage);
-            }
-            return S_OK;
+            Id = 31;
+            Offset = 0;
+        }
+        else
+        {
+            if (Target->Type & DIDFT_BUTTON)
+                Id = 28;
+            else if (Target->Type & DIDFT_AXIS)
+                Id = 29;
+            else if (Target->Type & DIDFT_POV)
+                Id = 30;
+            else
+                Id = 35;
+            Offset = Target->Index - Base[Group->Report] - Group->DataIndexMin;
         }
 
-        LoadStringW(DiModule, Id, Pattern, _countof(Pattern));
-        StringCchPrintfW(Object->tszName, _countof(Object->tszName), Pattern, DIDFT_GETINSTANCE(Target->Type));
+        if (Object->tszName[0] == L'\0')
+            NameObject(Target->Type, Group, Offset, Id, Object->tszName);
+
+        if (Object->dwSize >= sizeof(DIDEVICEOBJECTINSTANCEW))
+        {
+            USHORT Designator = static_cast<USHORT>(Group->DesignatorMin + Offset);
+
+            Object->wCollectionNumber = Group->LinkCollection;
+            Object->wDesignatorIndex = (Designator > Group->DesignatorMax) ? Group->DesignatorMax : Designator;
+            Object->wUsagePage = Group->UsagePage;
+            Object->wUsage = static_cast<WORD>(Group->UsageMin + Offset);
+            Object->dwDimension = Group->Units;
+            Object->wExponent = Group->Exponent;
+            Object->wReportId = Group->ReportId;
+        }
         return S_OK;
     }
 
@@ -1105,34 +1611,18 @@ public:
         _Inout_ LPDIPROPHEADER Header) override
     {
         LPDIPROPDWORD Value = reinterpret_cast<LPDIPROPDWORD>(Header);
-        const RX_DI_HID_OBJECT* Hid = (Target->Index < Format.dwNumObjs) ? &Info[Target->Index] : nullptr;
+
+        if (Target->Index != MAXULONG)
+        {
+            if (Target->Index >= ObjectCount)
+                return E_NOTIMPL;
+            return GetObjectProperty(Target, Header);
+        }
 
         switch (Target->Property)
         {
-            case 4:
-                if (Hid == nullptr || (Target->Type & DIDFT_ABSAXIS) == 0)
-                    return E_NOTIMPL;
-                reinterpret_cast<LPDIPROPRANGE>(Header)->lMin = Hid->RangeMin;
-                reinterpret_cast<LPDIPROPRANGE>(Header)->lMax = Hid->RangeMax;
-                return S_OK;
-
-            case 5:
-            case 6:
-                if (Hid == nullptr || (Target->Type & DIDFT_ABSAXIS) == 0)
-                    return E_NOTIMPL;
-                Value->dwData = (Target->Property == 5) ? Hid->DeadZone : Hid->Saturation;
-                return S_OK;
-
-            case DI_PROP_ENABLE_OBJECT:
-                if (Hid == nullptr)
-                    return E_NOTIMPL;
-                Value->dwData = 0;
-                return S_OK;
-
             case 13:
             case 14:
-                if (Hid != nullptr)
-                    return E_NOTIMPL;
                 ReadName(reinterpret_cast<LPDIPROPSTRING>(Header)->wsz);
                 return S_OK;
 
@@ -1146,8 +1636,6 @@ public:
             {
                 BOOLEAN Friendly;
 
-                if (Hid != nullptr)
-                    return E_NOTIMPL;
                 if (!ReadPortName(reinterpret_cast<LPDIPROPSTRING>(Header)->wsz, &Friendly))
                     return E_FAIL;
                 return Friendly ? S_OK : S_FALSE;
@@ -1157,8 +1645,6 @@ public:
             {
                 LPDIPROPGUIDANDPATH Path = reinterpret_cast<LPDIPROPGUIDANDPATH>(Header);
 
-                if (Hid != nullptr)
-                    return E_NOTIMPL;
                 Path->guidClass = GUID_HIDClass;
                 StringCchCopyW(Path->wszPath, _countof(Path->wszPath), Start.Path);
                 return S_OK;
@@ -1172,32 +1658,32 @@ public:
         _In_ const RX_DI_PROP_TARGET* Target,
         _In_ LPCDIPROPHEADER Header) override
     {
-        HRESULT hr;
-
-        /* Every object is read anyway, turning one on or off needs nothing */
-        if (Target->Property == DI_PROP_ENABLE_OBJECT)
-            return S_OK;
-
-        if (Target->Property != 4 && Target->Property != 5 && Target->Property != 6)
-            return E_NOTIMPL;
-
         if (Target->Index != MAXULONG)
         {
-            if (Target->Index >= Format.dwNumObjs || (Target->Type & DIDFT_ABSAXIS) == 0)
+            if (Target->Index >= ObjectCount)
                 return E_NOTIMPL;
-            return SetAxisProperty(&Info[Target->Index], Target->Property, Header);
+            return SetObjectProperty(Target, Header);
         }
 
-        /* The whole device means every absolute axis */
-        for (ULONG Index = 0; Index < Format.dwNumObjs; Index++)
+        switch (Target->Property)
         {
-            if ((Objects[Index].dwType & DIDFT_ABSAXIS) == 0)
-                continue;
-            hr = SetAxisProperty(&Info[Index], Target->Property, Header);
-            if (FAILED(hr))
-                return hr;
+            case 4:
+            case 5:
+            case 6:
+            case 10:
+            case 11:
+                return SetEveryAxis(Target, Header);
+
+            case DI_PROP_ENABLE_OBJECT:
+            {
+                BYTE Fill = (reinterpret_cast<const DIPROPDWORD*>(Header)->dwData != 0) ? 1 : 0;
+
+                for (ULONG Kind = 0; Kind < _countof(Enabled); Kind++)
+                    FillMemory(Enabled[Kind], ReportIds[Kind], Fill);
+                return S_OK;
+            }
         }
-        return S_OK;
+        return E_NOTIMPL;
     }
 
     HRESULT
@@ -1296,25 +1782,53 @@ public:
     GetUsage(
         _In_ ULONG Index) override
     {
-        if (Index >= Format.dwNumObjs || (Objects[Index].dwType & DIDFT_COLLECTION))
+        const RX_DI_HID_GROUP* Group;
+        ULONG Offset = 0;
+
+        if (Index >= ObjectCount || Slots[Index].Group == nullptr)
             return 0;
-        return MAKELONG(Info[Index].Usage, Info[Index].UsagePage);
+
+        Group = Slots[Index].Group;
+        if ((Objects[Index].dwType & DIDFT_COLLECTION) == 0)
+            Offset = Index - Base[Group->Report] - Group->DataIndexMin;
+        return DiHidUsageKey(Group->UsagePage, Group->UsageMin + Offset);
     }
 
+    /* Looks objects up through the GUID they were given, so only the first usage of each slot matches */
     HRESULT
     MapUsage(
         _In_ ULONG Usage,
         _Out_ PULONG Index) override
     {
-        for (ULONG Object = 0; Object < Format.dwNumObjs; Object++)
+        for (ULONG Kind = 0; Kind < GroupCount; Kind++)
         {
-            if (GetUsage(Object) == Usage)
+            const RX_DI_HID_GROUP* Group = &Groups[Kind];
+
+            for (ULONG Step = 0; Step < Group->Count; Step++)
             {
-                *Index = Object;
-                return S_OK;
+                ULONG Object = Base[HidP_Input] + Group->DataIndexMin + Step;
+                ULONG Found = 0;
+
+                if (Object >= ObjectCount || Objects[Object].pguid == nullptr)
+                    continue;
+
+                for (ULONG Entry = 0; Entry < _countof(DiUsageSlots); Entry++)
+                {
+                    if (IsEqualGUID(*DiUsageSlots[Entry].Guid, *Objects[Object].pguid))
+                    {
+                        Found = DiUsageSlots[Entry].Usage;
+                        break;
+                    }
+                }
+
+                if (Found == Usage)
+                {
+                    *Index = Object;
+                    return S_OK;
+                }
             }
         }
-        return DIERR_NOTFOUND;
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
     }
 
 private:
@@ -1530,96 +2044,512 @@ private:
         return Got;
     }
 
-    /* Extra type bits for objects that live in feature and output reports */
-    static
-    ULONG
-    ReportTypeBits(
-        _In_ HIDP_REPORT_TYPE Kind)
+    /* Object names, attributes and force feedback limits an OEM put in the type key */
+    VOID
+    ReadOemObjectInfo(
+        _In_ ULONG Type,
+        _Inout_ LPDIDEVICEOBJECTINSTANCEW Object)
     {
-        if (Kind == HidP_Feature)
-            return DIDFT_OUTPUT;
-        if (Kind == HidP_Output)
-            return DIDFT_OUTPUT | DIDFT_NODATA;
+        struct
+        {
+            ULONG Flags;
+            USHORT Page;
+            USHORT Usage;
+        } Attributes = {};
+        HRESULT Read;
+        HKEY Key;
+        LONG Error;
+
+        if (FAILED(DiHidOpenObjectKey(TypeKey, Type, KEY_QUERY_VALUE, &Key)))
+            return;
+
+        Read = DiReadValue(Key, L"Attributes", &Attributes, sizeof(Attributes));
+        if (SUCCEEDED(Read))
+        {
+            Object->dwFlags |= Attributes.Flags & ~DIDOI_ASPECTMASK;
+            if (Attributes.Flags & DIDOI_ASPECTMASK)
+                Object->dwFlags = (Object->dwFlags & ~DIDOI_ASPECTMASK) | (Attributes.Flags & DIDOI_ASPECTMASK);
+        }
+
+        if (Object->dwSize >= sizeof(DIDEVICEOBJECTINSTANCEW))
+        {
+            DWORD Force[2] = {};
+
+            if (SUCCEEDED(Read) && Attributes.Page != 0 && Attributes.Usage != 0)
+            {
+                Object->wUsagePage = Attributes.Page;
+                Object->wUsage = Attributes.Usage;
+            }
+            if (FAILED(DiReadValue(Key, L"FFAttributes", Force, sizeof(Force))))
+                ZeroMemory(Force, sizeof(Force));
+            Object->dwFFMaxForce = Force[0];
+            Object->dwFFForceResolution = Force[1];
+        }
+
+        Object->tszName[MAX_PATH - 1] = L'\0';
+        Error = DiHidReadString(Key, nullptr, Object->tszName, MAX_PATH - 1);
+        if (Error == ERROR_MORE_DATA)
+            Object->tszName[MAX_PATH - 2] = L'\0';
+        else if (Error != ERROR_SUCCESS)
+            Object->tszName[0] = L'\0';
+        RegCloseKey(Key);
+    }
+
+    /* Usage names where the page has them, numbered kind names otherwise */
+    VOID
+    NameObject(
+        _In_ ULONG Type,
+        _In_ const RX_DI_HID_GROUP* Group,
+        _In_ ULONG Offset,
+        _In_ UINT Id,
+        _Out_writes_(MAX_PATH) PWSTR Name)
+    {
+        WCHAR Pattern[64];
+        WCHAR Numbered[256];
+        ULONG Usage = Group->UsageMin + Offset;
+
+        if (Group->UsagePage < _countof(DiUsageNameBase) && DiUsageNameBase[Group->UsagePage] != 0 && Usage < 0x200 &&
+            LoadStringW(DiModule, DiUsageNameBase[Group->UsagePage] + Usage, Name, MAX_PATH) != 0)
+        {
+            if (Type & DIDFT_COLLECTION)
+            {
+                WCHAR Text[MAX_PATH];
+
+                StringCchCopyW(Text, _countof(Text), Name);
+                LoadStringW(DiModule, 32, Pattern, _countof(Pattern));
+                StringCchPrintfW(Name, MAX_PATH, Pattern, DIDFT_GETINSTANCE(Type), Text);
+            }
+            return;
+        }
+
+        LoadStringW(DiModule, Id, Numbered, _countof(Numbered));
+        StringCchPrintfW(Name, MAX_PATH, Numbered, DIDFT_GETINSTANCE(Type));
+    }
+
+    HRESULT
+    GetObjectProperty(
+        _In_ const RX_DI_PROP_TARGET* Target,
+        _Inout_ LPDIPROPHEADER Header)
+    {
+        const RX_DI_HID_SLOT* Slot = &Slots[Target->Index];
+        LPDIPROPDWORD Value = reinterpret_cast<LPDIPROPDWORD>(Header);
+
+        if (Target->Property == DI_PROP_ENABLE_OBJECT)
+        {
+            Value->dwData = 0;
+            if (Slot->Group != nullptr && Slot->Group->Report < _countof(Enabled))
+                Value->dwData = Enabled[Slot->Group->Report][Slot->Group->ReportId];
+            return S_OK;
+        }
+
+        if (Target->Type & DIDFT_POV)
+        {
+            if (Slot->Group == nullptr)
+                return E_NOTIMPL;
+            if (Slot->Group->PovPoints && Target->Property == 10)
+                return (Slot->Cal != nullptr) ? DiHidGetCalProperty(Slot->Cal, 10, Header, Version) : E_NOTIMPL;
+            if (Target->Property != 3)
+                return E_NOTIMPL;
+            Value->dwData = Slot->Group->Granularity;
+            return S_OK;
+        }
+
+        if ((Target->Type & DIDFT_RELAXIS) == 0 && (Target->Type & DIDFT_ABSAXIS) != 0 && Slot->Cal != nullptr)
+            return DiHidGetCalProperty(Slot->Cal, Target->Property, Header, Version);
+        return E_NOTIMPL;
+    }
+
+    HRESULT
+    SetObjectProperty(
+        _In_ const RX_DI_PROP_TARGET* Target,
+        _In_ LPCDIPROPHEADER Header)
+    {
+        RX_DI_HID_SLOT* Slot = &Slots[Target->Index];
+        HRESULT hr;
+
+        if (Slot->Group == nullptr)
+            return E_NOTIMPL;
+
+        if (Target->Property == DI_PROP_ENABLE_OBJECT)
+        {
+            BOOLEAN On = reinterpret_cast<const DIPROPDWORD*>(Header)->dwData == 1;
+
+            if (Slot->Group->Report < _countof(Enabled))
+                Enabled[Slot->Group->Report][Slot->Group->ReportId] = On ? 1 : 0;
+            Slot->Group->Disabled = !On;
+            return S_OK;
+        }
+
+        if (Slot->Cal == nullptr)
+            return E_NOTIMPL;
+
+        if (Target->Type == DIDFT_POV)
+        {
+            /* Only the DirectX 5 betas could calibrate the points of a POV */
+            if (Version != 0x05B2 || !Slot->Group->PovPoints)
+                return E_NOTIMPL;
+            hr = DiHidSetCalProperty(Slot->Cal, Target, Header, Start.CalTypeKey, Version);
+            if (FAILED(hr))
+                return hr;
+            LoadCalibrations();
+        }
+        else
+        {
+            if ((Target->Type & DIDFT_RELAXIS) != 0 || (Target->Type & DIDFT_ABSAXIS) == 0)
+                return E_NOTIMPL;
+            hr = DiHidSetCalProperty(Slot->Cal, Target, Header, Start.CalTypeKey, Version);
+            LoadCalibrations();
+            if (FAILED(hr))
+                return hr;
+        }
+
+        ResetState();
+        return S_OK;
+    }
+
+    /* The whole device means each plain input axis and POV, last object first */
+    HRESULT
+    SetEveryAxis(
+        _In_ const RX_DI_PROP_TARGET* Target,
+        _In_ LPCDIPROPHEADER Header)
+    {
+        BYTE Copy[DI_HID_PROPCALPOV_BYTES] = {};
+        LPDIPROPHEADER Each = reinterpret_cast<LPDIPROPHEADER>(Copy);
+        RX_DI_PROP_TARGET One = *Target;
+
+        CopyMemory(Copy, Header, (Header->dwSize < sizeof(Copy)) ? Header->dwSize : sizeof(Copy));
+        Each->dwHow = DIPH_BYID;
+
+        for (ULONG Remaining = ObjectCount; Remaining > 0; Remaining -= 1)
+        {
+            ULONG Index = Remaining - 1;
+            ULONG Type = Objects[Index].dwType;
+            HRESULT hr;
+
+            if ((Type & (DIDFT_OUTPUT | DIDFT_ALIAS | DIDFT_VENDORDEFINED | DIDFT_ABSAXIS)) != DIDFT_ABSAXIS &&
+                (Type & (DIDFT_OUTPUT | DIDFT_ALIAS | DIDFT_VENDORDEFINED | DIDFT_POV)) != DIDFT_POV)
+            {
+                continue;
+            }
+
+            Each->dwObj = Type;
+            One.Index = Index;
+            One.Type = Type;
+            hr = SetObjectProperty(&One, Each);
+            if (FAILED(hr) && hr != E_NOTIMPL)
+                return hr;
+        }
+        return S_OK;
+    }
+
+    /* Calibrations come from the device's own Type key, defaults from the logical range */
+    VOID
+    LoadCalibrations(VOID)
+    {
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
+        {
+            RX_DI_HID_CAL* Cal = Slots[Index].Cal;
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            ULONG Type = Objects[Index].dwType;
+            LONG Saved[3] = {};
+            HKEY Key;
+
+            if (Cal == nullptr || Group == nullptr)
+                continue;
+
+            if (Type & DIDFT_POV)
+            {
+                LONG Points[10] = {};
+
+                if (!Group->PovPoints)
+                    continue;
+                if (SUCCEEDED(DiHidOpenObjectKey(Start.CalTypeKey, Type, KEY_QUERY_VALUE, &Key)))
+                {
+                    DiReadValue(Key, L"Calibration", Points, sizeof(Points));
+                    RegCloseKey(Key);
+                }
+                CopyMemory(Cal->PovLow, Points, sizeof(Cal->PovLow));
+                CopyMemory(Cal->PovHigh, Points + 5, sizeof(Cal->PovHigh));
+                continue;
+            }
+
+            if (FAILED(DiHidOpenObjectKey(Start.CalTypeKey, Type, KEY_QUERY_VALUE, &Key)) ||
+                FAILED(ReadCalibration(Key, Saved)))
+            {
+                LONG Low = Group->LogicalMin;
+                LONG High = Group->LogicalMax;
+
+                if (Low >= High)
+                {
+                    Low = 0;
+                    High = 655;
+                }
+                else if (VendorId == DI_HID_MS_VENDOR && (ProductId & 0xFF00) == 0x0100)
+                {
+                    High = (High - Low) / 11 + Low;
+                }
+                Saved[0] = Low;
+                Saved[1] = Low + static_cast<LONG>(static_cast<ULONG>(High - Low + 1) >> 1);
+                Saved[2] = High;
+            }
+
+            Cal->Min = Saved[0];
+            Cal->Center = Saved[1];
+            Cal->Max = Saved[2];
+            DiHidRecalc(Cal);
+        }
+    }
+
+    static
+    HRESULT
+    ReadCalibration(
+        _In_ HKEY Key,
+        _Out_writes_(3) PLONG Saved)
+    {
+        HRESULT hr = DiReadValue(Key, L"Calibration", Saved, 3 * sizeof(LONG));
+
+        RegCloseKey(Key);
+        return hr;
+    }
+
+    /* Values take a dword and buttons a byte, objects in output reports carry no data */
+    VOID
+    PlaceObject(
+        _Inout_ DIOBJECTDATAFORMAT* Object,
+        _In_ const RX_DI_HID_GROUP* Group,
+        _Inout_ PULONG Type,
+        _In_ ULONG Size)
+    {
+        if (Group->Report == HidP_Output)
+        {
+            *Type |= DIDFT_NODATA | DIDFT_OUTPUT;
+            return;
+        }
+
+        Object->dwOfs = DataSize;
+        if (!Group->Alias)
+            DataSize += Size;
+        if (Group->Report == HidP_Feature)
+            *Type |= DIDFT_OUTPUT;
+    }
+
+    /* Input values on these pages are axes, except two generic desktop usages and button page values */
+    ULONG
+    ClassifyInputValue(
+        _In_ const RX_DI_HID_GROUP* Group,
+        _In_ ULONG Usage)
+    {
+        switch (Group->UsagePage)
+        {
+            case HID_USAGE_PAGE_GENERIC:
+                if (Usage == 0x3A || Usage == 0x3B)
+                    return 0;
+                return Group->Absolute ? DIDFT_ABSAXIS : DIDFT_RELAXIS;
+
+            case HID_USAGE_PAGE_SIMULATION:
+            case HID_USAGE_PAGE_VR:
+            case HID_USAGE_PAGE_SPORT:
+            case HID_USAGE_PAGE_GAME:
+            case HID_USAGE_PAGE_KEYBOARD:
+            case HID_USAGE_PAGE_CONSUMER:
+            case HID_USAGE_PAGE_DIGITIZER:
+                return Group->Absolute ? DIDFT_ABSAXIS : DIDFT_RELAXIS;
+
+            case HID_USAGE_PAGE_BUTTON:
+                if (!Group->Absolute)
+                    return DIDFT_RELAXIS;
+                if (!Group->Alias)
+                    ButtonCount++;
+                return DIDFT_PSHBUTTON;
+        }
         return 0;
     }
 
-    ULONG
-    CountObjects(
-        _In_ HIDP_REPORT_TYPE Kind)
-    {
-        USHORT ValueCount = (Kind == HidP_Input) ? Caps.NumberInputValueCaps :
-                            (Kind == HidP_Feature) ? Caps.NumberFeatureValueCaps : Caps.NumberOutputValueCaps;
-        USHORT ButtonCapsCount = (Kind == HidP_Input) ? Caps.NumberInputButtonCaps :
-                                 (Kind == HidP_Feature) ? Caps.NumberFeatureButtonCaps : Caps.NumberOutputButtonCaps;
-        HIDP_BUTTON_CAPS* Buttons = nullptr;
-        ULONG Count = ValueCount;
-
-        if (ButtonCapsCount != 0 && SUCCEEDED(DiAllocate(sizeof(*Buttons) * ButtonCapsCount, reinterpret_cast<PVOID*>(&Buttons))))
-        {
-            if (HidP_GetButtonCaps(Kind, Buttons, &ButtonCapsCount, Data) == HIDP_STATUS_SUCCESS)
-            {
-                for (USHORT Index = 0; Index < ButtonCapsCount; Index++)
-                    Count += Buttons[Index].IsRange ? (Buttons[Index].Range.UsageMax - Buttons[Index].Range.UsageMin + 1) : 1;
-            }
-            DiFree(reinterpret_cast<PVOID*>(&Buttons));
-        }
-        return Count;
-    }
-
-    /* Values take a dword each, aliases share the slot of the value before them */
     HRESULT
-    AddValues(
+    AddValueGroup(
         _In_ HIDP_REPORT_TYPE Kind,
-        _Inout_ PULONG Offset)
+        _Inout_ HIDP_VALUE_CAPS* Entry)
     {
-        USHORT ValueCount = (Kind == HidP_Input) ? Caps.NumberInputValueCaps :
-                            (Kind == HidP_Feature) ? Caps.NumberFeatureValueCaps : Caps.NumberOutputValueCaps;
-        HIDP_VALUE_CAPS* Values = nullptr;
-        HRESULT hr;
+        RX_DI_HID_GROUP* Group = &Groups[GroupCount++];
+        LONG SignedMax;
+        LONG UnsignedMax;
+        ULONG Aspect = 0;
+        BOOLEAN Pov;
 
-        if (ValueCount == 0)
-            return S_OK;
-
-        hr = DiAllocate(sizeof(*Values) * ValueCount, reinterpret_cast<PVOID*>(&Values));
-        if (FAILED(hr))
-            return hr;
-
-        if (HidP_GetValueCaps(Kind, Values, &ValueCount, Data) != HIDP_STATUS_SUCCESS)
-            ValueCount = 0;
-
-        for (USHORT Index = 0; Index < ValueCount; Index++)
+        if (Entry->IsRange)
         {
-            const HIDP_VALUE_CAPS* Value = &Values[Index];
-            USHORT Usage = Value->IsRange ? Value->Range.UsageMin : Value->NotRange.Usage;
-            BOOLEAN Alias = Value->IsAlias != FALSE;
-            ULONG Type = ClassifyValue(Value, Usage);
-            const GUID* Guid = (Type & (DIDFT_AXIS | DIDFT_POV)) ? DiHidUsageGuid(Value->UsagePage, Usage) : &GUID_Unknown;
-            ULONG Slot = (Alias && *Offset >= sizeof(DWORD)) ? *Offset - sizeof(DWORD) : *Offset;
+            if (Entry->Range.DataIndexMax - Entry->Range.DataIndexMin != Entry->Range.UsageMax - Entry->Range.UsageMin)
+                return E_FAIL;
+        }
+        else
+        {
+            Entry->Range.UsageMax = Entry->Range.UsageMin;
+        }
+
+        if (Kind == HidP_Input && !Entry->IsAlias)
+            Aspect = DiHidValueAspect(Entry);
+
+        Group->ReportId = Entry->ReportID;
+        if (Entry->ReportID > ReportIds[Kind])
+            ReportIds[Kind] = Entry->ReportID;
+        Group->UsagePage = Entry->UsagePage;
+        Group->UsageMin = Entry->Range.UsageMin;
+        Group->DataIndexMin = Entry->Range.DataIndexMin;
+        Group->Count = Entry->Range.UsageMax - Entry->Range.UsageMin + 1;
+        Group->LinkCollection = Entry->LinkCollection;
+        Group->Units = Entry->Units;
+        Group->Exponent = static_cast<USHORT>(Entry->UnitsExp);
+        Group->LogicalMin = Entry->LogicalMin;
+        Group->LogicalMax = Entry->LogicalMax;
+        Group->PhysicalMin = Entry->PhysicalMin;
+        Group->PhysicalMax = Entry->PhysicalMax;
+        DiHidFieldLimits(Entry->BitSize, &Group->SignMask, &SignedMax, &UnsignedMax);
+
+        /* Without a usable logical range the physical one or the field size stands in */
+        Group->Signed = TRUE;
+        if (Group->LogicalMin < Group->LogicalMax || Group->PhysicalMin >= Group->PhysicalMax)
+        {
+            if (Group->LogicalMin >= Group->LogicalMax)
+            {
+                Group->LogicalMin = Group->SignMask;
+                Group->LogicalMax = SignedMax;
+            }
+
+            if (Group->PhysicalMin > Group->PhysicalMax)
+            {
+                Group->LogicalMin = 0;
+                Group->LogicalMax = UnsignedMax;
+                Group->PhysicalMin = 0;
+                Group->PhysicalMax = UnsignedMax;
+                Group->Signed = FALSE;
+            }
+            else if (Group->PhysicalMin == Group->PhysicalMax)
+            {
+                Group->PhysicalMin = Group->LogicalMin;
+                Group->PhysicalMax = Group->LogicalMax;
+            }
+        }
+        else
+        {
+            Group->LogicalMin = Group->PhysicalMin;
+            Group->LogicalMax = Group->PhysicalMax;
+        }
+
+        if (Group->Signed && (Group->LogicalMin < Group->SignMask || Group->LogicalMax > SignedMax))
+        {
+            if (Group->LogicalMin >= 0 && Group->LogicalMax <= UnsignedMax)
+            {
+                Group->Signed = FALSE;
+            }
+            else
+            {
+                if (Group->UsagePage < 0xFF00)
+                    return E_FAIL;
+                Group->LogicalMin = Group->SignMask;
+                Group->LogicalMax = SignedMax;
+            }
+        }
+        if (!Group->Signed)
+            Group->SignMask = UnsignedMax;
+
+        Group->StringMin = Entry->Range.StringMin;
+        Group->StringMax = Entry->IsStringRange ? Entry->Range.StringMax : Entry->Range.StringMin;
+        Group->DesignatorMin = Entry->Range.DesignatorMin;
+        Group->DesignatorMax = Entry->IsDesignatorRange ? Entry->Range.DesignatorMax : Entry->Range.DesignatorMin;
+        Group->Absolute = Entry->IsAbsolute;
+        Group->Value = TRUE;
+        Group->Report = Kind;
+        Group->Alias = Entry->IsAlias;
+
+        /* Steering and rudder controls say what kind of joystick this is */
+        if (Group->UsagePage == HID_USAGE_PAGE_SIMULATION)
+        {
+            if (Group->UsageMin == 0xC8)
+                DevType = DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_WHEEL);
+            else if (Group->UsageMin == 0xBA)
+                DevType = DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_RUDDER);
+        }
+
+        Pov = Group->Count == 1 &&
+              ((Group->UsagePage == HID_USAGE_PAGE_GENERIC && Group->UsageMin == HID_USAGE_GENERIC_HATSWITCH) ||
+               (Group->UsagePage == HID_USAGE_PAGE_GAME && Group->UsageMin == 0x20));
+        if (Pov && Group->LogicalMax - Group->LogicalMin != -1)
+            Group->Granularity = static_cast<USHORT>(36000UL / static_cast<ULONG>(Group->LogicalMax - Group->LogicalMin + 1));
+
+        /* Microsoft pads without a null state report their hat as points to calibrate */
+        if (!Entry->HasNull && Pov && VendorId == DI_HID_MS_VENDOR && (ProductId & 0xFF00) == 0x0100)
+        {
+            if (Group->LogicalMax - Group->LogicalMin != -1)
+                Group->Granularity = 9000;
+            Group->PovPoints = TRUE;
+        }
+
+        for (ULONG Step = 0; Step < Group->Count; Step++)
+        {
+            ULONG Index = Base[Kind] + Group->DataIndexMin + Step;
+            USHORT Usage = static_cast<USHORT>(Group->UsageMin + Step);
+            DIOBJECTDATAFORMAT* Object;
+            ULONG AliasBit = Group->Alias ? DIDFT_ALIAS : 0;
+            ULONG Type;
             ULONG Flags;
 
-            /* Only input POVs keep their kind outside the input report, the rest just carry data */
-            if (Kind != HidP_Input && (Type & (DIDFT_VENDORDEFINED | DIDFT_POV)) == 0)
-                Type = 0;
+            if (Index >= ObjectCount)
+                break;
+            if (Slots[Index].Group != nullptr)
+                return E_FAIL;
+            Slots[Index].Group = Group;
+            Object = &Objects[Index];
 
-            if (Alias)
-                Type |= DIDFT_ALIAS;
-            else if (Type & DIDFT_POV)
-                PovCount++;
-            else if (Kind == HidP_Input && (Type & DIDFT_AXIS))
-                AxisCount++;
-            else if (Kind == HidP_Input && (Type & DIDFT_BUTTON))
-                ButtonCount++;
+            if (LOBYTE(DevType) == DIDEVTYPE_MOUSE && Usage == HID_USAGE_GENERIC_WHEEL && Group->UsagePage == HID_USAGE_PAGE_GENERIC)
+            {
+                Object->pguid = &GUID_ZAxis;
+                Group->Granularity = 0;
+            }
+            else if (Kind != HidP_Input)
+            {
+                Object->pguid = &GUID_Unknown;
+            }
+            else
+            {
+                const RX_DI_USAGE_SLOT* Known = DiHidFindUsageSlot(DiHidUsageKey(Group->UsagePage, Usage));
+
+                Object->pguid = (Known != nullptr) ? Known->Guid : &GUID_Unknown;
+            }
+
+            if (Group->UsagePage >= 0xFF00)
+            {
+                Type = DIDFT_VENDORDEFINED | AliasBit;
+            }
+            else if (Object->pguid == &GUID_POV)
+            {
+                Type = DIDFT_POV | AliasBit;
+                if (!Group->Alias)
+                    PovCount++;
+            }
+            else if (Kind == HidP_Input)
+            {
+                Type = ClassifyInputValue(Group, Usage) | AliasBit;
+                if ((Type & DIDFT_AXIS) && !Group->Alias)
+                    AxisCount++;
+            }
+            else
+            {
+                Type = AliasBit;
+            }
+
+            Type |= DIDFT_MAKEINSTANCE(static_cast<USHORT>(Index));
+            PlaceObject(Object, Group, &Type, sizeof(DWORD));
 
             if (Kind != HidP_Input)
                 Flags = 0x80000000 | DIDOI_POLLED;
             else
-                Flags = ((Type & DIDFT_AXIS) ? DIDOI_ASPECTPOSITION : 0) | (Polled ? DIDOI_POLLED : 0);
+                Flags = Aspect | (Polled ? DIDOI_POLLED : 0);
 
-            /* A PID device can push on any usage it names in an output report */
-            if (PidDevice && Guid != &GUID_Unknown)
+            /* A PID device can push on any usage its output reports name */
+            if (PidDevice && !IsEqualGUID(*Object->pguid, GUID_Unknown))
             {
                 USHORT Length = 0;
-                NTSTATUS Status = HidP_GetSpecificButtonCaps(HidP_Output, Value->UsagePage, 0, Usage, nullptr, &Length, Data);
+                NTSTATUS Status = HidP_GetSpecificButtonCaps(HidP_Output, Group->UsagePage, 0, Usage, nullptr, &Length, Data);
 
                 if (Status >= 0 || Status == HIDP_STATUS_BUFFER_TOO_SMALL)
                 {
@@ -1628,61 +2558,92 @@ private:
                 }
             }
 
-            AddObject(Guid, Slot, Type | ReportTypeBits(Kind) | DIDFT_MAKEINSTANCE(ValueInstance++), Flags,
-                      Value->UsagePage, Usage, Value->LinkCollection, TRUE, Value->LogicalMin, Value->LogicalMax);
-            Info[Format.dwNumObjs - 1].ReportId = Value->ReportID;
-            Info[Format.dwNumObjs - 1].Units = Value->Units;
-            Info[Format.dwNumObjs - 1].Exponent = static_cast<USHORT>(Value->UnitsExp);
-            Info[Format.dwNumObjs - 1].Input = (Kind == HidP_Input);
-            if (!Alias)
-                *Offset += sizeof(DWORD);
-        }
+            Object->dwType = Type;
+            Object->dwFlags = Flags;
 
-        DiFree(reinterpret_cast<PVOID*>(&Values));
+            if (Kind == HidP_Input)
+            {
+                RX_DI_HID_CAL* Cal = &Cals[CalCount++];
+
+                Slots[Index].Cal = Cal;
+                Cal->Saturation = 10000;
+                if (Type & DIDFT_ABSAXIS)
+                {
+                    Cal->RangeMin = 0;
+                    Cal->RangeMax = DI_HID_AXIS_MAX;
+                    Cal->RangeCenter = DI_HID_AXIS_MAX / 2;
+                }
+                else if ((Type & DIDFT_POV) && Group->PovPoints)
+                {
+                    Cal->PovPoints = TRUE;
+                }
+            }
+        }
         return S_OK;
     }
 
-    /* Buttons take a byte each, only pages that hold buttons make buttons and keyboard pages make keys */
     HRESULT
-    AddButtons(
+    AddButtonGroup(
         _In_ HIDP_REPORT_TYPE Kind,
-        _Inout_ PULONG Offset)
+        _Inout_ HIDP_BUTTON_CAPS* Entry,
+        _Inout_ PBYTE ButtonReports)
     {
-        USHORT ButtonCapsCount = (Kind == HidP_Input) ? Caps.NumberInputButtonCaps :
-                                 (Kind == HidP_Feature) ? Caps.NumberFeatureButtonCaps : Caps.NumberOutputButtonCaps;
-        HIDP_BUTTON_CAPS* Buttons = nullptr;
-        ULONG First = *Offset;
-        HRESULT hr;
+        RX_DI_HID_GROUP* Group = &Groups[GroupCount++];
 
-        if (ButtonCapsCount == 0)
-            return S_OK;
-
-        hr = DiAllocate(sizeof(*Buttons) * ButtonCapsCount, reinterpret_cast<PVOID*>(&Buttons));
-        if (FAILED(hr))
-            return hr;
-
-        if (HidP_GetButtonCaps(Kind, Buttons, &ButtonCapsCount, Data) != HIDP_STATUS_SUCCESS)
-            ButtonCapsCount = 0;
-
-        for (USHORT Index = 0; Index < ButtonCapsCount; Index++)
+        if (Entry->IsRange)
         {
-            const HIDP_BUTTON_CAPS* Button = &Buttons[Index];
-            USHORT Low = Button->IsRange ? Button->Range.UsageMin : Button->NotRange.Usage;
-            USHORT High = Button->IsRange ? Button->Range.UsageMax : Low;
+            if (Entry->Range.DataIndexMax - Entry->Range.DataIndexMin != Entry->Range.UsageMax - Entry->Range.UsageMin)
+                return E_FAIL;
+        }
+        else
+        {
+            Entry->Range.UsageMax = Entry->Range.UsageMin;
+        }
 
-            for (ULONG Usage = Low; Usage <= High; Usage++)
+        Group->ReportId = Entry->ReportID;
+        if (Entry->ReportID > ReportIds[Kind])
+            ReportIds[Kind] = Entry->ReportID;
+        Group->UsagePage = Entry->UsagePage;
+        Group->UsageMin = Entry->Range.UsageMin;
+        Group->DataIndexMin = Entry->Range.DataIndexMin;
+        Group->Count = Entry->Range.UsageMax - Entry->Range.UsageMin + 1;
+        Group->SignMask = -1;
+        Group->LinkCollection = Entry->LinkCollection;
+        Group->StringMin = Entry->Range.StringMin;
+        Group->StringMax = Entry->IsStringRange ? Entry->Range.StringMax : Entry->Range.StringMin;
+        Group->DesignatorMin = Entry->Range.DesignatorMin;
+        Group->DesignatorMax = Entry->IsDesignatorRange ? Entry->Range.DesignatorMax : Entry->Range.DesignatorMin;
+        Group->Report = Kind;
+        Group->Absolute = Entry->IsAbsolute;
+        Group->Alias = Entry->IsAlias;
+
+        for (ULONG Step = 0; Step < Group->Count; Step++)
+        {
+            ULONG Index = Base[Kind] + Group->DataIndexMin + Step;
+            DIOBJECTDATAFORMAT* Object;
+            ULONG Type;
+            ULONG Flags;
+
+            if (Index >= ObjectCount)
+                break;
+            if (Slots[Index].Group != nullptr)
+                return E_FAIL;
+            if (Kind != HidP_Output)
+                ButtonReports[Index] = Entry->ReportID;
+            Slots[Index].Group = Group;
+            Object = &Objects[Index];
+            Object->pguid = &GUID_Unknown;
+
+            if (Group->UsagePage >= 0xFF00)
             {
-                const GUID* Guid = &GUID_Unknown;
-                BOOLEAN Alias = Button->IsAlias != FALSE;
-                ULONG Type = 0;
-
-                if (Button->UsagePage >= 0xFF00)
+                Type = DIDFT_VENDORDEFINED | (Group->Alias ? DIDFT_ALIAS : 0);
+            }
+            else
+            {
+                Type = Group->Alias ? DIDFT_ALIAS : 0;
+                if (Kind == HidP_Input)
                 {
-                    Type = DIDFT_VENDORDEFINED;
-                }
-                else if (Kind == HidP_Input)
-                {
-                    switch (Button->UsagePage)
+                    switch (Group->UsagePage)
                     {
                         case HID_USAGE_PAGE_GENERIC:
                         case HID_USAGE_PAGE_SIMULATION:
@@ -1692,195 +2653,578 @@ private:
                         case HID_USAGE_PAGE_BUTTON:
                         case HID_USAGE_PAGE_CONSUMER:
                         case HID_USAGE_PAGE_DIGITIZER:
-                            Guid = &GUID_Button;
-                            Type = DIDFT_PSHBUTTON;
+                            Object->pguid = &GUID_Button;
                             break;
                         case HID_USAGE_PAGE_KEYBOARD:
-                            Guid = &GUID_Key;
-                            Type = DIDFT_PSHBUTTON;
+                            Object->pguid = &GUID_Key;
                             break;
                     }
+                    if (Object->pguid != &GUID_Unknown)
+                    {
+                        Type |= DIDFT_PSHBUTTON;
+                        if (!Group->Alias)
+                            ButtonCount++;
+                    }
                 }
-
-                Type |= ReportTypeBits(Kind) | DIDFT_MAKEINSTANCE(ButtonInstance++);
-                if (PidDevice && (Type & DIDFT_PSHBUTTON))
-                    Type |= DIDFT_FFEFFECTTRIGGER;
-                if (Alias)
-                    Type |= DIDFT_ALIAS;
-                else if (Type & DIDFT_BUTTON)
-                    ButtonCount++;
-
-                AddObject(Guid, (Alias && *Offset > First) ? *Offset - 1 : *Offset, Type,
-                          ((Kind != HidP_Input) ? (0x80000000 | DIDOI_POLLED) : (Polled ? DIDOI_POLLED : 0)) |
-                          ((Type & DIDFT_FFEFFECTTRIGGER) ? DIDOI_FFEFFECTTRIGGER : 0),
-                          Button->UsagePage, static_cast<USHORT>(Usage), Button->LinkCollection, FALSE, 0, 1);
-                Info[Format.dwNumObjs - 1].ReportId = Button->ReportID;
-                Info[Format.dwNumObjs - 1].Input = (Kind == HidP_Input);
-                if (!Alias)
-                    (*Offset)++;
             }
+
+            Type |= DIDFT_MAKEINSTANCE(static_cast<USHORT>(Index));
+            PlaceObject(Object, Group, &Type, sizeof(BYTE));
+
+            Flags = (Kind != HidP_Input) ? (0x80000000 | DIDOI_POLLED) : (Polled ? DIDOI_POLLED : 0);
+            if (PidDevice && (Type & DIDFT_PSHBUTTON))
+            {
+                Type |= DIDFT_FFEFFECTTRIGGER;
+                Flags |= DIDOI_FFEFFECTTRIGGER;
+            }
+
+            Object->dwType = Type;
+            Object->dwFlags = Flags;
+        }
+        return S_OK;
+    }
+
+    HRESULT
+    AddValueGroups(
+        _In_ HIDP_REPORT_TYPE Kind,
+        _In_ USHORT Expected)
+    {
+        HIDP_VALUE_CAPS* List = nullptr;
+        USHORT Count = Expected;
+        HRESULT hr;
+
+        if (Expected == 0)
+            return S_OK;
+
+        hr = DiAllocate(sizeof(*List) * Expected, reinterpret_cast<PVOID*>(&List));
+        if (FAILED(hr))
+            return hr;
+
+        if (HidP_GetValueCaps(Kind, List, &Count, Data) < 0 || Count != Expected)
+        {
+            hr = E_FAIL;
+        }
+        else
+        {
+            DiHidSortCaps(List, Count);
+            for (USHORT Index = 0; Index < Count && SUCCEEDED(hr); Index++)
+                hr = AddValueGroup(Kind, &List[Index]);
         }
 
-        DiFree(reinterpret_cast<PVOID*>(&Buttons));
+        DiFree(reinterpret_cast<PVOID*>(&List));
+        return hr;
+    }
+
+    HRESULT
+    AddButtonGroups(
+        _In_ HIDP_REPORT_TYPE Kind,
+        _In_ USHORT Expected,
+        _Inout_ PBYTE ButtonReports)
+    {
+        HIDP_BUTTON_CAPS* List = nullptr;
+        USHORT Count = Expected;
+        HRESULT hr;
+
+        if (Expected == 0)
+            return S_OK;
+
+        hr = DiAllocate(sizeof(*List) * Expected, reinterpret_cast<PVOID*>(&List));
+        if (FAILED(hr))
+            return hr;
+
+        if (HidP_GetButtonCaps(Kind, List, &Count, Data) < 0 || Count != Expected)
+        {
+            hr = E_FAIL;
+        }
+        else
+        {
+            DiHidSortCaps(List, Count);
+            for (USHORT Index = 0; Index < Count && SUCCEEDED(hr); Index++)
+                hr = AddButtonGroup(Kind, &List[Index], ButtonReports);
+        }
+
+        DiFree(reinterpret_cast<PVOID*>(&List));
+        return hr;
+    }
+
+    /* Each report id gets a mask that clears only the buttons it carries */
+    HRESULT
+    BuildButtonMasks(
+        _In_reads_(ObjectCount) const BYTE* ButtonReports)
+    {
+        ULONG Rows = ReportIds[HidP_Input];
+        ULONG Next = 0;
+        HRESULT hr;
+
+        if (ReportIds[HidP_Output] > Rows)
+            Rows = ReportIds[HidP_Output];
+        if (ReportIds[HidP_Feature] > Rows)
+            Rows = ReportIds[HidP_Feature];
+        if (Rows == 0 || ButtonBytes == 0)
+            return S_OK;
+
+        hr = DiAllocate(sizeof(*MaskRows) * Rows, reinterpret_cast<PVOID*>(&MaskRows));
+        if (SUCCEEDED(hr))
+            hr = DiAllocate(Rows * ButtonBytes, reinterpret_cast<PVOID*>(&MaskData));
+        if (FAILED(hr))
+            return hr;
+
+        MaskRowCount = Rows;
+        FillMemory(MaskData, Rows * ButtonBytes, 0xFF);
+        for (ULONG Row = 0; Row < Rows; Row++)
+        {
+            ULONG Seen = 0;
+
+            for (ULONG Index = 0; Index < ObjectCount; Index++)
+            {
+                if (ButtonReports[Index] == Row + 1)
+                {
+                    MaskRows[Row] = MaskData + Next;
+                    if (Next + Seen < Rows * ButtonBytes)
+                        MaskData[Next + Seen] = 0;
+                }
+                if (ButtonReports[Index] != 0)
+                    Seen++;
+            }
+            if (MaskRows[Row] == MaskData + Next)
+                Next += ButtonBytes;
+        }
+        return S_OK;
+    }
+
+    HRESULT
+    AddCollections(VOID)
+    {
+        HIDP_LINK_COLLECTION_NODE* Nodes = nullptr;
+        ULONG Count = Caps.NumberLinkCollectionNodes;
+        HRESULT hr;
+
+        if (Count == 0)
+            return S_OK;
+
+        hr = DiAllocate(sizeof(*Nodes) * Count, reinterpret_cast<PVOID*>(&Nodes));
+        if (FAILED(hr))
+            return hr;
+
+        if (HidP_GetLinkCollectionNodes(Nodes, &Count, Data) < 0 || Count != Caps.NumberLinkCollectionNodes)
+        {
+            DiFree(reinterpret_cast<PVOID*>(&Nodes));
+            return E_FAIL;
+        }
+
+        for (ULONG Node = 0; Node < Count; Node++)
+        {
+            RX_DI_HID_GROUP* Group = &Groups[GroupCount++];
+            ULONG Index = Base[DI_HID_REPORT_COLLECTION] + Node;
+            ULONG Type = DIDFT_COLLECTION | DIDFT_NODATA | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Index));
+
+            Group->UsagePage = Nodes[Node].LinkUsagePage;
+            Group->UsageMin = Nodes[Node].LinkUsage;
+            Group->Count = 1;
+            Group->Alias = Nodes[Node].IsAlias;
+            Group->DataIndexMin = static_cast<USHORT>(Node);
+            Group->LinkCollection = Nodes[Node].Parent;
+            Group->Report = DI_HID_REPORT_COLLECTION;
+
+            if (Group->UsagePage >= 0xFF00)
+                Type |= DIDFT_VENDORDEFINED;
+            Slots[Index].Group = Group;
+            Objects[Index].pguid = &GUID_Unknown;
+            Objects[Index].dwType = Type;
+            Objects[Index].dwFlags = 0;
+        }
+
+        DiFree(reinterpret_cast<PVOID*>(&Nodes));
         return S_OK;
     }
 
     HRESULT
     BuildObjects(VOID)
     {
-        static const HIDP_REPORT_TYPE Reports[] = { HidP_Input, HidP_Feature, HidP_Output };
-        ULONG Capacity = Caps.NumberLinkCollectionNodes;
-        ULONG Offset = 0;
+        ULONG GroupTotal = Caps.NumberLinkCollectionNodes + Caps.NumberInputValueCaps + Caps.NumberInputButtonCaps +
+                           Caps.NumberOutputValueCaps + Caps.NumberOutputButtonCaps + Caps.NumberFeatureValueCaps +
+                           Caps.NumberFeatureButtonCaps;
+        PBYTE ButtonReports = nullptr;
         HRESULT hr;
 
-        for (ULONG Index = 0; Index < _countof(Reports); Index++)
-            Capacity += CountObjects(Reports[Index]);
+        ObjectCount = Caps.NumberInputDataIndices + Caps.NumberOutputDataIndices + Caps.NumberFeatureDataIndices +
+                      Caps.NumberLinkCollectionNodes;
+        if (ObjectCount >= 0xFFFF)
+            return E_FAIL;
 
-        hr = DiAllocate(sizeof(*Objects) * (Capacity + 1), reinterpret_cast<PVOID*>(&Objects));
+        /* Objects sit at their data index, inputs first, then features, outputs and collections */
+        Base[HidP_Input] = 0;
+        Base[HidP_Feature] = Caps.NumberInputDataIndices;
+        Base[HidP_Output] = Caps.NumberInputDataIndices + Caps.NumberFeatureDataIndices;
+        Base[DI_HID_REPORT_COLLECTION] = Base[HidP_Output] + Caps.NumberOutputDataIndices;
+
+        /* Devices that report effects in output reports get the PID driver */
+        if (Caps.NumberOutputValueCaps != 0 && Caps.NumberOutputButtonCaps != 0)
+        {
+            USHORT Length = 0;
+
+            PidDevice = HidP_GetSpecificButtonCaps(HidP_Output, DI_HID_PAGE_PID, 0, 0, nullptr, &Length, Data) ==
+                        HIDP_STATUS_BUFFER_TOO_SMALL && Length > 2;
+        }
+
+        hr = DiAllocate(sizeof(*Objects) * (ObjectCount + 1), reinterpret_cast<PVOID*>(&Objects));
         if (SUCCEEDED(hr))
-            hr = DiAllocate(sizeof(*Info) * (Capacity + 1), reinterpret_cast<PVOID*>(&Info));
-
-        /* Input, feature and output values, then the buttons in the same order */
-        for (ULONG Index = 0; SUCCEEDED(hr) && Index < _countof(Reports); Index++)
-            hr = AddValues(Reports[Index], &Offset);
-        for (ULONG Index = 0; SUCCEEDED(hr) && Index < _countof(Reports); Index++)
-            hr = AddButtons(Reports[Index], &Offset);
+            hr = DiAllocate(sizeof(*Slots) * (ObjectCount + 1), reinterpret_cast<PVOID*>(&Slots));
+        if (SUCCEEDED(hr))
+            hr = DiAllocate(sizeof(*Groups) * (GroupTotal + 1), reinterpret_cast<PVOID*>(&Groups));
+        if (SUCCEEDED(hr))
+            hr = DiAllocate(sizeof(*Cals) * (Caps.NumberInputDataIndices + 1), reinterpret_cast<PVOID*>(&Cals));
+        if (SUCCEEDED(hr))
+            hr = DiAllocate(ObjectCount + 1, reinterpret_cast<PVOID*>(&ButtonReports));
         if (FAILED(hr))
             return hr;
 
-        /* Link collections carry no data */
-        if (Caps.NumberLinkCollectionNodes != 0)
+        hr = AddValueGroups(HidP_Input, Caps.NumberInputValueCaps);
+        if (SUCCEEDED(hr))
+            hr = AddValueGroups(HidP_Feature, Caps.NumberFeatureValueCaps);
+        if (SUCCEEDED(hr))
+            hr = AddValueGroups(HidP_Output, Caps.NumberOutputValueCaps);
+
+        ButtonStart = DataSize;
+        if (SUCCEEDED(hr))
+            hr = AddButtonGroups(HidP_Input, Caps.NumberInputButtonCaps, ButtonReports);
+        if (SUCCEEDED(hr))
+            hr = AddButtonGroups(HidP_Feature, Caps.NumberFeatureButtonCaps, ButtonReports);
+        if (SUCCEEDED(hr))
+            hr = AddButtonGroups(HidP_Output, Caps.NumberOutputButtonCaps, ButtonReports);
+        ButtonBytes = DataSize - ButtonStart;
+        if (SUCCEEDED(hr))
+            hr = BuildButtonMasks(ButtonReports);
+        DiFree(reinterpret_cast<PVOID*>(&ButtonReports));
+
+        if (SUCCEEDED(hr))
+            hr = AddCollections();
+        if (FAILED(hr))
+            return hr;
+
+        DataSize = (DataSize + 3) & ~3UL;
+        for (ULONG Kind = 0; Kind < _countof(Enabled); Kind++)
         {
-            HIDP_LINK_COLLECTION_NODE* Nodes = nullptr;
-            ULONG NodeCount = Caps.NumberLinkCollectionNodes;
-
-            if (SUCCEEDED(DiAllocate(sizeof(*Nodes) * NodeCount, reinterpret_cast<PVOID*>(&Nodes))))
-            {
-                if (HidP_GetLinkCollectionNodes(Nodes, &NodeCount, Data) == HIDP_STATUS_SUCCESS)
-                {
-                    for (ULONG Index = 0; Index < NodeCount; Index++)
-                    {
-                        ULONG Type = DIDFT_COLLECTION | DIDFT_NODATA | DIDFT_MAKEINSTANCE(Index);
-
-                        if (Nodes[Index].LinkUsagePage >= 0xFF00)
-                            Type |= DIDFT_VENDORDEFINED;
-                        AddObject(&GUID_Unknown, 0, Type, 0, Nodes[Index].LinkUsagePage, Nodes[Index].LinkUsage,
-                                  static_cast<USHORT>(Index), FALSE, 0, 0);
-                        Info[Format.dwNumObjs - 1].Number = Nodes[Index].Parent;
-                    }
-                }
-                DiFree(reinterpret_cast<PVOID*>(&Nodes));
-            }
+            ReportIds[Kind] += 1;
+            hr = DiAllocate(ReportIds[Kind], reinterpret_cast<PVOID*>(&Enabled[Kind]));
+            if (FAILED(hr))
+                return hr;
         }
+
+        if (LOBYTE(DevType) == DIDEVTYPE_KEYBOARD)
+            MungeKeyboard();
+        else
+            MungeOther();
+        ApplyTypeAttributes();
 
         Format.dwSize = sizeof(Format);
         Format.dwObjSize = sizeof(DIOBJECTDATAFORMAT);
-        Format.dwDataSize = (Offset + 3) & ~3UL;
+        Format.dwDataSize = DataSize;
+        Format.dwNumObjs = ObjectCount;
         Format.rgodf = Objects;
 
-        hr = DiAllocate(Format.dwDataSize + sizeof(DWORD), reinterpret_cast<PVOID*>(&State));
+        DataListLength = HidP_MaxDataListLength(HidP_Input, Data);
+        hr = DiAllocate(sizeof(*DataList) * (DataListLength + 1), reinterpret_cast<PVOID*>(&DataList));
+        if (SUCCEEDED(hr))
+            hr = DiAllocate(Format.dwDataSize + sizeof(DWORD), reinterpret_cast<PVOID*>(&State));
         if (SUCCEEDED(hr))
             hr = DiAllocate(Caps.InputReportByteLength + 1, reinterpret_cast<PVOID*>(&Report));
-        if (SUCCEEDED(hr))
-            ResetState();
-        return hr;
-    }
+        if (FAILED(hr))
+            return hr;
 
-    VOID
-    AddObject(
-        _In_ const GUID* Guid,
-        _In_ ULONG Offset,
-        _In_ ULONG Type,
-        _In_ ULONG Flags,
-        _In_ USHORT Page,
-        _In_ USHORT Usage,
-        _In_ USHORT Collection,
-        _In_ BOOLEAN Value,
-        _In_ LONG Minimum,
-        _In_ LONG Maximum)
-    {
-        DIOBJECTDATAFORMAT* Object = &Objects[Format.dwNumObjs];
-        RX_DI_HID_OBJECT* Hid = &Info[Format.dwNumObjs];
-
-        Object->pguid = Guid;
-        Object->dwOfs = Offset;
-        Object->dwType = Type;
-        Object->dwFlags = Flags;
-        Hid->UsagePage = Page;
-        Hid->Usage = Usage;
-        Hid->Collection = Collection;
-        Hid->Number = Collection;
-        Hid->Value = Value;
-        Hid->LogicalMin = Minimum;
-        Hid->LogicalMax = Maximum;
-        Hid->RangeMin = 0;
-        Hid->RangeMax = DI_HID_AXIS_MAX;
-        Hid->Saturation = 10000;
-        Format.dwNumObjs++;
-    }
-
-    /* What DirectInput calls a value, by usage page */
-    static
-    ULONG
-    ClassifyValue(
-        _In_ const HIDP_VALUE_CAPS* Value,
-        _In_ USHORT Usage)
-    {
-        if (Value->UsagePage >= 0xFF00)
-            return DIDFT_VENDORDEFINED;
-
-        if (Value->UsagePage == HID_USAGE_PAGE_GENERIC && Usage == HID_USAGE_GENERIC_HATSWITCH)
-            return DIDFT_POV;
-
-        switch (Value->UsagePage)
-        {
-            case HID_USAGE_PAGE_GENERIC:
-                if (Usage == 0x3A || Usage == 0x3B)
-                    return 0;
-                return Value->IsAbsolute ? DIDFT_ABSAXIS : DIDFT_RELAXIS;
-
-            case HID_USAGE_PAGE_SIMULATION:
-            case HID_USAGE_PAGE_VR:
-            case HID_USAGE_PAGE_SPORT:
-            case HID_USAGE_PAGE_GAME:
-            case HID_USAGE_PAGE_KEYBOARD:
-            case HID_USAGE_PAGE_CONSUMER:
-            case HID_USAGE_PAGE_DIGITIZER:
-                return Value->IsAbsolute ? DIDFT_ABSAXIS : DIDFT_RELAXIS;
-
-            case HID_USAGE_PAGE_BUTTON:
-                return Value->IsAbsolute ? DIDFT_PSHBUTTON : DIDFT_RELAXIS;
-        }
-        return 0;
-    }
-
-    static
-    HRESULT
-    SetAxisProperty(
-        _Inout_ RX_DI_HID_OBJECT* Hid,
-        _In_ ULONG_PTR Property,
-        _In_ LPCDIPROPHEADER Header)
-    {
-        const DIPROPDWORD* Value = reinterpret_cast<const DIPROPDWORD*>(Header);
-
-        if (Property == 4)
-        {
-            const DIPROPRANGE* Range = reinterpret_cast<const DIPROPRANGE*>(Header);
-
-            if (Range->lMin >= Range->lMax)
-                return E_INVALIDARG;
-            Hid->RangeMin = Range->lMin;
-            Hid->RangeMax = Range->lMax;
-            return S_OK;
-        }
-
-        if (Value->dwData > 10000)
-            return E_INVALIDARG;
-        if (Property == 5)
-            Hid->DeadZone = Value->dwData;
-        else
-            Hid->Saturation = Value->dwData;
+        ResetState();
+        LoadCalibrations();
         return S_OK;
+    }
+
+    /* Keys take their DIK_ code as instance, everything else is numbered from 256 */
+    VOID
+    MungeKeyboard(VOID)
+    {
+        const BYTE* Table = static_cast<const BYTE*>(DiFindTable(DI_HID_KEY_TABLE));
+        BOOLEAN Taken[256] = {};
+        ULONG Next = 256;
+
+        if (Table == nullptr)
+            return;
+
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
+        {
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            ULONG Instance = MAXULONG;
+
+            if (Group != nullptr && Group->UsagePage == DI_HID_PAGE_KEYBOARD)
+            {
+                ULONG Usage = Group->UsageMin - Base[Group->Report] - Group->DataIndexMin + Index;
+
+                if (Usage < 256 && Table[Usage] != 0 && !Taken[Table[Usage]])
+                {
+                    Taken[Table[Usage]] = TRUE;
+                    Instance = Table[Usage];
+                }
+            }
+            if (Instance == MAXULONG)
+                Instance = Next++;
+
+            Objects[Index].dwType = (Objects[Index].dwType & 0xFF0000FF) | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Instance));
+        }
+    }
+
+    ULONG
+    ObjectUsage(
+        _In_ ULONG Index,
+        _In_ const RX_DI_HID_GROUP* Group,
+        _In_ ULONG Kind)
+    {
+        return DiHidUsageKey(Group->UsagePage, Group->UsageMin - Group->DataIndexMin - Base[Kind] + Index);
+    }
+
+    /*
+     * Axes take their slot from the type key's Axes branch first, then from the usage table,
+     * then from 6 up. Buttons, POVs and collections are numbered in object order.
+     */
+    VOID
+    MungeOther(VOID)
+    {
+        ULONG Axes = 0;
+        ULONG Povs = 0;
+        ULONG Buttons = 0;
+        ULONG Collections = 0;
+        ULONG Total;
+        ULONG ScratchCount;
+        PULONG Scratch = nullptr;
+        PULONG Map = nullptr;
+        PULONG Wanted;
+        ULONG PovsAt;
+        ULONG AxesAt;
+        ULONG CollectionsAt;
+        BOOLEAN Matched = TRUE;
+        ULONG Slot = 0;
+        ULONG Missing = 0;
+        ULONG Hits = 0;
+
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
+        {
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            ULONG Type = Objects[Index].dwType;
+
+            if (Group == nullptr || Group->Alias)
+                continue;
+            if (Type & DIDFT_COLLECTION)
+                Collections++;
+            else if (Type & DIDFT_NODATA)
+                continue;
+            else if (Type & DIDFT_BUTTON)
+                Buttons++;
+            else if (Type & DIDFT_AXIS)
+                Axes++;
+            else if (Type & DIDFT_POV)
+                Povs++;
+        }
+
+        /* Claims per object, then the usages the type key asks for, then one list per kind */
+        Total = Axes + Povs + Buttons + Collections + 6;
+        ScratchCount = Total + Axes + 6;
+        if (FAILED(DiAllocate(sizeof(ULONG) * ScratchCount, reinterpret_cast<PVOID*>(&Scratch))) ||
+            FAILED(DiAllocate(sizeof(ULONG) * Total, reinterpret_cast<PVOID*>(&Map))))
+        {
+            DiFree(reinterpret_cast<PVOID*>(&Scratch));
+            return;
+        }
+        FillMemory(Scratch, sizeof(ULONG) * Total, 0xFF);
+        FillMemory(Map, sizeof(ULONG) * Total, 0xFF);
+        Wanted = Scratch + Total;
+        PovsAt = Buttons;
+        AxesAt = Buttons + Povs;
+        CollectionsAt = Buttons + Axes + 6;
+
+        do
+        {
+            HKEY Key;
+
+            if (SUCCEEDED(DiHidOpenObjectKey(TypeKey, DIDFT_MAKEINSTANCE(Slot) | DIDFT_AXIS, KEY_QUERY_VALUE, &Key)))
+            {
+                struct
+                {
+                    ULONG Flags;
+                    USHORT Page;
+                    USHORT Usage;
+                } Attributes = {};
+
+                if (FAILED(DiReadValue(Key, L"Attributes", &Attributes, sizeof(Attributes))) ||
+                    (Attributes.Page == 0 && Attributes.Usage == 0))
+                {
+                    Missing++;
+                }
+                else
+                {
+                    BOOLEAN Present = FALSE;
+
+                    Wanted[Slot] = DiHidUsageKey(Attributes.Page, Attributes.Usage);
+                    for (ULONG Index = 0; Index < ObjectCount && !Present; Index++)
+                    {
+                        const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+
+                        Present = (Objects[Index].dwType & DIDFT_AXIS) && Group != nullptr && Group->Report == HidP_Input &&
+                                  ObjectUsage(Index, Group, HidP_Input) == Wanted[Slot];
+                    }
+
+                    /* A type key that names an axis the device lacks is ignored entirely */
+                    if (!Present)
+                    {
+                        RegCloseKey(Key);
+                        FillMemory(Scratch, sizeof(ULONG) * Total, 0xFF);
+                        Matched = FALSE;
+                        break;
+                    }
+                    Hits++;
+                }
+
+                RegCloseKey(Key);
+                if (Missing + Hits == Axes)
+                    break;
+            }
+            Slot++;
+        }
+        while (Slot < Axes + 5);
+
+        for (ULONG Index = 0; Matched && Index < ObjectCount; Index++)
+        {
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            ULONG Usage;
+            ULONG Claim;
+            ULONG Target;
+            ULONG Wish;
+            const GUID* Guid;
+
+            if ((Objects[Index].dwType & DIDFT_AXIS) == 0 || Group == nullptr || Group->Report != HidP_Input)
+                continue;
+
+            Claim = Group->Alias ? 0 : Index;
+            Usage = ObjectUsage(Index, Group, HidP_Input);
+            for (Wish = 0; Wish <= Slot; Wish++)
+            {
+                if (Wanted[Wish] == Usage)
+                    break;
+            }
+            if (Wish > Slot)
+                continue;
+
+            if (Claim < ScratchCount)
+                Scratch[Claim] = Wish;
+            Wanted[Wish] = 0;
+
+            /* The GUID lands on the object as far past this one as this one is into its group */
+            if (Wish < 6)
+                Guid = DiHidFindUsageSlot(DiHidUsageKey(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_X + Wish))->Guid;
+            else
+                Guid = (Wish < 8) ? &GUID_Slider : &GUID_Unknown;
+            Target = 2 * Index - Group->DataIndexMin - Base[HidP_Input];
+            if (Target < ObjectCount)
+                Objects[Target].pguid = Guid;
+
+            if (AxesAt + Wish < Total)
+                Map[AxesAt + Wish] = Claim;
+            Objects[Claim].dwType = (Objects[Claim].dwType & 0xFF0000FF) | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Wish));
+        }
+
+        {
+            ULONG NextCollection = 0;
+            ULONG NextButton = 0;
+            ULONG NextPov = 0;
+            ULONG NextAxis = 6;
+
+            for (ULONG Index = 0; Index < ObjectCount; Index++)
+            {
+                const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+                ULONG Original = Index;
+                ULONG Type;
+                ULONG Kept;
+
+                if (Group == nullptr || Group->Alias)
+                    continue;
+
+                Type = Objects[Index].dwType;
+                if ((Type & (DIDFT_AXIS | DIDFT_BUTTON | DIDFT_POV | DIDFT_COLLECTION)) == 0)
+                    continue;
+
+                if (Type & DIDFT_COLLECTION)
+                {
+                    Objects[Index].dwType = (Type & 0xFF0000FF) | DIDFT_MAKEINSTANCE(static_cast<USHORT>(NextCollection));
+                    if (CollectionsAt + NextCollection < Total)
+                        Map[CollectionsAt + NextCollection] = Index;
+                    NextCollection++;
+                    continue;
+                }
+
+                /* Objects beyond the claim list read whatever follows it, which is never unclaimed */
+                if ((Type & DIDFT_NODATA) || Index >= ScratchCount || Scratch[Index] != MAXULONG)
+                    continue;
+
+                Kept = Type & 0xFF0000FF;
+                Objects[Index].dwType = Kept;
+
+                if (Type & DIDFT_BUTTON)
+                {
+                    Objects[Index].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(NextButton));
+                    Map[NextButton] = Index;
+                    NextButton++;
+                }
+                else if ((Type & DIDFT_AXIS) == 0)
+                {
+                    Objects[Index].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(NextPov));
+                    Map[PovsAt + NextPov] = Index;
+                    NextPov++;
+                }
+                else
+                {
+                    const RX_DI_USAGE_SLOT* Known = DiHidFindUsageSlot(ObjectUsage(Index, Group, Group->Report));
+                    BOOLEAN Placed = FALSE;
+
+                    /* An axis without a slot of its own may borrow the slot of the aliases after it */
+                    while (Known == nullptr && Index + 1 != ObjectCount)
+                    {
+                        const RX_DI_HID_GROUP* Next = Slots[Index + 1].Group;
+
+                        if (Next == nullptr || !Next->Alias)
+                            break;
+                        Index += 1;
+                        Known = DiHidFindUsageSlot(ObjectUsage(Index, Next, Next->Report));
+                    }
+
+                    if (Known != nullptr)
+                    {
+                        ULONG Wish = (Known->Slot == 6) ? 2 : Known->Slot;
+
+                        if (Known->Slot <= 6 && Map[AxesAt + Wish] == MAXULONG)
+                        {
+                            Map[AxesAt + Wish] = Original;
+                            Objects[Original].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Wish));
+                            Placed = TRUE;
+                        }
+                    }
+
+                    if (!Placed)
+                    {
+                        Objects[Original].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(NextAxis));
+                        Map[AxesAt + NextAxis] = Original;
+                        NextAxis++;
+                    }
+                }
+            }
+        }
+
+        ApplyTypeKind();
+
+        /* Aliases keep only their alias and vendor bits */
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
+        {
+            if (Slots[Index].Group != nullptr && Slots[Index].Group->Alias)
+                Objects[Index].dwType &= DIDFT_ALIAS | DIDFT_VENDORDEFINED;
+        }
+
+        DiFree(reinterpret_cast<PVOID*>(&Scratch));
+        DiFree(reinterpret_cast<PVOID*>(&Map));
     }
 
     /* The port a device hangs off is named by the grandparent device */
@@ -1921,119 +3265,109 @@ private:
         return Got;
     }
 
-    /* Axes rest in the middle of their range and POVs point nowhere */
+    /* Input axes rest at their calibrated center and POVs point nowhere */
     VOID
     ResetState(VOID)
     {
-        ZeroMemory(State, Format.dwDataSize);
-        for (ULONG Index = 0; Index < Format.dwNumObjs; Index++)
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
         {
-            DWORD* Slot = reinterpret_cast<DWORD*>(State + Objects[Index].dwOfs);
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            LONG* Slot = reinterpret_cast<LONG*>(State + Objects[Index].dwOfs);
+
+            if (Group == nullptr || Group->Report != HidP_Input)
+                continue;
 
             if (Objects[Index].dwType & DIDFT_ABSAXIS)
-                *Slot = static_cast<DWORD>((Info[Index].RangeMin + Info[Index].RangeMax) / 2);
+                *Slot = (Slots[Index].Cal->Raw != 0) ? (Group->LogicalMin + Group->LogicalMax) / 2 : Slots[Index].Cal->RangeCenter;
             else if (Objects[Index].dwType & DIDFT_POV)
-                *Slot = MAXDWORD;
+                *Slot = -1;
         }
     }
 
-    LONG
-    ScaleAxis(
-        _In_ const RX_DI_HID_OBJECT* Hid,
-        _In_ LONG Raw)
-    {
-        LONGLONG Span = static_cast<LONGLONG>(Hid->LogicalMax) - Hid->LogicalMin;
-        LONGLONG Out = static_cast<LONGLONG>(Hid->RangeMax) - Hid->RangeMin;
-
-        if (Span <= 0)
-            return Hid->RangeMin;
-        if (Raw < Hid->LogicalMin)
-            Raw = Hid->LogicalMin;
-        if (Raw > Hid->LogicalMax)
-            Raw = Hid->LogicalMax;
-        return static_cast<LONG>(Hid->RangeMin + ((Raw - Hid->LogicalMin) * Out + Span / 2) / Span);
-    }
-
+    /* Applies one input report to a copy of the state and posts it */
     VOID
     ParseReport(
         _In_ ULONG Length)
     {
+        ULONG Count = DataListLength;
+        UCHAR Id = Report[0];
         PBYTE Next = nullptr;
 
+        if (DataListLength == 0 || Length == 0)
+            return;
+        if (Id >= ReportIds[HidP_Input] || Enabled[HidP_Input][Id] == 0)
+            return;
+        if (HidP_GetData(HidP_Input, DataList, &Count, Data, reinterpret_cast<PCHAR>(Report), Length) < 0)
+            return;
         if (FAILED(DiAllocate(Format.dwDataSize + sizeof(DWORD), reinterpret_cast<PVOID*>(&Next))))
             return;
         CopyMemory(Next, State, Format.dwDataSize);
 
-        for (ULONG Index = 0; Index < Format.dwNumObjs; Index++)
+        /* Buttons not in the data list are up, but only those this report carries */
+        if (MaskRows == nullptr)
         {
-            const RX_DI_HID_OBJECT* Hid = &Info[Index];
-            ULONG Type = Objects[Index].dwType;
-            PBYTE Slot = Next + Objects[Index].dwOfs;
-
-            if ((Type & DIDFT_COLLECTION) || !Hid->Input)
-                continue;
-
-            if (Hid->Value)
-            {
-                ULONG Raw = 0;
-                LONG Signed = 0;
-
-                if (HidP_GetUsageValue(HidP_Input, Hid->UsagePage, Hid->Collection, Hid->Usage, &Raw, Data,
-                                       reinterpret_cast<PCHAR>(Report), Length) != HIDP_STATUS_SUCCESS)
-                {
-                    continue;
-                }
-                if (HidP_GetScaledUsageValue(HidP_Input, Hid->UsagePage, Hid->Collection, Hid->Usage, &Signed, Data,
-                                             reinterpret_cast<PCHAR>(Report), Length) != HIDP_STATUS_SUCCESS)
-                {
-                    Signed = static_cast<LONG>(Raw);
-                }
-
-                if (Type & DIDFT_POV)
-                {
-                    LONG Count = Hid->LogicalMax - Hid->LogicalMin + 1;
-                    LONG Step = static_cast<LONG>(Raw) - Hid->LogicalMin;
-
-                    *reinterpret_cast<DWORD*>(Slot) = (Count <= 0 || Step < 0 || Step >= Count) ? MAXDWORD :
-                                                      static_cast<DWORD>(Step * 36000 / Count);
-                }
-                else
-                {
-                    *reinterpret_cast<LONG*>(Slot) = ScaleAxis(Hid, static_cast<LONG>(Raw));
-                }
-            }
-            else
-            {
-                USAGE Pressed[1];
-                ULONG Count = 0;
-                NTSTATUS Status;
-
-                Status = HidP_GetUsages(HidP_Input, Hid->UsagePage, Hid->Collection, Pressed, &Count, Data,
-                                        reinterpret_cast<PCHAR>(Report), Length);
-                if (Status != HIDP_STATUS_SUCCESS && Status != HIDP_STATUS_BUFFER_TOO_SMALL)
-                    continue;
-                *Slot = 0;
-            }
+            ZeroMemory(Next + ButtonStart, ButtonBytes);
+        }
+        else if (Id != 0 && Id <= MaskRowCount && MaskRows[Id - 1] != nullptr)
+        {
+            for (ULONG Byte = 0; Byte < ButtonBytes; Byte++)
+                Next[ButtonStart + Byte] &= MaskRows[Id - 1][Byte];
         }
 
-        /* Buttons are read as one list per page and collection */
-        for (ULONG Index = 0; Index < Format.dwNumObjs; Index++)
+        for (ULONG Item = 0; Item < Count; Item++)
         {
-            const RX_DI_HID_OBJECT* Hid = &Info[Index];
-            USAGE List[128];
-            ULONG Count = _countof(List);
+            ULONG Index = DataList[Item].DataIndex + Base[HidP_Input];
+            const RX_DI_HID_GROUP* Group;
+            ULONG Raw = DataList[Item].RawValue;
+            ULONG Type;
+            LONG Reading;
+            PBYTE Slot;
 
-            if (Hid->Value || !Hid->Input || (Objects[Index].dwType & DIDFT_BUTTON) == 0)
+            if (Index >= ObjectCount)
                 continue;
-            if (HidP_GetUsages(HidP_Input, Hid->UsagePage, Hid->Collection, List, &Count, Data,
-                               reinterpret_cast<PCHAR>(Report), Length) != HIDP_STATUS_SUCCESS)
+            Group = Slots[Index].Group;
+            if (Group == nullptr || Group->Report != HidP_Input)
+                continue;
+
+            /* Sign extend negative readings, mask positive ones to the field */
+            Reading = static_cast<LONG>(Raw & static_cast<ULONG>(Group->SignMask));
+            if (Reading == 0)
+                Reading = static_cast<LONG>(Raw);
+            else if (Group->Signed)
+                Reading = static_cast<LONG>(Raw | static_cast<ULONG>(Group->SignMask));
+
+            Slot = Next + Objects[Index].dwOfs;
+            if (!Group->Value)
             {
+                *Slot = 0x80;
                 continue;
             }
-            for (ULONG Pressed = 0; Pressed < Count; Pressed++)
+
+            Type = Objects[Index].dwType;
+            if (Type & DIDFT_RELAXIS)
             {
-                if (List[Pressed] == Hid->Usage)
-                    Next[Objects[Index].dwOfs] = 0x80;
+                if (Group->Granularity != 0)
+                    Reading = -static_cast<LONG>(Group->Granularity * Reading);
+                *reinterpret_cast<LONG*>(Slot) += Reading;
+            }
+            else if ((Type & DIDFT_ABSAXIS) || ((Type & DIDFT_POV) && Group->PovPoints))
+            {
+                *reinterpret_cast<LONG*>(Slot) = Reading;
+                if (Slots[Index].Cal != nullptr && (Sink->Flags & DI_SINK_RELATIVE) == 0)
+                    DiHidCook(Slots[Index].Cal, reinterpret_cast<LONG*>(Slot));
+            }
+            else if (Type & DIDFT_BUTTON)
+            {
+                LONG Half = (Group->LogicalMax - Group->LogicalMin + 1) / 2;
+
+                *Slot = (Reading > Group->LogicalMax || Reading - Group->LogicalMin < Half) ? 0 : 0x80;
+            }
+            else if (Type & DIDFT_POV)
+            {
+                if (Reading < Group->LogicalMin || Reading > Group->LogicalMax)
+                    *reinterpret_cast<LONG*>(Slot) = -1;
+                else
+                    *reinterpret_cast<LONG*>(Slot) = (Reading - Group->LogicalMin) * Group->Granularity;
             }
         }
 
@@ -2077,6 +3411,11 @@ private:
             if (!GetOverlappedResult(Self->Reader, &Overlapped, &Read, FALSE))
             {
                 DiTrace(L"HID device %ls lost, error %lu", Self->Start.InstanceId, GetLastError());
+                break;
+            }
+            if (Read != Self->Caps.InputReportByteLength)
+            {
+                DiTrace(L"HID device %ls sent a short report", Self->Start.InstanceId);
                 break;
             }
             Self->ParseReport(Read);
@@ -2152,6 +3491,7 @@ private:
     PHIDP_PREPARSED_DATA Data = nullptr;
     HIDP_CAPS Caps = {};
     ULONG DevType = 0;
+    DWORD Version = 0;
     HKEY TypeKey = nullptr;
     BOOLEAN PidDevice = FALSE;
     USHORT VendorId = 0;
@@ -2160,11 +3500,25 @@ private:
     ULONG AxisCount = 0;
     ULONG ButtonCount = 0;
     ULONG PovCount = 0;
-    ULONG ValueInstance = 0;
-    ULONG ButtonInstance = 0;
     DIDATAFORMAT Format = {};
     DIOBJECTDATAFORMAT* Objects = nullptr;
-    RX_DI_HID_OBJECT* Info = nullptr;
+    ULONG ObjectCount = 0;
+    RX_DI_HID_SLOT* Slots = nullptr;
+    RX_DI_HID_GROUP* Groups = nullptr;
+    ULONG GroupCount = 0;
+    RX_DI_HID_CAL* Cals = nullptr;
+    ULONG CalCount = 0;
+    ULONG Base[DI_HID_REPORT_KINDS] = {};
+    ULONG ReportIds[3] = {};
+    PBYTE Enabled[3] = {};
+    ULONG DataSize = 0;
+    ULONG ButtonStart = 0;
+    ULONG ButtonBytes = 0;
+    PBYTE* MaskRows = nullptr;
+    PBYTE MaskData = nullptr;
+    ULONG MaskRowCount = 0;
+    HIDP_DATA* DataList = nullptr;
+    ULONG DataListLength = 0;
     PBYTE State = nullptr;
     PBYTE Report = nullptr;
     HANDLE Reader = nullptr;
