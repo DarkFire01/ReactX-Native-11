@@ -405,6 +405,95 @@ DcCheckEnumDevices(
 }
 
 static
+BOOL
+CALLBACK
+DcEnumJoyTypes(
+    _In_ LPCWSTR Name,
+    _In_ LPVOID Context)
+{
+    printf("    type '%ls'\n", Name);
+    return ++*static_cast<ULONG*>(Context) < 64;
+}
+
+/* Read only questions, nothing here changes the joystick settings */
+static
+VOID
+DcCheckJoyConfig(
+    _In_ IDirectInputJoyConfig* Config)
+{
+    DIJOYTYPEINFO Type;
+    DIJOYCONFIG Joy;
+    DIJOYUSERVALUES User;
+    HKEY Key = nullptr;
+    ULONG Count = 0;
+    HRESULT hr;
+
+    printf("  joy acquire uncoop = %08lX\n", Config->Acquire());
+    printf("  joy unacquire = %08lX\n", Config->Unacquire());
+    printf("  joy coop null = %08lX\n", Config->SetCooperativeLevel(nullptr, DISCL_EXCLUSIVE | DISCL_BACKGROUND));
+    printf("  joy coop fg = %08lX\n", Config->SetCooperativeLevel(DcWindow, DISCL_EXCLUSIVE | DISCL_FOREGROUND));
+    printf("  joy coop desktop = %08lX\n", Config->SetCooperativeLevel(GetDesktopWindow(), DISCL_EXCLUSIVE | DISCL_BACKGROUND));
+    printf("  joy sendnotify = %08lX\n", Config->SendNotify());
+    hr = Config->EnumTypes(DcEnumJoyTypes, &Count);
+    printf("  joy enumtypes = %08lX count %lu\n", hr, Count);
+    printf("  joy enumtypes null = %08lX\n", Config->EnumTypes(nullptr, nullptr));
+
+    static const PCWSTR Types[] = { L"#2", L"#4", L"#12", L"VID_045E&PID_0000", L"NoSuchType", L"" };
+    static const DWORD TypeSizes[] = { sizeof(DIJOYTYPEINFO_DX5), sizeof(DIJOYTYPEINFO), 100 };
+    for (ULONG Index = 0; Index < _countof(Types); Index++)
+    {
+        for (ULONG Size = 0; Size < _countof(TypeSizes); Size++)
+        {
+            ZeroMemory(&Type, sizeof(Type));
+            Type.dwSize = TypeSizes[Size];
+            hr = Config->GetTypeInfo(Types[Index], &Type, DITC_REGHWSETTINGS | DITC_DISPLAYNAME);
+            printf("  joy typeinfo '%ls' %lu = %08lX flags %08lX name '%ls'\n", Types[Index], TypeSizes[Size], hr,
+                   Type.hws.dwFlags, Type.wszDisplayName);
+        }
+    }
+    ZeroMemory(&Type, sizeof(Type));
+    Type.dwSize = sizeof(Type);
+    printf("  joy typeinfo badflags = %08lX\n", Config->GetTypeInfo(L"#2", &Type, 0x100));
+    printf("  joy typeinfo null = %08lX\n", Config->GetTypeInfo(L"#2", nullptr, 0));
+    printf("  joy settypeinfo unacquired = %08lX\n", Config->SetTypeInfo(L"Test", &Type, 0));
+    printf("  joy deletetype unacquired = %08lX\n", Config->DeleteType(L"Test"));
+
+    for (UINT Id = 0; Id < 18; Id += (Id < 4) ? 1 : 6)
+    {
+        ZeroMemory(&Joy, sizeof(Joy));
+        Joy.dwSize = sizeof(Joy);
+        hr = Config->GetConfig(Id, &Joy, DIJC_REGHWCONFIGTYPE | DIJC_GUIDINSTANCE | DIJC_CALLOUT | DIJC_GAIN);
+        printf("  joy getconfig %u = %08lX type '%ls' gain %lu\n", Id, hr, Joy.wszType, Joy.dwGain);
+    }
+    ZeroMemory(&Joy, sizeof(Joy));
+    Joy.dwSize = sizeof(DIJOYCONFIG_DX5);
+    printf("  joy getconfig dx5 = %08lX\n", Config->GetConfig(0, &Joy, DIJC_REGHWCONFIGTYPE));
+    printf("  joy getconfig dx5 badflags = %08lX\n", Config->GetConfig(0, &Joy, DIJC_GAIN));
+    Joy.dwSize = 12;
+    printf("  joy getconfig badsize = %08lX\n", Config->GetConfig(0, &Joy, 0));
+    printf("  joy setconfig unacquired = %08lX\n", Config->SetConfig(0, &Joy, 0));
+    printf("  joy deleteconfig unacquired = %08lX\n", Config->DeleteConfig(0));
+
+    ZeroMemory(&User, sizeof(User));
+    User.dwSize = sizeof(User);
+    printf("  joy uservalues = %08lX\n", Config->GetUserValues(&User, DIJU_USERVALUES | DIJU_GLOBALDRIVER | DIJU_GAMEPORTEMULATOR));
+    printf("  joy uservalues badflags = %08lX\n", Config->GetUserValues(&User, 8));
+    printf("  joy setuservalues unacquired = %08lX\n", Config->SetUserValues(&User, DIJU_USERVALUES));
+    printf("  joy addnewhardware badwnd = %08lX\n", Config->AddNewHardware(reinterpret_cast<HWND>(0x1234), DcNullGuid));
+
+    hr = Config->OpenTypeKey(L"#2", KEY_READ, &Key);
+    printf("  joy opentypekey predef = %08lX\n", hr);
+    hr = Config->OpenTypeKey(L"NoSuchType", KEY_ALL_ACCESS, &Key);
+    printf("  joy opentypekey write unacquired = %08lX\n", hr);
+    printf("  joy opentypekey null = %08lX\n", Config->OpenTypeKey(L"x", KEY_READ, nullptr));
+    hr = Config->OpenConfigKey(0, KEY_READ, &Key);
+    printf("  joy openconfigkey = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+        RegCloseKey(Key);
+    printf("  joy openconfigkey write = %08lX\n", Config->OpenConfigKey(0, KEY_ALL_ACCESS, &Key));
+}
+
+static
 VOID
 DcCheckInputObject(VOID)
 {
@@ -425,6 +514,8 @@ DcCheckInputObject(VOID)
 
         hr = InputW->QueryInterface(IID_IDirectInputJoyConfig, reinterpret_cast<PVOID*>(&Config));
         printf("object qi joyconfig = %08lX %s\n", hr, Config ? "set" : "null");
+        if (Config != nullptr)
+            DcCheckJoyConfig(reinterpret_cast<IDirectInputJoyConfig*>(Config));
         DcRelease("  joyconfig", Config);
     }
 
@@ -1070,6 +1161,40 @@ DcCheckDevices(VOID)
 
             DcCheckDevice(Name, Device, Index >= 3, Versions[Version] == 0x0700 && (Index == 0 || Index == 3), FALSE);
             DcRelease("  device", Device);
+        }
+
+        /* Every HID collection, the way games walking the device list see them */
+        if (Versions[Version] == 0x0700)
+        {
+            GUID Found[64] = {};
+            ULONG Count;
+
+            Input->EnumDevices(DIDEVTYPE_HID, [](LPCDIDEVICEINSTANCEW Info, LPVOID Context) -> BOOL
+            {
+                GUID* List = static_cast<GUID*>(Context);
+                ULONG* Total = reinterpret_cast<ULONG*>(List + 63);
+
+                if (*Total < 62)
+                    List[(*Total)++] = Info->guidInstance;
+                return TRUE;
+            }, Found, DIEDFL_ALLDEVICES);
+            Count = *reinterpret_cast<ULONG*>(Found + 63);
+
+            for (ULONG Index = 0; Index < Count && Index < 62; Index++)
+            {
+                IDirectInputDevice7W* Device = nullptr;
+                HRESULT hr = Input->CreateDeviceEx(Found[Index], IID_IDirectInputDevice7W, reinterpret_cast<PVOID*>(&Device), nullptr);
+                CHAR Name[64];
+
+                sprintf_s(Name, "hid %lu = %08lX", Index, hr);
+                if (FAILED(hr))
+                {
+                    printf("device %s\n", Name);
+                    continue;
+                }
+                DcCheckDevice(Name, Device, FALSE, TRUE, FALSE);
+                DcRelease("  device", Device);
+            }
         }
 
         DcRelease("input", Input);
