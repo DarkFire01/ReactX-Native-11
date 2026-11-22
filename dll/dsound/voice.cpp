@@ -78,6 +78,8 @@ DsVoice::Setup(
 
     Device = Owner;
     Ratio = static_cast<float>(Wave->nSamplesPerSec) / static_cast<float>(Owner->Rate);
+    if (Wave->nSamplesPerSec != Owner->Rate && FAILED(Resampler.Configure(Wave->nSamplesPerSec, Owner->Rate, Channels)))
+        return E_OUTOFMEMORY;
     Owner->AddVoice(this);
     return S_OK;
 }
@@ -186,6 +188,7 @@ DsVoice::SetState(
         Finished = FALSE;
         HistoryFill = 0;
         Phase = 0.0;
+        Resampler.Reset();
         if (Effects != nullptr)
             DsResetEffects(Effects);
         if (PointCount != 0)
@@ -212,6 +215,7 @@ DsVoice::SetPosition(
         ReadPosition = Position;
         HistoryFill = 0;
         Phase = 0.0;
+        Resampler.Reset();
         if (Effects != nullptr)
             DsResetEffects(Effects);
         Finished = FALSE;
@@ -231,6 +235,10 @@ DsVoice::SetFrequency(
     Format->nSamplesPerSec = Frequency;
     Format->nAvgBytesPerSec = Frequency * Format->nBlockAlign;
     Ratio = static_cast<float>(Frequency) / static_cast<float>(Device->Rate);
+    if (Frequency == Device->Rate)
+        Resampler.Release();
+    else if (FAILED(Resampler.Configure(Frequency, Device->Rate, Channels)))
+        DS_TRACE_ONCE(L"no memory for a %lu Hz rate converter", Frequency);
     Device->Unlock();
 }
 
@@ -552,7 +560,30 @@ DsVoice::Mix(
         return;
     MatrixReady = TRUE;
     if (Effects != nullptr)
-        DsRunEffects(Effects, this, (static_cast<ULONG>(Frames * Ratio) + Taps + 2) * BlockAlign);
+    {
+        ULONG Ahead = Resampler.Active ? Resampler.InputFor(Frames) : static_cast<ULONG>(Frames * Ratio) + Taps + 2;
+
+        DsRunEffects(Effects, this, Ahead * BlockAlign);
+    }
+
+    if (Resampler.Active)
+    {
+        for (ULONG Index = 0; Index < Frames; Index++)
+        {
+            while (Resampler.WantsInput() && Pass != DS_PASS_FINISHED)
+            {
+                float Fresh[DS_MAX_CHANNELS];
+
+                ReadFrame(Fresh);
+                Resampler.Push(Fresh);
+            }
+            if (Pass == DS_PASS_FINISHED)
+                break;
+            Resampler.Pull(Frame);
+            ApplyMatrix(Frame, Output + Index * OutChannels, OutChannels);
+        }
+        return;
+    }
 
     if (Ratio == 1.0f)
     {

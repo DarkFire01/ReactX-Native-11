@@ -57,7 +57,7 @@
 /* Coefficient ramp after a matrix change, in milliseconds */
 #define DS_RAMP_MS          4
 
-/* Sinc taps on each side of the resampler center */
+/* Sinc taps on each side of the resampler center, for rate pairs without a polyphase design */
 #define DS_SINC_HALF        16
 
 template <typename T>
@@ -312,6 +312,67 @@ struct DsNotifyPoint
     HANDLE Event;
 };
 
+/* Polyphase Kaiser windowed sinc rate converter between two whole rates */
+class DsResampler
+{
+public:
+    DsResampler();
+    ~DsResampler();
+
+    /* S_FALSE when the pair has no polyphase design and the caller must convert another way */
+    HRESULT
+    Configure(
+        _In_ ULONG InRate,
+        _In_ ULONG OutRate,
+        _In_ UINT Channels);
+
+    VOID
+    Release(VOID);
+
+    VOID
+    Reset(VOID);
+
+    BOOLEAN
+    WantsInput(VOID) const
+    {
+        return Filled <= Position + Half;
+    }
+
+    VOID
+    Push(
+        _In_reads_(Channels) const float* Frame);
+
+    VOID
+    Pull(
+        _Out_writes_(Channels) float* Frame);
+
+    /* Input frames the next count of outputs will read */
+    ULONG
+    InputFor(
+        _In_ ULONG Outputs) const;
+
+    BOOLEAN Active;
+
+private:
+    float
+    Convolve(
+        _In_reads_(Taps) const float* Row,
+        _In_ const float* Line,
+        _In_ ULONG Slot) const;
+
+    ULONG Up;
+    ULONG Down;
+    ULONG Half;
+    ULONG Taps;
+    ULONG Capacity;
+    UINT Channels;
+    float* Coefficients;
+    float* Ring;
+    ULONG Phase;
+    LONGLONG Position;
+    LONGLONG Filled;
+};
+
 /* The mixer side of a playing buffer */
 class DsVoice
 {
@@ -417,6 +478,7 @@ public:
     double Phase;
     float History[DS_SINC_HALF * 2 * DS_MAX_CHANNELS];
     UINT HistoryFill;
+    DsResampler Resampler;
     DsEffectChain* Effects;
 
 private:
