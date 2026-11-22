@@ -801,6 +801,122 @@ DcCheckProperties(
 }
 
 static
+BOOL
+CALLBACK
+DcCollectObjectTypes(
+    _In_ LPCDIDEVICEOBJECTINSTANCEW Info,
+    _In_ LPVOID Context)
+{
+    static_cast<std::string*>(Context)->append(reinterpret_cast<const char*>(&Info->dwType), sizeof(Info->dwType));
+    return TRUE;
+}
+
+/* Per object properties and usage lookups of HID devices, nothing here reaches the registry */
+static
+VOID
+DcCheckObjectProperties(
+    _In_ IDirectInputDevice7W* Device)
+{
+    static const struct
+    {
+        ULONG_PTR Id;
+        DWORD Size;
+    } Gets[] =
+    {
+        { 3, sizeof(DIPROPDWORD) }, { 4, sizeof(DIPROPRANGE) }, { 5, sizeof(DIPROPDWORD) }, { 6, sizeof(DIPROPDWORD) },
+        { 10, sizeof(DIPROPDWORD) }, { 11, sizeof(DIPROPCAL) }, { 0xFFFB, sizeof(DIPROPDWORD) },
+    };
+    static const DWORD Usages[] = { 0x00010030, 0x00010031, 0x00010038, 0x00010039, 0x000200C8, 0x000C00E9, 0x000D0030 };
+    DIDEVCAPS Caps = {};
+    std::string Types;
+
+    Caps.dwSize = sizeof(Caps);
+    if (FAILED(Device->GetCapabilities(&Caps)) || (Caps.dwDevType & DIDEVTYPE_HID) == 0)
+        return;
+
+    Device->EnumObjects(DcCollectObjectTypes, &Types, DIDFT_ALL | DIDFT_ALIAS | DIDFT_VENDORDEFINED);
+    for (size_t At = 0; At + sizeof(DWORD) <= Types.size(); At += sizeof(DWORD))
+    {
+        DWORD Type = *reinterpret_cast<const DWORD*>(Types.data() + At);
+        BOOLEAN Collection = (Type & DIDFT_COLLECTION) != 0;
+        BYTE Buffer[64];
+        LPDIPROPHEADER Header = reinterpret_cast<LPDIPROPHEADER>(Buffer);
+        DIPROPRANGE Range = {};
+        DIPROPDWORD Value = {};
+
+        printf("  objprop %08lX", Type);
+        for (ULONG Index = 0; Index < _countof(Gets); Index++)
+        {
+            HRESULT hr;
+
+            /* The system dereferences garbage for the enable flag of a collection */
+            if (Collection && Gets[Index].Id == 0xFFFB)
+                continue;
+
+            FillMemory(Buffer, sizeof(Buffer), 0xCC);
+            Header->dwSize = Gets[Index].Size;
+            Header->dwHeaderSize = sizeof(DIPROPHEADER);
+            Header->dwObj = Type;
+            Header->dwHow = DIPH_BYID;
+            hr = Device->GetProperty(*reinterpret_cast<const GUID*>(Gets[Index].Id), Header);
+            printf(" %lX=%08lX", static_cast<ULONG>(Gets[Index].Id), hr);
+            if (SUCCEEDED(hr))
+            {
+                for (DWORD Byte = sizeof(DIPROPHEADER); Byte < Gets[Index].Size; Byte++)
+                    printf("%02X", Buffer[Byte]);
+            }
+        }
+
+        Range.diph.dwSize = sizeof(Range);
+        Range.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+        Range.diph.dwObj = Type;
+        Range.diph.dwHow = DIPH_BYID;
+        Range.lMin = -50;
+        Range.lMax = 50;
+        printf(" | range %08lX", Device->SetProperty(DIPROP_RANGE, &Range.diph));
+        Range.lMin = 7;
+        Range.lMax = 7;
+        printf(" %08lX", Device->SetProperty(DIPROP_RANGE, &Range.diph));
+
+        Value.diph.dwSize = sizeof(Value);
+        Value.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+        Value.diph.dwObj = Type;
+        Value.diph.dwHow = DIPH_BYID;
+        Value.dwData = 100;
+        printf(" dz %08lX", Device->SetProperty(DIPROP_DEADZONE, &Value.diph));
+        Value.dwData = 20000;
+        printf(" %08lX", Device->SetProperty(DIPROP_DEADZONE, &Value.diph));
+        Value.dwData = 9000;
+        printf(" sat %08lX", Device->SetProperty(DIPROP_SATURATION, &Value.diph));
+        Value.dwData = 1;
+        printf(" mode %08lX", Device->SetProperty(DIPROP_CALIBRATIONMODE, &Value.diph));
+        Value.dwData = 2;
+        printf(" %08lX", Device->SetProperty(DIPROP_CALIBRATIONMODE, &Value.diph));
+        Value.dwData = 0;
+        printf(" %08lX", Device->SetProperty(DIPROP_CALIBRATIONMODE, &Value.diph));
+        if (!Collection)
+        {
+            Value.dwData = 1;
+            printf(" on %08lX", Device->SetProperty(*reinterpret_cast<const GUID*>(static_cast<ULONG_PTR>(0xFFFB)), &Value.diph));
+            printf(" %08lX %lu", Device->GetProperty(*reinterpret_cast<const GUID*>(static_cast<ULONG_PTR>(0xFFFB)), &Value.diph),
+                   Value.dwData);
+        }
+
+        Range.lMin = Range.lMax = 0x12345678;
+        printf(" | %08lX %ld %ld\n", Device->GetProperty(DIPROP_RANGE, &Range.diph), Range.lMin, Range.lMax);
+    }
+
+    for (ULONG Index = 0; Index < _countof(Usages); Index++)
+    {
+        DIDEVICEOBJECTINSTANCEW Object = {};
+
+        Object.dwSize = sizeof(Object);
+        printf("  objbyusage %08lX = %08lX", Usages[Index], Device->GetObjectInfo(&Object, Usages[Index], DIPH_BYUSAGE));
+        printf(" type %08lX ofs %lu '%ls'\n", Object.dwType, Object.dwOfs, Object.tszName);
+    }
+}
+
+static
 VOID
 DcCheckFormats(
     _In_ IDirectInputDevice7W* Device)
@@ -1137,6 +1253,7 @@ DcCheckDevice(
 
     DcCheckObjects(Device, DeviceA, Verbose);
     DcCheckProperties(Device);
+    DcCheckObjectProperties(Device);
     if (!Uninitialized)
         DcCheckFormats(Device);
     DcCheckObjects(Device, DeviceA, FALSE);
