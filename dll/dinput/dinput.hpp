@@ -82,6 +82,12 @@ struct RX_DI_SOURCE;
 /* GetDeviceData flag that reads what is left after the device was lost */
 #define DI_GDD_RESIDUAL         0x00000002
 
+/* How RxDiDevice::ConvertObjects reads and writes objects, combined with the wanted type bits */
+#define DI_CONVERT_FROM_ID      0x00000100
+#define DI_CONVERT_FROM_OFFSET  0x00000200
+#define DI_CONVERT_TO_ID        0x00001000
+#define DI_CONVERT_TO_OFFSET    0x00002000
+
 /* SetForceFeedbackState command the runtime sends when a device is acquired */
 #define DI_FF_ACQUIRE           0x80000000
 
@@ -384,6 +390,19 @@ public:
 
     HRESULT
     InternalUnacquire(VOID);
+
+    DWORD
+    Version(VOID) const
+    {
+        return CreatedVersion;
+    }
+
+    /* Turns object ids or data format offsets into ids or offsets of objects with the wanted type */
+    HRESULT
+    ConvertObjects(
+        _In_ ULONG Count,
+        _Inout_updates_(Count) PDWORD Values,
+        _In_ DWORD How);
 
     /* Fits an effect read from a file to this device's actuators */
     HRESULT

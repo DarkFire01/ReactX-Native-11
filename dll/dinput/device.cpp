@@ -2729,6 +2729,60 @@ RxDiDevice::RefreshGain(VOID)
 }
 
 HRESULT
+RxDiDevice::ConvertObjects(
+    _In_ ULONG Count,
+    _Inout_updates_(Count) PDWORD Values,
+    _In_ DWORD How)
+{
+    BOOLEAN ByOffset = (How & (DI_CONVERT_FROM_ID | DI_CONVERT_FROM_OFFSET)) == DI_CONVERT_FROM_OFFSET;
+    BOOLEAN ToOffset = (How & (DI_CONVERT_TO_ID | DI_CONVERT_TO_OFFSET)) == DI_CONVERT_TO_OFFSET;
+    HRESULT hr = S_OK;
+
+    Enter();
+
+    /* Offsets mean nothing until the application sets a data format */
+    if ((How & (DI_CONVERT_FROM_OFFSET | DI_CONVERT_TO_OFFSET)) != 0 && (ObjectToApp == nullptr || AppToObject == nullptr))
+        hr = E_INVALIDARG;
+
+    for (ULONG Index = 0; SUCCEEDED(hr) && Index < Count; Index++)
+    {
+        LONG Object = -1;
+        DWORD Type;
+
+        if (ByOffset)
+        {
+            if (Values[Index] < AppDataSize)
+                Object = static_cast<LONG>(AppToObject[Values[Index]]);
+        }
+        else
+        {
+            for (Object = static_cast<LONG>(Native.dwNumObjs) - 1; Object >= 0; Object -= 1)
+            {
+                if (((Native.rgodf[Object].dwType ^ Values[Index]) & 0x00FFFFFF) == 0)
+                    break;
+            }
+        }
+
+        if (Object < 0)
+        {
+            hr = E_INVALIDARG;
+            break;
+        }
+
+        Type = Native.rgodf[Object].dwType;
+        if ((Type & How & 0xFF) == 0 || (Type & How & 0xFF000000) != (How & 0xFF000000))
+        {
+            hr = E_INVALIDARG;
+            break;
+        }
+        Values[Index] = ToOffset ? ObjectToApp[Object] : Type;
+    }
+
+    Leave();
+    return hr;
+}
+
+HRESULT
 RxDiDevice::ModifyEffectParams(
     _Inout_ LPDIEFFECT Params,
     _In_ REFGUID Guid)
