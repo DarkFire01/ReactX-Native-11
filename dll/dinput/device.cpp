@@ -517,14 +517,14 @@ RxDiDevice::InitForceFeedback(VOID)
     DWORD Count = 0;
     HRESULT hr;
 
-    hr = Backend->GetFFConfigKey(KEY_READ, &Key);
+    hr = Backend->GetFFConfigKey(KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, &Key);
     if (hr == S_FALSE)
     {
         hr = CreateEffectDriver();
         if (FAILED(hr))
             return hr;
 
-        hr = Backend->GetFFConfigKey(KEY_READ, &Key);
+        hr = Backend->GetFFConfigKey(KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, &Key);
         if (hr == S_FALSE)
             return E_FAIL;
     }
@@ -535,9 +535,9 @@ RxDiDevice::InitForceFeedback(VOID)
     if (DiReadAttributes(Key, &FFAttributes) != S_OK)
         ZeroMemory(&FFAttributes, sizeof(FFAttributes));
 
-    if (RegOpenKeyExW(Key, L"Effects", 0, KEY_READ, &Effects) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(Key, L"Effects", 0, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, &Effects) != ERROR_SUCCESS)
     {
-        hr = E_UNEXPECTED;
+        hr = E_NOTIMPL;
     }
     else
     {
@@ -553,10 +553,11 @@ RxDiDevice::InitForceFeedback(VOID)
             if (SUCCEEDED(hr))
             {
                 EffectCount = 0;
+                /* Each usable effect adds the envelope and condition kinds it supports */
                 for (DWORD Index = 0; Index < Count; Index++)
                 {
                     if (DiReadEffectEntry(Effects, Index, &EffectList[EffectCount]))
-                        EffectCount++;
+                        ForceFeedbackCaps |= EffectList[EffectCount++].EffectType & 0xFE00;
                 }
 
                 ForceFeedbackCaps &= 0xFF00;
@@ -2693,9 +2694,10 @@ RxDiDevice::CreateEffectDriver(VOID)
     {
         hr = Backend->CreateEffectDriver(&EffectDriver);
         if (SUCCEEDED(hr) && (State & DI_DEV_ACQUIRED))
+        {
             AcquireForceFeedback();
-        if (SUCCEEDED(hr))
             hr = S_OK;
+        }
     }
     Leave();
     return hr;

@@ -22,6 +22,27 @@
 
 static const GUID DiJoyConfigOwner = IID_IDirectInputJoyConfig;
 
+HRESULT
+DiOpenJoyTypeKey(
+    _In_z_ PCWSTR Type,
+    _In_ REGSAM Access,
+    _Out_ HKEY* Key)
+{
+    HKEY Root;
+    HRESULT hr;
+
+    *Key = nullptr;
+    hr = DiOpenKey(HKEY_CURRENT_USER, DI_JOY_OEM_ROOT, Access, 0, &Root);
+    if (FAILED(hr))
+        return hr;
+
+    hr = DiOpenKey(Root, Type, Access, 0, Key);
+    RegCloseKey(Root);
+    if (FAILED(hr))
+        *Key = nullptr;
+    return hr;
+}
+
 class RxDiJoyConfig final : public RxDiUnknown, public IDirectInputJoyConfig
 {
 public:
@@ -383,7 +404,6 @@ public:
         PHKEY Key) override
     {
         HRESULT hr = DiCheckString(Type, 256);
-        HKEY Root;
 
         if (FAILED(hr))
             return hr;
@@ -396,13 +416,7 @@ public:
         if ((Access & (KEY_SET_VALUE | KEY_CREATE_SUB_KEY | MAXIMUM_ALLOWED)) != 0 && !Acquired)
             return DIERR_NOTACQUIRED;
 
-        hr = DiOpenKey(HKEY_CURRENT_USER, DI_JOY_OEM_ROOT, Access, 0, &Root);
-        if (SUCCEEDED(hr))
-        {
-            hr = DiOpenKey(Root, Type, Access, 0, Key);
-            RegCloseKey(Root);
-        }
-        return hr;
+        return DiOpenJoyTypeKey(Type, Access, Key);
     }
 
     HRESULT

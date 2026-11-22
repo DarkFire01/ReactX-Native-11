@@ -50,6 +50,12 @@ DiHidParseIds(
     _Out_ PUSHORT ProductId);
 
 HRESULT
+DiOpenJoyTypeKey(
+    _In_z_ PCWSTR Type,
+    _In_ REGSAM Access,
+    _Out_ HKEY* Key);
+
+HRESULT
 DiCreateJoyConfig(
     _In_ IUnknown* OuterUnknown,
     _Outptr_ IUnknown** Inner);

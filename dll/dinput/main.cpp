@@ -41,7 +41,8 @@ typedef struct _RX_DI_SHARED
     LONG OwnerCount;
     LONG Sequence;
     LONG GuidSequence;
-    BYTE Reserved[196];
+    RX_DI_JOY_SLOT Joysticks[DI_JOY_SLOTS];
+    BYTE Reserved[4];
     RX_DI_OWNER Owners[DI_OWNER_LIMIT];
 } RX_DI_SHARED;
 
@@ -475,6 +476,99 @@ DiReadDword(
     return DiReadValue(Key, Name, Value, sizeof(*Value)) == S_OK;
 }
 
+LONG
+DiReadString(
+    _In_ HKEY Key,
+    _In_opt_z_ PCWSTR Name,
+    _Out_writes_(Count) PWSTR Buffer,
+    _In_ ULONG Count)
+{
+    DWORD Size = Count * sizeof(WCHAR);
+    DWORD Type = 0;
+    ULONG Length;
+    LONG Error;
+
+    Error = RegQueryValueExW(Key, Name, nullptr, &Type, reinterpret_cast<PBYTE>(Buffer), &Size);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Type != REG_SZ)
+        return ERROR_INVALID_DATA;
+
+    /* Terminate strings stored without their null, when there is room */
+    Length = Size / sizeof(WCHAR);
+    if (Length == 0)
+    {
+        Buffer[0] = L'\0';
+    }
+    else if (Buffer[Length - 1] != L'\0')
+    {
+        if (Length >= Count)
+            return ERROR_MORE_DATA;
+        Buffer[Length] = L'\0';
+    }
+    return ERROR_SUCCESS;
+}
+
+static
+PCWSTR
+DiTakeHex(
+    _In_ PCWSTR Text,
+    _In_ ULONG Digits,
+    _Out_ PULONG Value)
+{
+    *Value = 0;
+    for (ULONG Index = 0; Index < Digits; Index++)
+    {
+        WCHAR Char = Text[Index];
+        ULONG Nibble;
+
+        if (Char >= L'0' && Char <= L'9')
+            Nibble = Char - L'0';
+        else if ((Char | 0x20) >= L'a' && (Char | 0x20) <= L'f')
+            Nibble = (Char | 0x20) - L'a' + 10;
+        else
+            return nullptr;
+        *Value = (*Value << 4) | Nibble;
+    }
+    return Text + Digits;
+}
+
+BOOLEAN
+DiParseGuid(
+    _In_z_ PCWSTR Text,
+    _Out_ LPGUID Guid)
+{
+    /* Digits per field and the character that has to follow it */
+    static const UCHAR Digits[] = { 8, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2 };
+    static const WCHAR After[] = { L'-', L'-', L'-', 0, L'-', 0, 0, 0, 0, 0, L'}' };
+    ULONG Fields[_countof(Digits)];
+    PCWSTR Cursor;
+
+    if (lstrlenW(Text) != 38 || Text[0] != L'{')
+        return FALSE;
+
+    Cursor = Text + 1;
+    for (ULONG Index = 0; Index < _countof(Digits); Index++)
+    {
+        Cursor = DiTakeHex(Cursor, Digits[Index], &Fields[Index]);
+        if (Cursor == nullptr)
+            return FALSE;
+        if (After[Index] != 0)
+        {
+            if (*Cursor != After[Index])
+                return FALSE;
+            Cursor++;
+        }
+    }
+
+    Guid->Data1 = Fields[0];
+    Guid->Data2 = static_cast<USHORT>(Fields[1]);
+    Guid->Data3 = static_cast<USHORT>(Fields[2]);
+    for (ULONG Index = 0; Index < 8; Index++)
+        Guid->Data4[Index] = static_cast<UCHAR>(Fields[3 + Index]);
+    return TRUE;
+}
+
 BOOLEAN
 DiGetApplicationId(
     _Out_writes_(276) PWSTR Id,
@@ -719,6 +813,25 @@ DiNextGuidSequence(VOID)
     Value = static_cast<ULONG>(++DiShared->GuidSequence);
     ReleaseMutex(DiGlobalMutex);
     return Value;
+}
+
+VOID
+DiLockJoysticks(VOID)
+{
+    WaitForSingleObject(DiJoyMutex, INFINITE);
+}
+
+VOID
+DiUnlockJoysticks(VOID)
+{
+    ReleaseMutex(DiJoyMutex);
+}
+
+RX_DI_JOY_SLOT*
+DiJoystickSlot(
+    _In_ ULONG Id)
+{
+    return &DiShared->Joysticks[Id];
 }
 
 static

@@ -24,6 +24,15 @@
 #define DI_DEVTYPE_HID_JOYSTICK (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_UNKNOWN))
 #define DI_DEVTYPE_HID_GAMEPAD  (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_GAMEPAD))
 #define DI_DEVTYPE_HID_KEYBOARD (DIDEVTYPE_HID | DIDEVTYPE_KEYBOARD)
+#define DI_DEVTYPE_HID_STICK    (DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, DIDEVTYPEJOYSTICK_TRADITIONAL))
+
+/* Microsoft gameport adapters, which have no type key of their own */
+#define DI_HID_MS_VENDOR        0x045E
+#define DI_HID_MS_GAMEPORT_LOW  0x0102
+#define DI_HID_MS_GAMEPORT_HIGH 0x010C
+
+/* Physical interface device page, which describes force feedback effects */
+#define DI_HID_PAGE_PID         0x0F
 
 #define DI_PRIVATE_ROOT L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\DirectInput"
 
@@ -785,10 +794,21 @@ public:
 
         VendorId = Attributes.VendorID;
         ProductId = Attributes.ProductID;
+        OpenTypeKey();
+
+        /* Devices that report effects in output reports get the PID driver */
+        if (Caps.NumberOutputValueCaps != 0 && Caps.NumberOutputButtonCaps != 0)
+        {
+            USHORT Length = 0;
+
+            PidDevice = HidP_GetSpecificButtonCaps(HidP_Output, DI_HID_PAGE_PID, 0, 0, nullptr, &Length, Data) ==
+                        HIDP_STATUS_BUFFER_TOO_SMALL && Length > 2;
+        }
 
         hr = BuildObjects();
         if (FAILED(hr))
             return hr;
+        ApplyTypeAttributes();
 
         Source.State = State;
         Source.Types = nullptr;
@@ -807,6 +827,8 @@ public:
     ~RxDiHid() override
     {
         StopReader();
+        if (TypeKey != nullptr)
+            RegCloseKey(TypeKey);
         DiCloseSink(Sink);
         if (Data != nullptr)
             HidD_FreePreparsedData(Data);
@@ -1057,6 +1079,72 @@ public:
     }
 
     HRESULT
+    CreateEffectDriver(
+        _Outptr_ RxDiShepherd** Driver) override
+    {
+        DIHIDFFINITINFO Init = {};
+        HKEY Key = nullptr;
+        HRESULT hr;
+
+        *Driver = nullptr;
+        if (FAILED(GetFFConfigKey(KEY_QUERY_VALUE, &Key)))
+            return E_NOTIMPL;
+
+        hr = DiCreateShepherd(Key, Driver);
+        if (SUCCEEDED(hr))
+        {
+            Init.dwSize = sizeof(Init);
+            Init.pwszDeviceInterface = Start.Path;
+            EnterCriticalSection(&DiLock);
+            for (ULONG Index = 0; Index < DiHidCount; Index++)
+            {
+                if (lstrcmpiW(DiHidEntries[Index].Detail->DevicePath, Start.Path) == 0)
+                {
+                    Init.GuidInstance = DiHidEntries[Index].Instance;
+                    break;
+                }
+            }
+            LeaveCriticalSection(&DiLock);
+
+            hr = (*Driver)->DeviceID(Start.JoystickId, TRUE, &Init);
+            if (FAILED(hr))
+            {
+                DiTrace(L"effect driver refused HID device %ls, 0x%08lx", Start.InstanceId, hr);
+                delete *Driver;
+                *Driver = nullptr;
+            }
+        }
+
+        if (Key != nullptr)
+            RegCloseKey(Key);
+        return hr;
+    }
+
+    /* S_FALSE means the PID driver has to be created before its key exists */
+    HRESULT
+    GetFFConfigKey(
+        _In_ REGSAM Access,
+        _Out_ HKEY* Key) override
+    {
+        HRESULT hr;
+
+        *Key = nullptr;
+        if (TypeKey == nullptr)
+            hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        else if (RegOpenKeyExW(TypeKey, L"OEMForceFeedback", 0, Access, Key) == ERROR_SUCCESS)
+            return S_OK;
+        else
+            hr = E_FAIL;
+
+        if (PidDevice)
+        {
+            *Key = nullptr;
+            hr = S_FALSE;
+        }
+        return hr;
+    }
+
+    HRESULT
     Poll(VOID) override
     {
         return Polled ? S_OK : S_FALSE;
@@ -1088,6 +1176,64 @@ public:
     }
 
 private:
+    VOID
+    OpenTypeKey(VOID)
+    {
+        WCHAR Type[20];
+
+        /* The gameport adapters stand for whatever stick is plugged into them */
+        if (VendorId == DI_HID_MS_VENDOR && ProductId >= DI_HID_MS_GAMEPORT_LOW && ProductId <= DI_HID_MS_GAMEPORT_HIGH)
+        {
+            if (DevType == DI_DEVTYPE_HID_JOYSTICK)
+                DevType = DI_DEVTYPE_HID_STICK;
+            return;
+        }
+
+        StringCchPrintfW(Type, _countof(Type), L"VID_%04X&PID_%04X", VendorId, ProductId);
+        DiOpenJoyTypeKey(Type, MAXIMUM_ALLOWED, &TypeKey);
+    }
+
+    /* The type key can mark objects as actuators or triggers and override their aspect */
+    VOID
+    ApplyTypeAttributes(VOID)
+    {
+        if (TypeKey == nullptr)
+            return;
+
+        for (ULONG Index = 0; Index < Format.dwNumObjs; Index++)
+        {
+            DIOBJECTDATAFORMAT* Object = &Objects[Index];
+            WCHAR Path[32];
+            PCWSTR Kind;
+            DWORD Attributes = 0;
+            HKEY Key;
+
+            if (Object->dwType & DIDFT_AXIS)
+                Kind = L"Axes";
+            else if (Object->dwType & DIDFT_BUTTON)
+                Kind = L"Buttons";
+            else if (Object->dwType & DIDFT_POV)
+                Kind = L"POVs";
+            else if (Object->dwType & DIDFT_NODATA)
+                Kind = L"Actuators";
+            else
+                continue;
+
+            StringCchPrintfW(Path, _countof(Path), L"%s\\%u", Kind, DIDFT_GETINSTANCE(Object->dwType));
+            if (RegOpenKeyExW(TypeKey, Path, 0, KEY_QUERY_VALUE, &Key) != ERROR_SUCCESS)
+                continue;
+
+            if (SUCCEEDED(DiReadValue(Key, L"Attributes", &Attributes, sizeof(Attributes))))
+            {
+                Object->dwType |= Attributes << 24;
+                Object->dwFlags |= Attributes & ~DIDOI_ASPECTMASK;
+                if (Attributes & DIDOI_ASPECTMASK)
+                    Object->dwFlags = (Object->dwFlags & ~DIDOI_ASPECTMASK) | (Attributes & DIDOI_ASPECTMASK);
+            }
+            RegCloseKey(Key);
+        }
+    }
+
     HANDLE
     OpenDevice(
         _In_ DWORD Flags)
@@ -1301,6 +1447,19 @@ private:
             else
                 Flags = ((Type & DIDFT_AXIS) ? DIDOI_ASPECTPOSITION : 0) | (Polled ? DIDOI_POLLED : 0);
 
+            /* A PID device can push on any usage it names in an output report */
+            if (PidDevice && Guid != &GUID_Unknown)
+            {
+                USHORT Length = 0;
+                NTSTATUS Status = HidP_GetSpecificButtonCaps(HidP_Output, Value->UsagePage, 0, Usage, nullptr, &Length, Data);
+
+                if (Status >= 0 || Status == HIDP_STATUS_BUFFER_TOO_SMALL)
+                {
+                    Type |= DIDFT_FFACTUATOR;
+                    Flags |= DIDOI_FFACTUATOR;
+                }
+            }
+
             AddObject(Guid, Slot, Type | ReportTypeBits(Kind) | DIDFT_MAKEINSTANCE(ValueInstance++), Flags,
                       Value->UsagePage, Usage, Value->LinkCollection, TRUE, Value->LogicalMin, Value->LogicalMax);
             Info[Format.dwNumObjs - 1].ReportId = Value->ReportID;
@@ -1376,13 +1535,16 @@ private:
                 }
 
                 Type |= ReportTypeBits(Kind) | DIDFT_MAKEINSTANCE(ButtonInstance++);
+                if (PidDevice && (Type & DIDFT_PSHBUTTON))
+                    Type |= DIDFT_FFEFFECTTRIGGER;
                 if (Alias)
                     Type |= DIDFT_ALIAS;
                 else if (Type & DIDFT_BUTTON)
                     ButtonCount++;
 
                 AddObject(Guid, (Alias && *Offset > First) ? *Offset - 1 : *Offset, Type,
-                          (Kind != HidP_Input) ? (0x80000000 | DIDOI_POLLED) : (Polled ? DIDOI_POLLED : 0),
+                          ((Kind != HidP_Input) ? (0x80000000 | DIDOI_POLLED) : (Polled ? DIDOI_POLLED : 0)) |
+                          ((Type & DIDFT_FFEFFECTTRIGGER) ? DIDOI_FFEFFECTTRIGGER : 0),
                           Button->UsagePage, static_cast<USHORT>(Usage), Button->LinkCollection, FALSE, 0, 1);
                 Info[Format.dwNumObjs - 1].ReportId = Button->ReportID;
                 Info[Format.dwNumObjs - 1].Input = (Kind == HidP_Input);
@@ -1822,6 +1984,8 @@ private:
     PHIDP_PREPARSED_DATA Data = nullptr;
     HIDP_CAPS Caps = {};
     ULONG DevType = 0;
+    HKEY TypeKey = nullptr;
+    BOOLEAN PidDevice = FALSE;
     USHORT VendorId = 0;
     USHORT ProductId = 0;
     BOOL Polled = FALSE;

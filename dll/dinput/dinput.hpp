@@ -92,12 +92,23 @@ typedef struct _RX_DI_FF_HANDLE
     DWORD Tag;
 } RX_DI_FF_HANDLE;
 
+/* Force feedback state each joystick shares across processes */
+#define DI_JOY_SLOTS            16
+
+typedef struct _RX_DI_JOY_SLOT
+{
+    DWORD Tag;
+    DWORD GlobalGain;
+    DWORD DeviceGain;
+} RX_DI_JOY_SLOT;
+
 /* Per device go between for the force feedback driver */
 class RxDiShepherd
 {
 public:
     virtual ~RxDiShepherd() {}
 
+    virtual HRESULT DeviceID(_In_ DWORD ExternalId, _In_ DWORD Begin, _In_ PVOID Info) = 0;
     virtual HRESULT GetVersions(_Inout_ LPDIDRIVERVERSIONS Versions) = 0;
     virtual HRESULT Escape(_In_ RX_DI_FF_HANDLE* Handle, _Inout_ LPDIEFFESCAPE Request) = 0;
     virtual HRESULT DeviceEscape(_In_ RX_DI_FF_HANDLE* Handle, _Inout_ LPDIEFFESCAPE Request) = 0;
@@ -225,7 +236,7 @@ struct RX_DI_EFFECT_ENTRY
     DWORD EffectType;
     DWORD StaticParams;
     DWORD DynamicParams;
-    DWORD Reserved;
+    DWORD Coordinates;
     GUID Guid;
     WCHAR Name[MAX_PATH];
 };
@@ -525,7 +536,7 @@ BOOLEAN
 DiReadEffectEntry(
     _In_ HKEY Effects,
     _In_ DWORD Index,
-    _Out_ RX_DI_EFFECT_ENTRY* Entry);
+    _Inout_ RX_DI_EFFECT_ENTRY* Entry);
 
 HRESULT
 DiCreateEffect(
@@ -563,6 +574,17 @@ DiWriteEffectToFile(
     _In_ DWORD Count,
     _In_reads_opt_(Count) LPDIFILEEFFECT Effects,
     _In_ DWORD Flags);
+
+/* shepherd.cpp */
+
+HRESULT
+DiCreateShepherd(
+    _In_opt_ HKEY Config,
+    _Outptr_ RxDiShepherd** Shepherd);
+
+DWORD
+DiReadJoystickGain(
+    _In_ ULONG Id);
 
 /* main.cpp */
 
@@ -607,6 +629,28 @@ DiReadDword(
     _In_ HKEY Key,
     _In_z_ PCWSTR Name,
     _Out_ PULONG Value);
+
+LONG
+DiReadString(
+    _In_ HKEY Key,
+    _In_opt_z_ PCWSTR Name,
+    _Out_writes_(Count) PWSTR Buffer,
+    _In_ ULONG Count);
+
+BOOLEAN
+DiParseGuid(
+    _In_z_ PCWSTR Text,
+    _Out_ LPGUID Guid);
+
+VOID
+DiLockJoysticks(VOID);
+
+VOID
+DiUnlockJoysticks(VOID);
+
+RX_DI_JOY_SLOT*
+DiJoystickSlot(
+    _In_ ULONG Id);
 
 BOOLEAN
 DiGetApplicationId(
