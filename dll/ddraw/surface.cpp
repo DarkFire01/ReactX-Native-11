@@ -14,7 +14,7 @@ extern const VOID* const DdSurfaceVtbl4[];
 extern const VOID* const DdSurfaceVtbl7[];
 
 /* Caps a surface may ask for that need a Direct3D runtime 64 bit Windows does not have */
-static constexpr DWORD DdCapsNeedingDirect3D = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER | DDSCAPS_MIPMAP;
+static constexpr DWORD DdCapsNeedingDirect3D = DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_MIPMAP;
 
 /* Surfaces wider or taller than this are refused */
 static constexpr DWORD DdMaxSurfaceSide = 65535;
@@ -25,6 +25,12 @@ static
 VOID
 DdDropSurfaceDc(
     _Inout_ DdSurface* Surface);
+
+static
+VOID
+DdDestroySurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version);
 
 static const VOID*
 DdSurfaceVtblFor(
@@ -97,6 +103,127 @@ DdSurfaceInterfaceFor(
     Interface->Version = Version;
     Interface->Next = Surface->Interfaces;
     Surface->Interfaces = Interface;
+    return Interface;
+}
+
+UCHAR
+DdSurfaceVersionOf(
+    _In_ VOID* Com)
+{
+    return DdInterfaceFromCom(Com)->Version;
+}
+
+_Ret_maybenull_
+static
+DdSurfaceInterface*
+DdExistingInterface(
+    _In_ const DdSurface* Surface,
+    _In_ UCHAR Version)
+{
+    DdSurfaceInterface* Interface;
+
+    for (Interface = Surface->Interfaces; Interface != nullptr; Interface = Interface->Next)
+    {
+        if (Interface->Version == Version)
+            return Interface;
+    }
+    return nullptr;
+}
+
+ULONG
+DdSurfaceRefsOn(
+    _In_ const DdSurface* Surface,
+    _In_ UCHAR Version)
+{
+    DdSurfaceInterface* Interface = DdExistingInterface(Surface, Version);
+
+    return Interface != nullptr ? Interface->RefCount : 0;
+}
+
+/* Takes a reference through one interface version, as an attachment or the runtime itself does */
+VOID
+DdHoldSurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version)
+{
+    DdSurfaceInterface* Interface;
+
+    if ((Surface->ChainFlags & DdChainDying) != 0)
+        return;
+    Interface = DdSurfaceInterfaceFor(Surface, Version);
+    if (Interface == nullptr)
+        return;
+    Interface->RefCount += 1;
+    Surface->RefCount += 1;
+}
+
+/* Gives back one reference on an interface; the last one destroys the surface */
+static
+ULONG
+DdReleaseThrough(
+    _In_ DdSurface* Surface,
+    _In_ DdSurfaceInterface* Interface)
+{
+    DdSurfaceInterface** Link;
+    ULONG Remaining;
+
+    if ((Surface->ChainFlags & DdChainDying) != 0 || Interface->RefCount == 0)
+        return 0;
+
+    /* A surface complex creation made lives as long as the surface that made it */
+    if (Surface->RefCount == 1 && (Surface->ChainFlags & DdChainImplicit) != 0)
+        return 0;
+
+    Interface->RefCount -= 1;
+    Remaining = Interface->RefCount;
+    Surface->RefCount -= 1;
+
+    if (Surface->RefCount == 0)
+    {
+        DdDestroySurface(Surface, Interface->Version);
+        return 0;
+    }
+
+    if (Remaining == 0)
+    {
+        for (Link = &Surface->Interfaces; *Link != nullptr; Link = &(*Link)->Next)
+        {
+            if (*Link == Interface)
+            {
+                *Link = Interface->Next;
+                break;
+            }
+        }
+        Interface->Vtbl = nullptr;
+        delete Interface;
+    }
+    return Remaining;
+}
+
+VOID
+DdDropSurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version)
+{
+    DdSurfaceInterface* Interface = DdExistingInterface(Surface, Version);
+
+    if (Interface != nullptr)
+        DdReleaseThrough(Surface, Interface);
+}
+
+/* An interface of the given version with a reference for the caller */
+_Ret_maybenull_
+VOID*
+DdHandOutSurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version)
+{
+    DdSurfaceInterface* Interface = DdSurfaceInterfaceFor(Surface, Version);
+
+    if (Interface == nullptr)
+        return nullptr;
+    Interface->RefCount += 1;
+    Surface->RefCount += 1;
     return Interface;
 }
 
@@ -241,11 +368,14 @@ DdFreeAllPrivateData(
 static
 VOID
 DdDestroySurface(
-    _In_ DdSurface* Surface)
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version)
 {
     DdSurfaceInterface* Interface;
     DdInterface* Owner = Surface->Owner;
 
+    Surface->ChainFlags |= DdChainDying;
+    DdDetachForDestroy(Surface, Version);
     DdUnlinkSurface(Surface);
     if (Surface->Dc != NULL)
         DdDropSurfaceDc(Surface);
@@ -269,6 +399,293 @@ DdDestroySurface(
         DdReleaseInterface(Owner);
 }
 
+/* The combinations of caps the runtime refuses before it looks at anything else */
+static
+HRESULT
+DdCheckCapsCombination(
+    _In_ const DdInterface* This,
+    _In_ const DDSURFACEDESC2* Desc,
+    _In_ const DDSCAPS2* Requested)
+{
+    DWORD Caps = Requested->dwCaps;
+    DWORD Hints = Requested->dwCaps2;
+    BOOLEAN Counted = (Desc->dwFlags & DDSD_BACKBUFFERCOUNT) != 0;
+    BOOLEAN Mipped = (Desc->dwFlags & DDSD_MIPMAPCOUNT) != 0;
+
+    /* Counts only mean something on complex surfaces, and a flip chain needs one */
+    if ((Caps & DDSCAPS_COMPLEX) != 0)
+    {
+        if (Counted && Mipped)
+            return E_INVALIDARG;
+    }
+    else if (Counted || Mipped)
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    if ((Caps & DDSCAPS_FLIP) != 0)
+    {
+        if ((Caps & DDSCAPS_COMPLEX) == 0 || !Counted || Desc->dwBackBufferCount == 0)
+            return DDERR_INVALIDCAPS;
+        if (Mipped)
+            return E_NOTIMPL;
+    }
+
+    if ((Caps & (DDSCAPS_VISIBLE | DDSCAPS_PALETTE | DDSCAPS_OPTIMIZED)) != 0)
+        return DDERR_INVALIDCAPS;
+    if ((Caps & DDSCAPS_WRITEONLY) != 0 && (Caps & DDSCAPS_RESERVED2) == 0 &&
+        (Hints & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) == 0)
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    if ((Hints & (DDSCAPS2_HINTDYNAMIC | DDSCAPS2_HINTSTATIC)) == (DDSCAPS2_HINTDYNAMIC | DDSCAPS2_HINTSTATIC) ||
+        (Hints & (DDSCAPS2_HINTANTIALIASING | DDSCAPS2_HINTDYNAMIC)) == (DDSCAPS2_HINTANTIALIASING | DDSCAPS2_HINTDYNAMIC) ||
+        (Hints & (DDSCAPS2_HINTANTIALIASING | DDSCAPS2_HINTSTATIC)) == (DDSCAPS2_HINTANTIALIASING | DDSCAPS2_HINTSTATIC))
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    if ((Caps & DDSCAPS_LOCALVIDMEM) != 0 && (Caps & DDSCAPS_NONLOCALVIDMEM) != 0)
+        return DDERR_INVALIDCAPS;
+    if ((Caps & (DDSCAPS_LOCALVIDMEM | DDSCAPS_NONLOCALVIDMEM)) != 0 && (Caps & DDSCAPS_SYSTEMMEMORY) != 0)
+        return DDERR_INVALIDCAPS;
+
+    /* Only the first DirectDraw interface may name front and back buffers itself */
+    if (This->Kind != DdKind::Draw1 && (Caps & (DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER)) != 0)
+        return DDERR_INVALIDCAPS;
+
+    if ((Caps & DDSCAPS_COMPLEX) != 0)
+    {
+        if ((Caps & DDSCAPS_FRONTBUFFER) != 0)
+            return DDERR_INVALIDCAPS;
+        if ((Caps & DDSCAPS_BACKBUFFER) != 0 &&
+            ((Caps & (DDSCAPS_ZBUFFER | DDSCAPS_ALPHA)) == 0 || (Caps & DDSCAPS_FLIP) != 0))
+        {
+            return DDERR_INVALIDCAPS;
+        }
+        if ((Caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_OVERLAY | DDSCAPS_PRIMARYSURFACE |
+                     DDSCAPS_BACKBUFFER)) == 0)
+        {
+            return DDERR_INVALIDCAPS;
+        }
+        if ((Caps & (DDSCAPS_MIPMAP | DDSCAPS_ZBUFFER | DDSCAPS_FLIP | DDSCAPS_ALPHA)) == 0 &&
+            (Hints & DDSCAPS2_CUBEMAP) == 0)
+        {
+            return DDERR_INVALIDCAPS;
+        }
+    }
+    if ((Caps & DDSCAPS_BACKBUFFER) != 0 && (Caps & (DDSCAPS_FRONTBUFFER | DDSCAPS_ALPHA)) != 0)
+        return DDERR_INVALIDCAPS;
+    if ((Caps & DDSCAPS_FLIP) != 0 && (Caps & DDSCAPS_COMPLEX) == 0)
+        return DDERR_INVALIDCAPS;
+    if ((Caps & DDSCAPS_PRIMARYSURFACE) != 0 &&
+        ((Caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_OVERLAY | DDSCAPS_BACKBUFFER)) != 0 ||
+         ((Caps & DDSCAPS_ZBUFFER) != 0 && (Caps & DDSCAPS_FLIP) == 0)))
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    if ((Caps & DDSCAPS_OFFSCREENPLAIN) != 0 && (Caps & (DDSCAPS_TEXTURE | DDSCAPS_OVERLAY | DDSCAPS_BACKBUFFER)) != 0)
+        return DDERR_INVALIDCAPS;
+    if ((Caps & DDSCAPS_OVERLAY) != 0 &&
+        ((Caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_BACKBUFFER)) != 0 ||
+         ((Caps & DDSCAPS_ZBUFFER) != 0 && (Caps & DDSCAPS_FLIP) == 0)))
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    if ((Caps & DDSCAPS_MIPMAP) != 0)
+    {
+        if ((Caps & DDSCAPS_TEXTURE) == 0 || (Caps & DDSCAPS_ZBUFFER) != 0)
+            return DDERR_INVALIDCAPS;
+    }
+    else if ((Caps & DDSCAPS_ZBUFFER) != 0 && (Caps & DDSCAPS_BACKBUFFER) != 0 && (Caps & DDSCAPS_COMPLEX) == 0)
+    {
+        return DDERR_INVALIDCAPS;
+    }
+    if ((Caps & DDSCAPS_ALLOCONLOAD) != 0 && (Caps & DDSCAPS_TEXTURE) == 0)
+        return DDERR_INVALIDCAPS;
+    return S_OK;
+}
+
+/* A Z buffer's format comes from the pixel format, or from the depth field of the short description */
+static
+HRESULT
+DdTakeDepthFormat(
+    _In_ const DDSURFACEDESC2* Desc,
+    _In_ BOOLEAN ZBuffer,
+    _Out_ DDPIXELFORMAT* Format)
+{
+    const DDPIXELFORMAT* Given = &Desc->ddpfPixelFormat;
+    BOOLEAN Short = Desc->dwSize < sizeof(DDSURFACEDESC2);
+    BOOLEAN HasFormat = (Desc->dwFlags & DDSD_PIXELFORMAT) != 0;
+    DWORD Depth;
+
+    if (!ZBuffer)
+    {
+        if ((Desc->dwFlags & DDSD_ZBUFFERBITDEPTH) != 0)
+            return E_INVALIDARG;
+        if (HasFormat && (Given->dwFlags & (DDPF_ZBUFFER | DDPF_STENCILBUFFER)) != 0)
+            return E_INVALIDARG;
+        return S_FALSE;
+    }
+
+    if (!Short && (Desc->dwFlags & DDSD_ZBUFFERBITDEPTH) != 0)
+        return E_INVALIDARG;
+
+    if (HasFormat)
+    {
+        if (Given->dwSize != sizeof(*Given) || (Given->dwFlags & DDPF_ZBUFFER) == 0)
+            return E_INVALIDARG;
+        if (Short && (Given->dwFlags & DDPF_STENCILBUFFER) != 0)
+            return E_INVALIDARG;
+        if (!Short && Given->dwZBitMask == 0)
+            return E_INVALIDARG;
+        if ((Given->dwFlags & DDPF_STENCILBUFFER) != 0 && (Given->dwStencilBitDepth == 0 || Given->dwStencilBitMask == 0))
+            return E_INVALIDARG;
+        *Format = *Given;
+    }
+    else
+    {
+        if (!Short || (Desc->dwFlags & DDSD_ZBUFFERBITDEPTH) == 0)
+            return E_INVALIDARG;
+        Depth = Desc->dwMipMapCount;
+        ZeroMemory(Format, sizeof(*Format));
+        Format->dwSize = sizeof(*Format);
+        Format->dwFlags = DDPF_ZBUFFER;
+        Format->dwZBufferBitDepth = Depth;
+        Format->dwZBitMask = Depth >= 32 ? 0xFFFFFFFF : (1u << Depth) - 1;
+    }
+
+    Depth = Format->dwZBufferBitDepth;
+    if (Depth < 8)
+        return E_INVALIDARG;
+    if (Depth != 8 && Depth != 16 && Depth != 24 && Depth != 32)
+        return DDERR_INVALIDPIXELFORMAT;
+    return S_OK;
+}
+
+/* One surface with its memory, its first interface and a reference on it */
+static
+HRESULT
+DdNewSurface(
+    _In_ DdInterface* Maker,
+    _In_ const DDSCAPS2* Caps,
+    _In_ const DDPIXELFORMAT* Format,
+    _In_ DWORD Width,
+    _In_ DWORD Height,
+    _In_ UCHAR Version,
+    _Outptr_ DdSurface** Result)
+{
+    DdLocal* Local = Maker->Local;
+    DdDriver* Driver = Local->Driver;
+    DdSurfaceInterface* Interface;
+    DdSurface* Surface;
+    HRESULT hr;
+
+    Surface = new (std::nothrow) DdSurface;
+    if (Surface == nullptr)
+        return E_OUTOFMEMORY;
+
+    ZeroMemory(Surface, sizeof(*Surface));
+    Surface->Driver = Driver;
+    Surface->Creator = Local;
+    Surface->MakerKind = Maker->Kind;
+    Surface->ProcessId = GetCurrentProcessId();
+    Surface->Caps = *Caps;
+    Surface->Format = *Format;
+    Surface->Width = Width;
+    Surface->Height = Height;
+    Surface->Pitch = DdSurfacePitch(Width, Format->dwRGBBitCount);
+    Surface->Uniqueness = 1;
+
+    if ((Caps->dwCaps & DDSCAPS_PRIMARYSURFACE) == 0 && (Caps->dwCaps & DDSCAPS_VIDEOMEMORY) != 0)
+        hr = DdCreateSurfaceResource(Driver->Hardware, Surface);
+    else
+        hr = DdAllocateSystemBits(Surface);
+    if (FAILED(hr))
+    {
+        delete Surface;
+        return hr;
+    }
+
+    /* The pool the memory was charged to becomes part of the caps */
+    if (Surface->Resource != nullptr && (Surface->Caps.dwCaps & (DDSCAPS_LOCALVIDMEM | DDSCAPS_NONLOCALVIDMEM)) == 0)
+        Surface->Caps.dwCaps |= Surface->Resource->ChargedShared ? DDSCAPS_NONLOCALVIDMEM : DDSCAPS_LOCALVIDMEM;
+
+    Interface = DdSurfaceInterfaceFor(Surface, Version);
+    if (Interface == nullptr)
+    {
+        DdFreeSurfaceMemory(Surface);
+        delete Surface;
+        return E_OUTOFMEMORY;
+    }
+
+    Interface->RefCount = 1;
+    Surface->RefCount = 1;
+    DdLinkSurface(Surface);
+    *Result = Surface;
+    return S_OK;
+}
+
+/* Builds a front buffer and its back buffers, each pointing at the next and the last at the front */
+static
+HRESULT
+DdNewFlipChain(
+    _In_ DdInterface* Maker,
+    _In_ const DDSCAPS2* Caps,
+    _In_ const DDPIXELFORMAT* Format,
+    _In_ DWORD Width,
+    _In_ DWORD Height,
+    _In_ DWORD BackCount,
+    _In_ UCHAR Version,
+    _Outptr_ DdSurface** Result)
+{
+    DdSurface* Front = nullptr;
+    DdSurface* Previous = nullptr;
+    DdSurface* Member;
+    HRESULT hr;
+
+    for (DWORD Index = 0; Index <= BackCount; Index++)
+    {
+        hr = DdNewSurface(Maker, Caps, Format, Width, Height, Version, &Member);
+        if (SUCCEEDED(hr) && Previous != nullptr)
+            hr = DdAddLink(Previous, Version, Member, Version, TRUE);
+        if (FAILED(hr))
+        {
+            if (Front != nullptr)
+            {
+                Front->ChainFlags &= ~DdChainImplicit;
+                DdDestroySurface(Front, Version);
+            }
+            return hr;
+        }
+
+        if (Front == nullptr)
+        {
+            Front = Member;
+            Member->Caps.dwCaps |= DDSCAPS_FRONTBUFFER;
+            Member->ChainFlags = DdChainRoot | DdChainWasFront;
+            Member->BackBufferCount = BackCount;
+        }
+        else
+        {
+            Member->ChainFlags = DdChainImplicit;
+            if (Index == 1)
+            {
+                Member->Caps.dwCaps |= DDSCAPS_BACKBUFFER;
+                Member->ChainFlags |= DdChainWasBack;
+            }
+        }
+        Previous = Member;
+    }
+
+    hr = DdAddLink(Previous, Version, Front, Version, TRUE);
+    if (FAILED(hr))
+    {
+        DdDestroySurface(Front, Version);
+        return hr;
+    }
+    *Result = Front;
+    return S_OK;
+}
+
 HRESULT
 DdCreateSurfaceObject(
     _In_ DdInterface* This,
@@ -278,11 +695,14 @@ DdCreateSurfaceObject(
 {
     DdLocal* Local = This->Local;
     DdDriver* Driver = Local->Driver;
-    DdSurfaceInterface* Interface;
     DdSurface* Surface;
     DDSCAPS2 Caps = {};
+    DDSCAPS2 Checked;
     DDPIXELFORMAT Format;
     BOOLEAN Primary;
+    BOOLEAN Chain;
+    BOOLEAN Depth;
+    UCHAR Version;
     DWORD Width;
     DWORD Height;
     HRESULT hr;
@@ -309,21 +729,38 @@ DdCreateSurfaceObject(
         return DDERR_INVALIDCAPS;
     if ((Caps.dwCaps & (DDSCAPS_LOCALVIDMEM | DDSCAPS_NONLOCALVIDMEM)) != 0 && (Caps.dwCaps & DDSCAPS_VIDEOMEMORY) == 0)
         return DDERR_INVALIDCAPS;
-    if ((Caps.dwCaps & DDSCAPS_BACKBUFFER) != 0 && (Caps.dwCaps & DDSCAPS_FLIP) == 0)
-        return DDERR_INVALIDCAPS;
+
+    /* The checks see the caps with the memory the first attempt asks for */
+    Checked = Caps;
+    if ((Checked.dwCaps & DDSCAPS_SYSTEMMEMORY) == 0)
+        Checked.dwCaps |= DDSCAPS_VIDEOMEMORY;
+    hr = DdCheckCapsCombination(This, Desc, &Checked);
+    if (FAILED(hr))
+        return hr;
+
+    hr = DdTakeDepthFormat(Desc, (Caps.dwCaps & DDSCAPS_ZBUFFER) != 0, &Format);
+    if (FAILED(hr))
+        return hr;
+    Depth = hr == S_OK;
+
     if ((Caps.dwCaps & DdCapsNeedingDirect3D) != 0)
     {
         DD_TRACE_ONCE(L"surfaces for Direct3D are not offered, as on 64 bit Windows");
         return E_NOINTERFACE;
     }
+    if ((Caps.dwCaps & DDSCAPS_OVERLAY) != 0 && (Driver->HalCaps.dwCaps & DDCAPS_OVERLAY) == 0)
+        return DDERR_NOOVERLAYHW;
 
+    Chain = (Caps.dwCaps & DDSCAPS_FLIP) != 0;
     Primary = (Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0;
     if (Primary)
     {
         if ((Desc->dwFlags & (DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT)) != 0)
             return E_INVALIDARG;
-        if ((Desc->dwFlags & DDSD_BACKBUFFERCOUNT) != 0 || (Caps.dwCaps & DDSCAPS_FLIP) != 0)
+        if (Chain)
         {
+            if (Driver->ExclusiveOwner != Local)
+                return DDERR_NOEXCLUSIVEMODE;
             DD_TRACE_ONCE(L"flipping primary chains are not implemented yet");
             return DDERR_UNSUPPORTED;
         }
@@ -344,7 +781,11 @@ DdCreateSurfaceObject(
         Height = Desc->dwHeight;
     }
 
-    if (!Primary && (Desc->dwFlags & DDSD_PIXELFORMAT) != 0)
+    if (Depth)
+    {
+        /* The Z buffer format was taken above */
+    }
+    else if (!Primary && (Desc->dwFlags & DDSD_PIXELFORMAT) != 0)
     {
         if ((Desc->dwFlags & DDSD_CAPS) == 0)
             return DDERR_INVALIDPIXELFORMAT;
@@ -386,56 +827,25 @@ DdCreateSurfaceObject(
         }
     }
 
-    Surface = new (std::nothrow) DdSurface;
-    if (Surface == nullptr)
-        return E_OUTOFMEMORY;
-
-    ZeroMemory(Surface, sizeof(*Surface));
-    Surface->Driver = Driver;
-    Surface->Creator = Local;
-    Surface->ProcessId = GetCurrentProcessId();
-    Surface->Caps = Caps;
-    Surface->Format = Format;
-    Surface->Width = Width;
-    Surface->Height = Height;
-    Surface->Pitch = DdSurfacePitch(Width, Format.dwRGBBitCount);
-    Surface->Uniqueness = 1;
-
-    if (!Primary && (Caps.dwCaps & DDSCAPS_VIDEOMEMORY) != 0)
-        hr = DdCreateSurfaceResource(Driver->Hardware, Surface);
+    Version = This->Kind == DdKind::Draw7 ? 7 : This->Kind == DdKind::Draw4 ? 4 : 1;
+    if (Chain)
+        hr = DdNewFlipChain(This, &Caps, &Format, Width, Height, Desc->dwBackBufferCount, Version, &Surface);
     else
-        hr = DdAllocateSystemBits(Surface);
+        hr = DdNewSurface(This, &Caps, &Format, Width, Height, Version, &Surface);
     if (FAILED(hr))
-    {
-        delete Surface;
         return hr;
-    }
 
-    /* The pool the memory was charged to becomes part of the caps */
-    if (Surface->Resource != nullptr && (Surface->Caps.dwCaps & (DDSCAPS_LOCALVIDMEM | DDSCAPS_NONLOCALVIDMEM)) == 0)
-        Surface->Caps.dwCaps |= Surface->Resource->ChargedShared ? DDSCAPS_NONLOCALVIDMEM : DDSCAPS_LOCALVIDMEM;
-
-    Interface = DdSurfaceInterfaceFor(Surface, This->Kind == DdKind::Draw7 ? 7 : This->Kind == DdKind::Draw4 ? 4 : 1);
-    if (Interface == nullptr)
-    {
-        DdFreeSurfaceMemory(Surface);
-        delete Surface;
-        return E_OUTOFMEMORY;
-    }
-
-    Interface->RefCount = 1;
-    Surface->RefCount = 1;
-    DdLinkSurface(Surface);
     if (Primary)
         Driver->Primary = Surface;
 
+    /* Only the surface handed back keeps the DirectDraw object alive */
     if (!DdIsOldDraw(This))
     {
         DdAddRefInterface(This);
         Surface->Owner = This;
     }
 
-    *Result = Interface;
+    *Result = DdExistingInterface(Surface, Version);
     return S_OK;
 }
 
@@ -444,16 +854,22 @@ DdReleaseLocalSurfaces(
     _In_ DdLocal* Local)
 {
     DdSurface* Surface;
-    DdSurface* Next;
 
-    for (Surface = Local->Driver->Surfaces; Surface != nullptr; Surface = Next)
+    /* Destroying one surface of a chain takes others with it, so start over each time */
+    for (;;)
     {
-        Next = Surface->Next;
-        if (Surface->Creator == Local && Surface->ProcessId == Local->ProcessId)
+        for (Surface = Local->Driver->Surfaces; Surface != nullptr; Surface = Surface->Next)
         {
-            Surface->Owner = nullptr;
-            DdDestroySurface(Surface);
+            if (Surface->Creator == Local && Surface->ProcessId == Local->ProcessId &&
+                (Surface->ChainFlags & DdChainDying) == 0)
+            {
+                break;
+            }
         }
+        if (Surface == nullptr)
+            break;
+        Surface->Owner = nullptr;
+        DdDestroySurface(Surface, Surface->Interfaces != nullptr ? Surface->Interfaces->Version : 7);
     }
 }
 
@@ -520,41 +936,12 @@ DdSurfaceRelease(
     _In_ VOID* Com)
 {
     DdSurfaceInterface* Interface = DdInterfaceFromCom(Com);
-    DdSurfaceInterface** Link;
-    DdSurface* Surface;
-    ULONG Remaining;
 
     DdLockScope Lock;
 
-    if (Interface == nullptr || Interface->Surface == nullptr || Interface->RefCount == 0)
+    if (Interface == nullptr || Interface->Surface == nullptr)
         return 0;
-
-    Surface = Interface->Surface;
-    Interface->RefCount -= 1;
-    Remaining = Interface->RefCount;
-    Surface->RefCount -= 1;
-
-    if (Surface->RefCount == 0)
-    {
-        DdDestroySurface(Surface);
-        return 0;
-    }
-
-    if (Remaining == 0)
-    {
-        for (Link = &Surface->Interfaces; *Link != nullptr; Link = &(*Link)->Next)
-        {
-            if (*Link == Interface)
-            {
-                *Link = Interface->Next;
-                break;
-            }
-        }
-        Interface->Vtbl = nullptr;
-        delete Interface;
-    }
-
-    return Remaining;
+    return DdReleaseThrough(Interface->Surface, Interface);
 }
 
 static
@@ -571,6 +958,18 @@ DdDescribe(
     Desc->dwHeight = Surface->Height;
     Desc->lPitch = Surface->Pitch;
     Desc->ddpfPixelFormat = Surface->Format;
+
+    /* The short description carries a Z buffer's depth in its own field */
+    if ((Surface->Caps.dwCaps & DDSCAPS_ZBUFFER) != 0 && Size < sizeof(DDSURFACEDESC2))
+    {
+        Desc->dwFlags = (Desc->dwFlags & ~DDSD_PIXELFORMAT) | DDSD_ZBUFFERBITDEPTH;
+        Desc->dwMipMapCount = Surface->Format.dwZBufferBitDepth;
+    }
+    if ((Surface->ChainFlags & DdChainWasFront) != 0)
+    {
+        Desc->dwFlags |= DDSD_BACKBUFFERCOUNT;
+        Desc->dwBackBufferCount = Surface->BackBufferCount;
+    }
     Desc->ddsCaps.dwCaps = Surface->Caps.dwCaps;
     if (Size >= sizeof(DDSURFACEDESC2))
     {
@@ -604,6 +1003,15 @@ DdLearnPitch(
         return;
     if (SUCCEEDED(DdLockSurfaceResource(Hardware, Surface, nullptr, 0, &Bits)))
         DdUnlockSurfaceResource(Hardware, Surface);
+}
+
+/* The full description an enumeration hands out; a pitch not yet learned stays zero */
+VOID
+DdDescribeSurface(
+    _In_ DdSurface* Surface,
+    _Out_ DDSURFACEDESC2* Desc)
+{
+    DdDescribe(Surface, Desc, sizeof(*Desc));
 }
 
 static
@@ -1296,7 +1704,8 @@ DdSurfaceGetDDInterface(
 
     if (Draw == nullptr)
         return E_INVALIDARG;
-    Interface = DdFindInterface(Surface->Creator, DdKind::Draw1, TRUE);
+    /* The interface of the kind that created the surface */
+    Interface = DdFindInterface(Surface->Creator, Surface->MakerKind, TRUE);
     if (Interface == nullptr)
         return E_OUTOFMEMORY;
     DdAddRefInterface(Interface);
@@ -1540,7 +1949,7 @@ DdSurfaceInitialize(
     return DDERR_ALREADYINITIALIZED;
 }
 
-/* Overlays, attachment chains and private data are not implemented yet */
+/* Flipping and overlays are not implemented yet */
 static
 HRESULT
 STDMETHODCALLTYPE
@@ -1580,20 +1989,6 @@ DdSurfaceMissing3(
 static
 HRESULT
 STDMETHODCALLTYPE
-DdSurfaceMissing4(
-    _In_ VOID* Com,
-    _In_opt_ VOID* First,
-    _In_opt_ VOID* Second,
-    _In_opt_ VOID* Third,
-    _In_opt_ VOID* Fourth)
-{
-    DD_TRACE_ONCE(L"a surface method that is not implemented yet was called");
-    return DDERR_UNSUPPORTED;
-}
-
-static
-HRESULT
-STDMETHODCALLTYPE
 DdSurfaceMissing5(
     _In_ VOID* Com,
     _In_opt_ VOID* First,
@@ -1611,10 +2006,10 @@ DdSurfaceMissing5(
 /* The IDirectDrawSurface slots every version starts with, Unlock passed in */
 #define DD_SURFACE_SLOTS(UnlockSlot) \
     DD_SURFACE_SLOT(DdSurfaceQueryInterface), DD_SURFACE_SLOT(DdSurfaceAddRef), DD_SURFACE_SLOT(DdSurfaceRelease), \
-    DD_SURFACE_SLOT(DdSurfaceMissing1), DD_SURFACE_SLOT(DdSurfaceMissing1), DD_SURFACE_SLOT(DdSurfaceBlt), \
-    DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceBltFast), DD_SURFACE_SLOT(DdSurfaceMissing2), \
-    DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceMissing2), \
-    DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceStatus), DD_SURFACE_SLOT(DdSurfaceGetCaps), \
+    DD_SURFACE_SLOT(DdSurfaceAddAttached), DD_SURFACE_SLOT(DdSurfaceMissing1), DD_SURFACE_SLOT(DdSurfaceBlt), \
+    DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceBltFast), DD_SURFACE_SLOT(DdSurfaceDeleteAttached), \
+    DD_SURFACE_SLOT(DdSurfaceEnumAttached), DD_SURFACE_SLOT(DdSurfaceMissing3), DD_SURFACE_SLOT(DdSurfaceMissing2), \
+    DD_SURFACE_SLOT(DdSurfaceGetAttached), DD_SURFACE_SLOT(DdSurfaceStatus), DD_SURFACE_SLOT(DdSurfaceGetCaps), \
     DD_SURFACE_SLOT(DdSurfaceGetClipper), DD_SURFACE_SLOT(DdSurfaceGetColorKey), DD_SURFACE_SLOT(DdSurfaceGetDC), \
     DD_SURFACE_SLOT(DdSurfaceStatus), DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE_SLOT(DdSurfaceGetPalette), \
     DD_SURFACE_SLOT(DdSurfaceGetPixelFormat), DD_SURFACE_SLOT(DdSurfaceGetSurfaceDesc), \

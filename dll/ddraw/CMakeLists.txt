@@ -1,6 +1,7 @@
 nt_add_usermode_dll(ddraw
     DEF ddraw.def
     SOURCES
+        attach.cpp
         blit.cpp
         caps.cpp
         clipper.cpp

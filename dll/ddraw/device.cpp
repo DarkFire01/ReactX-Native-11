@@ -548,6 +548,69 @@ DdFormatFromMasks(
 }
 
 /* The Direct3D format for a DirectDraw pixel format; unknown when the driver has no such format */
+/* Z buffers with stencil, told apart by where the depth and stencil bits sit */
+static
+D3DDDIFORMAT
+DdStencilFormat(
+    _In_ const DDPIXELFORMAT* Format)
+{
+    DWORD Mask = Format->dwZBitMask;
+    DWORD Stencil = Format->dwStencilBitMask;
+    DWORD Bits = Format->dwStencilBitDepth;
+
+    if (Format->dwZBufferBitDepth == 32)
+    {
+        if (Mask == 0xFFFFFF00 && Stencil == 0xFF && Bits == 8)
+            return D3DDDIFMT_D24S8;
+        if (Mask == 0x00FFFFFF && Stencil == 0xFF000000 && Bits == 8)
+            return D3DDDIFMT_S8D24;
+    }
+    else if (Format->dwZBufferBitDepth == 16 && Bits == 1)
+    {
+        if (Mask == 0xFFFE && Stencil == 0x1)
+            return D3DDDIFMT_D15S1;
+        if (Mask == 0x7FFF && Stencil == 0x8000)
+            return D3DDDIFMT_S1D15;
+    }
+    return D3DDDIFMT_UNKNOWN;
+}
+
+/* Z buffers by depth and the bits the depth occupies */
+static
+D3DDDIFORMAT
+DdDepthFormat(
+    _In_ const DDPIXELFORMAT* Format)
+{
+    DWORD Mask = Format->dwZBitMask;
+
+    if ((Format->dwFlags & DDPF_STENCILBUFFER) != 0)
+        return DdStencilFormat(Format);
+
+    switch (Format->dwZBufferBitDepth)
+    {
+    case 15:
+    case 16:
+        if (Mask == 0xFFFF || Mask == 0)
+            return D3DDDIFMT_D16;
+        if (Mask == 0xFFFE)
+            return D3DDDIFMT_D15S1;
+        if (Mask == 0x7FFF)
+            return D3DDDIFMT_S1D15;
+        return D3DDDIFMT_UNKNOWN;
+    case 24:
+    case 32:
+        if (Mask == 0xFFFFFFFF)
+            return D3DDDIFMT_D32;
+        if (Mask == 0x00FFFFFF)
+            return D3DDDIFMT_X8D24;
+        if (Mask == 0xFFFFFF00)
+            return D3DDDIFMT_D24X8;
+        return D3DDDIFMT_UNKNOWN;
+    default:
+        return D3DDDIFMT_UNKNOWN;
+    }
+}
+
 D3DDDIFORMAT
 DdDriverFormat(
     _In_ const DDPIXELFORMAT* Format)
@@ -562,6 +625,8 @@ DdDriverFormat(
         return DdFormatFromMasks(Format);
     if ((Format->dwFlags & DDPF_ALPHA) != 0 && Format->dwAlphaBitDepth == 8)
         return D3DDDIFMT_A8;
+    if ((Format->dwFlags & DDPF_ZBUFFER) != 0)
+        return DdDepthFormat(Format);
     return D3DDDIFMT_UNKNOWN;
 }
 

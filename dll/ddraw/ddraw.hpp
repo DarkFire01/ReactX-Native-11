@@ -299,6 +299,28 @@ struct DdPrivateData
     DdPrivateData* Next;
 };
 
+/* How a surface came to be part of a complex structure, and what it was there */
+enum : ULONG
+{
+    DdChainImplicit = 0x00000001,
+    DdChainRoot = 0x00000002,
+    DdChainWasFront = 0x00000004,
+    DdChainWasBack = 0x00000008,
+    DdChainDying = 0x00000010,
+};
+
+/* One attachment, threaded on the attaching surface's out list and the attached surface's in list */
+struct DdLink
+{
+    DdSurface* From;
+    DdSurface* To;
+    UCHAR FromVersion;
+    UCHAR ToVersion;
+    BOOLEAN Implicit;
+    DdLink* NextOut;
+    DdLink* NextIn;
+};
+
 /* A DirectDraw surface; video memory surfaces keep their pixels in a driver resource */
 struct DdSurface
 {
@@ -306,6 +328,7 @@ struct DdSurface
     DdDriver* Driver;
     DdLocal* Creator;
     DdInterface* Owner;
+    DdKind MakerKind;
     DWORD ProcessId;
     DDSCAPS2 Caps;
     DDPIXELFORMAT Format;
@@ -337,6 +360,10 @@ struct DdSurface
     DWORD Lod;
     DdSurfaceInterface* Interfaces;
     DdPrivateData* PrivateData;
+    DdLink* Attached;
+    DdLink* AttachedFrom;
+    ULONG ChainFlags;
+    DWORD BackBufferCount;
 };
 
 /* Process wide runtime state */
@@ -712,6 +739,77 @@ DdUnmapSurface(
 VOID
 DdTouchSurface(
     _Inout_ DdSurface* Surface);
+
+VOID
+DdHoldSurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version);
+
+VOID
+DdDropSurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version);
+
+ULONG
+DdSurfaceRefsOn(
+    _In_ const DdSurface* Surface,
+    _In_ UCHAR Version);
+
+_Ret_maybenull_
+VOID*
+DdHandOutSurface(
+    _In_ DdSurface* Surface,
+    _In_ UCHAR Version);
+
+UCHAR
+DdSurfaceVersionOf(
+    _In_ VOID* Com);
+
+VOID
+DdDescribeSurface(
+    _In_ DdSurface* Surface,
+    _Out_ DDSURFACEDESC2* Desc);
+
+/* attach.cpp */
+HRESULT
+DdAddLink(
+    _In_ DdSurface* From,
+    _In_ UCHAR FromVersion,
+    _In_ DdSurface* To,
+    _In_ UCHAR ToVersion,
+    _In_ BOOLEAN Implicit);
+
+VOID
+DdDetachForDestroy(
+    _Inout_ DdSurface* Surface,
+    _In_ UCHAR Version);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceAddAttached(
+    _In_ VOID* Com,
+    _In_opt_ VOID* Attach);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceDeleteAttached(
+    _In_ VOID* Com,
+    _In_ DWORD Flags,
+    _In_opt_ VOID* Attach);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceEnumAttached(
+    _In_ VOID* Com,
+    _In_opt_ VOID* Context,
+    _In_opt_ VOID* Callback);
+
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceGetAttached(
+    _In_ VOID* Com,
+    _In_opt_ VOID* Caps,
+    _Out_opt_ VOID** Result);
 
 /* blit.cpp */
 HRESULT
