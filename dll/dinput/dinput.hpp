@@ -7,7 +7,9 @@
 
 #pragma once
 
+#ifndef DIRECTINPUT_VERSION
 #define DIRECTINPUT_VERSION 0x0700
+#endif
 
 #include <windows.h>
 #include <objbase.h>
@@ -801,6 +803,20 @@ HRESULT
 DiSetSinkBuffer(
     _Inout_ PRX_DI_SINK Sink,
     _In_ ULONG Count);
+
+/* What a backend may read and change on the sink it opened */
+ULONG
+DiSinkFlags(
+    _In_ PRX_DI_SINK Sink);
+
+VOID
+DiSetSinkExclusive(
+    _Inout_ PRX_DI_SINK Sink,
+    _In_ BOOLEAN Exclusive);
+
+ULONG_PTR
+DiSinkContext(
+    _In_ PRX_DI_SINK Sink);
 
 VOID
 DiPrimeKeyboard(

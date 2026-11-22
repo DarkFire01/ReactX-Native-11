@@ -1644,7 +1644,7 @@ public:
     GetDeviceState(
         _Out_ PVOID Target) override
     {
-        if ((Sink->Flags & DI_SINK_ACQUIRED) == 0)
+        if ((DiSinkFlags(Sink) & DI_SINK_ACQUIRED) == 0)
             return DIERR_INPUTLOST;
 
         CopyMemory(Target, State, Format.dwDataSize);
@@ -1754,10 +1754,7 @@ public:
         _In_opt_ HWND Window,
         _In_ DWORD Flags) override
     {
-        if (Flags & DISCL_EXCLUSIVE)
-            Sink->Flags |= DI_SINK_EXCLUSIVE;
-        else
-            Sink->Flags &= ~DI_SINK_EXCLUSIVE;
+        DiSetSinkExclusive(Sink, (Flags & DISCL_EXCLUSIVE) != 0);
         return S_OK;
     }
 
@@ -3416,7 +3413,7 @@ private:
             else if ((Type & DIDFT_ABSAXIS) || ((Type & DIDFT_POV) && Group->PovPoints))
             {
                 *reinterpret_cast<LONG*>(Slot) = Reading;
-                if (Slots[Index].Cal != nullptr && (Sink->Flags & DI_SINK_RELATIVE) == 0)
+                if (Slots[Index].Cal != nullptr && (DiSinkFlags(Sink) & DI_SINK_RELATIVE) == 0)
                     DiHidCook(Slots[Index].Cal, reinterpret_cast<LONG*>(Slot));
             }
             else if (Type & DIDFT_BUTTON)
@@ -3538,7 +3535,7 @@ private:
         _Inout_ PRX_DI_SINK Sink,
         _In_ BOOL Acquire)
     {
-        RxDiHid* Self = reinterpret_cast<RxDiHid*>(Sink->Extra);
+        RxDiHid* Self = reinterpret_cast<RxDiHid*>(DiSinkContext(Sink));
 
         if (!Acquire)
         {

@@ -267,6 +267,31 @@ DiSetSinkBuffer(
     return hr;
 }
 
+ULONG
+DiSinkFlags(
+    _In_ PRX_DI_SINK Sink)
+{
+    return Sink->Flags;
+}
+
+VOID
+DiSetSinkExclusive(
+    _Inout_ PRX_DI_SINK Sink,
+    _In_ BOOLEAN Exclusive)
+{
+    if (Exclusive)
+        Sink->Flags |= DI_SINK_EXCLUSIVE;
+    else
+        Sink->Flags &= ~DI_SINK_EXCLUSIVE;
+}
+
+ULONG_PTR
+DiSinkContext(
+    _In_ PRX_DI_SINK Sink)
+{
+    return Sink->Extra;
+}
+
 VOID
 DiPrimeKeyboard(
     _In_ ULONG Toggles)
