@@ -328,6 +328,7 @@ DsDevice::DsDevice()
     Failed = FALSE;
     Voices = nullptr;
     Scratch = nullptr;
+    CubicRates = FALSE;
     InitializeCriticalSection(&MixLock);
 }
 
@@ -526,6 +527,17 @@ DsDevice::AddVoice(
     Lock();
     Voice->Next = Voices;
     Voices = Voice;
+    Unlock();
+}
+
+/* Every voice, present and future, converts rates with the cubic converter from here on */
+VOID
+DsDevice::UseCubicRates(VOID)
+{
+    Lock();
+    CubicRates = TRUE;
+    for (DsVoice* Voice = Voices; Voice != nullptr; Voice = Voice->Next)
+        Voice->StartCubic();
     Unlock();
 }
 

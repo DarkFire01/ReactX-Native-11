@@ -49,7 +49,13 @@ DsVoice::Setup(
 
     Device = Owner;
     Ratio = static_cast<float>(Wave->nSamplesPerSec) / static_cast<float>(Owner->Rate);
-    if (Wave->nSamplesPerSec != Owner->Rate && FAILED(Resampler.Configure(Wave->nSamplesPerSec, Owner->Rate, Channels)))
+    Owner->Lock();
+    if (Owner->CubicRates)
+        StartCubic();
+    else if (Wave->nSamplesPerSec != Owner->Rate)
+        Resampler.Configure(Wave->nSamplesPerSec, Owner->Rate, Channels);
+    Owner->Unlock();
+    if (Ratio != 1.0f && !Resampler.Active)
         return E_OUTOFMEMORY;
     Owner->AddVoice(this);
     return S_OK;
@@ -198,15 +204,40 @@ VOID
 DsVoice::SetFrequency(
     _In_ DWORD Frequency)
 {
+    DWORD Old;
+    DWORD Gap;
+
     Device->Lock();
+    Old = Format->nSamplesPerSec;
+    Gap = Old >= Frequency ? Old - Frequency : Frequency - Old - 1;
+
+    /* A real rate change moves every buffer on the device to the cubic converter for good */
+    if (!Device->CubicRates && Gap > Old / 500)
+    {
+        Device->UseCubicRates();
+        DsTrace(L"rate change to %lu Hz moved the device to the cubic converter", Frequency);
+    }
+
     Format->nSamplesPerSec = Frequency;
     Format->nAvgBytesPerSec = Frequency * Format->nBlockAlign;
     Ratio = static_cast<float>(Frequency) / static_cast<float>(Device->Rate);
-    if (Frequency == Device->Rate)
+    if (Resampler.Cubic)
+        Resampler.Retune(Frequency, Device->Rate);
+    else if (Frequency == Device->Rate)
         Resampler.Release();
     else if (FAILED(Resampler.Configure(Frequency, Device->Rate, Channels)))
         DS_TRACE_ONCE(L"no memory for a %lu Hz rate converter", Frequency);
     Device->Unlock();
+}
+
+/* Restarts conversion with the cubic converter from the current read position */
+VOID
+DsVoice::StartCubic(VOID)
+{
+    BOOLEAN Whole16 = DsFormatTag(Format) == WAVE_FORMAT_PCM && Format->wBitsPerSample == 16;
+
+    if (FAILED(Resampler.ConfigureCubic(Format->nSamplesPerSec, Device->Rate, Channels, Whole16)))
+        DS_TRACE_ONCE(L"no memory for a cubic rate converter");
 }
 
 /* Each output speaker takes the left, right or overall amplitude depending on its side of the room */

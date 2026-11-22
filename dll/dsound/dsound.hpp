@@ -322,6 +322,19 @@ public:
         _In_ ULONG OutRate,
         _In_ UINT Channels);
 
+    /* Four point cubic converter the system falls back to once a buffer changes rate */
+    HRESULT
+    ConfigureCubic(
+        _In_ ULONG InRate,
+        _In_ ULONG OutRate,
+        _In_ UINT Channels,
+        _In_ BOOLEAN Whole16);
+
+    VOID
+    Retune(
+        _In_ ULONG InRate,
+        _In_ ULONG OutRate);
+
     VOID
     Release(VOID);
 
@@ -348,8 +361,13 @@ public:
         _In_ ULONG Outputs) const;
 
     BOOLEAN Active;
+    BOOLEAN Cubic;
 
 private:
+    VOID
+    PullCubic(
+        _Out_writes_(Channels) float* Frame);
+
     float
     Convolve(
         _In_reads_(Count) const float* Row,
@@ -385,6 +403,12 @@ private:
     LONG Stride;
     float Gain;
     LONGLONG Made;
+
+    /* Cubic path: whole input frames and the fraction each output moves, and where between frames it sits */
+    BOOLEAN Whole;
+    ULONG Leap;
+    float Creep;
+    float Fraction;
 };
 
 /* The mixer side of a playing buffer */
@@ -420,6 +444,9 @@ public:
     VOID
     SetFrequency(
         _In_ DWORD Frequency);
+
+    VOID
+    StartCubic(VOID);
 
     VOID
     SetAttenuation(
@@ -532,6 +559,9 @@ public:
         _In_ DsVoice* Voice);
 
     VOID
+    UseCubicRates(VOID);
+
+    VOID
     Kick(VOID);
 
     HRESULT
@@ -554,6 +584,9 @@ public:
     GUID Id;
     WCHAR* EndpointId;
     UINT Rate;
+
+    /* Set for good once any buffer changes rate by more than a fifth of a percent */
+    BOOLEAN CubicRates;
     UINT Channels;
     DWORD Mask;
     LONG Pan;

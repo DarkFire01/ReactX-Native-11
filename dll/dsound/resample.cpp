@@ -288,10 +288,15 @@ DsResampler::Release(VOID)
     Capacity = 0;
     Channels = 0;
     Polyphase = FALSE;
+    Cubic = FALSE;
+    Whole = FALSE;
+    Leap = 0;
+    Creep = 0.0f;
     Phase = 0;
     Position = 0;
     Filled = 0;
     Made = 0;
+    Fraction = 0.0f;
 }
 
 HRESULT
@@ -445,6 +450,7 @@ DsResampler::Reset(VOID)
     Position = 0;
     Filled = 0;
     Made = 0;
+    Fraction = 0.0f;
 }
 
 VOID
@@ -496,6 +502,8 @@ DsResampler::Convolve(
 LONGLONG
 DsResampler::Newest(VOID) const
 {
+    if (Cubic)
+        return Position;
     if (Polyphase)
         return Position + Half;
     return DsRound(fma(Step, static_cast<double>(Made), 0.0) + Reach);
@@ -512,6 +520,11 @@ VOID
 DsResampler::Pull(
     _Out_writes_(Channels) float* Frame)
 {
+    if (Cubic)
+    {
+        PullCubic(Frame);
+        return;
+    }
     if (Polyphase)
     {
         ULONG Start = Slot(Position - static_cast<LONGLONG>(Taps - Half - 1));
@@ -558,10 +571,118 @@ DsResampler::InputFor(
     LONGLONG Last;
     LONGLONG Need;
 
-    if (Polyphase)
+    if (Cubic)
+        Last = Position + static_cast<LONGLONG>(Outputs * (Leap + Creep)) + 2;
+    else if (Polyphase)
         Last = Position + static_cast<LONGLONG>((Phase + static_cast<ULONGLONG>(Down) * Outputs) / Up) + Half;
     else
         Last = DsRound(Step * static_cast<double>(Made + Outputs) + Reach);
     Need = Last + 1 - Filled;
     return Need > 0 ? static_cast<ULONG>(Need) : 0;
+}
+
+HRESULT
+DsResampler::ConfigureCubic(
+    _In_ ULONG InRate,
+    _In_ ULONG OutRate,
+    _In_ UINT Count,
+    _In_ BOOLEAN Whole16)
+{
+    Release();
+    Channels = Count;
+    Capacity = 8;
+    Ring = static_cast<float*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Count * Capacity * sizeof(*Ring)));
+    if (Ring == nullptr)
+    {
+        Release();
+        return E_OUTOFMEMORY;
+    }
+    Whole = Whole16;
+    Cubic = TRUE;
+    Active = TRUE;
+    Retune(InRate, OutRate);
+    Reset();
+    return S_OK;
+}
+
+/* A new rate keeps the place between frames and the history */
+VOID
+DsResampler::Retune(
+    _In_ ULONG InRate,
+    _In_ ULONG OutRate)
+{
+    float Ratio = static_cast<float>(OutRate) / static_cast<float>(InRate);
+    float Pace = 1.0f / Ratio;
+
+    Leap = static_cast<ULONG>(Pace);
+    Creep = Pace - static_cast<float>(Leap);
+}
+
+/* Lagrange cubic through the two frames on each side; 16 bit sources work on the raw sample values */
+VOID
+DsResampler::PullCubic(
+    _Out_writes_(Channels) float* Frame)
+{
+    ULONG Oldest = Slot(Position - 3);
+    ULONG Early = Slot(Position - 2);
+    ULONG Late = Slot(Position - 1);
+    ULONG Newest = Slot(Position);
+    float Third = 1.0f / 3.0f;
+    float Sixth = 1.0f / 6.0f;
+    float Unit = 1.0f;
+    float Before;
+
+    if (Whole)
+    {
+        Unit = 1.0f / 32768.0f;
+        Third = 1.0f / 98304.0f;
+        Sixth = 1.0f / 196608.0f;
+    }
+
+    for (UINT Channel = 0; Channel < Channels; Channel++)
+    {
+        const float* Line = Ring + Channel * Capacity;
+        float Back = Line[Oldest];
+        float Left = Line[Early];
+        float Right = Line[Late];
+        float Ahead = Line[Newest];
+        float Base;
+        float Linear;
+        float Square;
+        float Curve;
+
+        if (Whole)
+        {
+            Back = Back * 32768.0f;
+            Left = Left * 32768.0f;
+            Right = Right * 32768.0f;
+            Ahead = Ahead * 32768.0f;
+            Base = Left * Unit;
+            Linear = fmaf(Right, Unit, -(Back * Third));
+        }
+        else
+        {
+            Base = Left;
+            Linear = fmaf(-Back, Third, Right);
+        }
+        Linear = fmaf(-Left, Unit * 0.5f, Linear);
+        Linear = fmaf(-Ahead, Sixth, Linear);
+        Square = fmaf(Back + Right, Unit * 0.5f, -Base);
+        Curve = fmaf(Left - Right, Unit * 0.5f, (Ahead - Back) * Sixth);
+        Curve = fmaf(Curve, Fraction, Square);
+        Curve = fmaf(Curve, Fraction, Linear);
+        Frame[Channel] = fmaf(Curve, Fraction, Base);
+    }
+
+    Position += Leap;
+    Fraction = Creep + Fraction;
+    if (Fraction >= 1.0f)
+    {
+        do
+        {
+            Before = Fraction;
+            Position += 1;
+            Fraction = Fraction - 1.0f;
+        } while (Before >= 2.0f);
+    }
 }
