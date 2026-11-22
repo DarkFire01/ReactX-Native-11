@@ -2143,6 +2143,16 @@ DcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 64 },
         { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 65 },
         { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 65 },
+        /* The last frames of a one shot buffer, through each converter */
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 66 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 66 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22094, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 66 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 66 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 67 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, FALSE, 32000, 32, 0, 0, DSBCAPS_GLOBALFOCUS, 67 },
+        /* Ends late in an engine pass, where the filter would ring on into the next one */
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 68 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 68 },
     };
     IDirectSound8* Sound;
 
@@ -2154,6 +2164,7 @@ DcCheckMix(VOID)
     {
         UINT Scene = Cases[Case].Scene;
         BOOLEAN Later = Scene >= 63 && Scene <= 65;
+        BOOLEAN Ending = Scene >= 66 && Scene <= 68;
         size_t Shown = Later ? 1800 : 200;
         DcLoopback Loopback;
         WAVEFORMATEX Format;
@@ -2166,7 +2177,7 @@ DcCheckMix(VOID)
         size_t Onset;
         size_t Frames;
 
-        if (Later)
+        if (Later || Ending)
         {
             Sound->Release();
             if (FAILED(DcOpenMixDevice(&Sound)))
@@ -2182,9 +2193,11 @@ DcCheckMix(VOID)
         DcFormat(&Format, Cases[Case].Tag, Cases[Case].Channels,
                  Cases[Case].NativeRate ? Loopback.Format->nSamplesPerSec : Cases[Case].Rate, Cases[Case].Bits);
         Bytes = Format.nAvgBytesPerSec / 4 / Format.nBlockAlign * Format.nBlockAlign;
+        if (Scene == 68)
+            Bytes += 30 * Format.nBlockAlign;
         hr = DcMakeBuffer(Sound,
                           DSBCAPS_CTRLVOLUME | Cases[Case].Focus |
-                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 || Later ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
+                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 || Later || Ending ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
                                Cases[Case].Scene >= 50 && Cases[Case].Scene < 60 ? DSBCAPS_CTRLFX :
                                Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
                           Bytes, &Format, &Buffer);
@@ -2197,14 +2210,18 @@ DcCheckMix(VOID)
         DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format);
         Buffer->Unlock(Part1, Size1, nullptr, 0);
         Buffer->SetVolume(Cases[Case].Volume);
-        if (Cases[Case].Scene == 60 || Cases[Case].Scene == 61)
+        if (Scene == 67)
+        {
+            printf("  setfrequency = %08lX\n", Buffer->SetFrequency(Format.nSamplesPerSec * 3 / 2));
+        }
+        else if (Cases[Case].Scene == 60 || Cases[Case].Scene == 61)
         {
             /* A tenth of a percent stays within the converter, half again does not */
             DWORD Rate = Format.nSamplesPerSec;
 
             printf("  setfrequency = %08lX\n", Buffer->SetFrequency(Cases[Case].Scene == 60 ? Rate + Rate / 1000 : Rate * 3 / 2));
         }
-        else if (Cases[Case].Scene >= 50)
+        else if (Cases[Case].Scene >= 50 && Cases[Case].Scene < 60)
         {
             IDirectSoundBuffer8* Buffer8 = nullptr;
             DSEFFECTDESC Effect = {};
@@ -2278,6 +2295,18 @@ DcCheckMix(VOID)
             }
             for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
                 printf("  channel %u sum %.9g power %.9g\n", Channel, Sum[Channel], Power[Channel]);
+            if (Ending)
+            {
+                /* Only the end is shown, from a little before where the input runs out */
+                DWORD Played = Scene == 67 ? Format.nSamplesPerSec * 3 / 2 : Format.nSamplesPerSec;
+                size_t End = static_cast<size_t>(static_cast<ULONGLONG>(Bytes / Format.nBlockAlign) * Loopback.Format->nSamplesPerSec / Played);
+                size_t Skip = End > 120 ? End - 120 : 0;
+
+                Skip = Skip < Frames ? Skip : Frames;
+                Start += Skip * Channels;
+                Frames -= Skip;
+                Shown = 200;
+            }
             for (size_t Frame = 0; Frame < Shown && Frame < Frames; Frame++)
             {
                 printf("  frame %2zu", Frame);
