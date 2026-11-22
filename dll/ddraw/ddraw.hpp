@@ -14,6 +14,7 @@
 #include <d3d9types.h>
 #include <d3dumddi.h>
 
+#include "kmcallbacks.hpp"
 #include "trace.hpp"
 
 struct DdDriver;
@@ -67,10 +68,10 @@ enum : ULONG
     DdCreateEmulationOnly = 0x00000002,
 };
 
-/* The kernel adapter and the Direct3D 9 user mode driver behind a display */
-struct DdHardware
+/* The kernel adapter, kernel device and Direct3D 9 user mode driver device behind a display */
+struct DdHardware : public RxKernelDevice
 {
-    D3DKMT_HANDLE KernelAdapter = 0;
+    D3DKMT_HANDLE AdapterHandle = 0;
     LUID AdapterLuid = {};
     D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId = 0;
     HMODULE Module = NULL;
@@ -80,6 +81,31 @@ struct DdHardware
     UINT RuntimeVersion = 0;
     UINT DriverVersion = 0;
     BOOLEAN IsOldDisplayModel = FALSE;
+
+    /* The device every surface of this display is created on */
+    D3DKMT_HANDLE DeviceHandle = 0;
+    D3DKMT_HANDLE ContextHandle = 0;
+    D3DDDI_DEVICECALLBACKS DeviceCallbacks = {};
+    D3DDDI_DEVICEFUNCS DeviceFunctions = {};
+    HANDLE DriverDevice = NULL;
+    BOOLEAN UsesFlush1 = FALSE;
+
+    D3DKMT_HANDLE
+    KernelDevice() const override;
+
+    D3DKMT_HANDLE
+    KernelAdapter() const override;
+
+    D3DKMT_CLIENTHINT
+    KernelClientHint() const override;
+
+    D3DKMT_HANDLE
+    KernelResourceOf(
+        _In_opt_ HANDLE RuntimeResource) override;
+
+    VOID
+    RetireKernelResource(
+        _In_ HANDLE RuntimeResource) override;
 
     /* Memory as the kernel reports it, after the runtime's clamps */
     ULONGLONG LocalMemory = 0;
@@ -234,7 +260,22 @@ struct DdSurfaceInterface
     DdSurfaceInterface* Next;
 };
 
-/* A DirectDraw surface; every surface lives in system memory until the driver device backs them */
+/* A user mode driver resource behind a video memory surface */
+struct DdResource
+{
+    HANDLE DriverResource;
+    D3DKMT_HANDLE KernelResource;
+    D3DDDIFORMAT Format;
+    D3DDDI_POOL Pool;
+    D3DDDI_RESOURCEFLAGS Flags;
+    UINT SurfaceCount;
+    UINT MipLevels;
+    UINT Charged;
+    BOOLEAN ChargedShared;
+    USHORT LockCount;
+};
+
+/* A DirectDraw surface; video memory surfaces keep their pixels in a driver resource */
 struct DdSurface
 {
     ULONG RefCount;
@@ -249,6 +290,7 @@ struct DdSurface
     LONG Pitch;
     BYTE* Bits;
     HANDLE Section;
+    DdResource* Resource;
     DWORD KeyFlags;
     DDCOLORKEY SourceKey;
     DDCOLORKEY DestKey;
@@ -400,6 +442,23 @@ DdQueryEmulatedMemory(
     _In_ DWORD Caps,
     _Out_ DWORD* Total,
     _Out_ DWORD* Free);
+
+/* device.cpp */
+BOOLEAN
+DdCreateKernelDevice(
+    _Inout_ DdHardware* Hardware);
+
+BOOLEAN
+DdCreateDriverDevice(
+    _Inout_ DdHardware* Hardware);
+
+VOID
+DdDestroyDriverDevice(
+    _Inout_ DdHardware* Hardware);
+
+VOID
+DdDestroyKernelDevice(
+    _Inout_ DdHardware* Hardware);
 
 /* caps.cpp */
 BOOLEAN

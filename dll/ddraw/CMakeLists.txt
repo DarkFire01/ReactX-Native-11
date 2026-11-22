@@ -4,6 +4,7 @@ nt_add_usermode_dll(ddraw
         blit.cpp
         caps.cpp
         clipper.cpp
+        device.cpp
         driver.cpp
         globals.cpp
         hardware.cpp

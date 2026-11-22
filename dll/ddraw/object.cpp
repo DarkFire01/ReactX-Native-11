@@ -652,7 +652,7 @@ DdReadScanLine(
     if (Driver->Hardware == nullptr || Kmt == nullptr)
         return E_NOTIMPL;
 
-    Scan.hAdapter = Driver->Hardware->KernelAdapter;
+    Scan.hAdapter = Driver->Hardware->AdapterHandle;
     Scan.VidPnSourceId = Driver->Hardware->VidPnSourceId;
     Status = D3DKMTGetScanLine(&Scan);
     if (Status == STATUS_DEVICE_REMOVED)

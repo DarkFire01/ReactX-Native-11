@@ -152,7 +152,7 @@ DdQueryAdapterInfoCb(
 {
     DdHardware* Hardware = static_cast<DdHardware*>(hAdapter);
 
-    return DdHresultFromStatus(DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_UMDRIVERPRIVATE,
+    return DdHresultFromStatus(DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_UMDRIVERPRIVATE,
                                              Args->pPrivateDriverData, Args->PrivateDriverDataSize));
 }
 
@@ -173,7 +173,7 @@ DdQueryAdapterInfoCb2(
     else
         return E_INVALIDARG;
 
-    return DdHresultFromStatus(DdQueryKernel(Hardware->KernelAdapter, Type, Args->pPrivateDriverData,
+    return DdHresultFromStatus(DdQueryKernel(Hardware->AdapterHandle, Type, Args->pPrivateDriverData,
                                              Args->PrivateDriverDataSize));
 }
 
@@ -356,7 +356,7 @@ DdQueryAdapterState(
     ULONGLONG Borrow;
     NTSTATUS Status;
 
-    Status = DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_GETSEGMENTSIZE, &Segments, sizeof(Segments));
+    Status = DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_GETSEGMENTSIZE, &Segments, sizeof(Segments));
     if (!NT_SUCCESS(Status))
     {
         DdTrace(L"segment size query failed 0x%08lX", Status);
@@ -367,7 +367,7 @@ DdQueryAdapterState(
     Hardware->NonLocalMemory = Segments.SharedSystemMemorySize;
     DdClampMemory(&Hardware->LocalMemory, &Hardware->NonLocalMemory);
 
-    Status = DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_FLIPQUEUEINFO, &Hardware->FlipQueue,
+    Status = DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_FLIPQUEUEINFO, &Hardware->FlipQueue,
                            sizeof(Hardware->FlipQueue));
     if (!NT_SUCCESS(Status))
     {
@@ -394,7 +394,7 @@ DdQueryAdapterState(
     Hardware->LocalMemoryFree = Hardware->LocalMemory;
     Hardware->NonLocalMemoryFree = Hardware->NonLocalMemory;
 
-    Status = DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_ADAPTERTYPE, &Hardware->AdapterType,
+    Status = DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_ADAPTERTYPE, &Hardware->AdapterType,
                            sizeof(Hardware->AdapterType));
     if (!NT_SUCCESS(Status))
     {
@@ -402,7 +402,7 @@ DdQueryAdapterState(
         return FALSE;
     }
 
-    Status = DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_WDDM_1_2_CAPS, &Hardware->Wddm12Caps,
+    Status = DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_WDDM_1_2_CAPS, &Hardware->Wddm12Caps,
                            sizeof(Hardware->Wddm12Caps));
     if (!NT_SUCCESS(Status))
     {
@@ -422,7 +422,7 @@ DdLoadUserModeDriver(
     NTSTATUS Status;
 
     FileName.Version = KMTUMDVERSION_DX9;
-    Status = DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_UMDRIVERNAME, &FileName, sizeof(FileName));
+    Status = DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_UMDRIVERNAME, &FileName, sizeof(FileName));
     if (!NT_SUCCESS(Status) || FileName.UmdFileName[0] == UNICODE_NULL)
     {
         DdTrace(L"adapter has no Direct3D 9 UMD (0x%08lX), running without hardware", Status);
@@ -476,12 +476,12 @@ DdOpenHardware(
         return nullptr;
     }
 
-    Hardware->KernelAdapter = Open.hAdapter;
+    Hardware->AdapterHandle = Open.hAdapter;
     Hardware->AdapterLuid = Open.AdapterLuid;
     Hardware->VidPnSourceId = Open.VidPnSourceId;
 
     /* A driver waiting on an update reboot is treated as absent */
-    if (NT_SUCCESS(DdQueryKernel(Hardware->KernelAdapter, KMTQAITYPE_CHECKDRIVERUPDATESTATUS, &NeedsUpdate,
+    if (NT_SUCCESS(DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_CHECKDRIVERUPDATESTATUS, &NeedsUpdate,
                                  sizeof(NeedsUpdate))) && NeedsUpdate)
     {
         DdTrace(L"display driver has a pending update, running without hardware");
@@ -489,7 +489,8 @@ DdOpenHardware(
         return nullptr;
     }
 
-    if (!DdLoadUserModeDriver(Hardware) || !DdOpenDriverAdapter(Hardware) || !DdQueryAdapterState(Hardware))
+    if (!DdLoadUserModeDriver(Hardware) || !DdCreateKernelDevice(Hardware) || !DdOpenDriverAdapter(Hardware) ||
+        !DdCreateDriverDevice(Hardware) || !DdQueryAdapterState(Hardware))
     {
         DdCloseHardware(Hardware);
         return nullptr;
@@ -507,13 +508,15 @@ DdCloseHardware(
     if (Hardware == nullptr)
         return;
 
+    DdDestroyDriverDevice(Hardware);
     if (Hardware->DriverAdapter != NULL && Hardware->Functions.pfnCloseAdapter != nullptr)
         Hardware->Functions.pfnCloseAdapter(Hardware->DriverAdapter);
+    DdDestroyKernelDevice(Hardware);
 
     /* The UMD stays mapped: drivers start worker threads that outlive the adapter */
-    if (Hardware->KernelAdapter != 0)
+    if (Hardware->AdapterHandle != 0)
     {
-        Close.hAdapter = Hardware->KernelAdapter;
+        Close.hAdapter = Hardware->AdapterHandle;
         RxGetKmtThunks()->CloseAdapter(&Close);
     }
 
