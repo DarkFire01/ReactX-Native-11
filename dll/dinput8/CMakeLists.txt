@@ -2,9 +2,12 @@ nt_add_usermode_dll(dinput8
     DEF dinput8.def
     SOURCES
         apps.cpp
+        devdata.cpp
         device.cpp
+        devprop.cpp
         dinput.cpp
         formats.cpp
+        input.cpp
         keyboard.cpp
         keytables.cpp
         main.cpp

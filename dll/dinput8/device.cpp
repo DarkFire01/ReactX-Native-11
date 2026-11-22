@@ -1,21 +1,64 @@
 /*
  * PROJECT:     ReactX DirectInput 8
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     Device creation, identity and capabilities
+ * PURPOSE:     Device creation, identity, capabilities and objects
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
 #include "device.hpp"
 
+#include <stdlib.h>
+
+/* Default force feedback gain and the highest buffer size a device accepts */
+#define DI_DEFAULT_GAIN             10000
+#define DI_DEFAULT_MAX_BUFFER       1023
+
+/* EnumObjects flags outside these are rejected */
+#define DI_ENUM_OBJECTS_INVALID     0xE0000020
+
+/* Types EnumObjects matches when the caller names none */
+#define DI_ENUM_OBJECTS_ALL         (DIDFT_AXIS | DIDFT_BUTTON | DIDFT_POV | DIDFT_COLLECTION | DIDFT_NODATA)
+
 DiDevice::DiDevice(
-    _In_opt_ IUnknown* Outer) : DiObject(Outer), Backend(nullptr), Instance(GUID_NULL), Version(0), CapsFlags(0)
+    _In_opt_ IUnknown* Outer) : DiObject(Outer)
 {
     Ansi.Owner = this;
     InitializeCriticalSection(&Lock);
+    Backend = nullptr;
+    Emulation = nullptr;
+    Instance = GUID_NULL;
+    Version = 0;
+    CapsFlags = 0;
+    Flags = 0;
+    Window = nullptr;
+    Cooperation = 0;
+    Event = nullptr;
+    LostResult = DIERR_NOTACQUIRED;
+    PolledResult = DI_OK;
+    AppObjects = nullptr;
+    ObjectByOffset = nullptr;
+    AppDataSize = 0;
+    MissingPovs = nullptr;
+    MissingPovCount = 0;
+    CopyMode = DiCopyPerObject;
+    CopyShift = 0;
+    CopyFirst = 0;
+    CopyLength = 0;
+    NativeState = nullptr;
+    AxisOffsets = nullptr;
+    AxisCount = 0;
+    Baseline = nullptr;
+    Relative = FALSE;
+    BufferSize = 0;
+    MaxBufferSize = DI_DEFAULT_MAX_BUFFER;
+    Gain = DI_DEFAULT_GAIN;
+    AutoCenter = 1;
 }
 
 DiDevice::~DiDevice()
 {
+    if (Flags & DI_DEV_ACQUIRED)
+        InternalUnacquire();
     Reset();
     DeleteCriticalSection(&Lock);
 }
@@ -32,11 +75,49 @@ DiDevice::FindInterface(
 }
 
 VOID
+DiDevice::ClearFormat(VOID)
+{
+    free(AppObjects);
+    free(ObjectByOffset);
+    free(MissingPovs);
+    AppObjects = nullptr;
+    ObjectByOffset = nullptr;
+    MissingPovs = nullptr;
+    MissingPovCount = 0;
+    AppDataSize = 0;
+    CopyMode = DiCopyPerObject;
+}
+
+VOID
 DiDevice::Reset(VOID)
 {
+    ClearFormat();
+    if (Event != nullptr)
+        CloseHandle(Event);
+    Event = nullptr;
+    if (Emulation != nullptr)
+        DiEmRelease(Emulation);
+    Emulation = nullptr;
     delete Backend;
     Backend = nullptr;
+    free(NativeState);
+    free(AxisOffsets);
+    free(Baseline);
+    NativeState = nullptr;
+    AxisOffsets = nullptr;
+    Baseline = nullptr;
+    AxisCount = 0;
     CapsFlags = 0;
+    Flags = 0;
+    Window = nullptr;
+    Cooperation = 0;
+    LostResult = DIERR_NOTACQUIRED;
+    PolledResult = DI_OK;
+    Relative = FALSE;
+    BufferSize = 0;
+    MaxBufferSize = DI_DEFAULT_MAX_BUFFER;
+    Gain = DI_DEFAULT_GAIN;
+    AutoCenter = 1;
 }
 
 STDMETHODIMP
@@ -47,6 +128,8 @@ DiDevice::Initialize(
 {
     PDI_BACKEND_CREATE Create = nullptr;
     DiBackend* Created = nullptr;
+    const DI_FORMAT* Native;
+    DIDEVCAPS Caps;
     HRESULT Result;
 
     if (&Guid == nullptr)
@@ -68,15 +151,48 @@ DiDevice::Initialize(
         Result = DIERR_DEVICENOTREG;
         goto Exit;
     }
+    if (Flags & DI_DEV_ACQUIRED)
+    {
+        Result = DIERR_ACQUIRED;
+        goto Exit;
+    }
 
     Reset();
     Result = Create(Guid, &Created);
     if (FAILED(Result))
         goto Exit;
     Backend = Created;
-    CapsFlags = Created->Emulated() ? DIDC_EMULATED : 0;
+    Emulation = Created->Emulation();
+    Native = Created->Format();
+
+    NativeState = static_cast<BYTE*>(calloc(1, Native->DataSize + sizeof(DWORD)));
+    Baseline = static_cast<BYTE*>(calloc(1, Native->DataSize + sizeof(DWORD)));
+    AxisOffsets = static_cast<DWORD*>(calloc(Native->ObjectCount + 1, sizeof(DWORD)));
+    if (NativeState == nullptr || Baseline == nullptr || AxisOffsets == nullptr)
+    {
+        Reset();
+        Result = E_OUTOFMEMORY;
+        goto Exit;
+    }
+    for (DWORD Index = 0; Index < Native->ObjectCount; Index++)
+    {
+        if (Native->Objects[Index].Type & DIDFT_AXIS)
+            AxisOffsets[AxisCount++] = Native->Objects[Index].Offset;
+    }
+
+    ZeroMemory(&Caps, sizeof(Caps));
+    Caps.dwSize = sizeof(DIDEVCAPS_DX3);
+    Result = Created->GetCapabilities(&Caps);
+    if (FAILED(Result))
+    {
+        Reset();
+        goto Exit;
+    }
+    PolledResult = (Caps.dwFlags & DIDC_POLLEDDEVICE) ? DI_POLLEDDEVICE : DI_OK;
+    CapsFlags = Emulation != nullptr && (Emulation->Flags & DI_EM_ACTIVE) ? DIDC_EMULATED : 0;
     Instance = Guid;
     Version = NewVersion;
+    Result = DI_OK;
 
 Exit:
     LeaveCriticalSection(&Lock);
@@ -105,6 +221,8 @@ DiDevice::GetCapabilities(
     if (FAILED(Result))
         goto Exit;
     Caps->dwFlags |= CapsFlags;
+    if (Flags & DI_DEV_POLLED_FORMAT)
+        Caps->dwFlags |= DIDC_POLLEDDATAFORMAT;
     if (Caps->dwSize >= sizeof(DIDEVCAPS))
     {
         DIDRIVERVERSIONS Versions = { sizeof(Versions) };
@@ -177,130 +295,64 @@ DiDevice::RunControlPanel(
     return Backend->RunControlPanel(Window, 0);
 }
 
-/* Members the data path fills in */
-
-#define DI_DEVICE_PENDING() (Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL)
-
-STDMETHODIMP
-DiDevice::EnumObjects(
-    _In_ LPDIENUMDEVICEOBJECTSCALLBACKW Callback,
-    _In_opt_ VOID* Context,
-    _In_ DWORD Flags)
+/* Finds the device object an object identifier names */
+HRESULT
+DiDevice::ResolveObject(
+    _In_ DWORD Object,
+    _In_ DWORD How,
+    _Out_ DWORD* Index)
 {
-    UNREFERENCED_PARAMETER(Callback);
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    const DI_FORMAT* Native = Backend->Format();
+
+    *Index = static_cast<DWORD>(-1);
+    switch (How)
+    {
+        case DIPH_DEVICE:
+            return E_INVALIDARG;
+        case DIPH_BYOFFSET:
+            if (AppObjects == nullptr || ObjectByOffset == nullptr || Object >= AppDataSize || ObjectByOffset[Object] < 0)
+                return DIERR_OBJECTNOTFOUND;
+            *Index = static_cast<DWORD>(ObjectByOffset[Object]);
+            return S_OK;
+        case DIPH_BYID:
+            for (DWORD Candidate = Native->ObjectCount; Candidate-- > 0;)
+            {
+                if (((Native->Objects[Candidate].Type ^ Object) & 0xFFFFFF) == 0)
+                {
+                    *Index = Candidate;
+                    return S_OK;
+                }
+            }
+            return DIERR_OBJECTNOTFOUND;
+        case DIPH_BYUSAGE:
+            return Backend->MapUsage(Object, Index);
+        default:
+            return E_INVALIDARG;
+    }
 }
 
-STDMETHODIMP
-DiDevice::AnsiFace::EnumObjects(
-    _In_ LPDIENUMDEVICEOBJECTSCALLBACKA Callback,
-    _In_opt_ VOID* Context,
-    _In_ DWORD Flags)
+HRESULT
+DiDevice::GetObjectInfoCore(
+    _In_ DWORD Object,
+    _In_ DWORD How,
+    _Inout_ LPDIDEVICEOBJECTINSTANCEW Info)
 {
-    UNREFERENCED_PARAMETER(Callback);
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Flags);
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
-}
+    const DI_OBJECT* Source;
+    DWORD Index;
+    HRESULT Result;
 
-STDMETHODIMP
-DiDevice::GetProperty(
-    _In_ REFGUID Property,
-    _Inout_ LPDIPROPHEADER Header)
-{
-    UNREFERENCED_PARAMETER(Property);
-    UNREFERENCED_PARAMETER(Header);
-    return DI_DEVICE_PENDING();
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::GetProperty(
-    _In_ REFGUID Property,
-    _Inout_ LPDIPROPHEADER Header)
-{
-    return Owner->GetProperty(Property, Header);
-}
-
-STDMETHODIMP
-DiDevice::SetProperty(
-    _In_ REFGUID Property,
-    _In_ LPCDIPROPHEADER Header)
-{
-    UNREFERENCED_PARAMETER(Property);
-    UNREFERENCED_PARAMETER(Header);
-    return DI_DEVICE_PENDING();
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::SetProperty(
-    _In_ REFGUID Property,
-    _In_ LPCDIPROPHEADER Header)
-{
-    return Owner->SetProperty(Property, Header);
-}
-
-STDMETHODIMP
-DiDevice::Acquire()
-{
-    return E_INVALIDARG;
-}
-
-STDMETHODIMP
-DiDevice::Unacquire()
-{
-    return DI_NOEFFECT;
-}
-
-STDMETHODIMP
-DiDevice::GetDeviceState(
-    _In_ DWORD Size,
-    _Out_writes_bytes_(Size) VOID* Data)
-{
-    UNREFERENCED_PARAMETER(Size);
-    UNREFERENCED_PARAMETER(Data);
-    return DIERR_NOTACQUIRED;
-}
-
-STDMETHODIMP
-DiDevice::GetDeviceData(
-    _In_ DWORD ObjectSize,
-    _Out_writes_opt_(*Count) LPDIDEVICEOBJECTDATA Data,
-    _Inout_ LPDWORD Count,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(ObjectSize);
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(Count);
-    UNREFERENCED_PARAMETER(Flags);
-    return DIERR_NOTBUFFERED;
-}
-
-STDMETHODIMP
-DiDevice::SetDataFormat(
-    _In_ LPCDIDATAFORMAT Format)
-{
-    UNREFERENCED_PARAMETER(Format);
-    return DI_DEVICE_PENDING();
-}
-
-STDMETHODIMP
-DiDevice::SetEventNotification(
-    _In_opt_ HANDLE Event)
-{
-    UNREFERENCED_PARAMETER(Event);
-    return DI_DEVICE_PENDING();
-}
-
-STDMETHODIMP
-DiDevice::SetCooperativeLevel(
-    _In_opt_ HWND Window,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(Window);
-    UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    Result = ResolveObject(Object, How, &Index);
+    if (FAILED(Result))
+        return Result;
+    Source = &Backend->Format()->Objects[Index];
+    Info->guidType = *Source->Guid;
+    Info->dwOfs = Source->Offset;
+    Info->dwType = Source->Type;
+    Info->dwFlags = Source->Flags;
+    ZeroMemory(Info->tszName, Info->dwSize - FIELD_OFFSET(DIDEVICEOBJECTINSTANCEW, tszName));
+    return Backend->GetObjectInfo(Index, Source->Type, Info);
 }
 
 STDMETHODIMP
@@ -309,10 +361,41 @@ DiDevice::GetObjectInfo(
     _In_ DWORD Object,
     _In_ DWORD How)
 {
-    UNREFERENCED_PARAMETER(Info);
-    UNREFERENCED_PARAMETER(Object);
-    UNREFERENCED_PARAMETER(How);
-    return DI_DEVICE_PENDING();
+    HRESULT Result;
+
+    if (Info == nullptr)
+        return E_POINTER;
+    if (Info->dwSize != sizeof(DIDEVICEOBJECTINSTANCEW) && Info->dwSize != sizeof(DIDEVICEOBJECTINSTANCE_DX3W))
+        return E_INVALIDARG;
+    EnterCriticalSection(&Lock);
+    Result = GetObjectInfoCore(Object, How, Info);
+    LeaveCriticalSection(&Lock);
+    return Result;
+}
+
+static
+VOID
+DiObjectToAnsi(
+    _Inout_ LPDIDEVICEOBJECTINSTANCEA Ansi,
+    _In_ LPCDIDEVICEOBJECTINSTANCEW Wide)
+{
+    Ansi->guidType = Wide->guidType;
+    Ansi->dwOfs = Wide->dwOfs;
+    Ansi->dwType = Wide->dwType;
+    Ansi->dwFlags = Wide->dwFlags;
+    WideCharToMultiByte(CP_ACP, 0, Wide->tszName, -1, Ansi->tszName, MAX_PATH, nullptr, nullptr);
+    if (Ansi->dwSize >= sizeof(DIDEVICEOBJECTINSTANCEA))
+    {
+        Ansi->dwFFMaxForce = Wide->dwFFMaxForce;
+        Ansi->dwFFForceResolution = Wide->dwFFForceResolution;
+        Ansi->wCollectionNumber = Wide->wCollectionNumber;
+        Ansi->wDesignatorIndex = Wide->wDesignatorIndex;
+        Ansi->wUsagePage = Wide->wUsagePage;
+        Ansi->wUsage = Wide->wUsage;
+        Ansi->dwDimension = Wide->dwDimension;
+        Ansi->wExponent = Wide->wExponent;
+        Ansi->wReportId = Wide->wReportId;
+    }
 }
 
 STDMETHODIMP
@@ -321,11 +404,138 @@ DiDevice::AnsiFace::GetObjectInfo(
     _In_ DWORD Object,
     _In_ DWORD How)
 {
-    UNREFERENCED_PARAMETER(Info);
-    UNREFERENCED_PARAMETER(Object);
-    UNREFERENCED_PARAMETER(How);
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
+    DIDEVICEOBJECTINSTANCEW Wide;
+    HRESULT Result;
+
+    if (Info == nullptr)
+        return E_POINTER;
+    if (Info->dwSize != sizeof(DIDEVICEOBJECTINSTANCEA) && Info->dwSize != sizeof(DIDEVICEOBJECTINSTANCE_DX3A))
+        return E_INVALIDARG;
+    ZeroMemory(&Wide, sizeof(Wide));
+    Wide.dwSize = sizeof(Wide);
+    EnterCriticalSection(&Owner->Lock);
+    Result = Owner->GetObjectInfoCore(Object, How, &Wide);
+    LeaveCriticalSection(&Owner->Lock);
+    if (SUCCEEDED(Result))
+        DiObjectToAnsi(Info, &Wide);
+    return Result;
 }
+
+/*
+ * The type bits select object kinds, the high bits pick aspects, the instance field names a
+ * collection, and aliased or vendor objects only come back when asked for.
+ */
+STDMETHODIMP
+DiDevice::EnumObjects(
+    _In_ LPDIENUMDEVICEOBJECTSCALLBACKW Callback,
+    _In_opt_ VOID* Context,
+    _In_ DWORD Flags)
+{
+    const DI_FORMAT* Native;
+    DWORD Hidden = DIDFT_ALIAS | DIDFT_VENDORDEFINED;
+    DWORD Wanted;
+    DWORD Collection;
+    HRESULT Result = DI_OK;
+
+    if (Callback == nullptr || (Flags & DI_ENUM_OBJECTS_INVALID) != 0)
+        return E_INVALIDARG;
+    EnterCriticalSection(&Lock);
+    if (Backend == nullptr)
+    {
+        LeaveCriticalSection(&Lock);
+        return DIERR_NOTINITIALIZED;
+    }
+    Native = Backend->Format();
+    LeaveCriticalSection(&Lock);
+
+    if (Flags & DIDFT_ALIAS)
+        Hidden &= ~DIDFT_ALIAS;
+    if (Flags & DIDFT_VENDORDEFINED)
+        Hidden &= ~DIDFT_VENDORDEFINED;
+    Wanted = Flags & ~(DIDFT_ALIAS | DIDFT_VENDORDEFINED);
+    if (Wanted == 0)
+        Wanted = DI_ENUM_OBJECTS_ALL;
+    if ((Wanted & DIDFT_INSTANCEMASK) == 0)
+        Collection = 0xFFFF;
+    else
+        Collection = DIDFT_GETINSTANCE(Wanted) == 0xFFFF ? 0 : DIDFT_GETINSTANCE(Wanted);
+
+    AddRef();
+    for (DWORD Index = 0; Index < Native->ObjectCount; Index++)
+    {
+        const DI_OBJECT* Object = &Native->Objects[Index];
+        DIDEVICEOBJECTINSTANCEW Info;
+        HRESULT Status;
+
+        if ((Object->Type & Wanted & 0xFF) == 0 || (Object->Type & Wanted & 0xFF000000) != (Wanted & 0xFF000000) ||
+            (Object->Type & Hidden) != 0)
+        {
+            continue;
+        }
+        ZeroMemory(&Info, sizeof(Info));
+        Info.dwSize = sizeof(Info);
+        Info.guidType = *Object->Guid;
+        Info.dwOfs = Object->Offset;
+        Info.dwType = Object->Type;
+        Info.dwFlags = Object->Flags;
+        Status = Backend->GetObjectInfo(Index, Object->Type, &Info);
+        if (Status == DIERR_OBJECTNOTFOUND)
+            continue;
+        if (FAILED(Status))
+        {
+            Result = Status;
+            break;
+        }
+        if (Collection != 0xFFFF && Collection != Info.wCollectionNumber)
+        {
+            Result = Status;
+            break;
+        }
+        if (Callback(&Info, Context) == DIENUM_STOP)
+            break;
+    }
+    Release();
+    return Result;
+}
+
+struct DI_ANSI_OBJECTS
+{
+    LPDIENUMDEVICEOBJECTSCALLBACKA Callback;
+    VOID* Context;
+};
+
+static
+BOOL
+CALLBACK
+DiAnsiObjectThunk(
+    _In_ LPCDIDEVICEOBJECTINSTANCEW Wide,
+    _In_ VOID* Context)
+{
+    DI_ANSI_OBJECTS* Enum = static_cast<DI_ANSI_OBJECTS*>(Context);
+    DIDEVICEOBJECTINSTANCEA Ansi;
+
+    ZeroMemory(&Ansi, sizeof(Ansi));
+    Ansi.dwSize = sizeof(Ansi);
+    DiObjectToAnsi(&Ansi, Wide);
+    return Enum->Callback(&Ansi, Enum->Context);
+}
+
+STDMETHODIMP
+DiDevice::AnsiFace::EnumObjects(
+    _In_ LPDIENUMDEVICEOBJECTSCALLBACKA Callback,
+    _In_opt_ VOID* Context,
+    _In_ DWORD Flags)
+{
+    DI_ANSI_OBJECTS Enum;
+
+    if (Callback == nullptr)
+        return E_INVALIDARG;
+    Enum.Callback = Callback;
+    Enum.Context = Context;
+    return Owner->EnumObjects(DiAnsiObjectThunk, &Enum, Flags);
+}
+
+/* Force feedback answers for devices without an effect driver */
 
 STDMETHODIMP
 DiDevice::CreateEffect(
@@ -337,9 +547,12 @@ DiDevice::CreateEffect(
     UNREFERENCED_PARAMETER(Effect);
     UNREFERENCED_PARAMETER(Params);
     UNREFERENCED_PARAMETER(Outer);
-    if (Created != nullptr)
-        *Created = nullptr;
-    return DI_DEVICE_PENDING();
+    if (Created == nullptr)
+        return E_POINTER;
+    *Created = nullptr;
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_UNSUPPORTED;
 }
 
 STDMETHODIMP
@@ -348,10 +561,13 @@ DiDevice::EnumEffects(
     _In_opt_ VOID* Context,
     _In_ DWORD Type)
 {
-    UNREFERENCED_PARAMETER(Callback);
     UNREFERENCED_PARAMETER(Context);
     UNREFERENCED_PARAMETER(Type);
-    return DI_DEVICE_PENDING();
+    if (Callback == nullptr)
+        return E_INVALIDARG;
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DI_OK;
 }
 
 STDMETHODIMP
@@ -360,10 +576,13 @@ DiDevice::AnsiFace::EnumEffects(
     _In_opt_ VOID* Context,
     _In_ DWORD Type)
 {
-    UNREFERENCED_PARAMETER(Callback);
     UNREFERENCED_PARAMETER(Context);
     UNREFERENCED_PARAMETER(Type);
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
+    if (Callback == nullptr)
+        return E_INVALIDARG;
+    if (Owner->Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DI_OK;
 }
 
 STDMETHODIMP
@@ -371,9 +590,12 @@ DiDevice::GetEffectInfo(
     _Inout_ LPDIEFFECTINFOW Info,
     _In_ REFGUID Effect)
 {
-    UNREFERENCED_PARAMETER(Info);
     UNREFERENCED_PARAMETER(Effect);
-    return DI_DEVICE_PENDING();
+    if (Info == nullptr)
+        return E_POINTER;
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_DEVICENOTREG;
 }
 
 STDMETHODIMP
@@ -381,17 +603,24 @@ DiDevice::AnsiFace::GetEffectInfo(
     _Inout_ LPDIEFFECTINFOA Info,
     _In_ REFGUID Effect)
 {
-    UNREFERENCED_PARAMETER(Info);
     UNREFERENCED_PARAMETER(Effect);
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
+    if (Info == nullptr)
+        return E_POINTER;
+    if (Owner->Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_DEVICENOTREG;
 }
 
 STDMETHODIMP
 DiDevice::GetForceFeedbackState(
     _Out_ LPDWORD State)
 {
-    UNREFERENCED_PARAMETER(State);
-    return DI_DEVICE_PENDING();
+    if (State == nullptr)
+        return E_POINTER;
+    *State = 0;
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_UNSUPPORTED;
 }
 
 STDMETHODIMP
@@ -399,7 +628,9 @@ DiDevice::SendForceFeedbackCommand(
     _In_ DWORD Command)
 {
     UNREFERENCED_PARAMETER(Command);
-    return DI_DEVICE_PENDING();
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_UNSUPPORTED;
 }
 
 STDMETHODIMP
@@ -408,38 +639,38 @@ DiDevice::EnumCreatedEffectObjects(
     _In_opt_ VOID* Context,
     _In_ DWORD Flags)
 {
-    UNREFERENCED_PARAMETER(Callback);
     UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    if (Callback == nullptr || Flags != 0)
+        return E_INVALIDARG;
+    return DI_OK;
 }
 
 STDMETHODIMP
 DiDevice::Escape(
     _Inout_ LPDIEFFESCAPE Escape)
 {
-    UNREFERENCED_PARAMETER(Escape);
-    return DI_DEVICE_PENDING();
+    if (Escape == nullptr)
+        return E_POINTER;
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_UNSUPPORTED;
 }
 
-STDMETHODIMP
-DiDevice::Poll()
+/* Effect files open before anything else is checked, so a missing file reports first */
+static
+HRESULT
+DiOpenEffectFile(
+    _In_z_ LPCWSTR FileName)
 {
-    return DIERR_NOTACQUIRED;
-}
+    HANDLE File;
 
-STDMETHODIMP
-DiDevice::SendDeviceData(
-    _In_ DWORD ObjectSize,
-    _In_reads_(*Count) LPCDIDEVICEOBJECTDATA Data,
-    _Inout_ LPDWORD Count,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(ObjectSize);
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(Count);
-    UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    if (FileName == nullptr)
+        return E_POINTER;
+    File = CreateFileW(FileName, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (File == INVALID_HANDLE_VALUE)
+        return HRESULT_FROM_WIN32(GetLastError());
+    CloseHandle(File);
+    return DIERR_UNSUPPORTED;
 }
 
 STDMETHODIMP
@@ -449,11 +680,10 @@ DiDevice::EnumEffectsInFile(
     _In_opt_ VOID* Context,
     _In_ DWORD Flags)
 {
-    UNREFERENCED_PARAMETER(FileName);
     UNREFERENCED_PARAMETER(Callback);
     UNREFERENCED_PARAMETER(Context);
     UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    return DiOpenEffectFile(FileName);
 }
 
 STDMETHODIMP
@@ -463,11 +693,12 @@ DiDevice::AnsiFace::EnumEffectsInFile(
     _In_opt_ VOID* Context,
     _In_ DWORD Flags)
 {
-    UNREFERENCED_PARAMETER(FileName);
-    UNREFERENCED_PARAMETER(Callback);
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Flags);
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
+    WCHAR Wide[MAX_PATH];
+
+    if (FileName == nullptr)
+        return E_POINTER;
+    MultiByteToWideChar(CP_ACP, 0, FileName, -1, Wide, _countof(Wide));
+    return Owner->EnumEffectsInFile(Wide, Callback, Context, Flags);
 }
 
 STDMETHODIMP
@@ -481,7 +712,9 @@ DiDevice::WriteEffectToFile(
     UNREFERENCED_PARAMETER(Count);
     UNREFERENCED_PARAMETER(Effects);
     UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    if (Backend == nullptr)
+        return DIERR_NOTINITIALIZED;
+    return DIERR_UNSUPPORTED;
 }
 
 STDMETHODIMP
@@ -491,12 +724,15 @@ DiDevice::AnsiFace::WriteEffectToFile(
     _In_reads_(Count) LPDIFILEEFFECT Effects,
     _In_ DWORD Flags)
 {
-    UNREFERENCED_PARAMETER(FileName);
-    UNREFERENCED_PARAMETER(Count);
-    UNREFERENCED_PARAMETER(Effects);
-    UNREFERENCED_PARAMETER(Flags);
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
+    WCHAR Wide[MAX_PATH];
+
+    if (FileName == nullptr)
+        return E_POINTER;
+    MultiByteToWideChar(CP_ACP, 0, FileName, -1, Wide, _countof(Wide));
+    return Owner->WriteEffectToFile(Wide, Count, Effects, Flags);
 }
+
+/* Action mapping */
 
 STDMETHODIMP
 DiDevice::BuildActionMap(
@@ -507,7 +743,8 @@ DiDevice::BuildActionMap(
     UNREFERENCED_PARAMETER(Format);
     UNREFERENCED_PARAMETER(UserName);
     UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    DI_TRACE_ONCE(L"BuildActionMap is not implemented");
+    return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 
 STDMETHODIMP
@@ -519,6 +756,7 @@ DiDevice::AnsiFace::BuildActionMap(
     UNREFERENCED_PARAMETER(Format);
     UNREFERENCED_PARAMETER(UserName);
     UNREFERENCED_PARAMETER(Flags);
+    DI_TRACE_ONCE(L"BuildActionMap is not implemented");
     return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 
@@ -531,7 +769,8 @@ DiDevice::SetActionMap(
     UNREFERENCED_PARAMETER(Format);
     UNREFERENCED_PARAMETER(UserName);
     UNREFERENCED_PARAMETER(Flags);
-    return DI_DEVICE_PENDING();
+    DI_TRACE_ONCE(L"SetActionMap is not implemented");
+    return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 
 STDMETHODIMP
@@ -543,6 +782,7 @@ DiDevice::AnsiFace::SetActionMap(
     UNREFERENCED_PARAMETER(Format);
     UNREFERENCED_PARAMETER(UserName);
     UNREFERENCED_PARAMETER(Flags);
+    DI_TRACE_ONCE(L"SetActionMap is not implemented");
     return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 
@@ -551,7 +791,8 @@ DiDevice::GetImageInfo(
     _Inout_ LPDIDEVICEIMAGEINFOHEADERW Header)
 {
     UNREFERENCED_PARAMETER(Header);
-    return DI_DEVICE_PENDING();
+    DI_TRACE_ONCE(L"GetImageInfo is not implemented");
+    return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 
 STDMETHODIMP
@@ -559,6 +800,7 @@ DiDevice::AnsiFace::GetImageInfo(
     _Inout_ LPDIDEVICEIMAGEINFOHEADERA Header)
 {
     UNREFERENCED_PARAMETER(Header);
+    DI_TRACE_ONCE(L"GetImageInfo is not implemented");
     return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 

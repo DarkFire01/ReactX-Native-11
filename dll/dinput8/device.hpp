@@ -8,6 +8,31 @@
 #pragma once
 
 #include "dinput8.hpp"
+#include "input.hpp"
+
+/* Device state */
+#define DI_DEV_ACQUIRED             0x01
+#define DI_DEV_EM_ACQUIRED          0x02
+#define DI_DEV_POLLED_FORMAT        0x10
+#define DI_DEV_WAS_ACQUIRED         0x20
+#define DI_DEV_FORCED_OFF           0x40
+#define DI_DEV_ICONIC               0x80
+
+/* Where a device object lands in the application's data format */
+struct DI_APP_OBJECT
+{
+    LONG Offset;
+    UINT_PTR AppData;
+};
+
+/* How GetDeviceState moves the native state into the application's buffer */
+enum DI_STATE_COPY
+{
+    DiCopyPerObject,
+    DiCopyRange,
+    DiCopyShifted,
+    DiCopyWhole,
+};
 
 class DiDevice : public DiObject, public IDirectInputDevice8W
 {
@@ -242,9 +267,39 @@ public:
 
     /* The device class behind this object, or nullptr until Initialize succeeds */
     DiBackend* Backend;
+    DI_EM_INSTANCE* Emulation;
     GUID Instance;
     DWORD Version;
     DWORD CapsFlags;
+    DWORD Flags;
+    HWND Window;
+    DWORD Cooperation;
+    HANDLE Event;
+    HRESULT LostResult;
+    HRESULT PolledResult;
+
+    /* The application data format */
+    DI_APP_OBJECT* AppObjects;
+    LONG* ObjectByOffset;
+    DWORD AppDataSize;
+    DWORD* MissingPovs;
+    DWORD MissingPovCount;
+    DI_STATE_COPY CopyMode;
+    LONG CopyShift;
+    DWORD CopyFirst;
+    DWORD CopyLength;
+    BYTE* NativeState;
+
+    /* Axes and their last reported positions, for relative mode */
+    DWORD* AxisOffsets;
+    DWORD AxisCount;
+    BYTE* Baseline;
+    BOOLEAN Relative;
+
+    DWORD BufferSize;
+    DWORD MaxBufferSize;
+    DWORD Gain;
+    DWORD AutoCenter;
 
     DiDevice(
         _In_opt_ IUnknown* Outer);
@@ -427,7 +482,61 @@ public:
     GetImageInfo(
         _Inout_ LPDIDEVICEIMAGEINFOHEADERW Header) override;
 
+    /* Drops acquisition for a reason other than the application asking */
+    HRESULT
+    InternalUnacquire(VOID);
+
 private:
     VOID
     Reset(VOID);
+
+    HRESULT
+    ResolveObject(
+        _In_ DWORD Object,
+        _In_ DWORD How,
+        _Out_ DWORD* Index);
+
+    HRESULT
+    CheckProperty(
+        _In_ REFGUID Property,
+        _In_ LPCDIPROPHEADER Header,
+        _Out_ DI_PROPERTY* Resolved);
+
+    HRESULT
+    DefaultGetProperty(
+        _In_ const DI_PROPERTY* Property,
+        _Inout_ LPDIPROPHEADER Header);
+
+    HRESULT
+    DefaultSetProperty(
+        _In_ const DI_PROPERTY* Property,
+        _In_ LPCDIPROPHEADER Header);
+
+    HRESULT
+    SetAxisMode(
+        _In_ DWORD Mode);
+
+    HRESULT
+    ParseFormat(
+        _In_ LPCDIDATAFORMAT Format);
+
+    VOID
+    PlanStateCopy(VOID);
+
+    VOID
+    ClearFormat(VOID);
+
+    HRESULT
+    ReleaseEmulation(VOID);
+
+    VOID
+    RestoreIfNeeded(VOID);
+
+    HRESULT
+    GetObjectInfoCore(
+        _In_ DWORD Object,
+        _In_ DWORD How,
+        _Inout_ LPDIDEVICEOBJECTINSTANCEW Info);
+
+    friend class AnsiFace;
 };

@@ -5,12 +5,15 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "dinput8.hpp"
+#include "input.hpp"
 
 /* The mouse layout: three axes, then up to eight buttons */
 #define DI_MOUSE_DATA_SIZE          20
 #define DI_MOUSE_AXES               3
 #define DI_MOUSE_BUTTONS            8
+
+/* Wheel detents report this many units each */
+#define DI_WHEEL_GRANULARITY        WHEEL_DELTA
 
 static const DI_OBJECT DiMouseObjects[DI_MOUSE_AXES + DI_MOUSE_BUTTONS] =
 {
@@ -44,7 +47,16 @@ public:
     DI_OBJECT Objects[DI_MOUSE_AXES + DI_MOUSE_BUTTONS];
     DWORD Axes;
     DWORD Buttons;
-    DWORD Emulation;
+    DWORD Level;
+    DI_EM_INSTANCE* Instance = nullptr;
+    HWND Window = nullptr;
+    POINT SavedCursor = {};
+
+    ~DiMouse() override
+    {
+        if (Instance != nullptr)
+            DiEmRelease(Instance);
+    }
 
     const DI_FORMAT*
     Format(VOID) override
@@ -52,17 +64,17 @@ public:
         return &NativeFormat;
     }
 
-    BOOLEAN
-    Emulated(VOID) override
+    DI_EM_INSTANCE*
+    Emulation(VOID) override
     {
-        return TRUE;
+        return Instance;
     }
 
     HRESULT
     GetCapabilities(
         _Inout_ LPDIDEVCAPS Caps) override
     {
-        Caps->dwFlags = Emulation != 0 ? DIDC_ATTACHED | DIDC_ALIAS : DIDC_ATTACHED;
+        Caps->dwFlags = Level != 0 ? DIDC_ATTACHED | DIDC_ALIAS : DIDC_ATTACHED;
         Caps->dwDevType = (DI8DEVTYPEMOUSE_UNKNOWN << 8) | DI8DEVTYPE_MOUSE;
         Caps->dwAxes = Axes;
         Caps->dwButtons = Buttons;
@@ -81,16 +93,119 @@ public:
     }
 
     HRESULT
-    RunControlPanel(
-        _In_opt_ HWND Window,
+    GetObjectInfo(
+        _In_ DWORD Index,
+        _In_ DWORD Type,
+        _Inout_ LPDIDEVICEOBJECTINSTANCEW Info) override
+    {
+        if (Index >= NativeFormat.ObjectCount)
+            return E_INVALIDARG;
+        LoadStringW(DiInstance, IDS_MOUSE_OBJECT + DIDFT_GETINSTANCE(Type), Info->tszName, MAX_PATH);
+        return S_OK;
+    }
+
+    HRESULT
+    GetProperty(
+        _In_ const DI_PROPERTY* Property,
+        _Inout_ LPDIPROPHEADER Header) override
+    {
+        if (Property->Id != 3 || Property->Type != (DIDFT_RELAXIS | DIDFT_MAKEINSTANCE(2)))
+            return E_NOTIMPL;
+        reinterpret_cast<LPDIPROPDWORD>(Header)->dwData = DI_WHEEL_GRANULARITY;
+        return DI_OK;
+    }
+
+    HRESULT
+    SetCooperativeLevel(
+        _In_opt_ HWND NewWindow,
         _In_ DWORD Flags) override
     {
-        UNREFERENCED_PARAMETER(Window);
+        if (Instance->Flags & DI_EM_MOUSE_SUBCLASS)
+        {
+            if ((Flags & (DISCL_EXCLUSIVE | DISCL_FOREGROUND)) != (DISCL_EXCLUSIVE | DISCL_FOREGROUND))
+                return E_NOTIMPL;
+            Instance->Flags |= DI_EM_EXCLUSIVE;
+        }
+        else if (!(Flags & DISCL_EXCLUSIVE))
+        {
+            Instance->Flags &= ~DI_EM_EXCLUSIVE;
+        }
+        else if (Flags & DISCL_FOREGROUND)
+        {
+            Instance->Flags |= DI_EM_EXCLUSIVE;
+        }
+        else
+        {
+            return E_NOTIMPL;
+        }
+        Window = NewWindow;
+        return DI_OK;
+    }
+
+    /* The buttons start out as they are now; an exclusive mouse parks the cursor in its window */
+    HRESULT
+    Acquire(VOID) override
+    {
+        BYTE Seed[3];
+
+        Seed[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 0x80 : 0;
+        Seed[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 0x80 : 0;
+        Seed[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 0x80 : 0;
+        if (Instance->Flags & DI_EM_EXCLUSIVE)
+        {
+            RECT Frame = {};
+
+            GetCursorPos(&SavedCursor);
+            GetWindowRect(Window, &Frame);
+            SetCursorPos((Frame.left + Frame.right) >> 1, (Frame.top + Frame.bottom) >> 1);
+            ShowCursor(FALSE);
+        }
+        DiEmSeedMouseButtons(Seed);
+        return S_FALSE;
+    }
+
+    /* The cursor goes back where it was unless the window in front covers the whole desktop */
+    HRESULT
+    Unacquire(VOID) override
+    {
+        if (Instance->Flags & DI_EM_EXCLUSIVE)
+        {
+            RECT Desktop = {};
+            RECT Front = {};
+
+            GetWindowRect(GetDesktopWindow(), &Desktop);
+            GetWindowRect(GetForegroundWindow(), &Front);
+            SubtractRect(&Desktop, &Desktop, &Front);
+            if (!IsRectEmpty(&Desktop))
+                SetCursorPos(SavedCursor.x, SavedCursor.y);
+            ShowCursor(TRUE);
+        }
+        return S_FALSE;
+    }
+
+    HRESULT
+    GetDeviceState(
+        _Out_ VOID* State) override
+    {
+        if (!(Instance->Flags & DI_EM_ACQUIRED))
+            return DIERR_INPUTLOST;
+        EnterCriticalSection(&DiLock);
+        CopyMemory(State, DiMouseClass.State, DI_MOUSE_DATA_SIZE);
+        LeaveCriticalSection(&DiLock);
+        return DI_OK;
+    }
+
+    HRESULT
+    RunControlPanel(
+        _In_opt_ HWND Owner,
+        _In_ DWORD Flags) override
+    {
+        UNREFERENCED_PARAMETER(Owner);
         UNREFERENCED_PARAMETER(Flags);
         return DiLaunchControlPanel(L"mouse");
     }
 
-    VOID
+    HRESULT
     Build(
         _In_ REFGUID Guid)
     {
@@ -106,11 +221,11 @@ public:
             Buttons = Reported;
 
         if (IsEqualGUID(Guid, GUID_SysMouseEm))
-            Emulation = DI_EMULATE_MOUSE;
+            Level = DI_EMULATE_MOUSE;
         else if (IsEqualGUID(Guid, GUID_SysMouseEm2))
-            Emulation = DI_EMULATE_MOUSE_HOOK;
+            Level = DI_EMULATE_MOUSE_HOOK;
         else
-            Emulation = 0;
+            Level = 0;
 
         for (DWORD Index = 0; Index < Axes; Index++)
             Objects[Index] = DiMouseObjects[Index];
@@ -119,6 +234,9 @@ public:
         NativeFormat.DataSize = DI_MOUSE_DATA_SIZE;
         NativeFormat.ObjectCount = Axes + Buttons;
         NativeFormat.Objects = Objects;
+
+        /* Only the first emulation level applies to the mouse; the alias GUIDs still report as aliases */
+        return DiEmCreate(&DiMouseClass, &NativeFormat, DI_EM_MOUSE_RAW, &Instance);
     }
 };
 
@@ -128,6 +246,7 @@ DiCreateMouse(
     _Outptr_ DiBackend** Backend)
 {
     DiMouse* Mouse;
+    HRESULT Result;
 
     *Backend = nullptr;
     if (!GetSystemMetrics(SM_MOUSEPRESENT))
@@ -135,7 +254,12 @@ DiCreateMouse(
     Mouse = new (std::nothrow) DiMouse();
     if (Mouse == nullptr)
         return E_OUTOFMEMORY;
-    Mouse->Build(Guid);
+    Result = Mouse->Build(Guid);
+    if (FAILED(Result))
+    {
+        delete Mouse;
+        return Result;
+    }
     *Backend = Mouse;
     return S_OK;
 }

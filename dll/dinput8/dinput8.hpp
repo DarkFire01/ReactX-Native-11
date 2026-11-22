@@ -206,6 +206,16 @@ struct DI_FORMAT
     DI_OBJECT* Objects;
 };
 
+struct DI_EM_INSTANCE;
+
+/* A property request after the generic layer resolved the object it names */
+struct DI_PROPERTY
+{
+    DWORD Id;
+    DWORD Index;
+    DWORD Type;
+};
+
 /* What a device class does behind the generic device object */
 class DiBackend
 {
@@ -238,12 +248,107 @@ public:
         return E_NOTIMPL;
     }
 
-    /* Whether the state comes from the input emulation layer rather than a driver */
+    /* The emulation instance the state comes from, or nullptr for a device read directly */
     virtual
-    BOOLEAN
-    Emulated(VOID)
+    DI_EM_INSTANCE*
+    Emulation(VOID)
     {
-        return FALSE;
+        return nullptr;
+    }
+
+    /* Fills the name and the fields past the common ones */
+    virtual
+    HRESULT
+    GetObjectInfo(
+        _In_ DWORD Index,
+        _In_ DWORD Type,
+        _Inout_ LPDIDEVICEOBJECTINSTANCEW Info)
+    {
+        UNREFERENCED_PARAMETER(Index);
+        UNREFERENCED_PARAMETER(Type);
+        UNREFERENCED_PARAMETER(Info);
+        return S_OK;
+    }
+
+    virtual
+    HRESULT
+    GetProperty(
+        _In_ const DI_PROPERTY* Property,
+        _Inout_ LPDIPROPHEADER Header)
+    {
+        UNREFERENCED_PARAMETER(Property);
+        UNREFERENCED_PARAMETER(Header);
+        return E_NOTIMPL;
+    }
+
+    virtual
+    HRESULT
+    SetProperty(
+        _In_ const DI_PROPERTY* Property,
+        _In_ LPCDIPROPHEADER Header)
+    {
+        UNREFERENCED_PARAMETER(Property);
+        UNREFERENCED_PARAMETER(Header);
+        return E_NOTIMPL;
+    }
+
+    virtual
+    HRESULT
+    SetCooperativeLevel(
+        _In_opt_ HWND Window,
+        _In_ DWORD Flags)
+    {
+        UNREFERENCED_PARAMETER(Window);
+        UNREFERENCED_PARAMETER(Flags);
+        return S_OK;
+    }
+
+    /* S_FALSE asks the generic layer to acquire the emulation instance */
+    virtual
+    HRESULT
+    Acquire(VOID)
+    {
+        return S_FALSE;
+    }
+
+    virtual
+    HRESULT
+    Unacquire(VOID)
+    {
+        return S_FALSE;
+    }
+
+    /* Copies the native state */
+    virtual
+    HRESULT
+    GetDeviceState(
+        _Out_ VOID* State) = 0;
+
+    virtual
+    HRESULT
+    Poll(VOID)
+    {
+        return S_FALSE;
+    }
+
+    virtual
+    HRESULT
+    MapUsage(
+        _In_ DWORD Usage,
+        _Out_ DWORD* Index)
+    {
+        UNREFERENCED_PARAMETER(Usage);
+        *Index = 0;
+        return E_NOTIMPL;
+    }
+
+    virtual
+    DWORD
+    GetUsage(
+        _In_ DWORD Index)
+    {
+        UNREFERENCED_PARAMETER(Index);
+        return 0;
     }
 
     virtual
