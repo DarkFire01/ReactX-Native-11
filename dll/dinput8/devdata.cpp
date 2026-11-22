@@ -885,15 +885,15 @@ DiDevice::GetDeviceData(
         Position = Emulation->Tail;
         while (Read < Limit && Position != Emulation->Head && Emulation->Buffer != nullptr)
         {
-            const DI_EM_EVENT* Event = &Emulation->Buffer[Position];
+            const DI_EM_EVENT* Entry = &Emulation->Buffer[Position];
 
             if (Data != nullptr)
             {
-                Data[Read].dwOfs = AppObjects != nullptr ? static_cast<DWORD>(AppObjects[Event->Object].Offset) : Event->Object;
-                Data[Read].dwData = Event->Data;
-                Data[Read].dwTimeStamp = Event->TimeStamp;
-                Data[Read].dwSequence = Event->Sequence;
-                Data[Read].uAppData = AppObjects != nullptr ? AppObjects[Event->Object].AppData : static_cast<UINT_PTR>(-1);
+                Data[Read].dwOfs = AppObjects != nullptr ? static_cast<DWORD>(AppObjects[Entry->Object].Offset) : Entry->Object;
+                Data[Read].dwData = Entry->Data;
+                Data[Read].dwTimeStamp = Entry->TimeStamp;
+                Data[Read].dwSequence = Entry->Sequence;
+                Data[Read].uAppData = AppObjects != nullptr ? AppObjects[Entry->Object].AppData : static_cast<UINT_PTR>(-1);
             }
             Position = (Position + 1) % (Emulation->Capacity + 1);
             Read++;

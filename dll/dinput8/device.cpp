@@ -283,16 +283,16 @@ DiDevice::AnsiFace::GetDeviceInfo(
 
 STDMETHODIMP
 DiDevice::RunControlPanel(
-    _In_opt_ HWND Window,
-    _In_ DWORD Flags)
+    _In_opt_ HWND Owner,
+    _In_ DWORD PanelFlags)
 {
-    if (Window != nullptr && !IsWindow(Window))
+    if (Owner != nullptr && !IsWindow(Owner))
         return E_HANDLE;
-    if (Flags != 0)
+    if (PanelFlags != 0)
         return E_INVALIDARG;
     if (Backend == nullptr)
         return DIERR_NOTINITIALIZED;
-    return Backend->RunControlPanel(Window, 0);
+    return Backend->RunControlPanel(Owner, 0);
 }
 
 /* Finds the device object an object identifier names */
@@ -429,7 +429,7 @@ STDMETHODIMP
 DiDevice::EnumObjects(
     _In_ LPDIENUMDEVICEOBJECTSCALLBACKW Callback,
     _In_opt_ VOID* Context,
-    _In_ DWORD Flags)
+    _In_ DWORD EnumFlags)
 {
     const DI_FORMAT* Native;
     DWORD Hidden = DIDFT_ALIAS | DIDFT_VENDORDEFINED;
@@ -437,7 +437,7 @@ DiDevice::EnumObjects(
     DWORD Collection;
     HRESULT Result = DI_OK;
 
-    if (Callback == nullptr || (Flags & DI_ENUM_OBJECTS_INVALID) != 0)
+    if (Callback == nullptr || (EnumFlags & DI_ENUM_OBJECTS_INVALID) != 0)
         return E_INVALIDARG;
     EnterCriticalSection(&Lock);
     if (Backend == nullptr)
@@ -448,11 +448,11 @@ DiDevice::EnumObjects(
     Native = Backend->Format();
     LeaveCriticalSection(&Lock);
 
-    if (Flags & DIDFT_ALIAS)
+    if (EnumFlags & DIDFT_ALIAS)
         Hidden &= ~DIDFT_ALIAS;
-    if (Flags & DIDFT_VENDORDEFINED)
+    if (EnumFlags & DIDFT_VENDORDEFINED)
         Hidden &= ~DIDFT_VENDORDEFINED;
-    Wanted = Flags & ~(DIDFT_ALIAS | DIDFT_VENDORDEFINED);
+    Wanted = EnumFlags & ~(DIDFT_ALIAS | DIDFT_VENDORDEFINED);
     if (Wanted == 0)
         Wanted = DI_ENUM_OBJECTS_ALL;
     if ((Wanted & DIDFT_INSTANCEMASK) == 0)
@@ -637,10 +637,10 @@ STDMETHODIMP
 DiDevice::EnumCreatedEffectObjects(
     _In_ LPDIENUMCREATEDEFFECTOBJECTSCALLBACK Callback,
     _In_opt_ VOID* Context,
-    _In_ DWORD Flags)
+    _In_ DWORD EnumFlags)
 {
     UNREFERENCED_PARAMETER(Context);
-    if (Callback == nullptr || Flags != 0)
+    if (Callback == nullptr || EnumFlags != 0)
         return E_INVALIDARG;
     return DI_OK;
 }
@@ -678,11 +678,11 @@ DiDevice::EnumEffectsInFile(
     _In_z_ LPCWSTR FileName,
     _In_ LPDIENUMEFFECTSINFILECALLBACK Callback,
     _In_opt_ VOID* Context,
-    _In_ DWORD Flags)
+    _In_ DWORD FileFlags)
 {
     UNREFERENCED_PARAMETER(Callback);
     UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Flags);
+    UNREFERENCED_PARAMETER(FileFlags);
     return DiOpenEffectFile(FileName);
 }
 
@@ -706,12 +706,12 @@ DiDevice::WriteEffectToFile(
     _In_z_ LPCWSTR FileName,
     _In_ DWORD Count,
     _In_reads_(Count) LPDIFILEEFFECT Effects,
-    _In_ DWORD Flags)
+    _In_ DWORD FileFlags)
 {
     UNREFERENCED_PARAMETER(FileName);
     UNREFERENCED_PARAMETER(Count);
     UNREFERENCED_PARAMETER(Effects);
-    UNREFERENCED_PARAMETER(Flags);
+    UNREFERENCED_PARAMETER(FileFlags);
     if (Backend == nullptr)
         return DIERR_NOTINITIALIZED;
     return DIERR_UNSUPPORTED;
@@ -738,11 +738,11 @@ STDMETHODIMP
 DiDevice::BuildActionMap(
     _Inout_ LPDIACTIONFORMATW Format,
     _In_opt_z_ LPCWSTR UserName,
-    _In_ DWORD Flags)
+    _In_ DWORD MapFlags)
 {
     UNREFERENCED_PARAMETER(Format);
     UNREFERENCED_PARAMETER(UserName);
-    UNREFERENCED_PARAMETER(Flags);
+    UNREFERENCED_PARAMETER(MapFlags);
     DI_TRACE_ONCE(L"BuildActionMap is not implemented");
     return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
@@ -764,11 +764,11 @@ STDMETHODIMP
 DiDevice::SetActionMap(
     _In_ LPDIACTIONFORMATW Format,
     _In_opt_z_ LPCWSTR UserName,
-    _In_ DWORD Flags)
+    _In_ DWORD MapFlags)
 {
     UNREFERENCED_PARAMETER(Format);
     UNREFERENCED_PARAMETER(UserName);
-    UNREFERENCED_PARAMETER(Flags);
+    UNREFERENCED_PARAMETER(MapFlags);
     DI_TRACE_ONCE(L"SetActionMap is not implemented");
     return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
