@@ -757,6 +757,75 @@ DcCheckProperties(VOID)
     Wide->Release();
 }
 
+/* Reads every property from each HID device and a few of its objects, without setting any */
+static
+VOID
+DcCheckHidProperties(VOID)
+{
+    const std::vector<const GUID*>& Devices = DcReadDevices();
+    IDirectInput8W* Wide = DcCreateWide();
+
+    if (Wide == nullptr)
+        return;
+    for (SIZE_T Index = ARRAYSIZE(DcDataDevices); Index < Devices.size(); Index++)
+    {
+        IDirectInputDevice8W* Device = DcOpen(Wide, Devices[Index]);
+        std::vector<std::pair<DWORD, DWORD>> Targets = { { DIPH_DEVICE, 0 } };
+        std::vector<DIDEVICEOBJECTINSTANCEW> Objects;
+
+        printf("device %s\n", DcGuid(Devices[Index]).c_str());
+        if (Device == nullptr)
+            continue;
+        Device->EnumObjects([](LPCDIDEVICEOBJECTINSTANCEW Info, VOID* Context) -> BOOL
+        {
+            auto* List = static_cast<std::vector<DIDEVICEOBJECTINSTANCEW>*>(Context);
+
+            List->push_back(*Info);
+            return List->size() < 4 ? DIENUM_CONTINUE : DIENUM_STOP;
+        }, &Objects, DIDFT_ALL);
+        for (const auto& Object : Objects)
+        {
+            Targets.push_back({ DIPH_BYID, Object.dwType });
+            Targets.push_back({ DIPH_BYUSAGE, static_cast<DWORD>(MAKELONG(Object.wUsage, Object.wUsagePage)) });
+        }
+        for (int Pass = 0; Pass < 2; Pass++)
+        {
+            if (Pass != 0)
+            {
+                printf("  format = %08lX\n", Device->SetDataFormat(&DcJoystickFormat));
+                Targets.push_back({ DIPH_BYOFFSET, 0 });
+                Targets.push_back({ DIPH_BYOFFSET, 48 });
+            }
+            for (const auto& Property : DcProperties)
+            {
+                /* The private ids crash the system library on some objects */
+                if (strncmp(Property.Name, "prop", 4) == 0)
+                    continue;
+                for (const auto& Target : Targets)
+                {
+                    BYTE Buffer[1024];
+                    LPDIPROPHEADER Header = reinterpret_cast<LPDIPROPHEADER>(Buffer);
+                    HRESULT Result;
+
+                    memset(Buffer, 0xCC, sizeof(Buffer));
+                    Header->dwSize = Property.Size;
+                    Header->dwHeaderSize = sizeof(DIPROPHEADER);
+                    Header->dwObj = Target.second;
+                    Header->dwHow = Target.first;
+                    Result = Device->GetProperty(*Property.Property, Header);
+                    printf("  get%s %s how %lu obj %#lx = %08lX", Pass ? " formatted" : "", Property.Name, Target.first,
+                           Target.second, Result);
+                    if (SUCCEEDED(Result))
+                        DcPrintProperty(Buffer, Property.Size);
+                    printf("\n");
+                }
+            }
+        }
+        Device->Release();
+    }
+    Wide->Release();
+}
+
 static
 VOID
 DcCheckMisc(VOID)
@@ -874,6 +943,8 @@ DcRunDataChecks(
         DcCheckAcquire();
     else if (strcmp(Name, "props") == 0)
         DcCheckProperties();
+    else if (strcmp(Name, "hidprops") == 0)
+        DcCheckHidProperties();
     else if (strcmp(Name, "misc") == 0)
         DcCheckMisc();
 }

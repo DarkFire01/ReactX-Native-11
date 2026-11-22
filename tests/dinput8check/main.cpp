@@ -739,6 +739,7 @@ static const struct
     { "coop", [] { DcRunDataChecks("coop"); } },
     { "acquire", [] { DcRunDataChecks("acquire"); } },
     { "props", [] { DcRunDataChecks("props"); } },
+    { "hidprops", [] { DcRunDataChecks("hidprops"); } },
     { "misc", [] { DcRunDataChecks("misc"); } },
     { "effects", DcCheckEffectFiles },
     { "actions", DcCheckActions },
