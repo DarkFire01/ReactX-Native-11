@@ -157,7 +157,8 @@ public:
     STDMETHODIMP_(ULONG)
     Release() override
     {
-        return --Refs;
+        Refs -= 1;
+        return Refs;
     }
 };
 
