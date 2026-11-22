@@ -6,6 +6,7 @@
  *
  * dinput8check [-runtime system|reactx|<path>] [check ...]
  *
+ * -read <file> lists the effects in a file instead of running checks.
  * The watch check prints live keyboard and mouse input and only runs when named.
  */
 
@@ -738,6 +739,7 @@ static const struct
     { "acquire", [] { DcRunDataChecks("acquire"); } },
     { "props", [] { DcRunDataChecks("props"); } },
     { "misc", [] { DcRunDataChecks("misc"); } },
+    { "effects", DcCheckEffectFiles },
     { "watch", [] { DcRunDataChecks("watch"); }, TRUE },
 };
 
@@ -768,6 +770,7 @@ wmain(
     _In_reads_(argc) wchar_t** argv)
 {
     PCWSTR Runtime = L"system";
+    PCWSTR ReadPath = nullptr;
     std::vector<std::string> Wanted;
     WCHAR Path[MAX_PATH];
 
@@ -776,6 +779,10 @@ wmain(
         if (_wcsicmp(argv[Index], L"-runtime") == 0 && Index + 1 < argc)
         {
             Runtime = argv[++Index];
+        }
+        else if (_wcsicmp(argv[Index], L"-read") == 0 && Index + 1 < argc)
+        {
+            ReadPath = argv[++Index];
         }
         else
         {
@@ -804,6 +811,11 @@ wmain(
     DcWindow = CreateWindowExW(0, L"STATIC", L"dinput8check", WS_POPUP, 0, 0, 16, 16, nullptr, nullptr,
                                GetModuleHandleW(nullptr), nullptr);
 
+    if (ReadPath != nullptr)
+    {
+        DcCheckEffectFileRead(ReadPath);
+        return 0;
+    }
     for (const auto& Check : DcChecks)
     {
         BOOLEAN Run = Wanted.empty() && !Check.ByHand;

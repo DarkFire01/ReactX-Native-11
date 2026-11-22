@@ -64,5 +64,12 @@ extern DIDATAFORMAT DcJoystickFormat;
 #define DC_OPTIONAL         0x80000000
 
 VOID
+DcCheckEffectFiles(VOID);
+
+VOID
+DcCheckEffectFileRead(
+    _In_z_ PCWSTR Path);
+
+VOID
 DcRunDataChecks(
     _In_z_ PCSTR Name);
