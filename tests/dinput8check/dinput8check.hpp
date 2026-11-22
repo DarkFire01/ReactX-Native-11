@@ -67,6 +67,9 @@ VOID
 DcCheckEffectFiles(VOID);
 
 VOID
+DcCheckActions(VOID);
+
+VOID
 DcCheckEffectFileRead(
     _In_z_ PCWSTR Path);
 

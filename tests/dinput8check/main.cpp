@@ -740,6 +740,7 @@ static const struct
     { "props", [] { DcRunDataChecks("props"); } },
     { "misc", [] { DcRunDataChecks("misc"); } },
     { "effects", DcCheckEffectFiles },
+    { "actions", DcCheckActions },
     { "watch", [] { DcRunDataChecks("watch"); }, TRUE },
 };
 
