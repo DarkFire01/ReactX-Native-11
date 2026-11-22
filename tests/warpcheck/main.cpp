@@ -3111,6 +3111,176 @@ Exit:
     return hr;
 }
 
+/* A test pattern in any of the presented formats, one texel at a time */
+static
+VOID
+TcPresentTexel(
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT X,
+    _In_ UINT Y,
+    _Out_writes_bytes_(8) BYTE *Texel)
+{
+    FLOAT Color[4] = { (FLOAT)X / 63.0f, (FLOAT)Y / 63.0f, (FLOAT)((X * 7 + Y * 13) % 64) / 63.0f, 1.0f };
+
+    switch (Format)
+    {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            Texel[0] = (BYTE)(Color[2] * 255.0f + 0.5f);
+            Texel[1] = (BYTE)(Color[1] * 255.0f + 0.5f);
+            Texel[2] = (BYTE)(Color[0] * 255.0f + 0.5f);
+            Texel[3] = 255;
+            break;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            for (UINT Index = 0; Index < 4; Index++)
+                Texel[Index] = (BYTE)(Color[Index] * 255.0f + 0.5f);
+            break;
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+        {
+            UINT Packed = (UINT)(Color[0] * 1023.0f + 0.5f) | (UINT)(Color[1] * 1023.0f + 0.5f) << 10 |
+                          (UINT)(Color[2] * 1023.0f + 0.5f) << 20 | 3u << 30;
+
+            memcpy(Texel, &Packed, 4);
+            break;
+        }
+        default:
+            for (UINT Index = 0; Index < 4; Index++)
+            {
+                /* Halves of k / 63 with k < 64 are exact enough to build by hand: sign 0, then exponent and mantissa */
+                FLOAT Value = Color[Index];
+                UINT Bits;
+                USHORT Half;
+
+                memcpy(&Bits, &Value, 4);
+                Half = (Value == 0.0f) ? 0 : (USHORT)((((Bits >> 23) & 0xFF) - 112) << 10 | ((Bits >> 13) & 0x3FF));
+                memcpy(Texel + Index * 2, &Half, 2);
+            }
+            break;
+    }
+}
+
+/* Swap chains on a window, read back from the window through GDI: format conversion and stretching on present */
+static
+HRESULT
+ScenePresent(
+    _In_ ID3D11Device *Device,
+    _In_ ID3D11DeviceContext *Context,
+    _Inout_ TcResult *Result)
+{
+    static const struct { DXGI_FORMAT Format; UINT Width; UINT Height; UINT Bytes; } Cases[] =
+    {
+        { DXGI_FORMAT_B8G8R8A8_UNORM, 64, 64, 4 },
+        { DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 4 },
+        { DXGI_FORMAT_R10G10B10A2_UNORM, 64, 64, 4 },
+        { DXGI_FORMAT_R16G16B16A16_FLOAT, 64, 64, 8 },
+        { DXGI_FORMAT_B8G8R8A8_UNORM, 40, 24, 4 },
+        { DXGI_FORMAT_R8G8B8A8_UNORM, 96, 80, 4 },
+    };
+    WNDCLASSW Class = {};
+    IDXGIDevice *DxgiDevice = NULL;
+    IDXGIAdapter *Adapter = NULL;
+    IDXGIFactory *Factory = NULL;
+    HWND Window = NULL;
+    HRESULT hr;
+
+    UNREFERENCED_PARAMETER(Context);
+    Class.lpfnWndProc = DefWindowProcW;
+    Class.hInstance = GetModuleHandleW(NULL);
+    Class.lpszClassName = L"WarpCheckPresent";
+    RegisterClassW(&Class);
+    Window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, Class.lpszClassName, L"", WS_POPUP | WS_VISIBLE, 0, 0, 64, 64,
+                             NULL, NULL, Class.hInstance, NULL);
+    if (Window == NULL)
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    hr = Device->QueryInterface(IID_PPV_ARGS(&DxgiDevice));
+    if (SUCCEEDED(hr))
+        hr = DxgiDevice->GetAdapter(&Adapter);
+    if (SUCCEEDED(hr))
+        hr = Adapter->GetParent(IID_PPV_ARGS(&Factory));
+
+    for (UINT Case = 0; Case < ARRAYSIZE(Cases) && SUCCEEDED(hr); Case++)
+    {
+        DXGI_SWAP_CHAIN_DESC Desc = {};
+        IDXGISwapChain *Chain = NULL;
+        ID3D11Texture2D *Back = NULL;
+        std::vector<BYTE> Pattern(Cases[Case].Width * Cases[Case].Height * Cases[Case].Bytes);
+        BITMAPINFO Info = {};
+        VOID *Bits = NULL;
+        HBITMAP Bitmap = NULL;
+        HDC WindowDc = NULL;
+        HDC MemoryDc = NULL;
+        MSG Message;
+
+        Desc.BufferDesc.Width = Cases[Case].Width;
+        Desc.BufferDesc.Height = Cases[Case].Height;
+        Desc.BufferDesc.Format = Cases[Case].Format;
+        Desc.SampleDesc.Count = 1;
+        Desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        Desc.BufferCount = 1;
+        Desc.OutputWindow = Window;
+        Desc.Windowed = TRUE;
+        Desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        hr = Factory->CreateSwapChain(Device, &Desc, &Chain);
+        if (SUCCEEDED(hr))
+            hr = Chain->GetBuffer(0, IID_PPV_ARGS(&Back));
+        if (FAILED(hr))
+        {
+            printf("present case %u: %08lx\n", Case, hr);
+            if (Chain)
+                Chain->Release();
+            break;
+        }
+
+        for (UINT Y = 0; Y < Cases[Case].Height; Y++)
+        {
+            for (UINT X = 0; X < Cases[Case].Width; X++)
+                TcPresentTexel(Cases[Case].Format, X * 63 / (Cases[Case].Width - 1), Y * 63 / (Cases[Case].Height - 1),
+                               &Pattern[(Y * Cases[Case].Width + X) * Cases[Case].Bytes]);
+        }
+        Context->UpdateSubresource(Back, 0, NULL, Pattern.data(), Cases[Case].Width * Cases[Case].Bytes, 0);
+        hr = Chain->Present(0, 0);
+        while (PeekMessageW(&Message, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&Message);
+
+        Info.bmiHeader.biSize = sizeof(Info.bmiHeader);
+        Info.bmiHeader.biWidth = 64;
+        Info.bmiHeader.biHeight = -64;
+        Info.bmiHeader.biPlanes = 1;
+        Info.bmiHeader.biBitCount = 32;
+        WindowDc = GetDC(Window);
+        MemoryDc = CreateCompatibleDC(WindowDc);
+        Bitmap = CreateDIBSection(MemoryDc, &Info, DIB_RGB_COLORS, &Bits, NULL, 0);
+        if (Bitmap != NULL)
+        {
+            HGDIOBJ Previous = SelectObject(MemoryDc, Bitmap);
+
+            BitBlt(MemoryDc, 0, 0, 64, 64, WindowDc, 0, 0, SRCCOPY);
+            GdiFlush();
+            for (UINT Index = 0; Index < 64 * 64; Index++)
+            {
+                BYTE *Pixel = (BYTE *)Bits + Index * 4;
+
+                Result->Data.insert(Result->Data.end(), Pixel, Pixel + 3);
+            }
+            SelectObject(MemoryDc, Previous);
+            DeleteObject(Bitmap);
+        }
+        DeleteDC(MemoryDc);
+        ReleaseDC(Window, WindowDc);
+        Back->Release();
+        Chain->Release();
+    }
+
+    if (Factory)
+        Factory->Release();
+    if (Adapter)
+        Adapter->Release();
+    if (DxgiDevice)
+        DxgiDevice->Release();
+    DestroyWindow(Window);
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "caps", 0, SceneCaps },
@@ -3141,6 +3311,7 @@ static const TcScene Scenes[] =
     { "a2c", 0, SceneAlphaCoverage },
     { "linemodes", 0, SceneLineModes },
     { "rate", 0, SceneSampleRate },
+    { "present", 0, ScenePresent },
 };
 
 static
