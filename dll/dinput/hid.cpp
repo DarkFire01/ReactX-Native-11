@@ -1737,6 +1737,30 @@ public:
                 StringCchCopyW(Path->wszPath, _countof(Path->wszPath), Start.Path);
                 return S_OK;
             }
+
+#if DIRECTINPUT_VERSION >= 0x0800
+            case 24:
+                Value->dwData = MAKELONG(VendorId, ProductId);
+                return S_OK;
+
+            /* The joystick type key name, which the gameport adapters write as a predefined type number */
+            case 26:
+            {
+                PWSTR Name = reinterpret_cast<LPDIPROPSTRING>(Header)->wsz;
+
+                if (LOBYTE(DevType) == DI8DEVTYPE_MOUSE || LOBYTE(DevType) == DI8DEVTYPE_KEYBOARD)
+                    return E_NOTIMPL;
+                if (VendorId == DI_HID_MS_VENDOR && ProductId >= DI_HID_MS_GAMEPORT_LOW && ProductId <= DI_HID_MS_GAMEPORT_HIGH)
+                {
+                    Name[0] = L'#';
+                    Name[1] = static_cast<WCHAR>(ProductId - 208);
+                    Name[2] = L'\0';
+                    return S_OK;
+                }
+                StringCchPrintfW(Name, MAX_PATH, L"VID_%04X&PID_%04X", VendorId, ProductId);
+                return S_OK;
+            }
+#endif
         }
         return E_NOTIMPL;
     }
@@ -2240,6 +2264,44 @@ private:
     {
         const RX_DI_HID_SLOT* Slot = &Slots[Target->Index];
         LPDIPROPDWORD Value = reinterpret_cast<LPDIPROPDWORD>(Header);
+
+#if DIRECTINPUT_VERSION >= 0x0800
+        /* DirectInput 8 also reports the descriptor ranges and the usage name of each object */
+        switch (Target->Property)
+        {
+            case 18:
+            case 19:
+            {
+                LPDIPROPRANGE Range = reinterpret_cast<LPDIPROPRANGE>(Header);
+
+                if (Slot->Group == nullptr)
+                    return E_NOTIMPL;
+                Range->lMin = (Target->Property == 18) ? Slot->Group->PhysicalMin : Slot->Group->LogicalMin;
+                Range->lMax = (Target->Property == 18) ? Slot->Group->PhysicalMax : Slot->Group->LogicalMax;
+                return S_OK;
+            }
+
+            case 20:
+            {
+                const RX_DI_HID_GROUP* Group = Slot->Group;
+                ULONG Offset = 0;
+                ULONG Usage;
+
+                if (Group == nullptr)
+                    return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+                if ((Target->Type & DIDFT_COLLECTION) == 0)
+                    Offset = Target->Index - Base[Group->Report] - Group->DataIndexMin;
+                Usage = Group->UsageMin + Offset;
+                if (Group->UsagePage >= _countof(DiUsageNameBase) || DiUsageNameBase[Group->UsagePage] == 0 || Usage >= 0x200 ||
+                    LoadStringW(DiModule, DiUsageNameBase[Group->UsagePage] + Usage,
+                                reinterpret_cast<LPDIPROPSTRING>(Header)->wsz, MAX_PATH) == 0)
+                {
+                    return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+                }
+                return S_OK;
+            }
+        }
+#endif
 
         if (Target->Property == DI_PROP_ENABLE_OBJECT)
         {
