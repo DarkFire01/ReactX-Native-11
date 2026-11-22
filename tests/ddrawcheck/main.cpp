@@ -1205,6 +1205,22 @@ DcCheckSurfaceCreate(
         { "backbuffer_alone", Size, DDSCAPS_BACKBUFFER | DDSCAPS_SYSTEMMEMORY, 64, 32 },
         { "huge", Size, Sys, 70000, 2 },
         { "fourcc_yuy2", Size, Sys, 16, 8, 0, DDPF_FOURCC },
+        { "z16_sys", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 16, DDPF_ZBUFFER, 0, 0xFFFF },
+        { "z16_video", Size, DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY, 13, 7, 16, DDPF_ZBUFFER, 0, 0xFFFF },
+        { "z16_default", Size, DDSCAPS_ZBUFFER, 13, 7, 16, DDPF_ZBUFFER, 0, 0xFFFF },
+        { "z32_sys", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 32, DDPF_ZBUFFER, 0, 0xFFFFFFFF },
+        { "z24_video", Size, DDSCAPS_ZBUFFER, 13, 7, 32, DDPF_ZBUFFER, 0, 0xFFFFFF },
+        { "z24x8_video", Size, DDSCAPS_ZBUFFER, 13, 7, 32, DDPF_ZBUFFER, 0, 0xFFFFFF00 },
+        { "z15_sys", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 15, DDPF_ZBUFFER, 0, 0x7FFF },
+        { "z4_sys", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 4, DDPF_ZBUFFER, 0, 0xF },
+        { "z_nomask", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 16, DDPF_ZBUFFER, 0, 0 },
+        { "z_stencil", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 32, DDPF_ZBUFFER | DDPF_STENCILBUFFER,
+          8, 0xFFFFFF00, 0xFF },
+        { "z_stencil_video", Size, DDSCAPS_ZBUFFER, 13, 7, 32, DDPF_ZBUFFER | DDPF_STENCILBUFFER, 8, 0xFFFFFF00,
+          0xFF },
+        { "z_stencil_nomask", Size, DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY, 13, 7, 32,
+          DDPF_ZBUFFER | DDPF_STENCILBUFFER, 8, 0xFFFFFF00, 0 },
+        { "plain_with_zformat", Size, Sys, 13, 7, 16, DDPF_ZBUFFER, 0, 0xFFFF },
     };
     LPDIRECTDRAWSURFACE7 Surface;
     LPDIRECTDRAW7 Draw7;
@@ -2020,6 +2036,489 @@ DcCheckPrivateData(
     Draw7->Release();
 }
 
+static
+HRESULT
+WINAPI
+DcCountAttached(
+    _In_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ LPDDSURFACEDESC2 Desc,
+    _In_ LPVOID Context)
+{
+    DWORD* Count = static_cast<DWORD*>(Context);
+
+    printf("    attached caps=%08lX\n", Desc->ddsCaps.dwCaps);
+    *Count += 1;
+    Surface->Release();
+    return DDENUMRET_OK;
+}
+
+static
+VOID
+DcDescribeChain(
+    _In_ LPDIRECTDRAWSURFACE7 Surface)
+{
+    LPDIRECTDRAWSURFACE7 Found;
+    DDSCAPS2 Caps;
+    DWORD Count = 0;
+    HRESULT hr;
+
+    memset(&Caps, 0, sizeof(Caps));
+    Surface->GetCaps(&Caps);
+    printf("  caps = %08lX %08lX refs=%lu\n", Caps.dwCaps, Caps.dwCaps2, DcRefCount(Surface));
+    printf("  enum = %08lX", Surface->EnumAttachedSurfaces(&Count, DcCountAttached));
+    printf("  count=%lu\n", Count);
+    for (DWORD Want : { DWORD(DDSCAPS_BACKBUFFER), DWORD(DDSCAPS_FRONTBUFFER), DWORD(DDSCAPS_FLIP), DWORD(DDSCAPS_OFFSCREENPLAIN), DWORD(0) })
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = Want;
+        Found = nullptr;
+        hr = Surface->GetAttachedSurface(&Caps, &Found);
+        printf("  get_attached %08lX = %08lX", Want, hr);
+        if (SUCCEEDED(hr))
+        {
+            memset(&Caps, 0, sizeof(Caps));
+            Found->GetCaps(&Caps);
+            printf(" caps=%08lX refs=%lu", Caps.dwCaps, Found->Release());
+        }
+        printf("\n");
+    }
+}
+
+/* Follows the flip links from the front, then pokes at the first back buffer */
+static
+VOID
+DcWalkChain(
+    _In_ LPDIRECTDRAWSURFACE7 Front)
+{
+    LPDIRECTDRAWSURFACE7 Current = Front;
+    LPDIRECTDRAWSURFACE7 Next;
+    LPDIRECTDRAWSURFACE7 Back = nullptr;
+    LPDIRECTDRAWSURFACE7 Plain;
+    LPDIRECTDRAW7 Draw7 = nullptr;
+    DDSCAPS2 Caps;
+    char Name[32];
+    HRESULT hr;
+
+    Current->AddRef();
+    for (int Step = 0; Step < 4; Step++)
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = DDSCAPS_FLIP;
+        Next = nullptr;
+        hr = Current->GetAttachedSurface(&Caps, &Next);
+        Current->Release();
+        if (FAILED(hr))
+        {
+            printf("  walk %d = %08lX\n", Step, hr);
+            return;
+        }
+        printf("  walk %d front=%d\n", Step, Next == Front);
+        if (Next == Front)
+        {
+            Next->Release();
+            break;
+        }
+        sprintf_s(Name, "  walk_desc %d", Step);
+        DcSurfaceDesc(Name, Next);
+        if (Back == nullptr)
+        {
+            Back = Next;
+            Back->AddRef();
+        }
+        Current = Next;
+    }
+    if (Back == nullptr)
+        return;
+
+    printf("  delete_implicit = %08lX\n", Front->DeleteAttachedSurface(0, Back));
+    printf("  back_delete_front = %08lX\n", Back->DeleteAttachedSurface(0, Front));
+    printf("  delete_all_implicit = %08lX\n", Front->DeleteAttachedSurface(0, nullptr));
+    Front->GetDDInterface(reinterpret_cast<VOID**>(&Draw7));
+    if (Draw7 != nullptr)
+    {
+        Plain = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 32, 16, 0);
+        if (Plain != nullptr)
+        {
+            printf("  add_plain = %08lX\n", Front->AddAttachedSurface(Plain));
+            Plain->Release();
+        }
+        Draw7->Release();
+    }
+    printf("  back_release = %lu\n", Back->Release());
+    printf("  back_release_last = %lu\n", Back->Release());
+    printf("  back_release_more = %lu\n", Back->Release());
+    memset(&Caps, 0, sizeof(Caps));
+    Caps.dwCaps = DDSCAPS_BACKBUFFER;
+    Next = nullptr;
+    hr = Front->GetAttachedSurface(&Caps, &Next);
+    printf("  back_after = %08lX same=%d refs=%lu\n", hr, Next == Back, Next != nullptr ? Next->Release() : 0);
+}
+
+static
+VOID
+DcCheckComplex(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Size = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    static const DWORD Chain = DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Flags;
+        DWORD Caps;
+        DWORD Back;
+    } Shapes[] =
+    {
+        { "primary_chain", DDSD_CAPS | DDSD_BACKBUFFERCOUNT, DDSCAPS_PRIMARYSURFACE | Chain, 1 },
+        { "primary_flip_nocount", DDSD_CAPS, DDSCAPS_PRIMARYSURFACE | Chain, 0 },
+        { "primary_count_only", DDSD_CAPS | DDSD_BACKBUFFERCOUNT, DDSCAPS_PRIMARYSURFACE, 1 },
+        { "plain_chain_sys", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | Chain, 1 },
+        { "plain_chain_video", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | Chain, 2 },
+        { "chain_sys", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_SYSTEMMEMORY | Chain, 1 },
+        { "chain_video", Size | DDSD_BACKBUFFERCOUNT, Chain, 1 },
+        { "chain_zero", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_SYSTEMMEMORY | Chain, 0 },
+        { "chain_nocount", Size, DDSCAPS_SYSTEMMEMORY | Chain, 0 },
+        { "flip_only", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_SYSTEMMEMORY | DDSCAPS_FLIP, 1 },
+        { "complex_only", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_SYSTEMMEMORY | DDSCAPS_COMPLEX, 1 },
+        { "count_only", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN, 1 },
+        { "frontbuffer", Size, DDSCAPS_SYSTEMMEMORY | DDSCAPS_FRONTBUFFER, 0 },
+        { "zbuffer", Size, DDSCAPS_SYSTEMMEMORY | DDSCAPS_ZBUFFER, 0 },
+        { "zbuffer_format", Size | DDSD_PIXELFORMAT, DDSCAPS_SYSTEMMEMORY | DDSCAPS_ZBUFFER, 16 },
+        { "zbuffer_video", Size | DDSD_PIXELFORMAT, DDSCAPS_VIDEOMEMORY | DDSCAPS_ZBUFFER, 16 },
+        { "zbuffer_depth", Size | DDSD_ZBUFFERBITDEPTH, DDSCAPS_SYSTEMMEMORY | DDSCAPS_ZBUFFER, 16 },
+        { "chain_three_sys", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | Chain, 3 },
+        { "chain_both_counts", Size | DDSD_BACKBUFFERCOUNT | DDSD_MIPMAPCOUNT, DDSCAPS_OFFSCREENPLAIN | Chain, 1 },
+        { "chain_backbuffer", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_BACKBUFFER | Chain, 1 },
+        { "chain_frontbuffer", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_FRONTBUFFER | Chain, 1 },
+        { "chain_565", Size | DDSD_BACKBUFFERCOUNT | DDSD_PIXELFORMAT, DDSCAPS_OFFSCREENPLAIN | Chain, 1 },
+        { "texture_chain", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY | Chain, 1 },
+        { "mipmap", Size | DDSD_MIPMAPCOUNT, DDSCAPS_SYSTEMMEMORY | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX, 2 },
+        { "overlay_sys", Size, DDSCAPS_SYSTEMMEMORY | DDSCAPS_OVERLAY, 0 },
+        { "overlay_video", Size, DDSCAPS_VIDEOMEMORY | DDSCAPS_OVERLAY, 0 },
+        { "overlay_chain", Size | DDSD_BACKBUFFERCOUNT, DDSCAPS_OVERLAY | Chain, 1 },
+    };
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (const auto& Shape : Shapes)
+    {
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Desc.dwFlags = Shape.Flags;
+        Desc.ddsCaps.dwCaps = Shape.Caps;
+        Desc.dwWidth = 32;
+        Desc.dwHeight = 16;
+        Desc.dwBackBufferCount = Shape.Back;
+        if ((Shape.Flags & DDSD_MIPMAPCOUNT) != 0 && (Shape.Flags & DDSD_BACKBUFFERCOUNT) == 0)
+        {
+            Desc.dwBackBufferCount = 0;
+            Desc.dwMipMapCount = Shape.Back;
+        }
+        if ((Shape.Caps & DDSCAPS_ZBUFFER) != 0)
+        {
+            Desc.dwBackBufferCount = 0;
+            Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+            Desc.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER;
+            Desc.ddpfPixelFormat.dwZBufferBitDepth = Shape.Back;
+            Desc.ddpfPixelFormat.dwZBitMask = 0xFFFF;
+            if ((Shape.Flags & DDSD_ZBUFFERBITDEPTH) != 0)
+                Desc.dwMipMapCount = Shape.Back;
+        }
+        else if ((Shape.Flags & DDSD_PIXELFORMAT) != 0)
+        {
+            Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+            Desc.ddpfPixelFormat.dwFlags = DDPF_RGB;
+            Desc.ddpfPixelFormat.dwRGBBitCount = 16;
+            Desc.ddpfPixelFormat.dwRBitMask = 0xF800;
+            Desc.ddpfPixelFormat.dwGBitMask = 0x07E0;
+            Desc.ddpfPixelFormat.dwBBitMask = 0x001F;
+        }
+        Surface = nullptr;
+        hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+        printf("complex %s = %08lX\n", Shape.Name, hr);
+        if (FAILED(hr))
+            continue;
+        DcSurfaceDesc("  get_desc", Surface);
+        DcDescribeChain(Surface);
+        printf("  draw_refs = %lu\n", DcRefCount(Draw7));
+        DcWalkChain(Surface);
+        printf("  release = %lu\n", Surface->Release());
+    }
+
+    Draw7->Release();
+}
+
+static
+HRESULT
+WINAPI
+DcDumpOldAttached(
+    _In_ LPDIRECTDRAWSURFACE Surface,
+    _In_ LPDDSURFACEDESC Desc,
+    _In_ LPVOID Context)
+{
+    DDSURFACEDESC2 Copy;
+
+    memset(&Copy, 0xCC, sizeof(Copy));
+    memcpy(&Copy, Desc, sizeof(DDSURFACEDESC));
+    Copy.lpSurface = nullptr;
+    DcBytes("    old_attached", &Copy, sizeof(DDSURFACEDESC));
+    printf("    refs=%lu\n", Surface->Release());
+    return *static_cast<DWORD*>(Context) == 0 ? DDENUMRET_CANCEL : DDENUMRET_OK;
+}
+
+static
+LPDIRECTDRAWSURFACE
+DcMakeOld(
+    _In_ LPDIRECTDRAW Draw,
+    _In_ DWORD Caps,
+    _In_ DWORD Width,
+    _In_ DWORD Height)
+{
+    LPDIRECTDRAWSURFACE Surface = nullptr;
+    DDSURFACEDESC Desc;
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    Desc.ddsCaps.dwCaps = Caps;
+    Desc.dwWidth = Width;
+    Desc.dwHeight = Height;
+    if (FAILED(Draw->CreateSurface(&Desc, &Surface, nullptr)))
+        return nullptr;
+    return Surface;
+}
+
+static
+VOID
+DcDescribeOld(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAWSURFACE Surface)
+{
+    LPDIRECTDRAWSURFACE7 Surface7 = nullptr;
+
+    printf(" %s:\n", Name);
+    if (FAILED(Surface->QueryInterface(IID_IDirectDrawSurface7, reinterpret_cast<VOID**>(&Surface7))))
+        return;
+    DcDescribeChain(Surface7);
+    Surface7->Release();
+}
+
+static
+VOID
+DcCheckAttach(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Sys = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    static const DWORD Video = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY;
+    LPDIRECTDRAWSURFACE Surfaces[4] = {};
+    LPDIRECTDRAWSURFACE Small;
+    LPDIRECTDRAWSURFACE Other;
+    LPDIRECTDRAWSURFACE7 First7;
+    LPDIRECTDRAWSURFACE7 Second7;
+    LPDIRECTDRAWSURFACE4 First4 = nullptr;
+    LPDIRECTDRAWSURFACE4 Second4 = nullptr;
+    LPDIRECTDRAW Draw = nullptr;
+    LPDIRECTDRAW7 Draw7;
+    DDSCAPS Caps;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    /* IDirectDrawSurface7 only takes Z buffers */
+    First7 = DcMakeSurface(Draw7, Sys, 32, 16, 0);
+    Second7 = DcMakeSurface(Draw7, Sys, 32, 16, 0);
+    if (First7 != nullptr && Second7 != nullptr)
+    {
+        printf("add7 = %08lX\n", First7->AddAttachedSurface(Second7));
+        printf("delete7 = %08lX\n", First7->DeleteAttachedSurface(0, Second7));
+        First7->QueryInterface(IID_IDirectDrawSurface4, reinterpret_cast<VOID**>(&First4));
+        Second7->QueryInterface(IID_IDirectDrawSurface4, reinterpret_cast<VOID**>(&Second4));
+        if (First4 != nullptr && Second4 != nullptr)
+        {
+            printf("add4 = %08lX\n", First4->AddAttachedSurface(Second4));
+            printf("  refs first=%lu second=%lu\n", DcRefCount(First7), DcRefCount(Second7));
+            DcDescribeChain(First7);
+            DcDescribeChain(Second7);
+            printf("add4_again = %08lX\n", First4->AddAttachedSurface(Second4));
+            printf("add4_back = %08lX\n", Second4->AddAttachedSurface(First4));
+            printf("delete4_flags = %08lX\n", First4->DeleteAttachedSurface(1, Second4));
+            printf("delete4_back = %08lX\n", Second4->DeleteAttachedSurface(0, First4));
+            printf("delete4 = %08lX\n", First4->DeleteAttachedSurface(0, Second4));
+            printf("  refs first=%lu second=%lu\n", DcRefCount(First7), DcRefCount(Second7));
+            DcDescribeChain(First7);
+            printf("delete4_again = %08lX\n", First4->DeleteAttachedSurface(0, Second4));
+            printf("delete4_all_none = %08lX\n", First4->DeleteAttachedSurface(0, nullptr));
+            printf("add4_self = %08lX\n", First4->AddAttachedSurface(First4));
+        }
+        if (First4 != nullptr)
+            First4->Release();
+        if (Second4 != nullptr)
+            Second4->Release();
+    }
+    if (First7 != nullptr)
+        First7->Release();
+    if (Second7 != nullptr)
+        Second7->Release();
+
+    for (DWORD Kind : { Sys, Video })
+    {
+        LPDIRECTDRAWSURFACE7 Plain = DcMakeSurface(Draw7, Kind, 32, 16, 0);
+        LPDIRECTDRAWSURFACE7 Depth[3] = {};
+        LPDIRECTDRAWSURFACE7 Found;
+        DDSCAPS2 Want = {};
+
+        printf("[zattach %08lX]\n", Kind);
+        for (DWORD Index = 0; Index < 3; Index++)
+        {
+            DWORD Memory = Index == 2 ? (Kind == Sys ? DDSCAPS_VIDEOMEMORY : DDSCAPS_SYSTEMMEMORY) :
+                                        (Kind & (DDSCAPS_SYSTEMMEMORY | DDSCAPS_VIDEOMEMORY));
+            DDSURFACEDESC2 Desc = {};
+
+            Desc.dwSize = sizeof(Desc);
+            Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+            Desc.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | Memory;
+            Desc.dwWidth = Index == 1 ? 16 : 32;
+            Desc.dwHeight = 16;
+            Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+            Desc.ddpfPixelFormat.dwFlags = DDPF_ZBUFFER;
+            Desc.ddpfPixelFormat.dwZBufferBitDepth = 16;
+            Desc.ddpfPixelFormat.dwZBitMask = 0xFFFF;
+            printf("create_z %lu = %08lX\n", Index, Draw7->CreateSurface(&Desc, &Depth[Index], nullptr));
+        }
+        if (Plain == nullptr || Depth[0] == nullptr)
+        {
+            printf("create failed\n");
+            continue;
+        }
+        printf("add_z = %08lX\n", Plain->AddAttachedSurface(Depth[0]));
+        printf("  z_refs=%lu\n", DcRefCount(Depth[0]));
+        printf("add_z_again = %08lX\n", Plain->AddAttachedSurface(Depth[0]));
+        if (Depth[1] != nullptr)
+            printf("add_z_small = %08lX\n", Plain->AddAttachedSurface(Depth[1]));
+        if (Depth[2] != nullptr)
+            printf("add_z_other_memory = %08lX\n", Plain->AddAttachedSurface(Depth[2]));
+        printf("z_add_plain = %08lX\n", Depth[0]->AddAttachedSurface(Plain));
+        DcDescribeChain(Plain);
+        DcDescribeChain(Depth[0]);
+        Want.dwCaps = DDSCAPS_ZBUFFER;
+        Found = nullptr;
+        hr = Plain->GetAttachedSurface(&Want, &Found);
+        printf("get_z = %08lX same=%d\n", hr, Found == Depth[0]);
+        if (Found != nullptr)
+            Found->Release();
+        printf("delete_z = %08lX\n", Plain->DeleteAttachedSurface(0, Depth[0]));
+        printf("  z_refs=%lu\n", DcRefCount(Depth[0]));
+        printf("readd_z = %08lX\n", Plain->AddAttachedSurface(Depth[0]));
+        printf("release_plain = %lu\n", Plain->Release());
+        printf("  z_refs=%lu\n", DcRefCount(Depth[0]));
+        for (LPDIRECTDRAWSURFACE7 Surface : Depth)
+        {
+            if (Surface != nullptr)
+                printf("release_z = %lu\n", Surface->Release());
+        }
+    }
+    Draw7->Release();
+
+    if (FAILED(Check->Create(nullptr, &Draw, nullptr)))
+        return;
+    Draw->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Kind : { Sys, Video })
+    {
+        printf("[attach %08lX]\n", Kind);
+        for (LPDIRECTDRAWSURFACE& Surface : Surfaces)
+            Surface = DcMakeOld(Draw, Kind, 32, 16);
+        Small = DcMakeOld(Draw, Kind, 16, 16);
+        Other = DcMakeOld(Draw, Kind == Sys ? Video : Sys, 32, 16);
+        if (Surfaces[0] == nullptr || Surfaces[1] == nullptr || Surfaces[2] == nullptr || Surfaces[3] == nullptr ||
+            Small == nullptr || Other == nullptr)
+        {
+            printf("create failed\n");
+            break;
+        }
+
+        printf("add_small = %08lX\n", Surfaces[0]->AddAttachedSurface(Small));
+        printf("add_other_memory = %08lX\n", Surfaces[0]->AddAttachedSurface(Other));
+        printf("add = %08lX\n", Surfaces[0]->AddAttachedSurface(Surfaces[1]));
+        DcDescribeOld("first", Surfaces[0]);
+        DcDescribeOld("second", Surfaces[1]);
+        printf("add_third = %08lX\n", Surfaces[0]->AddAttachedSurface(Surfaces[2]));
+        DcDescribeOld("first", Surfaces[0]);
+        DcDescribeOld("second", Surfaces[1]);
+        DcDescribeOld("third", Surfaces[2]);
+        printf("add_fourth_to_second = %08lX\n", Surfaces[1]->AddAttachedSurface(Surfaces[3]));
+        DcDescribeOld("first", Surfaces[0]);
+        DcDescribeOld("second", Surfaces[1]);
+        DcDescribeOld("third", Surfaces[2]);
+        DcDescribeOld("fourth", Surfaces[3]);
+
+        {
+            DWORD KeepGoing = 1;
+            LPDIRECTDRAWSURFACE2 Second2 = nullptr;
+            LPDIRECTDRAWSURFACE Found = nullptr;
+
+            printf("old_enum = %08lX\n", Surfaces[1]->EnumAttachedSurfaces(&KeepGoing, DcDumpOldAttached));
+            printf("old_enum_null = %08lX\n", Surfaces[1]->EnumAttachedSurfaces(&KeepGoing, nullptr));
+            Surfaces[1]->QueryInterface(IID_IDirectDrawSurface2, reinterpret_cast<VOID**>(&Second2));
+            if (Second2 != nullptr)
+            {
+                memset(&Caps, 0, sizeof(Caps));
+                Caps.dwCaps = DDSCAPS_FLIP;
+                hr = Second2->GetAttachedSurface(&Caps, reinterpret_cast<LPDIRECTDRAWSURFACE2*>(&Found));
+                printf("get2 = %08lX first=%d\n", hr, Found == Surfaces[0]);
+                if (Found != nullptr)
+                    Found->Release();
+                Second2->Release();
+            }
+        }
+
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = DDSCAPS_BACKBUFFER;
+        Other->Release();
+        Other = nullptr;
+        hr = Surfaces[0]->GetAttachedSurface(&Caps, &Other);
+        printf("get_back = %08lX same=%d\n", hr, Other == Surfaces[1]);
+        if (Other != nullptr)
+            Other->Release();
+        Other = nullptr;
+
+        printf("delete_third_from_second = %08lX\n", Surfaces[1]->DeleteAttachedSurface(0, Surfaces[2]));
+        printf("delete_implicit = %08lX\n", Surfaces[2]->DeleteAttachedSurface(0, Surfaces[0]));
+        printf("delete_second = %08lX\n", Surfaces[0]->DeleteAttachedSurface(0, Surfaces[1]));
+        DcDescribeOld("first", Surfaces[0]);
+        DcDescribeOld("second", Surfaces[1]);
+        DcDescribeOld("third", Surfaces[2]);
+        printf("delete_all = %08lX\n", Surfaces[0]->DeleteAttachedSurface(0, nullptr));
+        DcDescribeOld("first", Surfaces[0]);
+        DcDescribeOld("third", Surfaces[2]);
+
+        printf("readd = %08lX\n", Surfaces[0]->AddAttachedSurface(Surfaces[1]));
+        printf("release_first = %lu\n", Surfaces[0]->Release());
+        Surfaces[0] = nullptr;
+        DcDescribeOld("second", Surfaces[1]);
+
+        for (LPDIRECTDRAWSURFACE& Surface : Surfaces)
+        {
+            if (Surface != nullptr)
+                printf("release = %lu\n", Surface->Release());
+            Surface = nullptr;
+        }
+        printf("release_small = %lu\n", Small->Release());
+    }
+
+    printf("release_draw = %lu\n", Draw->Release());
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -2043,6 +2542,8 @@ static const DrawCheckInfo DcChecks[] =
     { "blit_rules", DcCheckBlitRules },
     { "present", DcCheckPresent },
     { "private_data", DcCheckPrivateData },
+    { "complex", DcCheckComplex },
+    { "attach", DcCheckAttach },
 };
 
 static
