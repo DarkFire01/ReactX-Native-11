@@ -57,9 +57,6 @@
 /* Coefficient ramp after a matrix change, in milliseconds */
 #define DS_RAMP_MS          4
 
-/* Sinc taps on each side of the resampler center, for rate pairs without a polyphase design */
-#define DS_SINC_HALF        16
-
 template <typename T>
 constexpr
 T
@@ -312,15 +309,14 @@ struct DsNotifyPoint
     HANDLE Event;
 };
 
-/* Polyphase Kaiser windowed sinc rate converter between two whole rates */
+/* Kaiser windowed sinc rate converter, polyphase when the rate pair allows and table driven otherwise */
 class DsResampler
 {
 public:
     DsResampler();
     ~DsResampler();
 
-    /* S_FALSE when the pair has no polyphase design and the caller must convert another way */
-    HRESULT
+        HRESULT
     Configure(
         _In_ ULONG InRate,
         _In_ ULONG OutRate,
@@ -335,7 +331,7 @@ public:
     BOOLEAN
     WantsInput(VOID) const
     {
-        return Filled <= Position + Half;
+        return Filled <= Newest();
     }
 
     VOID
@@ -356,10 +352,19 @@ public:
 private:
     float
     Convolve(
-        _In_reads_(Taps) const float* Row,
+        _In_reads_(Count) const float* Row,
+        _In_ ULONG Count,
         _In_ const float* Line,
         _In_ ULONG Slot) const;
 
+    LONGLONG
+    Newest(VOID) const;
+
+    ULONG
+    Slot(
+        _In_ LONGLONG Frame) const;
+
+    BOOLEAN Polyphase;
     ULONG Up;
     ULONG Down;
     ULONG Half;
@@ -371,6 +376,15 @@ private:
     ULONG Phase;
     LONGLONG Position;
     LONGLONG Filled;
+
+    /* Interpolated table path: input frames per output, filter units per frame, reach and gain */
+    double Step;
+    double InStep;
+    double OutStep;
+    double Reach;
+    LONG Stride;
+    float Gain;
+    LONGLONG Made;
 };
 
 /* The mixer side of a playing buffer */
@@ -475,9 +489,6 @@ public:
     BOOLEAN MatrixReady;
     ULONG RampLeft;
     ULONG RampTotal;
-    double Phase;
-    float History[DS_SINC_HALF * 2 * DS_MAX_CHANNELS];
-    UINT HistoryFill;
     DsResampler Resampler;
     DsEffectChain* Effects;
 

@@ -9,33 +9,6 @@
 
 #include <math.h>
 
-/* Blackman window over the resampler taps, sampled finely enough for nearest lookup */
-#define DS_WINDOW_STEPS 4096
-
-static float DsWindow[DS_WINDOW_STEPS + 1];
-static INIT_ONCE DsWindowOnce = INIT_ONCE_STATIC_INIT;
-
-static
-BOOL
-CALLBACK
-DsBuildWindow(
-    _Inout_ PINIT_ONCE Once,
-    _Inout_opt_ PVOID Parameter,
-    _Outptr_opt_ PVOID* Context)
-{
-    UNREFERENCED_PARAMETER(Once);
-    UNREFERENCED_PARAMETER(Parameter);
-    UNREFERENCED_PARAMETER(Context);
-
-    for (int Step = 0; Step <= DS_WINDOW_STEPS; Step++)
-    {
-        double Place = static_cast<double>(Step) / DS_WINDOW_STEPS;
-
-        DsWindow[Step] = static_cast<float>(0.42 + 0.5 * cos(3.14159265358979 * Place) + 0.08 * cos(2 * 3.14159265358979 * Place));
-    }
-    return TRUE;
-}
-
 DsVoice::DsVoice()
 {
     ZeroMemory(this, sizeof(*this));
@@ -58,8 +31,6 @@ DsVoice::Setup(
     _In_ ULONG Length)
 {
     ULONG Half;
-
-    InitOnceExecuteOnce(&DsWindowOnce, DsBuildWindow, nullptr, nullptr);
 
     Format = DsCopyFormat(Wave);
     if (Format == nullptr)
@@ -186,8 +157,6 @@ DsVoice::SetState(
         ReadPosition = StopPosition;
         LastPlay = StopPosition;
         Finished = FALSE;
-        HistoryFill = 0;
-        Phase = 0.0;
         Resampler.Reset();
         if (Effects != nullptr)
             DsResetEffects(Effects);
@@ -213,8 +182,6 @@ DsVoice::SetPosition(
     if (State & DS_VOICE_PLAYING)
     {
         ReadPosition = Position;
-        HistoryFill = 0;
-        Phase = 0.0;
         Resampler.Reset();
         if (Effects != nullptr)
             DsResetEffects(Effects);
@@ -553,7 +520,6 @@ DsVoice::Mix(
     _In_ ULONG Frames,
     _In_ UINT OutChannels)
 {
-    const UINT Taps = DS_SINC_HALF * 2;
     float Frame[DS_MAX_CHANNELS];
 
     if (!(State & DS_VOICE_PLAYING) || Pass == DS_PASS_FINISHED)
@@ -561,7 +527,7 @@ DsVoice::Mix(
     MatrixReady = TRUE;
     if (Effects != nullptr)
     {
-        ULONG Ahead = Resampler.Active ? Resampler.InputFor(Frames) : static_cast<ULONG>(Frames * Ratio) + Taps + 2;
+        ULONG Ahead = Resampler.Active ? Resampler.InputFor(Frames) : Frames;
 
         DsRunEffects(Effects, this, Ahead * BlockAlign);
     }
@@ -585,78 +551,12 @@ DsVoice::Mix(
         return;
     }
 
-    if (Ratio == 1.0f)
-    {
-        for (ULONG Index = 0; Index < Frames && Pass != DS_PASS_FINISHED; Index++)
-        {
-            ReadFrame(Frame);
-            ApplyMatrix(Frame, Output + Index * OutChannels, OutChannels);
-        }
+    /* Without a converter, from a failed allocation, the voice stays quiet */
+    if (Ratio != 1.0f)
         return;
-    }
-
+    for (ULONG Index = 0; Index < Frames && Pass != DS_PASS_FINISHED; Index++)
     {
-        double Step = Ratio;
-        double Cutoff = Step > 1.0 ? 0.97 / Step : 0.97;
-
-        /* A restart begins from a silent window */
-        if (HistoryFill == 0)
-        {
-            ZeroMemory(History, sizeof(History));
-            HistoryFill = 1;
-        }
-
-        for (ULONG Index = 0; Index < Frames && Pass != DS_PASS_FINISHED; Index++)
-        {
-            double Base = -(DS_SINC_HALF - 1) - Phase;
-            double Angle = 3.14159265358979 * Cutoff * Base;
-            double Turn = 3.14159265358979 * Cutoff;
-            double SinValue = sin(Angle);
-            double CosValue = cos(Angle);
-            double SinStep = sin(Turn);
-            double CosStep = cos(Turn);
-
-            for (UINT Channel = 0; Channel < Channels; Channel++)
-                Frame[Channel] = 0.0f;
-
-            /* Windowed sinc taps around the fractional read point between taps 15 and 16 */
-            for (UINT Tap = 0; Tap < Taps; Tap++)
-            {
-                double Distance = Base + Tap;
-                double Weight;
-                double Rotated;
-                UINT Slot = static_cast<UINT>(fabs(Distance) / DS_SINC_HALF * DS_WINDOW_STEPS + 0.5);
-
-                if (fabs(Distance) < 1e-9)
-                    Weight = Cutoff;
-                else
-                    Weight = SinValue / (3.14159265358979 * Distance);
-                if (Slot > DS_WINDOW_STEPS)
-                    Slot = DS_WINDOW_STEPS;
-                Weight *= DsWindow[Slot];
-
-                for (UINT Channel = 0; Channel < Channels; Channel++)
-                    Frame[Channel] += static_cast<float>(Weight) * History[Tap * Channels + Channel];
-
-                Rotated = SinValue * CosStep + CosValue * SinStep;
-                CosValue = CosValue * CosStep - SinValue * SinStep;
-                SinValue = Rotated;
-            }
-
-            ApplyMatrix(Frame, Output + Index * OutChannels, OutChannels);
-
-            Phase += Step;
-            while (Phase >= 1.0)
-            {
-                float Fresh[DS_MAX_CHANNELS];
-
-                Phase -= 1.0;
-                ReadFrame(Fresh);
-                memmove(History, &History[Channels], (Taps - 1) * Channels * sizeof(float));
-                memcpy(&History[(Taps - 1) * Channels], Fresh, Channels * sizeof(float));
-                if (Pass == DS_PASS_FINISHED)
-                    break;
-            }
-        }
+        ReadFrame(Frame);
+        ApplyMatrix(Frame, Output + Index * OutChannels, OutChannels);
     }
 }
