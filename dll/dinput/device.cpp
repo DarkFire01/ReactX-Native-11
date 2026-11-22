@@ -2725,3 +2725,93 @@ RxDiDevice::RefreshGain(VOID)
     if (EffectDriver != nullptr)
         EffectDriver->SetGain(&DriverId, Gain);
 }
+
+HRESULT
+RxDiDevice::ModifyEffectParams(
+    _Inout_ LPDIEFFECT Params,
+    _In_ REFGUID Guid)
+{
+    LPDIRECTINPUTEFFECT Effect = nullptr;
+    RX_DI_EFFECT_ENTRY Entry = {};
+    PULONG Actuators = nullptr;
+    ULONG Count = 0;
+    BOOLEAN Found = FALSE;
+    HRESULT Result = S_OK;
+    HRESULT hr;
+
+    hr = CreateEffect(Guid, Params, &Effect, nullptr);
+    if (SUCCEEDED(hr))
+    {
+        Effect->Release();
+        return S_OK;
+    }
+    if (hr != E_INVALIDARG)
+        return S_OK;
+
+    /* Point the effect at the axes this device can push on */
+    DiAllocate(sizeof(ULONG) * (Native.dwNumObjs + 1), reinterpret_cast<PVOID*>(&Actuators));
+    for (ULONG Index = 0; Actuators != nullptr && Index < Native.dwNumObjs; Index++)
+    {
+        ULONG Type = Native.rgodf[Index].dwType;
+
+        if ((Type & DIDFT_AXIS) && (Type & DIDFT_FFACTUATOR))
+            Actuators[Count++] = Native.rgodf[Index].dwOfs;
+    }
+
+    if (Count == 0)
+    {
+        Result = E_NOTIMPL;
+        goto Done;
+    }
+
+    if (Params->dwTriggerButton != DIEB_NOTRIGGER)
+    {
+        Params->dwTriggerButton = DIJOFS_BUTTON0;
+        hr = CreateEffect(Guid, Params, &Effect, nullptr);
+        if (SUCCEEDED(hr))
+            Effect->Release();
+        if (hr != E_INVALIDARG)
+            goto Done;
+    }
+
+    if (Params->cAxes > Count)
+    {
+        Params->cAxes = Count;
+        if (Count < 3)
+        {
+            if (Params->dwFlags & DIEFF_SPHERICAL)
+                Params->dwFlags = (Params->dwFlags & ~(DIEFF_SPHERICAL | DIEFF_POLAR)) | DIEFF_POLAR;
+            else if (Count < 2 && (Params->dwFlags & DIEFF_POLAR))
+                Params->dwFlags = (Params->dwFlags & ~(DIEFF_POLAR | DIEFF_CARTESIAN)) | DIEFF_CARTESIAN;
+        }
+    }
+
+    /* Conditions carry one block per axis */
+    Enter();
+    for (ULONG Index = 0; Index < EffectCount; Index++)
+    {
+        if (IsEqualGUID(EffectList[Index].Guid, Guid))
+        {
+            Entry = EffectList[Index];
+            Found = TRUE;
+            break;
+        }
+    }
+    Leave();
+
+    if (Found && (Entry.EffectType & DIEFT_CONDITION) && Params->cAxes < Params->cbTypeSpecificParams / sizeof(DICONDITION))
+        Params->cbTypeSpecificParams = Params->cAxes * sizeof(DICONDITION);
+
+    for (ULONG Index = 0; Index < Count && Index < Params->cAxes; Index++)
+        Params->rgdwAxes[Index] = Actuators[Index];
+
+    hr = CreateEffect(Guid, Params, &Effect, nullptr);
+    if (SUCCEEDED(hr))
+        Effect->Release();
+
+Done:
+    DiFree(reinterpret_cast<PVOID*>(&Actuators));
+    if (SUCCEEDED(Result) && hr == E_INVALIDARG)
+        Result = E_INVALIDARG;
+    return Result;
+}

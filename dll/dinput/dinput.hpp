@@ -374,6 +374,12 @@ public:
     HRESULT
     InternalUnacquire(VOID);
 
+    /* Fits an effect read from a file to this device's actuators */
+    HRESULT
+    ModifyEffectParams(
+        _Inout_ LPDIEFFECT Params,
+        _In_ REFGUID Guid);
+
     HRESULT STDMETHODCALLTYPE QueryInterface(_In_ REFIID Iid, _COM_Outptr_ PVOID* Object) override;
     ULONG STDMETHODCALLTYPE AddRef(VOID) override;
     ULONG STDMETHODCALLTYPE Release(VOID) override;

@@ -5,6 +5,7 @@ nt_add_usermode_dll(dinput
         devices.cpp
         dinputobj.cpp
         effect.cpp
+        effectfile.cpp
         emulation.cpp
         hid.cpp
         joycfg.cpp

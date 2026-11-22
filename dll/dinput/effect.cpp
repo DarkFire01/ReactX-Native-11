@@ -65,35 +65,3 @@ DiReleaseCreatedEffects(
     UNREFERENCED_PARAMETER(Effects);
     UNREFERENCED_PARAMETER(Count);
 }
-
-HRESULT
-DiEnumEffectsInFile(
-    _In_ RxDiDevice* Device,
-    _In_opt_z_ LPCSTR Name,
-    _In_opt_ LPDIENUMEFFECTSINFILECALLBACK Callback,
-    _In_opt_ LPVOID Context,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(Device);
-    UNREFERENCED_PARAMETER(Name);
-    UNREFERENCED_PARAMETER(Callback);
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Flags);
-    return DIERR_UNSUPPORTED;
-}
-
-HRESULT
-DiWriteEffectToFile(
-    _In_ RxDiDevice* Device,
-    _In_opt_z_ LPCSTR Name,
-    _In_ DWORD Count,
-    _In_reads_opt_(Count) LPDIFILEEFFECT Effects,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(Device);
-    UNREFERENCED_PARAMETER(Name);
-    UNREFERENCED_PARAMETER(Count);
-    UNREFERENCED_PARAMETER(Effects);
-    UNREFERENCED_PARAMETER(Flags);
-    return DIERR_UNSUPPORTED;
-}
