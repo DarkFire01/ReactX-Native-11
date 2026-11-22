@@ -1890,6 +1890,136 @@ DcCheckPresent(
     Draw7->Release();
 }
 
+/* Private data rules and the contents stamp that volatile data and GetUniquenessValue share */
+static
+VOID
+DcCheckPrivateData(
+    _Inout_ DrawCheck* Check)
+{
+    static const GUID Tag = { 0x1a2b3c4d, 0x1111, 0x2222, { 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x66, 0x66 } };
+    static const GUID Other = { 0x5e6f7a8b, 0x1111, 0x2222, { 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x66, 0x77 } };
+    PDC_CREATE_CLIPPER CreateClipper =
+        reinterpret_cast<PDC_CREATE_CLIPPER>(GetProcAddress(Check->Module, "DirectDrawCreateClipper"));
+    LPDIRECTDRAWCLIPPER Clipper = nullptr;
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAWSURFACE7 Source;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    BYTE Data[12] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    BYTE Back[16];
+    IUnknown* Pointer;
+    DWORD Size;
+    DWORD Value;
+    HRESULT hr;
+    HDC Dc;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Caps : { DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY })
+    {
+        printf("[caps %08lX]\n", Caps);
+        Surface = DcMakeSurface(Draw7, Caps, 8, 4, 32);
+        Source = DcMakeSurface(Draw7, Caps, 8, 4, 32);
+        if (Surface == nullptr || Source == nullptr)
+        {
+            printf("create failed\n");
+            continue;
+        }
+
+        Value = 0xCCCCCCCC;
+        hr = Surface->GetUniquenessValue(&Value);
+        printf("uniq = %08lX value=%lu\n", hr, Value);
+        printf("change = %08lX\n", Surface->ChangeUniquenessValue());
+        Surface->GetUniquenessValue(&Value);
+        printf("  after_change=%lu\n", Value);
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        if (SUCCEEDED(Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        {
+            Surface->GetUniquenessValue(&Value);
+            printf("  in_lock=%lu\n", Value);
+            Surface->Unlock(nullptr);
+        }
+        Surface->GetUniquenessValue(&Value);
+        printf("  after_unlock=%lu\n", Value);
+        if (SUCCEEDED(Surface->Lock(nullptr, &Desc, DDLOCK_WAIT | DDLOCK_READONLY, NULL)))
+            Surface->Unlock(nullptr);
+        Surface->GetUniquenessValue(&Value);
+        printf("  after_readonly=%lu\n", Value);
+        Surface->Blt(nullptr, Source, nullptr, DDBLT_WAIT, nullptr);
+        Surface->GetUniquenessValue(&Value);
+        printf("  after_blt=%lu\n", Value);
+        Source->GetUniquenessValue(&Value);
+        printf("  source_after_blt=%lu\n", Value);
+        Surface->BltFast(0, 0, Source, nullptr, DDBLTFAST_WAIT);
+        Surface->GetUniquenessValue(&Value);
+        printf("  after_fast=%lu\n", Value);
+        if (SUCCEEDED(Surface->GetDC(&Dc)))
+        {
+            Surface->GetUniquenessValue(&Value);
+            printf("  in_dc=%lu\n", Value);
+            Surface->ReleaseDC(Dc);
+        }
+        Surface->GetUniquenessValue(&Value);
+        printf("  after_dc=%lu\n", Value);
+
+        printf("set = %08lX\n", Surface->SetPrivateData(Tag, Data, sizeof(Data), 0));
+        printf("set_zero = %08lX\n", Surface->SetPrivateData(Tag, Data, 0, 0));
+        printf("set_badflags = %08lX\n", Surface->SetPrivateData(Tag, Data, sizeof(Data), 4));
+        Size = 4;
+        hr = Surface->GetPrivateData(Tag, Back, &Size);
+        printf("get_small = %08lX size=%lu\n", hr, Size);
+        Size = sizeof(Back);
+        memset(Back, 0xCC, sizeof(Back));
+        hr = Surface->GetPrivateData(Tag, Back, &Size);
+        printf("get = %08lX size=%lu\n", hr, Size);
+        DcBytes("  data", Back, sizeof(Back));
+        Size = sizeof(Back);
+        printf("get_other = %08lX size=%lu\n", Surface->GetPrivateData(Other, Back, &Size), Size);
+        printf("free_other = %08lX\n", Surface->FreePrivateData(Other));
+        printf("set_volatile = %08lX\n", Surface->SetPrivateData(Other, Data, 3, DDSPD_VOLATILE));
+        Size = sizeof(Back);
+        hr = Surface->GetPrivateData(Other, Back, &Size);
+        printf("get_volatile = %08lX size=%lu\n", hr, Size);
+        Surface->ChangeUniquenessValue();
+        Size = sizeof(Back);
+        hr = Surface->GetPrivateData(Other, Back, &Size);
+        printf("get_volatile_changed = %08lX size=%lu\n", hr, Size);
+        printf("free = %08lX\n", Surface->FreePrivateData(Tag));
+        printf("free_again = %08lX\n", Surface->FreePrivateData(Tag));
+
+        if (CreateClipper(0, &Clipper, nullptr) == S_OK)
+        {
+            printf("set_unknown_size = %08lX\n", Surface->SetPrivateData(Tag, Clipper, 4, DDSPD_IUNKNOWNPOINTER));
+            printf("set_unknown = %08lX\n", Surface->SetPrivateData(Tag, Clipper, sizeof(Clipper), DDSPD_IUNKNOWNPOINTER));
+            printf("  clipper_refs=%lu\n", DcRefCount(Clipper));
+            Size = sizeof(Back);
+            Pointer = nullptr;
+            hr = Surface->GetPrivateData(Tag, &Pointer, &Size);
+            printf("get_unknown = %08lX size=%lu same=%d refs=%lu\n", hr, Size, Pointer == Clipper,
+                   DcRefCount(Clipper));
+            printf("replace_unknown = %08lX\n", Surface->SetPrivateData(Tag, Data, 2, 0));
+            printf("  clipper_refs=%lu\n", DcRefCount(Clipper));
+            Surface->SetPrivateData(Other, Clipper, sizeof(Clipper), DDSPD_IUNKNOWNPOINTER);
+            printf("  clipper_refs_held=%lu\n", DcRefCount(Clipper));
+        }
+
+        printf("release_source = %lu\n", Source->Release());
+        printf("release = %lu\n", Surface->Release());
+        if (Clipper != nullptr)
+        {
+            printf("  clipper_refs_after=%lu\n", DcRefCount(Clipper));
+            Clipper->Release();
+            Clipper = nullptr;
+        }
+    }
+
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -1912,6 +2042,7 @@ static const DrawCheckInfo DcChecks[] =
     { "video_memory", DcCheckVideoMemory },
     { "blit_rules", DcCheckBlitRules },
     { "present", DcCheckPresent },
+    { "private_data", DcCheckPrivateData },
 };
 
 static
