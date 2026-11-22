@@ -590,6 +590,7 @@ DcCheckSemanticEnum(
         { L"dc owner", DIEDBSFL_AVAILABLEDEVICES }, { L"dc owner", DIEDBSFL_AVAILABLEDEVICES | DIEDBSFL_THISUSER },
         { L"bob", DIEDBSFL_AVAILABLEDEVICES | DIEDBSFL_THISUSER }, { L"dc owner", DIEDBSFL_MULTIMICEKEYBOARDS },
         { L"dc owner", DIEDBSFL_FORCEFEEDBACK }, { L"dc owner", 0x7110 & ~DIEDBSFL_NONGAMINGDEVICES },
+        { L"dc owner", DIEDBSFL_NONGAMINGDEVICES }, { L"dc owner", 0x7110 }, { nullptr, DIEDBSFL_NONGAMINGDEVICES | DIEDBSFL_AVAILABLEDEVICES },
         { L"dc owner", 0x8000 }, { L"dc owner", 0x1 },
     };
 
