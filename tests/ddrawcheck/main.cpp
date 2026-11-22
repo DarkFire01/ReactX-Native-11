@@ -1092,6 +1092,394 @@ DcCheckPalette(
     Draw7->Release();
 }
 
+/* Surface description bytes with the surface pointer blanked, it differs every run */
+static
+VOID
+DcSurfaceDesc(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAWSURFACE7 Surface)
+{
+    DDSURFACEDESC2 Desc;
+    HRESULT hr;
+
+    memset(&Desc, 0xCC, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    hr = Surface->GetSurfaceDesc(&Desc);
+    printf("%s = %08lX\n", Name, hr);
+    Desc.lpSurface = nullptr;
+    DcBytes("  desc", &Desc, sizeof(Desc));
+}
+
+struct DcSurfaceShape
+{
+    PCSTR Name;
+    DWORD Flags;
+    DWORD Caps;
+    DWORD Width;
+    DWORD Height;
+    DWORD BitCount;
+    DWORD PixelFlags;
+    DWORD Red;
+    DWORD Green;
+    DWORD Blue;
+    DWORD Alpha;
+};
+
+static
+VOID
+DcFillDesc(
+    _In_ const DcSurfaceShape& Shape,
+    _Out_ DDSURFACEDESC2* Desc)
+{
+    memset(Desc, 0, sizeof(*Desc));
+    Desc->dwSize = sizeof(*Desc);
+    Desc->dwFlags = Shape.Flags;
+    Desc->ddsCaps.dwCaps = Shape.Caps;
+    Desc->dwWidth = Shape.Width;
+    Desc->dwHeight = Shape.Height;
+    if (Shape.PixelFlags != 0)
+    {
+        Desc->dwFlags |= DDSD_PIXELFORMAT;
+        Desc->ddpfPixelFormat.dwSize = sizeof(Desc->ddpfPixelFormat);
+        Desc->ddpfPixelFormat.dwFlags = Shape.PixelFlags;
+        Desc->ddpfPixelFormat.dwRGBBitCount = Shape.BitCount;
+        Desc->ddpfPixelFormat.dwRBitMask = Shape.Red;
+        Desc->ddpfPixelFormat.dwGBitMask = Shape.Green;
+        Desc->ddpfPixelFormat.dwBBitMask = Shape.Blue;
+        Desc->ddpfPixelFormat.dwRGBAlphaBitMask = Shape.Alpha;
+    }
+}
+
+static
+VOID
+DcCheckSurfaceCreate(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Size = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    static const DWORD Plain = DDSCAPS_OFFSCREENPLAIN;
+    static const DWORD Sys = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    static const DcSurfaceShape Shapes[] =
+    {
+        { "sys_default", Size, Sys, 64, 32 },
+        { "video_default", Size, Plain, 64, 32 },
+        { "plain_default", Size, Plain | DDSCAPS_VIDEOMEMORY, 64, 32 },
+        { "sys_odd", Size, Sys, 13, 7 },
+        { "sys_565", Size, Sys, 13, 7, 16, DDPF_RGB, 0xF800, 0x07E0, 0x001F },
+        { "sys_555", Size, Sys, 13, 7, 16, DDPF_RGB, 0x7C00, 0x03E0, 0x001F },
+        { "sys_1555", Size, Sys, 13, 7, 16, DDPF_RGB | DDPF_ALPHAPIXELS, 0x7C00, 0x03E0, 0x001F, 0x8000 },
+        { "sys_24", Size, Sys, 13, 7, 24, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "sys_32", Size, Sys, 13, 7, 32, DDPF_RGB, 0xFF0000, 0xFF00, 0xFF },
+        { "sys_8888", Size, Sys, 13, 7, 32, DDPF_RGB | DDPF_ALPHAPIXELS, 0xFF0000, 0xFF00, 0xFF, 0xFF000000 },
+        { "sys_bgr", Size, Sys, 13, 7, 32, DDPF_RGB, 0xFF, 0xFF00, 0xFF0000 },
+        { "sys_p8", Size, Sys, 13, 7, 8, DDPF_RGB | DDPF_PALETTEINDEXED8 },
+        { "sys_p4", Size, Sys, 13, 7, 4, DDPF_RGB | DDPF_PALETTEINDEXED4 },
+        { "sys_332", Size, Sys, 13, 7, 8, DDPF_RGB, 0xE0, 0x1C, 0x03 },
+        { "video_565", Size, Plain, 13, 7, 16, DDPF_RGB, 0xF800, 0x07E0, 0x001F },
+        { "video_p8", Size, Plain, 13, 7, 8, DDPF_RGB | DDPF_PALETTEINDEXED8 },
+        { "no_caps", DDSD_WIDTH | DDSD_HEIGHT, 0, 64, 32 },
+        { "caps_zero", Size, 0, 64, 32 },
+        { "no_size", DDSD_CAPS, Sys, 0, 0 },
+        { "zero_width", Size, Sys, 0, 32 },
+        { "sys_and_video", Size, Sys | DDSCAPS_VIDEOMEMORY, 64, 32 },
+        { "texture_sys", Size, DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY, 64, 32 },
+        { "primary", DDSD_CAPS, DDSCAPS_PRIMARYSURFACE },
+        { "primary_size", Size, DDSCAPS_PRIMARYSURFACE, 64, 32 },
+        { "backbuffer_alone", Size, DDSCAPS_BACKBUFFER | DDSCAPS_SYSTEMMEMORY, 64, 32 },
+        { "huge", Size, Sys, 70000, 2 },
+        { "fourcc_yuy2", Size, Sys, 16, 8, 0, DDPF_FOURCC },
+    };
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+
+    DcFillDesc(Shapes[0], &Desc);
+    printf("surface_nocoop = %08lX\n", Draw7->CreateSurface(&Desc, &Surface, nullptr));
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    printf("surface_outer = %08lX\n", Draw7->CreateSurface(&Desc, &Surface, reinterpret_cast<IUnknown*>(1)));
+    printf("surface_null_desc = %08lX\n", Draw7->CreateSurface(nullptr, &Surface, nullptr));
+    Desc.dwSize = sizeof(DDSURFACEDESC);
+    printf("surface_old_size = %08lX\n", Draw7->CreateSurface(&Desc, &Surface, nullptr));
+
+    for (const DcSurfaceShape& Shape : Shapes)
+    {
+        DcFillDesc(Shape, &Desc);
+        if (Shape.PixelFlags == DDPF_FOURCC)
+            Desc.ddpfPixelFormat.dwFourCC = MAKEFOURCC('Y', 'U', 'Y', '2');
+        Surface = nullptr;
+        hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+        printf("surface %s = %08lX\n", Shape.Name, hr);
+        if (FAILED(hr))
+            continue;
+
+        DcSurfaceDesc("  get_desc", Surface);
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        hr = Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL);
+        printf("  lock = %08lX pitch=%ld flags=%08lX\n", hr, Desc.lPitch, Desc.dwFlags);
+        if (SUCCEEDED(hr))
+        {
+            Desc.lpSurface = nullptr;
+            DcBytes("  lock_desc", &Desc, sizeof(Desc));
+            printf("  unlock = %08lX\n", Surface->Unlock(nullptr));
+        }
+        printf("  unlock_again = %08lX\n", Surface->Unlock(nullptr));
+        printf("  release = %lu\n", Surface->Release());
+    }
+
+    Draw7->Release();
+}
+
+static
+LPDIRECTDRAWSURFACE7
+DcMakeSurface(
+    _In_ LPDIRECTDRAW7 Draw7,
+    _In_ DWORD Caps,
+    _In_ DWORD Width,
+    _In_ DWORD Height,
+    _In_ DWORD BitCount)
+{
+    DcSurfaceShape Shape = { "", DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, Caps, Width, Height };
+    LPDIRECTDRAWSURFACE7 Surface = nullptr;
+    DDSURFACEDESC2 Desc;
+
+    if (BitCount == 16)
+    {
+        Shape.BitCount = 16;
+        Shape.PixelFlags = DDPF_RGB;
+        Shape.Red = 0xF800;
+        Shape.Green = 0x07E0;
+        Shape.Blue = 0x001F;
+    }
+    else if (BitCount == 32)
+    {
+        Shape.BitCount = 32;
+        Shape.PixelFlags = DDPF_RGB;
+        Shape.Red = 0xFF0000;
+        Shape.Green = 0xFF00;
+        Shape.Blue = 0xFF;
+    }
+    DcFillDesc(Shape, &Desc);
+    if (FAILED(Draw7->CreateSurface(&Desc, &Surface, nullptr)))
+        return nullptr;
+    return Surface;
+}
+
+/* Writes a known pattern into every row, then reads the surface back as bytes */
+static
+VOID
+DcPattern(
+    _In_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ DWORD Seed)
+{
+    DDSURFACEDESC2 Desc = {};
+    BYTE* Row;
+
+    Desc.dwSize = sizeof(Desc);
+    if (FAILED(Surface->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL)))
+        return;
+    for (DWORD Y = 0; Y < Desc.dwHeight; Y++)
+    {
+        Row = static_cast<BYTE*>(Desc.lpSurface) + Y * Desc.lPitch;
+        for (DWORD X = 0; X < Desc.dwWidth * (Desc.ddpfPixelFormat.dwRGBBitCount / 8); X++)
+            Row[X] = static_cast<BYTE>(Seed + X * 7 + Y * 13);
+    }
+    Surface->Unlock(nullptr);
+}
+
+static
+VOID
+DcDump(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAWSURFACE7 Surface)
+{
+    DDSURFACEDESC2 Desc = {};
+    HRESULT hr;
+
+    Desc.dwSize = sizeof(Desc);
+    hr = Surface->Lock(nullptr, &Desc, DDLOCK_WAIT | DDLOCK_READONLY, NULL);
+    printf("%s = %08lX\n", Name, hr);
+    if (FAILED(hr))
+        return;
+    for (DWORD Y = 0; Y < Desc.dwHeight; Y++)
+    {
+        char Label[32];
+
+        sprintf_s(Label, "  row%lu", Y);
+        DcBytes(Label, static_cast<BYTE*>(Desc.lpSurface) + Y * Desc.lPitch,
+                Desc.dwWidth * (Desc.ddpfPixelFormat.dwRGBBitCount / 8));
+    }
+    Surface->Unlock(nullptr);
+}
+
+static
+VOID
+DcCheckSurfaceOps(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Sys = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    LPDIRECTDRAWSURFACE7 Target;
+    LPDIRECTDRAWSURFACE7 Source;
+    LPDIRECTDRAWSURFACE7 Wide;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDPIXELFORMAT Format;
+    DDCOLORKEY Key;
+    DDSCAPS2 Caps;
+    DDBLTFX Fx;
+    RECT From;
+    RECT To;
+    IUnknown* Object;
+    HDC Dc;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD BitCount : { 32u, 16u })
+    {
+        printf("[depth %lu]\n", BitCount);
+        Target = DcMakeSurface(Draw7, Sys, 6, 4, BitCount);
+        Source = DcMakeSurface(Draw7, Sys, 6, 4, BitCount);
+        Wide = DcMakeSurface(Draw7, Sys, 3, 2, BitCount);
+        if (Target == nullptr || Source == nullptr || Wide == nullptr)
+        {
+            printf("create failed\n");
+            continue;
+        }
+
+        memset(&Caps, 0xCC, sizeof(Caps));
+        hr = Target->GetCaps(&Caps);
+        printf("get_caps = %08lX\n", hr);
+        DcBytes("  caps", &Caps, sizeof(Caps));
+        memset(&Format, 0xCC, sizeof(Format));
+        Format.dwSize = sizeof(Format);
+        hr = Target->GetPixelFormat(&Format);
+        printf("get_format = %08lX\n", hr);
+        DcBytes("  format", &Format, sizeof(Format));
+        printf("is_lost = %08lX\n", Target->IsLost());
+        printf("restore = %08lX\n", Target->Restore());
+        Object = nullptr;
+        hr = Target->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<LPVOID*>(&Object));
+        printf("qi_surface1 = %08lX same=%d\n", hr, Object == Target);
+        if (Object != nullptr)
+            Object->Release();
+        hr = Target->QueryInterface(IID_IDirectDrawSurface7, reinterpret_cast<LPVOID*>(&Object));
+        printf("qi_surface7 = %08lX same=%d\n", hr, Object == Target);
+        if (SUCCEEDED(hr))
+            Object->Release();
+        printf("qi_draw = %08lX\n", Target->QueryInterface(IID_IDirectDraw7, reinterpret_cast<LPVOID*>(&Object)));
+
+        DcPattern(Source, 1);
+        DcPattern(Target, 100);
+        DcPattern(Wide, 200);
+
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillColor = BitCount == 32 ? 0x00112233 : 0x1234;
+        SetRect(&To, 1, 1, 4, 3);
+        printf("fill = %08lX\n", Target->Blt(&To, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+        DcDump("  after_fill", Target);
+        printf("fill_nofx = %08lX\n", Target->Blt(&To, nullptr, nullptr, DDBLT_COLORFILL, nullptr));
+        Fx.dwSize = 3;
+        printf("fill_badfx = %08lX\n", Target->Blt(&To, nullptr, nullptr, DDBLT_COLORFILL, &Fx));
+        Fx.dwSize = sizeof(Fx);
+        SetRect(&To, 4, 2, 9, 5);
+        printf("fill_outside = %08lX\n", Target->Blt(&To, nullptr, nullptr, DDBLT_COLORFILL, &Fx));
+
+        printf("copy = %08lX\n", Target->Blt(nullptr, Source, nullptr, DDBLT_WAIT, nullptr));
+        DcDump("  after_copy", Target);
+
+        DcPattern(Target, 100);
+        SetRect(&From, 0, 0, 3, 2);
+        printf("fast = %08lX\n", Target->BltFast(2, 1, Source, &From, DDBLTFAST_NOCOLORKEY | DDBLTFAST_WAIT));
+        DcDump("  after_fast", Target);
+        printf("fast_clip = %08lX\n", Target->BltFast(5, 3, Source, &From, DDBLTFAST_WAIT));
+        printf("fast_self = %08lX\n", Target->BltFast(1, 0, Target, &From, DDBLTFAST_WAIT));
+        DcDump("  after_self", Target);
+
+        DcPattern(Target, 100);
+        SetRect(&To, 0, 0, 6, 4);
+        printf("stretch = %08lX\n", Target->Blt(&To, Wide, nullptr, DDBLT_WAIT, nullptr));
+        DcDump("  after_stretch", Target);
+        SetRect(&To, 0, 0, 2, 1);
+        SetRect(&From, 0, 0, 6, 4);
+        DcPattern(Target, 100);
+        printf("shrink = %08lX\n", Target->Blt(&To, Source, &From, DDBLT_WAIT, nullptr));
+        DcDump("  after_shrink", Target);
+
+        Key.dwColorSpaceLowValue = BitCount == 32 ? 0x000F0801 : 0x0801;
+        Key.dwColorSpaceHighValue = Key.dwColorSpaceLowValue;
+        printf("set_key = %08lX\n", Source->SetColorKey(DDCKEY_SRCBLT, &Key));
+        memset(&Key, 0xCC, sizeof(Key));
+        hr = Source->GetColorKey(DDCKEY_SRCBLT, &Key);
+        printf("get_key = %08lX low=%08lX high=%08lX\n", hr, Key.dwColorSpaceLowValue, Key.dwColorSpaceHighValue);
+        printf("get_key_dest = %08lX\n", Source->GetColorKey(DDCKEY_DESTBLT, &Key));
+        printf("set_key_bad = %08lX\n", Source->SetColorKey(DDCKEY_SRCBLT | DDCKEY_DESTBLT, &Key));
+        DcPattern(Target, 100);
+        printf("keyed = %08lX\n", Target->Blt(nullptr, Source, nullptr, DDBLT_KEYSRC | DDBLT_WAIT, nullptr));
+        DcDump("  after_keyed", Target);
+        DcPattern(Target, 100);
+        printf("fast_keyed = %08lX\n", Target->BltFast(0, 0, Source, nullptr, DDBLTFAST_SRCCOLORKEY));
+        DcDump("  after_fast_keyed", Target);
+        printf("clear_key = %08lX\n", Source->SetColorKey(DDCKEY_SRCBLT, nullptr));
+        printf("get_key_cleared = %08lX\n", Source->GetColorKey(DDCKEY_SRCBLT, &Key));
+
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwROP = BLACKNESS;
+        printf("rop_black = %08lX\n", Target->Blt(nullptr, nullptr, nullptr, DDBLT_ROP, &Fx));
+        DcDump("  after_black", Target);
+        Fx.dwROP = SRCINVERT;
+        printf("rop_xor = %08lX\n", Target->Blt(nullptr, Source, nullptr, DDBLT_ROP, &Fx));
+        Fx.dwROP = SRCCOPY;
+        DcPattern(Target, 100);
+        printf("rop_copy = %08lX\n", Target->Blt(nullptr, Source, nullptr, DDBLT_ROP, &Fx));
+        DcDump("  after_rop_copy", Target);
+        Fx.dwDDFX = DDBLTFX_MIRRORLEFTRIGHT;
+        DcPattern(Target, 100);
+        printf("mirror = %08lX\n", Target->Blt(nullptr, Source, nullptr, DDBLT_DDFX, &Fx));
+        DcDump("  after_mirror", Target);
+
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        SetRect(&To, 2, 1, 4, 3);
+        hr = Target->Lock(&To, &Desc, DDLOCK_WAIT, NULL);
+        printf("lock_rect = %08lX pitch=%ld\n", hr, Desc.lPitch);
+        printf("lock_twice = %08lX\n", Target->Lock(&To, &Desc, DDLOCK_WAIT, NULL));
+        printf("blt_locked = %08lX\n", Target->Blt(nullptr, Source, nullptr, DDBLT_WAIT, nullptr));
+        printf("unlock_wrong = %08lX\n", Target->Unlock(&From));
+        printf("unlock = %08lX\n", Target->Unlock(&To));
+        SetRect(&To, 2, 1, 9, 3);
+        printf("lock_bad_rect = %08lX\n", Target->Lock(&To, &Desc, DDLOCK_WAIT, NULL));
+        printf("lock_null_desc = %08lX\n", Target->Lock(nullptr, nullptr, DDLOCK_WAIT, NULL));
+
+        hr = Target->GetDC(&Dc);
+        printf("get_dc = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            printf("  get_dc_twice = %08lX\n", Target->GetDC(&Dc));
+            printf("  lock_with_dc = %08lX\n", Target->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL));
+            SetPixel(Dc, 0, 0, RGB(0x10, 0x20, 0x30));
+            printf("  release_dc = %08lX\n", Target->ReleaseDC(Dc));
+            DcDump("  after_dc", Target);
+        }
+        printf("release_dc_again = %08lX\n", Target->ReleaseDC(NULL));
+
+        printf("release_wide = %lu\n", Wide->Release());
+        printf("release_source = %lu\n", Source->Release());
+        printf("release_target = %lu\n", Target->Release());
+    }
+
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -1108,6 +1496,8 @@ static const DrawCheckInfo DcChecks[] =
     { "factory", DcCheckFactory },
     { "clipper", DcCheckClipper },
     { "palette", DcCheckPalette },
+    { "surface_create", DcCheckSurfaceCreate },
+    { "surface_ops", DcCheckSurfaceOps },
 };
 
 static
