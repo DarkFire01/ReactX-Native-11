@@ -20,6 +20,10 @@ HINSTANCE DiModule = reinterpret_cast<HINSTANCE>(&__ImageBase);
 /* The scan code tables keytables.cpp holds, in the order the shared code numbers them */
 extern const BYTE DiKeyTranslations[9][256];
 
+/* The semantic classes of the system keyboard and mouse */
+#define DI8_GENRE_KEYBOARD      0x81000000
+#define DI8_GENRE_MOUSE         0x82000000
+
 static_assert(sizeof(DI_OBJECT) == sizeof(DIOBJECTDATAFORMAT), "object layout");
 static_assert(sizeof(DI_JOYSTICK_SLOT) == sizeof(RX_DI_JOY_SLOT), "joystick slot layout");
 static_assert(DI_JOYSTICK_SLOTS == DI_JOY_SLOTS, "joystick slot count");
@@ -237,17 +241,22 @@ public:
     RxDiBackend* Inner;
     DI_FORMAT Native;
     RX_DI_APP_HACKS Hacks;
+    DWORD DevType;
 
     DiHidBackend(
-        _In_ RxDiBackend* Shared) : Inner(Shared), Native(), Hacks()
+        _In_ RxDiBackend* Shared) : Inner(Shared), Native(), Hacks(), DevType(0)
     {
         const DIDATAFORMAT* Format = nullptr;
+        DIDEVCAPS Caps = {};
 
         Inner->GetDataFormat(&Format);
         Native.DataSize = Format->dwDataSize;
         Native.ObjectCount = Format->dwNumObjs;
         Native.Objects = reinterpret_cast<DI_OBJECT*>(Format->rgodf);
         Inner->SetDIData(DIRECTINPUT_VERSION, &Hacks);
+        Caps.dwSize = sizeof(DIDEVCAPS_DX3);
+        if (SUCCEEDED(Inner->GetCapabilities(&Caps)))
+            DevType = Caps.dwDevType;
     }
 
     ~DiHidBackend() override
@@ -375,6 +384,28 @@ public:
         _In_ DWORD Flags) override
     {
         return Inner->RunControlPanel(Window, Flags);
+    }
+
+    /* Plain HID devices have nothing to map, HID keyboards and mice map like the system ones */
+    HRESULT
+    BuildDefaultActionMap(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_ DWORD Flags,
+        _In_ REFGUID Instance) override
+    {
+        UNREFERENCED_PARAMETER(Flags);
+        switch (LOBYTE(DevType))
+        {
+            case DI8DEVTYPE_DEVICE:
+                return S_FALSE;
+            case DI8DEVTYPE_MOUSE:
+                return DiBuildSystemDefaultMap(Format, DI8_GENRE_MOUSE, Instance, &Native, 0);
+            case DI8DEVTYPE_KEYBOARD:
+                return DiBuildSystemDefaultMap(Format, DI8_GENRE_KEYBOARD, Instance, &Native, 0);
+            default:
+                DI_TRACE_ONCE(L"no default action map for HID game controllers yet");
+                return E_NOTIMPL;
+        }
     }
 };
 

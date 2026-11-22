@@ -203,6 +203,15 @@ HRESULT
     _In_ REFGUID Guid,
     _Outptr_ DiBackend** Backend);
 
+/* Maps a keyboard or mouse's objects to the semantics of its class */
+HRESULT
+DiBuildSystemDefaultMap(
+    _Inout_ LPDIACTIONFORMATW Format,
+    _In_ DWORD Class,
+    _In_ REFGUID Device,
+    _In_ const DI_FORMAT* Native,
+    _In_ DWORD FirstButton);
+
 /* Finds the HID device a GUID names, refreshing the device list once when it is not there */
 HRESULT
 DiFindHidDevice(

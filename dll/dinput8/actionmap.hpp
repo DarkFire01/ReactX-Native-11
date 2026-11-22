@@ -113,15 +113,6 @@ DiIsDeviceUser(
     _In_ REFGUID Device,
     _In_z_ PCWSTR User);
 
-/* Maps a system device's objects to the semantics of its class */
-HRESULT
-DiBuildSystemDefaultMap(
-    _Inout_ LPDIACTIONFORMATW Format,
-    _In_ DWORD Class,
-    _In_ REFGUID Device,
-    _In_ const DI_FORMAT* Native,
-    _In_ DWORD FirstButton);
-
 /* Copies the ANSI fields an action format shares with its wide form */
 VOID
 DiActionHeaderFromAnsi(
