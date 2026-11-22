@@ -11,6 +11,7 @@ add_subdirectory(xinput9)
 add_subdirectory(dinput)
 add_subdirectory(ddraw)
 add_subdirectory(dinput8)
+add_subdirectory(dsound)
 
 # Direct3D 12 needs WDDM 2, so only the Windows 10 and later targets get it
 if(NT_TARGET MATCHES "^win1[01]")

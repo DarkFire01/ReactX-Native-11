@@ -1,0 +1,12 @@
+/*
+ * PROJECT:     ReactX DirectSound
+ * LICENSE:     MIT (https://spdx.org/licenses/MIT)
+ * PURPOSE:     Names of the primary drivers in device lists
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
+ */
+
+STRINGTABLE
+BEGIN
+    1000 "Primary Sound Driver"
+    1001 "Primary Sound Capture Driver"
+END
