@@ -1,0 +1,419 @@
+/*
+ * PROJECT:     ReactX DirectDraw
+ * LICENSE:     MIT (https://spdx.org/licenses/MIT)
+ * PURPOSE:     Objects shared by every part of the DirectDraw runtime
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
+ */
+
+#pragma once
+
+#include "rxcommon.hpp"
+
+#include <ddraw.h>
+#include <ddrawi.h>
+#include <d3d9types.h>
+#include <d3dumddi.h>
+
+#include "trace.hpp"
+
+struct DdDriver;
+struct DdLocal;
+struct DdInterface;
+
+/* Which interface an object pointer stands for */
+enum class DdKind : UCHAR
+{
+    Draw1,
+    Draw2,
+    Draw4,
+    Draw7,
+    VideoPortContainer,
+};
+
+/* Registry switches read when an object is created */
+enum : ULONG
+{
+    DdRegModeXOnly = 0x00000001,
+    DdRegEmulationOnly = 0x00000002,
+    DdRegShowFrameRate = 0x00000004,
+    DdRegEnablePrintScreen = 0x00000008,
+    DdRegForceAgp = 0x00000010,
+    DdRegDisableMmx = 0x00000020,
+    DdRegDisableWiderSurfaces = 0x00000040,
+    DdRegDisableCapsInDesc = 0x00000400,
+    DdRegDisableAgp = 0x00000800,
+    DdRegForceRefreshRate = 0x00008000,
+    DdRegEnumAttachedSecondaries = 0x00008000,
+    DdRegUseNonLocalVidMem = 0x00010000,
+    DdRegFlipNoVsync = 0x00020000,
+};
+
+/* Driver object flags; the low bits follow the public DDRAWI_ values */
+enum : ULONG
+{
+    DdDriverEmulatedCaps = 0x00000400,
+    DdDriverHelCaps = 0x00004000,
+    DdDriverDoesGdi = 0x00800000,
+    DdDriverAttached = 0x01000000,
+};
+
+/* Creation flags passed down from the entry points */
+enum : ULONG
+{
+    DdCreateHardwareOnly = 0x00000001,
+    DdCreateEmulationOnly = 0x00000002,
+};
+
+/* The kernel adapter and the Direct3D 9 user mode driver behind a display */
+struct DdHardware
+{
+    D3DKMT_HANDLE KernelAdapter = 0;
+    LUID AdapterLuid = {};
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId = 0;
+    HMODULE Module = NULL;
+    D3DDDI_ADAPTERCALLBACKS Callbacks = {};
+    D3DDDI_ADAPTERFUNCS Functions = {};
+    HANDLE DriverAdapter = NULL;
+    UINT RuntimeVersion = 0;
+    UINT DriverVersion = 0;
+    BOOLEAN IsOldDisplayModel = FALSE;
+
+    /* Memory as the kernel reports it, after the runtime's clamps */
+    ULONGLONG LocalMemory = 0;
+    ULONGLONG NonLocalMemory = 0;
+    ULONGLONG LocalMemoryFree = 0;
+    ULONGLONG NonLocalMemoryFree = 0;
+
+    D3DKMT_FLIPQUEUEINFO FlipQueue = {};
+    D3DKMT_ADAPTERTYPE AdapterType = {};
+    D3DKMT_WDDM_1_2_CAPS Wddm12Caps = {};
+
+    FORMATOP* Formats = nullptr;
+    UINT FormatCount = 0;
+    BOOLEAN FormatsQueried = FALSE;
+
+    WCHAR UmdName[MAX_PATH] = {};
+};
+
+/* One display mode as the driver object remembers it */
+struct DdModeInfo
+{
+    DWORD Width;
+    DWORD Height;
+    LONG Pitch;
+    DWORD BitCount;
+    WORD Flags;
+    WORD RefreshRate;
+    DWORD RedMask;
+    DWORD GreenMask;
+    DWORD BlueMask;
+    DWORD AlphaMask;
+};
+
+/* The short mode signature TestCooperativeLevel compares */
+struct DdModeKey
+{
+    WORD Width;
+    WORD Height;
+    BYTE BitCount;
+    BYTE MonitorCount;
+    WORD RefreshRate;
+};
+
+/* Per display state shared by every DirectDraw object that uses it */
+struct DdDriver
+{
+    LONG RefCount;
+    ULONG Flags;
+    CHAR Name[32];
+    CHAR DeviceName[32];
+    DdDriver* Next;
+
+    DdHardware* Hardware;
+
+    DDCORECAPS HalCaps;
+    DDNONLOCALVIDMEMCAPS HalNonLocalCaps;
+    BOOLEAN HasNonLocalCaps;
+    DDSCAPSEX HalMoreCaps;
+
+    DDCORECAPS HelCaps;
+    DDNONLOCALVIDMEMCAPS HelNonLocalCaps;
+    DDSCAPSEX HelMoreCaps;
+    DWORD Internal1;
+
+    DWORD MonitorFrequency;
+    DWORD* FourCC;
+    DWORD FourCCCount;
+
+    DdModeInfo Mode;
+    DdModeKey ModeKey;
+    RECT DeviceRect;
+    RECT DesktopRect;
+    DWORD MonitorCount;
+
+    DdLocal* ExclusiveOwner;
+    ULONG FakeFlags;
+
+    /* The adapter an emulated driver reports memory for */
+    LUID AdapterLuid;
+};
+
+/* One DirectDraw object as the application created it */
+struct DdLocal
+{
+    DdDriver* Driver;
+    ULONG Flags;
+    LONG RefCount;
+    DWORD ProcessId;
+    HWND Window;
+    HWND FocusWindow;
+    HDC Dc;
+    DWORD AppHackFlags;
+    DdModeKey SavedMode;
+    BOOLEAN MaxWindowedMode;
+    DdLocal* Next;
+};
+
+/* One interface pointer handed to the application */
+struct DdInterface
+{
+    const VOID* Vtbl;
+    DdLocal* Local;
+    DdInterface* Next;
+    ULONG RefCount;
+    DdKind Kind;
+    BOOLEAN Initialized;
+};
+
+/* Process wide runtime state */
+struct DdGlobals
+{
+    CRITICAL_SECTION Lock;
+    LONG Recursion;
+    UINT DisplayUniqueness;
+    BOOLEAN DeviceLost;
+    BOOLEAN RestoreFailed;
+    BOOLEAN Restoring;
+    HMODULE Module;
+
+    DdInterface* Interfaces;
+    DdLocal* Locals;
+    DdDriver* Drivers;
+    VOID* Clippers;
+    LONG LockCount;
+
+    ULONG RegFlags;
+    DWORD ForcedRefreshRate;
+    BOOLEAN ReloadRegistry;
+    CHAR PrimaryDisplay[32];
+
+    /* SetAppCompatData switches */
+    BOOLEAN EnableOverlays;
+    BOOLEAN DisableMaxWindowedMode;
+    BOOLEAN DwmOffForPrimaryLock;
+    BOOLEAN DwmOffForPrimaryBlt;
+    BOOLEAN ForceFullscreenSprite;
+    BOOLEAN ForceBltToPrimary;
+    BOOLEAN DisableSurfaceLock;
+    BOOLEAN RedirectPrimaryBlts;
+    BOOLEAN StripMaxWindowBorder;
+    DWORD ShadowBufferColor;
+
+    DWORD BlankToggle;
+};
+
+extern DdGlobals DdState;
+
+/* Takes the runtime lock and resets objects when the display changed underneath them */
+class DdLockScope
+{
+public:
+    DdLockScope();
+    ~DdLockScope();
+
+    DdLockScope(const DdLockScope&) = delete;
+    DdLockScope& operator=(const DdLockScope&) = delete;
+};
+
+VOID
+DdEnterLock(VOID);
+
+VOID
+DdLeaveLock(VOID);
+
+/* globals.cpp */
+UINT
+DdQueryDisplayUniqueness(VOID);
+
+VOID
+DdRefreshPrimaryName(VOID);
+
+BOOLEAN
+DdIsMultiMonitor(VOID);
+
+BOOLEAN
+DdEnumDisplayDevice(
+    _In_ DWORD Index,
+    _Out_ DISPLAY_DEVICEA* Device);
+
+_Ret_maybenull_
+HDC
+DdCreateDisplayDc(
+    _In_z_ PCSTR Name);
+
+VOID
+DdReadRegistry(VOID);
+
+_Ret_maybenull_
+HMONITOR
+DdMonitorFromDevice(
+    _In_z_ PCSTR DeviceName);
+
+/* hardware.cpp */
+_Ret_maybenull_
+DdHardware*
+DdOpenHardware(
+    _In_ HDC Dc);
+
+VOID
+DdCloseHardware(
+    _In_opt_ DdHardware* Hardware);
+
+HRESULT
+DdHardwareGetCaps(
+    _In_ DdHardware* Hardware,
+    _In_ D3DDDICAPS_TYPE Type,
+    _In_opt_ VOID* Info,
+    _Out_writes_bytes_(Size) VOID* Data,
+    _In_ UINT Size);
+
+BOOLEAN
+DdHardwareQueryFormats(
+    _Inout_ DdHardware* Hardware);
+
+HRESULT
+DdHresultFromStatus(
+    _In_ NTSTATUS Status);
+
+BOOLEAN
+DdReadAdapterIdentity(
+    _In_z_ PCSTR DeviceName,
+    _Out_ DWORD* VendorId,
+    _Out_ DWORD* DeviceId,
+    _Out_ DWORD* SubSysId,
+    _Out_ DWORD* Revision,
+    _Out_writes_z_(DriverSize) PSTR Driver,
+    _In_ SIZE_T DriverSize);
+
+BOOLEAN
+DdAdapterLuidFromDc(
+    _In_ HDC Dc,
+    _Out_ LUID* AdapterLuid);
+
+HRESULT
+DdQueryEmulatedMemory(
+    _In_ const LUID& AdapterLuid,
+    _In_ DWORD Caps,
+    _Out_ DWORD* Total,
+    _Out_ DWORD* Free);
+
+/* caps.cpp */
+BOOLEAN
+DdBuildHardwareCaps(
+    _Inout_ DdDriver* Driver);
+
+VOID
+DdBuildEmulatedCaps(
+    _Inout_ DdDriver* Driver);
+
+VOID
+DdBuildHelCaps(
+    _Inout_ DdDriver* Driver);
+
+BOOLEAN
+DdReadDisplayMode(
+    _Inout_ DdDriver* Driver);
+
+VOID
+DdUpdateDeviceRect(
+    _Inout_ DdDriver* Driver);
+
+VOID
+DdFillPixelFormat(
+    _Out_ DDPIXELFORMAT* Format,
+    _In_opt_ HDC Dc,
+    _In_ DWORD BitCount);
+
+/* driver.cpp */
+HRESULT
+DdCreateObject(
+    _In_opt_ GUID* Guid,
+    _Out_ DdInterface** Interface,
+    _In_opt_ DdInterface* Existing,
+    _In_ ULONG LocalFlags);
+
+_Ret_maybenull_
+DdInterface*
+DdFindInterface(
+    _In_ DdLocal* Local,
+    _In_ DdKind Kind,
+    _In_ BOOLEAN Initialized);
+
+_Ret_maybenull_
+DdInterface*
+DdNewUninitializedObject(
+    _In_ DdKind Kind);
+
+VOID
+DdFreeUninitializedObject(
+    _In_ DdInterface* Interface);
+
+VOID
+DdResetAllObjects(
+    _In_ BOOLEAN Restore);
+
+ULONG
+DdReleaseInterface(
+    _In_ DdInterface* Interface);
+
+ULONG
+DdAddRefInterface(
+    _In_ DdInterface* Interface);
+
+/* object.cpp */
+const VOID*
+DdVtblFor(
+    _In_ DdKind Kind,
+    _In_ BOOLEAN Initialized);
+
+HRESULT
+DdGetAvailableMemory(
+    _In_ DdLocal* Local,
+    _In_ const DDSCAPS2* Caps,
+    _Out_opt_ DWORD* Total,
+    _Out_opt_ DWORD* Free);
+
+HRESULT
+DdQueryObject(
+    _In_ DdInterface* This,
+    _In_opt_ const IID* Iid,
+    _Outptr_ VOID** Object);
+
+/* Cast helpers between the application pointer and our interface record */
+static
+inline
+DdInterface*
+DdFromCom(
+    _In_ VOID* Com)
+{
+    return static_cast<DdInterface*>(Com);
+}
+
+static
+inline
+BOOLEAN
+DdIsOldDraw(
+    _In_ const DdInterface* This)
+{
+    return This->Kind == DdKind::Draw1 || This->Kind == DdKind::Draw2;
+}
