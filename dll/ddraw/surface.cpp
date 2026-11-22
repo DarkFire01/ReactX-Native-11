@@ -559,6 +559,10 @@ DdTakeDepthFormat(
         return E_INVALIDARG;
     if (Depth != 8 && Depth != 16 && Depth != 24 && Depth != 32)
         return DDERR_INVALIDPIXELFORMAT;
+
+    /* The emulation layer only keeps 16 and 32 bit Z buffers */
+    if ((Desc->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) != 0 && Depth != 16 && Depth != 32)
+        return DDERR_INVALIDPIXELFORMAT;
     return S_OK;
 }
 

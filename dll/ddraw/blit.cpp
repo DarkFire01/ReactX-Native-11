@@ -664,6 +664,62 @@ DdFillSurface(
     return hr;
 }
 
+/* The driver takes depth fills of its own resources only when it reports them */
+static
+BOOLEAN
+DdDriverDepthFills(
+    _In_ const DdSurface* Target)
+{
+    const DdHardware* Hardware = Target->Driver->Hardware;
+
+    return Target->Resource != nullptr && (Target->Driver->HalCaps.dwCaps & DDCAPS_BLTDEPTHFILL) != 0 &&
+           Hardware != nullptr && Hardware->DeviceFunctions.pfnDepthFill != nullptr;
+}
+
+/* Depth fills write the value untouched, without the conversion color fills get */
+static
+HRESULT
+DdDepthFillSurface(
+    _In_ DdSurface* Target,
+    _In_ const RECT* To,
+    _In_ DWORD Value)
+{
+    DdHardware* Hardware = Target->Driver->Hardware;
+    D3DDDIARG_DEPTHFILL Fill = {};
+    DdClipPieces Pieces;
+    BYTE* Bits;
+    DWORD Index;
+    HRESULT hr = S_OK;
+
+    if (!DdClipTarget(Target, To, &Pieces))
+        return E_OUTOFMEMORY;
+
+    if (DdDriverDepthFills(Target))
+    {
+        Fill.hResource = Target->Resource->DriverResource;
+        Fill.Depth = Value;
+        for (Index = 0; Index < Pieces.Count && SUCCEEDED(hr); Index++)
+        {
+            Fill.DstRect = Pieces.Rects[Index];
+            hr = Hardware->DeviceFunctions.pfnDepthFill(Hardware->DriverDevice, &Fill);
+        }
+        if (FAILED(hr))
+            DdTrace(L"UMD DepthFill failed 0x%08lX", hr);
+    }
+    else
+    {
+        hr = DdMapSurface(Target, FALSE, &Bits);
+        if (SUCCEEDED(hr))
+        {
+            for (Index = 0; Index < Pieces.Count; Index++)
+                DdFillRect(Target, Bits, &Pieces.Rects[Index], Value);
+            DdUnmapSurface(Target);
+        }
+    }
+    DdFreeClipPieces(&Pieces);
+    return hr;
+}
+
 HRESULT
 DdBlt(
     _In_ DdSurface* Target,
@@ -695,6 +751,20 @@ DdBlt(
     if ((Flags & DDBLT_KEYDESTOVERRIDE) != 0)
         return DDERR_NOCOLORKEYHW;
 
+    /* Fills take no source; color fills skip Z buffers and depth fills want one */
+    if ((Flags & DDBLT_COLORFILL) != 0)
+    {
+        if (Source != nullptr || (Target->Caps.dwCaps & DDSCAPS_ZBUFFER) != 0)
+            return E_INVALIDARG;
+    }
+    else if ((Flags & DDBLT_DEPTHFILL) != 0)
+    {
+        if (Source != nullptr || (Target->Caps.dwCaps & DDSCAPS_ZBUFFER) == 0)
+            return E_INVALIDARG;
+        if (!DdDriverDepthFills(Target) && (Target->Driver->HelCaps.dwCaps & DDCAPS_BLTDEPTHFILL) == 0)
+            return E_NOTIMPL;
+    }
+
     Job.Target = Target;
     if (TargetRect != nullptr)
         Job.To = *TargetRect;
@@ -713,6 +783,8 @@ DdBlt(
             return DdPresentToPrimary(Target, &Job.To, nullptr, nullptr, TRUE, Fx->dwFillColor);
         return DdFillSurface(Target, &Job.To, Fx->dwFillColor, TRUE);
     }
+    if ((Flags & DDBLT_DEPTHFILL) != 0)
+        return DdDepthFillSurface(Target, &Job.To, Fx->dwFillDepth);
 
     if ((Flags & DDBLT_ROP) != 0)
     {
