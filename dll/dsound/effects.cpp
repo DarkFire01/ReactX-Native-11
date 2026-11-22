@@ -58,9 +58,12 @@ DsFreeEffects(
 
     if (Chain == nullptr)
         return;
-    Buffer->Voice.Device->Lock();
-    Buffer->Voice.Effects = nullptr;
-    Buffer->Voice.Device->Unlock();
+    if (Buffer->Voice.Device != nullptr)
+    {
+        Buffer->Voice.Device->Lock();
+        Buffer->Voice.Effects = nullptr;
+        Buffer->Voice.Device->Unlock();
+    }
     memcpy(Buffer->Data, Chain->Dry, Buffer->Bytes);
     Buffer->Effects = nullptr;
     DsReleaseChain(Chain);
@@ -146,7 +149,7 @@ DsSetEffects(
         if (FAILED(Created))
         {
             DsTrace(L"effect %08lX did not load (0x%08lX)", Effects[Index].guidDSFXClass.Data1, Created);
-            hr = DSERR_FXUNAVAILABLE;
+            hr = Created;
         }
     }
     if (FAILED(hr))

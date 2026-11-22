@@ -441,6 +441,7 @@ DsSecondary::DsSecondary(
 
 DsSecondary::~DsSecondary()
 {
+    DsFreeEffects(this);
     if (Voice.Device != nullptr)
     {
         Voice.Device->RemoveVoice(&Voice);
@@ -448,7 +449,6 @@ DsSecondary::~DsSecondary()
     }
     if (Spatial != nullptr)
         DsDestroy3dBuffer(Spatial);
-    DsFreeEffects(this);
     Owner->Forget(this);
     HeapFree(GetProcessHeap(), 0, Data);
     HeapFree(GetProcessHeap(), 0, Format);
