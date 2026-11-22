@@ -448,7 +448,6 @@ DiPostKey(
         DiSignalSinks(&DiKeyboardSource);
 }
 
-static
 VOID
 DiPostState(
     _In_ RX_DI_SOURCE* Source,

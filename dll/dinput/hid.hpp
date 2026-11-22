@@ -43,6 +43,12 @@ DiFindHidBackend(
 ULONG
 DiHidMouseAxes(VOID);
 
+BOOLEAN
+DiHidParseIds(
+    _In_z_ PCWSTR Text,
+    _Out_ PUSHORT VendorId,
+    _Out_ PUSHORT ProductId);
+
 HRESULT
 DiCreateJoyConfig(
     _In_ IUnknown* OuterUnknown,

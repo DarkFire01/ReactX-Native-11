@@ -585,6 +585,9 @@ DiCheckVersion(
 HRESULT
 DiStartup(VOID);
 
+ULONG
+DiNextGuidSequence(VOID);
+
 HRESULT
 DiOpenKey(
     _In_ HKEY Root,
@@ -737,6 +740,12 @@ DiPrimeKeyboard(
 VOID
 DiSeedMouse(
     _In_ ULONG Buttons);
+
+VOID
+DiPostState(
+    _In_ RX_DI_SOURCE* Source,
+    _In_reads_bytes_(Source->StateSize) const BYTE* Values,
+    _In_ DWORD Time);
 
 VOID
 DiProcessShutdown(VOID);

@@ -40,7 +40,8 @@ typedef struct _RX_DI_SHARED
 {
     LONG OwnerCount;
     LONG Sequence;
-    BYTE Reserved[200];
+    LONG GuidSequence;
+    BYTE Reserved[196];
     RX_DI_OWNER Owners[DI_OWNER_LIMIT];
 } RX_DI_SHARED;
 
@@ -707,6 +708,17 @@ DiStartup(VOID)
 Done:
     LeaveCriticalSection(&DiLock);
     return hr;
+}
+
+ULONG
+DiNextGuidSequence(VOID)
+{
+    ULONG Value;
+
+    WaitForSingleObject(DiGlobalMutex, INFINITE);
+    Value = static_cast<ULONG>(++DiShared->GuidSequence);
+    ReleaseMutex(DiGlobalMutex);
+    return Value;
 }
 
 static
