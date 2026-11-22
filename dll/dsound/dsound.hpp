@@ -309,6 +309,14 @@ struct DsNotifyPoint
     HANDLE Event;
 };
 
+/* What the cubic converter reads: float samples, raw 16 bit values or other integer widths */
+enum
+{
+    DS_CUBIC_FLOAT,
+    DS_CUBIC_WHOLE,
+    DS_CUBIC_INTEGER
+};
+
 /* Kaiser windowed sinc rate converter, polyphase when the rate pair allows and table driven otherwise */
 class DsResampler
 {
@@ -328,7 +336,7 @@ public:
         _In_ ULONG InRate,
         _In_ ULONG OutRate,
         _In_ UINT Channels,
-        _In_ BOOLEAN Whole16);
+        _In_ UCHAR Kind);
 
     VOID
     Retune(
@@ -360,10 +368,17 @@ public:
     Pull(
         _Out_writes_(Channels) float* Frame);
 
-    /* Input frames the next count of outputs will read */
+    /* Input frames an engine pass of this many outputs takes */
     ULONG
-    InputFor(
-        _In_ ULONG Outputs) const;
+    BeginPass(
+        _In_ ULONG Outputs);
+
+    /* The pass has not yet taken all the input it is due */
+    BOOLEAN
+    Lacking(VOID) const
+    {
+        return Filled < PassEnd;
+    }
 
     BOOLEAN Active;
     BOOLEAN Cubic;
@@ -430,9 +445,14 @@ private:
     LONGLONG Made;
 
     /* Cubic path: whole input frames and the fraction each output moves, and where between frames it sits */
-    BOOLEAN Whole;
+    UCHAR Source;
+    float Pace;
     ULONG Leap;
     float Creep;
+
+    /* Frame numbers the current pass's input starts and ends at */
+    LONGLONG PassStart;
+    LONGLONG PassEnd;
     float Fraction;
 };
 

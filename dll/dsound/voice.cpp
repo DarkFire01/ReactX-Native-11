@@ -249,9 +249,14 @@ DsVoice::SetFrequency(
 VOID
 DsVoice::StartCubic(VOID)
 {
-    BOOLEAN Whole16 = DsFormatTag(Format) == WAVE_FORMAT_PCM && Format->wBitsPerSample == 16;
+    WORD Tag = DsFormatTag(Format);
+    UCHAR Kind = DS_CUBIC_INTEGER;
 
-    if (FAILED(Resampler.ConfigureCubic(Format->nSamplesPerSec, Device->Rate, Channels, Whole16)))
+    if (Tag == WAVE_FORMAT_IEEE_FLOAT)
+        Kind = DS_CUBIC_FLOAT;
+    else if (Format->wBitsPerSample == 16)
+        Kind = DS_CUBIC_WHOLE;
+    if (FAILED(Resampler.ConfigureCubic(Format->nSamplesPerSec, Device->Rate, Channels, Kind)))
         DS_TRACE_ONCE(L"no memory for a cubic rate converter");
 }
 
@@ -567,16 +572,14 @@ DsVoice::Mix(
     _In_ UINT OutChannels)
 {
     float Frame[DS_MAX_CHANNELS];
+    ULONG Ahead;
 
     if (!(State & DS_VOICE_PLAYING) || Pass == DS_PASS_FINISHED)
         return;
     MatrixReady = TRUE;
+    Ahead = Resampler.Active ? Resampler.BeginPass(Frames) : Frames;
     if (Effects != nullptr)
-    {
-        ULONG Ahead = Resampler.Active ? Resampler.InputFor(Frames) : Frames;
-
         DsRunEffects(Effects, this, Ahead * BlockAlign);
-    }
 
     /* Once a one shot runs out the converter reads silence to the end of the pass, and the voice stops after it */
     if (Resampler.Active)
@@ -592,6 +595,13 @@ DsVoice::Mix(
             }
             Resampler.Pull(Frame);
             ApplyMatrix(Frame, Output + Index * OutChannels, OutChannels);
+        }
+        while (Resampler.Lacking())
+        {
+            float Fresh[DS_MAX_CHANNELS];
+
+            ReadFrame(Fresh);
+            Resampler.Push(Fresh);
         }
         return;
     }

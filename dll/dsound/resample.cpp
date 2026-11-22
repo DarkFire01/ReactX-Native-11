@@ -291,9 +291,12 @@ DsResampler::Release(VOID)
     TargetRate = 0.0f;
     Polyphase = FALSE;
     Cubic = FALSE;
-    Whole = FALSE;
+    Source = DS_CUBIC_FLOAT;
+    Pace = 0.0f;
     Leap = 0;
     Creep = 0.0f;
+    PassStart = 0;
+    PassEnd = 0;
     Position = 0;
     Filled = 0;
     Made = 0;
@@ -545,6 +548,8 @@ DsResampler::Reset(VOID)
     Filled = 0;
     Made = 0;
     Shift = 0;
+    PassStart = 0;
+    PassEnd = 0;
     TimeOffset = 0.0;
     InOffset = 0.0;
     FilterOffset = 0.0;
@@ -674,20 +679,35 @@ DsResampler::Pull(
     }
 }
 
+/*
+ * Sets the input one engine pass takes and returns how many frames that is beyond what is in.
+ * The cubic converter takes a count from its pace and place; the filters take up to the last frame they read.
+ */
 ULONG
-DsResampler::InputFor(
-    _In_ ULONG Outputs) const
+DsResampler::BeginPass(
+    _In_ ULONG Outputs)
 {
-    LONGLONG Last;
     LONGLONG Need;
 
     if (Outputs == 0)
         return 0;
     if (Cubic)
-        Last = Position + static_cast<LONGLONG>(Outputs * (Leap + Creep)) + 2;
+    {
+        float Into;
+        float Span;
+
+        /* Each pass the place restarts just before or at the first frame of the new input */
+        Position = Position == PassEnd ? PassEnd : PassEnd - 1;
+        PassStart = PassEnd;
+        Into = static_cast<float>((Position - PassStart) * static_cast<LONGLONG>(Channels)) / static_cast<float>(Channels);
+        Span = static_cast<float>(Outputs) * Pace + Fraction + Into;
+        PassEnd = PassStart + (Span > 0.0f ? static_cast<LONGLONG>(static_cast<ULONG>(Span)) : 0) + 1;
+    }
     else
-        Last = Taken(Made + Outputs - 1);
-    Need = Last + 1 - Filled;
+    {
+        PassEnd = Taken(Made + Outputs - 1) + 1;
+    }
+    Need = PassEnd - Filled;
     return Need > 0 ? static_cast<ULONG>(Need) : 0;
 }
 
@@ -696,7 +716,7 @@ DsResampler::ConfigureCubic(
     _In_ ULONG InRate,
     _In_ ULONG OutRate,
     _In_ UINT Count,
-    _In_ BOOLEAN Whole16)
+    _In_ UCHAR Kind)
 {
     Release();
     Channels = Count;
@@ -707,7 +727,7 @@ DsResampler::ConfigureCubic(
         Release();
         return E_OUTOFMEMORY;
     }
-    Whole = Whole16;
+    Source = Kind;
     Cubic = TRUE;
     Active = TRUE;
     Retune(InRate, OutRate);
@@ -722,13 +742,104 @@ DsResampler::Retune(
     _In_ ULONG OutRate)
 {
     float Ratio = static_cast<float>(OutRate) / static_cast<float>(InRate);
-    float Pace = 1.0f / Ratio;
 
+    Pace = 1.0f / Ratio;
     Leap = static_cast<ULONG>(Pace);
     Creep = Pace - static_cast<float>(Leap);
 }
 
-/* Lagrange cubic through the two frames on each side; 16 bit sources work on the raw sample values */
+/* The cubic on samples as floats; Swapped adds the outer difference into the inner one instead */
+static
+float
+DsCubicFloat(
+    _In_ float Back,
+    _In_ float Left,
+    _In_ float Right,
+    _In_ float Ahead,
+    _In_ float Fraction,
+    _In_ BOOLEAN Swapped)
+{
+    const float Third = 1.0f / 3.0f;
+    const float Sixth = 1.0f / 6.0f;
+    float Linear = fmaf(-Back, Third, Right);
+    float Square = fmaf(Back + Right, 0.5f, -Left);
+    float Curve;
+
+    Linear = fmaf(-Left, 0.5f, Linear);
+    Linear = fmaf(-Ahead, Sixth, Linear);
+    if (Swapped)
+        Curve = fmaf(Ahead - Back, Sixth, (Left - Right) * 0.5f);
+    else
+        Curve = fmaf(Left - Right, 0.5f, (Ahead - Back) * Sixth);
+    Curve = fmaf(Curve, Fraction, Square);
+    Curve = fmaf(Curve, Fraction, Linear);
+    return fmaf(Curve, Fraction, Left);
+}
+
+/* The cubic as the converter for 8, 24 and 32 bit integer samples evaluates it */
+static
+float
+DsCubicLoose(
+    _In_ float Back,
+    _In_ float Left,
+    _In_ float Right,
+    _In_ float Ahead,
+    _In_ float Fraction)
+{
+    const float Third = 1.0f / 3.0f;
+    const float Sixth = 1.0f / 6.0f;
+    float Curve = fmaf(Ahead - Back, Sixth, (Left - Right) * 0.5f);
+    float Square = fmaf(Right, 0.5f, fmaf(Back, 0.5f, -Left));
+    float Linear = fmaf(-Back, Third, Right);
+
+    Linear = fmaf(-Left, 0.5f, Linear);
+    Linear = fmaf(-Ahead, Sixth, Linear);
+    Curve = fmaf(Curve, Fraction, Square);
+    Curve = fmaf(Curve, Fraction, Linear);
+    return fmaf(Curve, Fraction, Left);
+}
+
+/* The cubic on raw 16 bit sample values with the scale folded into each constant */
+static
+float
+DsCubicWhole(
+    _In_ float Back,
+    _In_ float Left,
+    _In_ float Right,
+    _In_ float Ahead,
+    _In_ float Fraction,
+    _In_ BOOLEAN Spread)
+{
+    const float Unit = 1.0f / 32768.0f;
+    const float Half = 1.0f / 65536.0f;
+    const float Third = 1.0f / 98304.0f;
+    const float Sixth = 1.0f / 196608.0f;
+    float Base = Left * Unit;
+    float Linear = fmaf(Right, Unit, -(Back * Third));
+    float Square = fmaf(Back + Right, Half, -Base);
+    float Curve;
+
+    Linear = fmaf(-Left, Half, Linear);
+    Linear = fmaf(-Ahead, Sixth, Linear);
+    if (Spread)
+    {
+        Curve = fmaf(Left, Half, -(Right * Half));
+        Curve = fmaf(Ahead, Sixth, Curve);
+        Curve = fmaf(-Back, Sixth, Curve);
+    }
+    else
+    {
+        Curve = fmaf(Left - Right, Half, (Ahead - Back) * Sixth);
+    }
+    Curve = fmaf(Curve, Fraction, Square);
+    Curve = fmaf(Curve, Fraction, Linear);
+    return fmaf(Curve, Fraction, Base);
+}
+
+/*
+ * Lagrange cubic through the two frames on each side. The first frames of each pass come from the
+ * converter's float history; past them the 16 bit and other integer kernels work their own way.
+ */
 VOID
 DsResampler::PullCubic(
     _Out_writes_(Channels) float* Frame)
@@ -737,17 +848,9 @@ DsResampler::PullCubic(
     ULONG Early = Slot(Position - 2);
     ULONG Late = Slot(Position - 1);
     ULONG Newest = Slot(Position);
-    float Third = 1.0f / 3.0f;
-    float Sixth = 1.0f / 6.0f;
-    float Unit = 1.0f;
+    BOOLEAN Spread = Channels > 1;
+    BOOLEAN History = Position - PassStart < 3;
     float Before;
-
-    if (Whole)
-    {
-        Unit = 1.0f / 32768.0f;
-        Third = 1.0f / 98304.0f;
-        Sixth = 1.0f / 196608.0f;
-    }
 
     for (UINT Channel = 0; Channel < Channels; Channel++)
     {
@@ -756,32 +859,15 @@ DsResampler::PullCubic(
         float Left = Line[Early];
         float Right = Line[Late];
         float Ahead = Line[Newest];
-        float Base;
-        float Linear;
-        float Square;
-        float Curve;
 
-        if (Whole)
-        {
-            Back = Back * 32768.0f;
-            Left = Left * 32768.0f;
-            Right = Right * 32768.0f;
-            Ahead = Ahead * 32768.0f;
-            Base = Left * Unit;
-            Linear = fmaf(Right, Unit, -(Back * Third));
-        }
+        if (History)
+            Frame[Channel] = DsCubicFloat(Back, Left, Right, Ahead, Fraction, Spread || Source == DS_CUBIC_INTEGER);
+        else if (Source == DS_CUBIC_WHOLE)
+            Frame[Channel] = DsCubicWhole(Back * 32768.0f, Left * 32768.0f, Right * 32768.0f, Ahead * 32768.0f, Fraction, Spread);
+        else if (Source == DS_CUBIC_INTEGER)
+            Frame[Channel] = DsCubicLoose(Back, Left, Right, Ahead, Fraction);
         else
-        {
-            Base = Left;
-            Linear = fmaf(-Back, Third, Right);
-        }
-        Linear = fmaf(-Left, Unit * 0.5f, Linear);
-        Linear = fmaf(-Ahead, Sixth, Linear);
-        Square = fmaf(Back + Right, Unit * 0.5f, -Base);
-        Curve = fmaf(Left - Right, Unit * 0.5f, (Ahead - Back) * Sixth);
-        Curve = fmaf(Curve, Fraction, Square);
-        Curve = fmaf(Curve, Fraction, Linear);
-        Frame[Channel] = fmaf(Curve, Fraction, Base);
+            Frame[Channel] = DsCubicFloat(Back, Left, Right, Ahead, Fraction, FALSE);
     }
 
     Position += Leap;
