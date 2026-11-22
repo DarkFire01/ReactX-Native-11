@@ -6,6 +6,7 @@ nt_add_usermode_dll(dinput8
         device.cpp
         devprop.cpp
         dinput.cpp
+        effectfile.cpp
         formats.cpp
         input.cpp
         keyboard.cpp
@@ -14,6 +15,6 @@ nt_add_usermode_dll(dinput8
         mouse.cpp
         dinput8.rc)
 
-target_link_libraries(dinput8 PRIVATE dxguid advapi32 user32)
+target_link_libraries(dinput8 PRIVATE dxguid advapi32 user32 winmm)
 
 set_target_properties(dinput8 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/reactx")
