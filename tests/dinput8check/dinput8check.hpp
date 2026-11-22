@@ -76,3 +76,6 @@ DcCheckEffectFileRead(
 VOID
 DcRunDataChecks(
     _In_z_ PCSTR Name);
+
+VOID
+DcCheckJoyConfig(VOID);

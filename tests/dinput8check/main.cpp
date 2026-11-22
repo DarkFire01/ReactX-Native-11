@@ -743,6 +743,7 @@ static const struct
     { "misc", [] { DcRunDataChecks("misc"); } },
     { "effects", DcCheckEffectFiles },
     { "actions", DcCheckActions },
+    { "joyconfig", DcCheckJoyConfig },
     { "watch", [] { DcRunDataChecks("watch"); }, TRUE },
 };
 
