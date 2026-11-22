@@ -2153,6 +2153,12 @@ DcCheckMix(VOID)
         /* Ends late in an engine pass, where the filter would ring on into the next one */
         { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 68 },
         { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 68 },
+        /* Several passes through the cubic converter for each kind of sample */
+        { WAVE_FORMAT_PCM, 2, FALSE, 22050, 8, 0, 0, DSBCAPS_GLOBALFOCUS, 69 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 32000, 24, 0, 0, DSBCAPS_GLOBALFOCUS, 69 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 69 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 11025, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 69 },
+        { WAVE_FORMAT_IEEE_FLOAT, 1, FALSE, 44100, 32, 0, 0, DSBCAPS_GLOBALFOCUS, 69 },
     };
     IDirectSound8* Sound;
 
@@ -2165,7 +2171,8 @@ DcCheckMix(VOID)
         UINT Scene = Cases[Case].Scene;
         BOOLEAN Later = Scene >= 63 && Scene <= 65;
         BOOLEAN Ending = Scene >= 66 && Scene <= 68;
-        size_t Shown = Later ? 1800 : 200;
+        BOOLEAN Long = Scene == 69;
+        size_t Shown = Later || Long ? 1800 : 200;
         DcLoopback Loopback;
         WAVEFORMATEX Format;
         IDirectSoundBuffer* Buffer;
@@ -2177,7 +2184,7 @@ DcCheckMix(VOID)
         size_t Onset;
         size_t Frames;
 
-        if (Later || Ending)
+        if (Later || Ending || Long)
         {
             Sound->Release();
             if (FAILED(DcOpenMixDevice(&Sound)))
@@ -2197,7 +2204,7 @@ DcCheckMix(VOID)
             Bytes += 30 * Format.nBlockAlign;
         hr = DcMakeBuffer(Sound,
                           DSBCAPS_CTRLVOLUME | Cases[Case].Focus |
-                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 || Later || Ending ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
+                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 || Later || Ending || Long ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
                                Cases[Case].Scene >= 50 && Cases[Case].Scene < 60 ? DSBCAPS_CTRLFX :
                                Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
                           Bytes, &Format, &Buffer);
@@ -2210,7 +2217,7 @@ DcCheckMix(VOID)
         DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format);
         Buffer->Unlock(Part1, Size1, nullptr, 0);
         Buffer->SetVolume(Cases[Case].Volume);
-        if (Scene == 67)
+        if (Scene == 67 || Long)
         {
             printf("  setfrequency = %08lX\n", Buffer->SetFrequency(Format.nSamplesPerSec * 3 / 2));
         }
