@@ -1885,6 +1885,23 @@ public:
         _In_ ULONG Usage,
         _Out_ PULONG Index) override
     {
+#if DIRECTINPUT_VERSION >= 0x0800
+        /* DirectInput 8 matches the page and usage the descriptor gives each control */
+        for (ULONG Kind = 0; Kind < GroupCount; Kind++)
+        {
+            const RX_DI_HID_GROUP* Group = &Groups[Kind];
+
+            for (ULONG Step = 0; Step < Group->Count; Step++)
+            {
+                if (static_cast<ULONG>(MAKELONG(static_cast<USHORT>(Group->UsageMin + Step), Group->UsagePage)) == Usage)
+                {
+                    *Index = Step + Group->DataIndexMin + Base[HidP_Input];
+                    return S_OK;
+                }
+            }
+        }
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+#else
         for (ULONG Kind = 0; Kind < GroupCount; Kind++)
         {
             const RX_DI_HID_GROUP* Group = &Groups[Kind];
@@ -1914,6 +1931,7 @@ public:
             }
         }
         return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+#endif
     }
 
 private:
