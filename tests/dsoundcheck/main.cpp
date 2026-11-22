@@ -1859,18 +1859,21 @@ DcCheckMix(VOID)
         WORD Bits;
         LONG Volume;
         LONG Pan;
+        DWORD Focus;
     } Cases[] =
     {
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0 },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -1234, 2500 },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -300, -7000 },
-        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0 },
-        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, -500, 1500 },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 8, 0, 0 },
-        { WAVE_FORMAT_PCM, 2, TRUE, 0, 24, 0, 0 },
-        { WAVE_FORMAT_IEEE_FLOAT, 2, TRUE, 0, 32, -600, 0 },
-        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0 },
-        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -1234, 2500, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -300, -7000, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, -500, 1500, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 8, 0, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 24, 0, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, TRUE, 0, 32, -600, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, 0 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_STICKYFOCUS },
     };
     IDirectSound8* Sound;
 
@@ -1915,7 +1918,7 @@ DcCheckMix(VOID)
         DcFormat(&Format, Cases[Case].Tag, Cases[Case].Channels,
                  Cases[Case].NativeRate ? Loopback.Format->nSamplesPerSec : Cases[Case].Rate, Cases[Case].Bits);
         Bytes = Format.nAvgBytesPerSec / 4 / Format.nBlockAlign * Format.nBlockAlign;
-        hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_GLOBALFOCUS, Bytes, &Format, &Buffer);
+        hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | Cases[Case].Focus, Bytes, &Format, &Buffer);
         if (FAILED(hr))
         {
             printf("mix[%u] create = %08lX\n", Case, hr);
