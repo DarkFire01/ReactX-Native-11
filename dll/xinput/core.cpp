@@ -598,7 +598,7 @@ XiGetDeviceOnPort(
         if (FAILED(hr))
             return hr;
         *Device = (Port < XiPortCount) ? XiPorts[XiPortSlot(Port)] : nullptr;
-        Retries--;
+        Retries -= 1;
     }
     return S_OK;
 }
