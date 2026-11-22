@@ -1266,6 +1266,117 @@ DcEnumFileEffects(
 }
 
 /* Effect files under the scratch folder, written and read back with the keyboard device */
+/* Prints what the registry says about a device's effect driver, opening keys for reading only */
+static
+VOID
+DcPrintFFRegistry(
+    _In_ const DIDEVICEINSTANCEW* Info)
+{
+    WCHAR Path[160];
+    WCHAR Clsid[64] = {};
+    WCHAR Threading[32] = {};
+    DWORD Size = sizeof(Clsid);
+    DWORD Count = 0;
+    HKEY Type = nullptr;
+    HKEY Driver = nullptr;
+    HKEY Effects = nullptr;
+    HKEY Server = nullptr;
+    LONG Error;
+
+    swprintf_s(Path, L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM\\VID_%04X&PID_%04X",
+               LOWORD(Info->guidProduct.Data1), HIWORD(Info->guidProduct.Data1));
+    Error = RegOpenKeyExW(HKEY_CURRENT_USER, Path, 0, KEY_READ, &Type);
+    printf("  ffreg type = %ld\n", Error);
+    if (Error != ERROR_SUCCESS)
+        return;
+
+    Error = RegOpenKeyExW(Type, L"OEMForceFeedback", 0, KEY_READ, &Driver);
+    printf("  ffreg driver = %ld\n", Error);
+    if (Error == ERROR_SUCCESS)
+    {
+        Error = RegQueryValueExW(Driver, L"CLSID", nullptr, nullptr, reinterpret_cast<PBYTE>(Clsid), &Size);
+        printf("  ffreg clsid = %ld '%ls'\n", Error, Clsid);
+        if (Error == ERROR_SUCCESS)
+        {
+            swprintf_s(Path, L"CLSID\\%s\\InProcServer32", Clsid);
+            Size = sizeof(Threading);
+            Error = RegOpenKeyExW(HKEY_CLASSES_ROOT, Path, 0, KEY_READ, &Server);
+            if (Error == ERROR_SUCCESS)
+            {
+                Error = RegQueryValueExW(Server, L"ThreadingModel", nullptr, nullptr, reinterpret_cast<PBYTE>(Threading), &Size);
+                RegCloseKey(Server);
+            }
+            printf("  ffreg threading = %ld '%ls'\n", Error, Threading);
+        }
+
+        Error = RegOpenKeyExW(Driver, L"Effects", 0, KEY_READ, &Effects);
+        if (Error == ERROR_SUCCESS)
+        {
+            RegQueryInfoKeyW(Effects, nullptr, nullptr, nullptr, &Count, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+            RegCloseKey(Effects);
+        }
+        printf("  ffreg effects = %ld %lu\n", Error, Count);
+        RegCloseKey(Driver);
+    }
+    RegCloseKey(Type);
+}
+
+/* Matches each HID device's registry entries against the effects and flags the runtime reports */
+static
+VOID
+DcCheckFFRegistry(VOID)
+{
+    IDirectInput7W* Input = nullptr;
+    GUID Found[64] = {};
+    ULONG Count;
+
+    printf("ffregistry create = %08lX\n", DcCreateEx(DcSelf, 0x0700, IID_IDirectInput7W, reinterpret_cast<PVOID*>(&Input), nullptr));
+    Input->EnumDevices(DIDEVTYPE_HID, [](LPCDIDEVICEINSTANCEW Info, LPVOID Context) -> BOOL
+    {
+        GUID* List = static_cast<GUID*>(Context);
+        ULONG* Total = reinterpret_cast<ULONG*>(List + 63);
+
+        if (*Total < 62)
+            List[(*Total)++] = Info->guidInstance;
+        return TRUE;
+    }, Found, DIEDFL_ALLDEVICES);
+    Count = *reinterpret_cast<ULONG*>(Found + 63);
+
+    for (ULONG Index = 0; Index < Count && Index < 62; Index++)
+    {
+        IDirectInputDevice7W* Device = nullptr;
+        DIDEVICEINSTANCEW Info = {};
+        DIDEVCAPS Caps = {};
+        ULONG Effects = 0;
+        HRESULT hr = Input->CreateDeviceEx(Found[Index], IID_IDirectInputDevice7W, reinterpret_cast<PVOID*>(&Device), nullptr);
+
+        printf("ffregistry hid %lu = %08lX\n", Index, hr);
+        if (FAILED(hr))
+            continue;
+
+        Info.dwSize = sizeof(Info);
+        Device->GetDeviceInfo(&Info);
+        DcPrintFFRegistry(&Info);
+
+        Caps.dwSize = sizeof(Caps);
+        hr = Device->GetCapabilities(&Caps);
+        printf("  ffcaps = %08lX %08lX %lu %lu %08lX\n", hr, Caps.dwFlags & 0xFF00, Caps.dwFFSamplePeriod,
+               Caps.dwFFMinTimeResolution, Caps.dwFFDriverVersion);
+
+        hr = Device->EnumEffects([](LPCDIEFFECTINFOW Effect, LPVOID Context) -> BOOL
+        {
+            (*static_cast<ULONG*>(Context))++;
+            printf("  ffeffect %s %08lX %08lX %08lX '%ls'\n", DcGuid(Effect->guid).c_str(), Effect->dwEffType,
+                   Effect->dwStaticParams, Effect->dwDynamicParams, Effect->tszName);
+            return TRUE;
+        }, &Effects, DIEFT_ALL);
+        printf("  ffeffects = %08lX %lu\n", hr, Effects);
+        DcRelease("  device", Device);
+    }
+
+    DcRelease("ffregistry input", Input);
+}
+
 static
 VOID
 DcCheckEffectFiles(VOID)
@@ -1432,6 +1543,7 @@ wmain(
     DcCheckEnumDevices(0x0700);
     DcCheckInputObject();
     DcCheckDevices();
+    DcCheckFFRegistry();
     if (DcScratch != nullptr)
         DcCheckEffectFiles();
     printf("cancanunload end = %08lX\n", DcCanUnloadNow());
