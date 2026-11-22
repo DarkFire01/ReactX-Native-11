@@ -309,12 +309,13 @@ DdFreeSurfaceMemory(
         DdDestroySurfaceResource(Surface->Driver->Hardware, Surface);
     if (Surface->SystemResource != nullptr)
         DdDestroySystemResource(Surface->Driver->Hardware, Surface);
-    if (Surface->Bits != nullptr)
+    if (Surface->Bits != nullptr && !Surface->ClientMemory)
         UnmapViewOfFile(Surface->Bits);
     if (Surface->Section != NULL)
         CloseHandle(Surface->Section);
     Surface->Bits = nullptr;
     Surface->Section = NULL;
+    Surface->ClientMemory = FALSE;
 }
 
 /* A section lets GDI wrap the same pixels when the application asks for a DC */
@@ -571,6 +572,7 @@ DdNewSurface(
     _In_ DWORD Width,
     _In_ DWORD Height,
     _In_ UCHAR Version,
+    _In_ BOOLEAN SysMemRequested,
     _Outptr_ DdSurface** Result)
 {
     DdLocal* Local = Maker->Local;
@@ -594,6 +596,9 @@ DdNewSurface(
     Surface->Height = Height;
     Surface->Pitch = DdSurfacePitch(Width, Format->dwRGBBitCount);
     Surface->Uniqueness = 1;
+    Surface->SysMemRequested = SysMemRequested;
+    Surface->FillBitCount = Format->dwRGBBitCount;
+    Surface->CreatedMode = Driver->ModeKey;
 
     if ((Caps->dwCaps & DDSCAPS_PRIMARYSURFACE) == 0 && (Caps->dwCaps & DDSCAPS_VIDEOMEMORY) != 0)
         hr = DdCreateSurfaceResource(Driver->Hardware, Surface);
@@ -635,6 +640,7 @@ DdNewFlipChain(
     _In_ DWORD Height,
     _In_ DWORD BackCount,
     _In_ UCHAR Version,
+    _In_ BOOLEAN SysMemRequested,
     _Outptr_ DdSurface** Result)
 {
     DdSurface* Front = nullptr;
@@ -644,7 +650,7 @@ DdNewFlipChain(
 
     for (DWORD Index = 0; Index <= BackCount; Index++)
     {
-        hr = DdNewSurface(Maker, Caps, Format, Width, Height, Version, &Member);
+        hr = DdNewSurface(Maker, Caps, Format, Width, Height, Version, SysMemRequested, &Member);
         if (SUCCEEDED(hr) && Previous != nullptr)
             hr = DdAddLink(Previous, Version, Member, Version, TRUE);
         if (FAILED(hr))
@@ -702,6 +708,7 @@ DdCreateSurfaceObject(
     BOOLEAN Primary;
     BOOLEAN Chain;
     BOOLEAN Depth;
+    BOOLEAN SysMemRequested;
     UCHAR Version;
     DWORD Width;
     DWORD Height;
@@ -727,6 +734,7 @@ DdCreateSurfaceObject(
 
     if ((Caps.dwCaps & DDSCAPS_SYSTEMMEMORY) != 0 && (Caps.dwCaps & DDSCAPS_VIDEOMEMORY) != 0)
         return DDERR_INVALIDCAPS;
+    SysMemRequested = (Caps.dwCaps & DDSCAPS_SYSTEMMEMORY) != 0;
     if ((Caps.dwCaps & (DDSCAPS_LOCALVIDMEM | DDSCAPS_NONLOCALVIDMEM)) != 0 && (Caps.dwCaps & DDSCAPS_VIDEOMEMORY) == 0)
         return DDERR_INVALIDCAPS;
 
@@ -829,9 +837,9 @@ DdCreateSurfaceObject(
 
     Version = This->Kind == DdKind::Draw7 ? 7 : This->Kind == DdKind::Draw4 ? 4 : 1;
     if (Chain)
-        hr = DdNewFlipChain(This, &Caps, &Format, Width, Height, Desc->dwBackBufferCount, Version, &Surface);
+        hr = DdNewFlipChain(This, &Caps, &Format, Width, Height, Desc->dwBackBufferCount, Version, SysMemRequested, &Surface);
     else
-        hr = DdNewSurface(This, &Caps, &Format, Width, Height, Version, &Surface);
+        hr = DdNewSurface(This, &Caps, &Format, Width, Height, Version, SysMemRequested, &Surface);
     if (FAILED(hr))
         return hr;
 
@@ -1058,6 +1066,8 @@ DdLockSurface(
 
     if (Desc == nullptr || Desc->dwSize != DdDescSizeFor(Interface))
         return E_INVALIDARG;
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
 
     /* Primary surfaces are composed by the desktop and cannot be locked */
     if ((Surface->Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0)
@@ -1207,12 +1217,92 @@ DdSurfaceGetPixelFormat(
     return S_OK;
 }
 
+/* The next implicit link along a complex structure, stopping when it comes back to its root */
+_Ret_maybenull_
+static
+DdLink*
+DdNextImplicitMember(
+    _In_ const DdLink* Link,
+    _In_ const DdSurface* Root)
+{
+    DdLink* Next;
+
+    if (Link->To == Root)
+        return nullptr;
+    for (Next = Link->To->Attached; Next != nullptr; Next = Next->NextOut)
+    {
+        if (Next->Implicit)
+            return Next->To == Root ? nullptr : Next;
+    }
+    return nullptr;
+}
+
 static
 HRESULT
 STDMETHODCALLTYPE
 DdSurfaceIsLost(
     _In_ VOID* Com)
 {
+    DdLockScope Lock;
+
+    return DdSurfaceFromCom(Com)->Lost ? DDERR_SURFACELOST : S_OK;
+}
+
+/* Gives a lost surface memory again; what it held before is gone */
+static
+HRESULT
+DdGiveBackMemory(
+    _Inout_ DdSurface* Surface)
+{
+    HRESULT hr = S_OK;
+
+    if (Surface->Resource == nullptr && Surface->Bits == nullptr && (Surface->Caps.dwCaps & DDSCAPS_VIDEOMEMORY) != 0 &&
+        (Surface->Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) == 0)
+    {
+        hr = DdCreateSurfaceResource(Surface->Driver->Hardware, Surface);
+    }
+    if (SUCCEEDED(hr))
+        Surface->Lost = FALSE;
+    return hr;
+}
+
+static
+HRESULT
+DdRestoreSurface(
+    _Inout_ DdSurface* Surface)
+{
+    DdDriver* Driver = Surface->Driver;
+    DdLink* Link;
+    HRESULT hr;
+
+    if ((Surface->ChainFlags & DdChainDying) != 0)
+        return DDERR_INVALIDOBJECT;
+    if (!Surface->Lost)
+        return S_OK;
+    if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+        return DDERR_NOTONMIPMAPSUBLEVEL;
+    if ((Surface->ChainFlags & DdChainImplicit) != 0)
+        return DDERR_IMPLICITLYCREATED;
+    if (memcmp(&Surface->CreatedMode, &Driver->ModeKey, sizeof(Driver->ModeKey)) != 0 ||
+        (Driver->ExclusiveOwner != nullptr && Driver->ExclusiveOwner != Surface->Creator))
+    {
+        return DDERR_WRONGMODE;
+    }
+
+    hr = DdGiveBackMemory(Surface);
+    if (FAILED(hr) || (Surface->ChainFlags & DdChainRoot) == 0)
+        return hr;
+
+    /* The surfaces complex creation made come back with their root */
+    for (Link = Surface->Attached; Link != nullptr; Link = DdNextImplicitMember(Link, Surface))
+    {
+        if (Link->Implicit && Link->To->Lost)
+        {
+            hr = DdGiveBackMemory(Link->To);
+            if (FAILED(hr))
+                return hr;
+        }
+    }
     return S_OK;
 }
 
@@ -1222,6 +1312,63 @@ STDMETHODCALLTYPE
 DdSurfaceRestore(
     _In_ VOID* Com)
 {
+    DdLockScope Lock;
+
+    return DdRestoreSurface(DdSurfaceFromCom(Com));
+}
+
+/* What a display change does: video memory goes, and everything not asked to live in system memory is lost */
+VOID
+DdInvalidateSurfaces(
+    _Inout_ DdDriver* Driver)
+{
+    DdSurface* Surface;
+
+    for (Surface = Driver->Surfaces; Surface != nullptr; Surface = Surface->Next)
+    {
+        if (Surface->Lost)
+            continue;
+        if (Surface->Resource != nullptr)
+        {
+            if (Surface->Dc != NULL)
+                DdDropSurfaceDc(Surface);
+            Surface->Locked = FALSE;
+            DdDestroySurfaceResource(Driver->Hardware, Surface);
+            if (Surface->SystemResource != nullptr)
+                DdDestroySystemResource(Driver->Hardware, Surface);
+        }
+        if (!Surface->SysMemRequested)
+        {
+            Surface->Lost = TRUE;
+            DdTouchSurface(Surface);
+        }
+    }
+}
+
+/* Restores the object's surfaces oldest first, stopping at the first that will not come back */
+HRESULT
+DdRestoreLocalSurfaces(
+    _In_ DdLocal* Local)
+{
+    DdSurface* Surface;
+    ULONG Count = 0;
+    ULONG Index;
+    HRESULT hr;
+
+    for (Surface = Local->Driver->Surfaces; Surface != nullptr; Surface = Surface->Next)
+        Count += 1;
+
+    for (ULONG Remaining = Count; Remaining > 0; Remaining -= 1)
+    {
+        Surface = Local->Driver->Surfaces;
+        for (Index = 0; Index + 1 < Remaining; Index++)
+            Surface = Surface->Next;
+        if (Surface->Creator != Local || (Surface->ChainFlags & DdChainImplicit) != 0)
+            continue;
+        hr = DdRestoreSurface(Surface);
+        if (FAILED(hr))
+            return hr;
+    }
     return S_OK;
 }
 
@@ -1418,30 +1565,25 @@ DdGdiExport(
     return Gdi != NULL ? GetProcAddress(Gdi, Name) : nullptr;
 }
 
-/* A DC the kernel builds over the locked resource, kept until ReleaseDC */
+/* A DC the kernel builds over memory the surface does not own as a section */
 static
 HRESULT
-DdCreateResourceDc(
-    _Inout_ DdSurface* Surface)
+DdCreateMemoryDc(
+    _Inout_ DdSurface* Surface,
+    _In_ BYTE* Bits,
+    _In_ D3DDDIFORMAT Format)
 {
     static PDD_CREATE_DC_FROM_MEMORY CreateDc =
         reinterpret_cast<PDD_CREATE_DC_FROM_MEMORY>(DdGdiExport("D3DKMTCreateDCFromMemory"));
-    DdHardware* Hardware = Surface->Driver->Hardware;
     D3DKMT_CREATEDCFROMMEMORY Create = {};
     PALETTEENTRY Entries[256];
-    BYTE* Bits;
     NTSTATUS Status;
     HDC Screen;
-    HRESULT hr;
 
     if (CreateDc == nullptr)
         return DDERR_CANTCREATEDC;
 
-    hr = DdLockSurfaceResource(Hardware, Surface, nullptr, 0, &Bits);
-    if (FAILED(hr))
-        return hr;
-
-    if (Surface->Resource->Format == D3DDDIFMT_P8)
+    if (Format == D3DDDIFMT_P8)
     {
         DdSurfaceColors(Surface, 256, Entries);
         Create.pColorTable = Entries;
@@ -1449,7 +1591,7 @@ DdCreateResourceDc(
 
     Screen = GetDC(NULL);
     Create.pMemory = Bits;
-    Create.Format = Surface->Resource->Format;
+    Create.Format = Format;
     Create.Width = Surface->Width;
     Create.Height = Surface->Height;
     Create.Pitch = static_cast<UINT>(Surface->Pitch);
@@ -1458,14 +1600,32 @@ DdCreateResourceDc(
     ReleaseDC(NULL, Screen);
     if (!NT_SUCCESS(Status))
     {
-        DdTrace(L"D3DKMTCreateDCFromMemory failed 0x%08lX for format %u", Status, Surface->Resource->Format);
-        DdUnlockSurfaceResource(Hardware, Surface);
+        DdTrace(L"D3DKMTCreateDCFromMemory failed 0x%08lX for format %u", Status, Format);
         return DDERR_CANTCREATEDC;
     }
 
     Surface->Dc = Create.hDc;
     Surface->Bitmap = static_cast<HBITMAP>(Create.hBitmap);
     return S_OK;
+}
+
+/* A DC over the locked resource, kept until ReleaseDC */
+static
+HRESULT
+DdCreateResourceDc(
+    _Inout_ DdSurface* Surface)
+{
+    DdHardware* Hardware = Surface->Driver->Hardware;
+    BYTE* Bits;
+    HRESULT hr;
+
+    hr = DdLockSurfaceResource(Hardware, Surface, nullptr, 0, &Bits);
+    if (FAILED(hr))
+        return hr;
+    hr = DdCreateMemoryDc(Surface, Bits, Surface->Resource->Format);
+    if (FAILED(hr))
+        DdUnlockSurfaceResource(Hardware, Surface);
+    return hr;
 }
 
 static
@@ -1478,13 +1638,14 @@ DdDropSurfaceDc(
     D3DKMT_DESTROYDCFROMMEMORY Destroy;
 
     GdiFlush();
-    if (Surface->Resource != nullptr)
+    if (Surface->Resource != nullptr || Surface->ClientMemory)
     {
         Destroy.hDc = Surface->Dc;
         Destroy.hBitmap = Surface->Bitmap;
         if (DestroyDc != nullptr)
             DestroyDc(&Destroy);
-        DdUnlockSurfaceResource(Surface->Driver->Hardware, Surface);
+        if (Surface->Resource != nullptr)
+            DdUnlockSurfaceResource(Surface->Driver->Hardware, Surface);
     }
     else
     {
@@ -1510,6 +1671,8 @@ DdSurfaceGetDC(
 
     if (Result == nullptr)
         return E_INVALIDARG;
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
     if (Surface->Dc != NULL)
         return DDERR_DCALREADYCREATED;
     if (Surface->Locked)
@@ -1523,6 +1686,10 @@ DdSurfaceGetDC(
     if (Surface->Resource != nullptr)
     {
         hr = DdCreateResourceDc(Surface);
+    }
+    else if (Surface->ClientMemory)
+    {
+        hr = DdCreateMemoryDc(Surface, Surface->Bits, DdDriverFormat(&Surface->Format));
     }
     else
     {
@@ -1566,9 +1733,14 @@ DdSurfaceBlt(
     _In_ DWORD Flags,
     _In_opt_ LPDDBLTFX Fx)
 {
+    DdSurface* Target = DdSurfaceFromCom(Com);
+    DdSurface* From = DdSurfaceFromCom(Source);
+
     DdLockScope Lock;
 
-    return DdBlt(DdSurfaceFromCom(Com), TargetRect, DdSurfaceFromCom(Source), SourceRect, Flags, Fx);
+    if (Target->Lost || (From != nullptr && From->Lost))
+        return DDERR_SURFACELOST;
+    return DdBlt(Target, TargetRect, From, SourceRect, Flags, Fx);
 }
 
 static
@@ -1588,6 +1760,8 @@ DdSurfaceBltFast(
 
     if (From == nullptr)
         return E_INVALIDARG;
+    if (DdSurfaceFromCom(Com)->Lost || From->Lost)
+        return DDERR_SURFACELOST;
     return DdBltFast(DdSurfaceFromCom(Com), X, Y, From, SourceRect, Flags);
 }
 
@@ -1938,6 +2112,101 @@ DdSurfaceGetPriority(
     return S_OK;
 }
 
+static constexpr DWORD DdSetDescFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_LPSURFACE |
+                                        DDSD_PIXELFORMAT;
+
+/* Points an explicitly system memory surface at the application's own memory */
+static
+HRESULT
+DdSetSurfaceDesc(
+    _Inout_ DdSurface* Surface,
+    _In_ const DDSURFACEDESC2* Desc)
+{
+    DWORD Flags = Desc->dwFlags;
+    HRESULT hr;
+
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
+    if (DdSurfaceBusy(Surface))
+        return DDERR_SURFACEBUSY;
+    if (!Surface->SysMemRequested ||
+        (Surface->Caps.dwCaps & (DDSCAPS_ALLOCONLOAD | DDSCAPS_PRIMARYSURFACE | DDSCAPS_RESERVED3 | DDSCAPS_OVERLAY)) != 0 ||
+        (Surface->Caps.dwCaps2 & (DDSCAPS2_TEXTUREMANAGE | DDSCAPS2_D3DTEXTUREMANAGE)) != 0)
+    {
+        return DDERR_INVALIDSURFACETYPE;
+    }
+
+    if ((Flags & ~DdSetDescFlags) != 0 || (Flags & DDSD_LPSURFACE) == 0 || Desc->lpSurface == nullptr)
+        return E_INVALIDARG;
+    if (((Flags & DDSD_WIDTH) != 0) != ((Flags & DDSD_PITCH) != 0))
+        return E_INVALIDARG;
+    if (((Flags & DDSD_WIDTH) != 0 && Desc->dwWidth == 0) || ((Flags & DDSD_HEIGHT) != 0 && Desc->dwHeight == 0))
+        return E_INVALIDARG;
+    if ((Flags & DDSD_PITCH) != 0 && (Desc->lPitch <= 0 || (Desc->lPitch % 4) != 0))
+        return E_INVALIDARG;
+    if ((Flags & DDSD_PIXELFORMAT) != 0 && Desc->ddpfPixelFormat.dwSize != sizeof(Desc->ddpfPixelFormat))
+        return E_INVALIDARG;
+    if ((Flags & DDSD_CAPS) != 0 && (Desc->ddsCaps.dwCaps != 0 || Desc->ddsCaps.dwCaps3 != 0 || Desc->ddsCaps.dwCaps4 != 0))
+        return DDERR_INVALIDCAPS;
+    if ((Flags & DDSD_PIXELFORMAT) != 0)
+    {
+        hr = DdCheckPixelFormat(&Desc->ddpfPixelFormat);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    DdFreeSurfaceMemory(Surface);
+    if ((Flags & DDSD_WIDTH) != 0)
+        Surface->Width = Desc->dwWidth;
+    if ((Flags & DDSD_HEIGHT) != 0)
+        Surface->Height = Desc->dwHeight;
+    if ((Flags & DDSD_PITCH) != 0)
+        Surface->Pitch = Desc->lPitch;
+    if ((Flags & DDSD_PIXELFORMAT) != 0)
+        Surface->Format = Desc->ddpfPixelFormat;
+    Surface->Bits = static_cast<BYTE*>(Desc->lpSurface);
+    Surface->ClientMemory = TRUE;
+
+    /* Nothing can say what the new memory holds, so the contents stamp stops */
+    Surface->Uniqueness = 0;
+    return S_OK;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdSurfaceSetSurfaceDesc(
+    _In_ VOID* Com,
+    _In_opt_ VOID* Desc,
+    _In_ DWORD Flags)
+{
+    DdSurfaceInterface* Interface = DdInterfaceFromCom(Com);
+    const DDSURFACEDESC2* Given = static_cast<const DDSURFACEDESC2*>(Desc);
+    DDSURFACEDESC2 Long = {};
+
+    DdLockScope Lock;
+
+    if ((Interface->Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+        return DDERR_NOTONMIPMAPSUBLEVEL;
+    if (Flags != 0 || Given == nullptr)
+        return E_INVALIDARG;
+
+    /* The third interface takes the short description and reads it over the long layout */
+    if (Interface->Version < 4)
+    {
+        if (Given->dwSize != sizeof(DDSURFACEDESC))
+            return E_INVALIDARG;
+        memcpy(&Long, Given, sizeof(DDSURFACEDESC));
+        Long.dwSize = sizeof(Long);
+        Given = &Long;
+    }
+    else if (Given->dwSize != sizeof(DDSURFACEDESC2))
+    {
+        return E_INVALIDARG;
+    }
+    return DdSetSurfaceDesc(Interface->Surface, Given);
+}
+
 static
 HRESULT
 STDMETHODCALLTYPE
@@ -2039,17 +2308,17 @@ const VOID* const DdSurfaceVtbl2[] =
 
 const VOID* const DdSurfaceVtbl3[] =
 {
-    DD_SURFACE_SLOTS(DdSurfaceUnlock), DD_SURFACE2_SLOTS, DD_SURFACE_SLOT(DdSurfaceMissing2),
+    DD_SURFACE_SLOTS(DdSurfaceUnlock), DD_SURFACE2_SLOTS, DD_SURFACE_SLOT(DdSurfaceSetSurfaceDesc),
 };
 
 const VOID* const DdSurfaceVtbl4[] =
 {
-    DD_SURFACE_SLOTS(DdSurfaceUnlock4), DD_SURFACE2_SLOTS, DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE4_SLOTS,
+    DD_SURFACE_SLOTS(DdSurfaceUnlock4), DD_SURFACE2_SLOTS, DD_SURFACE_SLOT(DdSurfaceSetSurfaceDesc), DD_SURFACE4_SLOTS,
 };
 
 const VOID* const DdSurfaceVtbl7[] =
 {
-    DD_SURFACE_SLOTS(DdSurfaceUnlock4), DD_SURFACE2_SLOTS, DD_SURFACE_SLOT(DdSurfaceMissing2), DD_SURFACE4_SLOTS,
+    DD_SURFACE_SLOTS(DdSurfaceUnlock4), DD_SURFACE2_SLOTS, DD_SURFACE_SLOT(DdSurfaceSetSurfaceDesc), DD_SURFACE4_SLOTS,
     DD_SURFACE_SLOT(DdSurfaceSetPriority), DD_SURFACE_SLOT(DdSurfaceGetPriority), DD_SURFACE_SLOT(DdSurfaceSetPriority),
     DD_SURFACE_SLOT(DdSurfaceGetPriority),
 };

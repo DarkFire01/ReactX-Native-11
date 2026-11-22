@@ -566,6 +566,7 @@ DdResetAllObjects(
         if (Driver->Hardware != nullptr)
             DdBuildHardwareCaps(Driver);
         DdUpdateDeviceRect(Driver);
+        DdInvalidateSurfaces(Driver);
         DdTrace(L"display %S changed to %lux%lu at %lu bits", Driver->Name, Driver->Mode.Width, Driver->Mode.Height,
                 Driver->Mode.BitCount);
     }

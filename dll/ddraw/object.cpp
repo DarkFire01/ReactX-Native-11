@@ -1381,7 +1381,7 @@ DdRestoreAllSurfaces(
 {
     DdLockScope Lock;
 
-    return S_OK;
+    return DdRestoreLocalSurfaces(DdFromCom(Com)->Local);
 }
 
 /* True when the input desktop is the one this thread draws on */

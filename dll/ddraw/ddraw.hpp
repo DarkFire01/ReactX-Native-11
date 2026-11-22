@@ -364,6 +364,13 @@ struct DdSurface
     DdLink* AttachedFrom;
     ULONG ChainFlags;
     DWORD BackBufferCount;
+
+    /* Lost surfaces keep their identity until Restore gives them memory again */
+    BOOLEAN Lost;
+    BOOLEAN SysMemRequested;
+    BOOLEAN ClientMemory;
+    DWORD FillBitCount;
+    DdModeKey CreatedMode;
 };
 
 /* Process wide runtime state */
@@ -769,6 +776,14 @@ VOID
 DdDescribeSurface(
     _In_ DdSurface* Surface,
     _Out_ DDSURFACEDESC2* Desc);
+
+VOID
+DdInvalidateSurfaces(
+    _Inout_ DdDriver* Driver);
+
+HRESULT
+DdRestoreLocalSurfaces(
+    _In_ DdLocal* Local);
 
 /* attach.cpp */
 HRESULT

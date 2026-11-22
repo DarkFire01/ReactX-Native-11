@@ -324,6 +324,8 @@ DdSurfaceAddAttached(
         return DDERR_NOEXCLUSIVEMODE;
     if (Surface == Other)
         return DDERR_CANNOTATTACHSURFACE;
+    if (Surface->Lost || Other->Lost)
+        return DDERR_SURFACELOST;
     if (DdFindLink(Surface, Other, OtherVersion) != nullptr)
         return DDERR_SURFACEALREADYATTACHED;
 
@@ -442,6 +444,8 @@ DdSurfaceDeleteAttached(
 
     if (Flags != 0)
         return E_INVALIDARG;
+    if (Surface->Lost || (Other != nullptr && Other->Lost))
+        return DDERR_SURFACELOST;
     if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
         return DDERR_NOTONMIPMAPSUBLEVEL;
 
@@ -515,6 +519,8 @@ DdSurfaceFlip(
         return E_INVALIDARG;
     if ((Flags & DDFLIP_NOVSYNC) != 0 && (Flags & DdFlipIntervals) != 0)
         return E_INVALIDARG;
+    if (Surface->Lost || (Wanted != nullptr && Wanted->Lost))
+        return DDERR_SURFACELOST;
     if ((Flags & DDFLIP_STEREO) != 0)
         return E_INVALIDARG;
     if ((Caps & DDSCAPS_FRONTBUFFER) == 0 || (Caps & DDSCAPS_FLIP) == 0)
@@ -531,6 +537,8 @@ DdSurfaceFlip(
     for (; Link != nullptr && Link->To != Surface; Link = DdNextInChain(Link->To))
     {
         Member = Link->To;
+        if (Member->Lost)
+            return DDERR_SURFACELOST;
         if (Partner == nullptr)
             Partner = Member;
         if (DdSurfaceBusy(Member) && (Wanted == nullptr || Wanted == Member))
@@ -577,6 +585,8 @@ DdSurfaceGetFlipStatus(
         return E_INVALIDARG;
     if ((Surface->Caps.dwCaps & DDSCAPS_RESERVED2) != 0)
         return DDERR_INVALIDSURFACETYPE;
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
     return S_OK;
 }
 
@@ -607,6 +617,8 @@ DdSurfaceEnumAttached(
 
     if (Report == nullptr)
         return E_INVALIDARG;
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
 
     for (Link = Surface->Attached; Link != nullptr; Link = Link->NextOut)
     {
@@ -638,6 +650,8 @@ DdSurfaceGetAttached(
 
     if (Caps == nullptr || Result == nullptr)
         return E_INVALIDARG;
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
     if (Version >= 7)
         Want = *static_cast<const DDSCAPS2*>(Caps);
     else

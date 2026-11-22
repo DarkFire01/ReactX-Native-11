@@ -114,6 +114,39 @@ DdFillRect(
     }
 }
 
+/*
+ * After SetSurfaceDesc changes the pixel size, fills still spread the color as the surface was
+ * created and write it four bytes at a time, as the system does.
+ */
+static
+VOID
+DdFillRectStale(
+    _In_ DdSurface* Target,
+    _In_ BYTE* Bits,
+    _In_ const RECT* To,
+    _In_ DWORD Value)
+{
+    DWORD Size = DdBytesPerPixel(Target);
+    DWORD Masked = Value & ((1u << Target->Format.dwRGBBitCount) - 1);
+    DWORD Pattern = Masked;
+    BYTE* Row;
+    DWORD Count;
+    LONG Y;
+
+    if (Target->FillBitCount == 8)
+        Pattern = Masked * 0x01010101;
+    else if (Target->FillBitCount == 16)
+        Pattern = Masked | (Masked << 16);
+
+    for (Y = To->top; Y < To->bottom; Y++)
+    {
+        Row = Bits + Y * Target->Pitch + To->left * Size;
+        Count = (To->right - To->left) * Size;
+        for (DWORD Index = 0; Index < Count; Index++)
+            Row[Index] = static_cast<BYTE>(Pattern >> ((Index % 4) * 8));
+    }
+}
+
 /* Nearest pixel sampling from the middle of each target pixel, mirrored when asked */
 static
 VOID
@@ -619,7 +652,12 @@ DdFillSurface(
     if (SUCCEEDED(hr))
     {
         for (Index = 0; Index < Pieces.Count; Index++)
-            DdFillRect(Target, Bits, &Pieces.Rects[Index], Value);
+        {
+            if (Target->FillBitCount != Target->Format.dwRGBBitCount && Target->Format.dwRGBBitCount < 24)
+                DdFillRectStale(Target, Bits, &Pieces.Rects[Index], Value);
+            else
+                DdFillRect(Target, Bits, &Pieces.Rects[Index], Value);
+        }
         DdUnmapSurface(Target);
     }
     DdFreeClipPieces(&Pieces);
