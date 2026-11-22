@@ -1913,6 +1913,7 @@ RxDiDevice::Acquire(VOID)
     }
 
     State |= DI_DEV_ACQUIRED | DI_DEV_WANTS_ACQUIRE;
+    DiTrace(L"device %08lx acquired, cooperative level 0x%lx", InstanceGuid.Data1, CoopFlags);
     LostResult = DIERR_INPUTLOST;
     hr = S_OK;
 
@@ -1939,6 +1940,7 @@ RxDiDevice::InternalUnacquire(VOID)
     }
 
     State &= ~DI_DEV_ACQUIRED;
+    DiTrace(L"device %08lx unacquired", InstanceGuid.Data1);
     DiReleaseExclusive(&InstanceGuid, Window, CoopFlags);
 
     if (CoopFlags & DISCL_FOREGROUND)
