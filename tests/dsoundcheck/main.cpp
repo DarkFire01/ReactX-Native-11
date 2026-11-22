@@ -2020,6 +2020,10 @@ DcSetScene(
             Spatial->SetPosition(0.2f, 0.0f, 0.0f, DS3D_DEFERRED);
             Spatial->SetMaxDistance(0.1f, DS3D_DEFERRED);
             break;
+        case 62:
+            Spatial->SetPosition(0.0f, 0.0f, 5.0f, DS3D_DEFERRED);
+            Spatial->SetVelocity(0.0f, 0.0f, -40.0f, DS3D_DEFERRED);
+            break;
     }
     Listener->CommitDeferredSettings();
     Spatial->Release();
@@ -2076,6 +2080,13 @@ DcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 9 },
         { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 50 },
         { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -300, 0, DSBCAPS_GLOBALFOCUS, 51 },
+        /* Rate changes last: a large one moves the whole device to another converter */
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 60 },
+        { WAVE_FORMAT_PCM, 1, FALSE, 22050, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 61 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_PCM, 2, FALSE, 44100, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 0 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, FALSE, 32000, 32, 0, 0, DSBCAPS_GLOBALFOCUS, 61 },
+        { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 62 },
     };
     IDirectSound8* Sound;
 
@@ -2122,7 +2133,8 @@ DcCheckMix(VOID)
         Bytes = Format.nAvgBytesPerSec / 4 / Format.nBlockAlign * Format.nBlockAlign;
         hr = DcMakeBuffer(Sound,
                           DSBCAPS_CTRLVOLUME | Cases[Case].Focus |
-                              (Cases[Case].Scene >= 50 ? DSBCAPS_CTRLFX :
+                              (Cases[Case].Scene == 60 || Cases[Case].Scene == 61 ? DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN :
+                               Cases[Case].Scene >= 50 && Cases[Case].Scene < 60 ? DSBCAPS_CTRLFX :
                                Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
                           Bytes, &Format, &Buffer);
         if (FAILED(hr))
@@ -2134,7 +2146,14 @@ DcCheckMix(VOID)
         DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format);
         Buffer->Unlock(Part1, Size1, nullptr, 0);
         Buffer->SetVolume(Cases[Case].Volume);
-        if (Cases[Case].Scene >= 50)
+        if (Cases[Case].Scene == 60 || Cases[Case].Scene == 61)
+        {
+            /* A tenth of a percent stays within the converter, half again does not */
+            DWORD Rate = Format.nSamplesPerSec;
+
+            printf("  setfrequency = %08lX\n", Buffer->SetFrequency(Cases[Case].Scene == 60 ? Rate + Rate / 1000 : Rate * 3 / 2));
+        }
+        else if (Cases[Case].Scene >= 50)
         {
             IDirectSoundBuffer8* Buffer8 = nullptr;
             DSEFFECTDESC Effect = {};
