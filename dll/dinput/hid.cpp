@@ -1028,26 +1028,74 @@ typedef struct _RX_DI_USAGE_SLOT
     ULONG Usage;
     ULONG Slot;
     const GUID* Guid;
+    UCHAR Kind;
+    ULONG Has;
 } RX_DI_USAGE_SLOT;
+
+/* What DirectInput 8 learns about a controller from the axes it finds */
+#define DI_HID_HAS_X            0x00000001
+#define DI_HID_HAS_Y            0x00000002
+#define DI_HID_HAS_Z            0x00000004
+#define DI_HID_HAS_RX           0x00000008
+#define DI_HID_HAS_RY           0x00000010
+#define DI_HID_HAS_RZ           0x00000020
+#define DI_HID_HAS_THROTTLE     0x00000040
+#define DI_HID_HAS_POV          0x00000080
+#define DI_HID_HAS_ACCELERATOR  0x00000100
+#define DI_HID_HAS_BRAKE        0x00000200
+#define DI_HID_HAS_CLUTCH       0x00000400
+#define DI_HID_HAS_SHIFTER      0x00000800
+#define DI_HID_HAS_STEERING     0x00001000
+#define DI_HID_HAS_RUDDER       0x00002000
+#define DI_HID_HAS_SLIDER       0x00004000
+#define DI_HID_HAS_ABSOLUTE     0x00008000
+
+/* Simulation page usages DirectInput 8 looks for */
+#define DI_HID_USAGE_CLUTCH     0xC6
+#define DI_HID_USAGE_SHIFTER    0xC7
+#define DI_HID_USAGE_STEERING   0xC8
+
+/* Pedal layout of a wheel in its Flags2 value, the first one also marks Z as a slider elsewhere */
+#define DI_HID_PEDAL_MASK           0x00E00000
+#define DI_HID_PEDALS_COMBINED_Y    0x00200000
+#define DI_HID_PEDALS_Y_BRAKES      0x00400000
+#define DI_HID_PEDALS_Y_ACCELERATES 0x00600000
+#define DI_HID_PEDALS_RZ_BRAKES     0x00800000
+#define DI_HID_Z_IS_SLIDER          0x00200000
+
+/* X, Y, Z and the three rotations */
+#define DI_HID_SIX_AXES         0x0000003F
+
+/* Axis kinds as action map semantics number them in bits 15 to 18 */
+#define DI_HID_KIND_X           1
+#define DI_HID_KIND_Y           2
+#define DI_HID_KIND_Z           3
+#define DI_HID_KIND_R           4
+#define DI_HID_KIND_U           5
+#define DI_HID_KIND_V           6
+#define DI_HID_KIND_A           7
+#define DI_HID_KIND_B           8
+#define DI_HID_KIND_C           9
+#define DI_HID_KIND_S           10
 
 static const RX_DI_USAGE_SLOT DiUsageSlots[] =
 {
-    { 0x00010030, 0, &GUID_XAxis },
-    { 0x00010031, 1, &GUID_YAxis },
-    { 0x00010032, 2, &GUID_ZAxis },
-    { 0x00010038, 2, &GUID_ZAxis },
-    { 0x00010033, 3, &GUID_RxAxis },
-    { 0x00010034, 4, &GUID_RyAxis },
-    { 0x00010035, 5, &GUID_RzAxis },
-    { 0x00010039, 7, &GUID_POV },
-    { 0x00010036, 6, &GUID_Slider },
-    { 0x00010037, 6, &GUID_Slider },
-    { 0x000200C8, 0, &GUID_XAxis },
-    { 0x000200C4, 1, &GUID_YAxis },
-    { 0x000200C5, 5, &GUID_RzAxis },
-    { 0x000200BA, 5, &GUID_RzAxis },
-    { 0x000200BB, 6, &GUID_Slider },
-    { 0x00050020, 7, &GUID_POV },
+    { 0x00010030, 0, &GUID_XAxis, DI_HID_KIND_X, DI_HID_HAS_X },
+    { 0x00010031, 1, &GUID_YAxis, DI_HID_KIND_Y, DI_HID_HAS_Y },
+    { 0x00010032, 2, &GUID_ZAxis, DI_HID_KIND_Z, DI_HID_HAS_Z },
+    { 0x00010038, 2, &GUID_ZAxis, DI_HID_KIND_Z, DI_HID_HAS_Z },
+    { 0x00010033, 3, &GUID_RxAxis, DI_HID_KIND_V, DI_HID_HAS_RX },
+    { 0x00010034, 4, &GUID_RyAxis, DI_HID_KIND_U, DI_HID_HAS_RY },
+    { 0x00010035, 5, &GUID_RzAxis, DI_HID_KIND_R, DI_HID_HAS_RZ },
+    { 0x00010039, 7, &GUID_POV, 0, DI_HID_HAS_POV },
+    { 0x00010036, 6, &GUID_Slider, DI_HID_KIND_S, DI_HID_HAS_SLIDER },
+    { 0x00010037, 6, &GUID_Slider, DI_HID_KIND_S, DI_HID_HAS_SLIDER },
+    { 0x000200C8, 0, &GUID_XAxis, DI_HID_KIND_X, DI_HID_HAS_STEERING },
+    { 0x000200C4, 1, &GUID_YAxis, DI_HID_KIND_A, DI_HID_HAS_ACCELERATOR },
+    { 0x000200C5, 5, &GUID_RzAxis, DI_HID_KIND_B, DI_HID_HAS_BRAKE },
+    { 0x000200BA, 5, &GUID_RzAxis, DI_HID_KIND_R, DI_HID_HAS_RUDDER },
+    { 0x000200BB, 6, &GUID_Slider, DI_HID_KIND_A, DI_HID_HAS_THROTTLE },
+    { 0x00050020, 7, &GUID_POV, 0, DI_HID_HAS_POV },
 };
 
 /* First string of each usage page's names, zero for pages without names */
@@ -1550,6 +1598,8 @@ public:
         StopReader();
         if (TypeKey != nullptr)
             RegCloseKey(TypeKey);
+        if (PropKey != nullptr)
+            RegCloseKey(PropKey);
         if (Start.CalTypeKey != nullptr)
             RegCloseKey(Start.CalTypeKey);
         DiCloseSink(Sink);
@@ -1566,6 +1616,7 @@ public:
         DiFree(reinterpret_cast<PVOID*>(&DataList));
         DiFree(reinterpret_cast<PVOID*>(&State));
         DiFree(reinterpret_cast<PVOID*>(&Report));
+        DiFree(reinterpret_cast<PVOID*>(&AxisKinds));
     }
 
     PRX_DI_SINK GetSink(VOID) override { return Sink; }
@@ -1976,6 +2027,19 @@ private:
 
         StringCchPrintfW(Type, _countof(Type), L"VID_%04X&PID_%04X", VendorId, ProductId);
         DiOpenJoyTypeKey(Type, MAXIMUM_ALLOWED, &TypeKey);
+#if DIRECTINPUT_VERSION >= 0x0800
+        {
+            HKEY Root;
+
+            /* Only read here, the key exists once the device was described */
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, DI_PRIVATE_ROOT, 0, KEY_READ, &Root) == ERROR_SUCCESS)
+            {
+                if (RegOpenKeyExW(Root, Type, 0, KEY_READ, &PropKey) != ERROR_SUCCESS)
+                    PropKey = nullptr;
+                RegCloseKey(Root);
+            }
+        }
+#endif
     }
 
     /* The joystick type settings say what kind of stick a HID joystick is */
@@ -3085,7 +3149,11 @@ private:
         if (LOBYTE(DevType) == DI_HID_TYPE_KEYBOARD)
             MungeKeyboard();
         else
+#if DIRECTINPUT_VERSION >= 0x0800
+            MungeOther8();
+#else
             MungeOther();
+#endif
         ApplyTypeAttributes();
 
         Format.dwSize = sizeof(Format);
@@ -3398,6 +3466,635 @@ private:
         DiFree(reinterpret_cast<PVOID*>(&Map));
     }
 
+#if DIRECTINPUT_VERSION >= 0x0800
+    /* The usage an object stands for, as a plain number past its group's first usage */
+    LONG
+    UsageNumber(
+        _In_ ULONG Index,
+        _In_ const RX_DI_HID_GROUP* Group)
+    {
+        return static_cast<LONG>(Group->UsageMin) - static_cast<LONG>(Group->DataIndexMin) -
+               static_cast<LONG>(Base[Group->Report]) + static_cast<LONG>(Index);
+    }
+
+    /*
+     * Reads the usages the type key's Axes branch wants for each axis slot. Returns FALSE when one
+     * names an axis the device lacks, which voids the whole branch.
+     */
+    BOOLEAN
+    ReadAxisWishes(
+        _Out_writes_(Axes + 6) PULONG Wanted,
+        _In_ ULONG Axes,
+        _Out_ PULONG Last)
+    {
+        ULONG Missing = 0;
+        ULONG Hits = 0;
+        ULONG Slot;
+
+        for (Slot = 0; Slot < Axes + 5; Slot++)
+        {
+            struct
+            {
+                ULONG Flags;
+                USHORT Page;
+                USHORT Usage;
+            } Attributes = {};
+            BOOLEAN Present = FALSE;
+            HKEY Key;
+
+            if (FAILED(DiHidOpenObjectKey(TypeKey, DIDFT_MAKEINSTANCE(Slot) | DIDFT_AXIS, KEY_QUERY_VALUE, &Key)))
+                continue;
+
+            if (FAILED(DiReadValue(Key, L"Attributes", &Attributes, sizeof(Attributes))) ||
+                (Attributes.Page == 0 && Attributes.Usage == 0))
+            {
+                Missing++;
+            }
+            else
+            {
+                Wanted[Slot] = DiHidUsageKey(Attributes.Page, Attributes.Usage);
+                for (ULONG Index = 0; Index < ObjectCount && !Present; Index++)
+                {
+                    const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+
+                    Present = (Objects[Index].dwType & DIDFT_AXIS) && Group != nullptr && Group->Report == HidP_Input &&
+                              ObjectUsage(Index, Group, HidP_Input) == Wanted[Slot];
+                }
+                if (!Present)
+                {
+                    RegCloseKey(Key);
+                    *Last = Slot;
+                    return FALSE;
+                }
+                Hits++;
+            }
+
+            RegCloseKey(Key);
+            if (Missing + Hits == Axes)
+                break;
+        }
+
+        *Last = Slot;
+        return TRUE;
+    }
+
+    /* Gives the axis holding one role another role, when the device has the first and not the second */
+    VOID
+    RecastAxis(
+        _Inout_updates_(Count) PULONG Roles,
+        _In_ ULONG Count,
+        _In_reads_(Count) const ULONG* AxisMap,
+        _Inout_ PULONG Has,
+        _In_ ULONG From,
+        _In_ ULONG To,
+        _In_ UCHAR Kind,
+        _In_ const GUID* Guid)
+    {
+        if ((*Has & (From | To)) != From)
+            return;
+
+        for (ULONG Instance = 0; Instance < Count; Instance++)
+        {
+            if (Roles[Instance] != From)
+                continue;
+            Roles[Instance] = To;
+            *Has ^= From | To;
+            AxisKinds[Instance] = Kind;
+            Objects[AxisMap[Instance]].pguid = Guid;
+            return;
+        }
+    }
+
+    /* Checks a type and subtype against what that type requires, falling back to its limited subtype */
+    static
+    ULONG
+    FitSubtype(
+        _In_ ULONG Type,
+        _In_ ULONG Buttons,
+        _In_ ULONG Has)
+    {
+        static const struct
+        {
+            UCHAR First;
+            UCHAR End;
+            UCHAR Buttons;
+            UCHAR Needs;
+        } Rules[] =
+        {
+            { 0, 1, 0, 0 },
+            { 1, 7, 0, 0 },
+            { 0, 13, 0, 0 },
+            { 1, 3, 5, 3 },
+            { 1, 5, 6, 0 },
+            { 1, 6, 4, 0 },
+            { 1, 5, 4, 3 },
+            { 1, 5, 4, 0 },
+            { 2, 5, 0, 0 },
+            { 2, 6, 0, 0 },
+            { 2, 3, 0, 0 },
+            { 2, 14, 0, 0 },
+        };
+        UCHAR Slot = static_cast<UCHAR>(LOBYTE(Type) - DI8DEVTYPE_DEVICE);
+        UCHAR Subtype = HIBYTE(LOWORD(Type));
+
+        if (Slot >= _countof(Rules) || Subtype < Rules[Slot].First || Subtype >= Rules[Slot].End)
+            return 0;
+        if (Rules[Slot].Buttons != 0 && (Buttons < Rules[Slot].Buttons || (Rules[Slot].Needs & Has) != Rules[Slot].Needs))
+            return MAKEWORD(LOBYTE(Type), DI8DEVTYPE_LIMITEDGAMESUBTYPE);
+        return LOWORD(Type);
+    }
+
+    /* Narrows a guessed type by the axes the device turned out to have */
+    static
+    ULONG
+    RefineType(
+        _In_ ULONG Type,
+        _In_ ULONG Has)
+    {
+        switch (LOBYTE(Type))
+        {
+            case DI8DEVTYPE_DEVICE:
+                if ((Has & (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE | DI_HID_HAS_CLUTCH)) ==
+                    (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE | DI_HID_HAS_CLUTCH))
+                    return MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_THREEPEDALS);
+                if ((Has & (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE)) == (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE))
+                    return MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_DUALPEDALS);
+                if (Has & DI_HID_HAS_THROTTLE)
+                    return MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_THROTTLE);
+                if (Has & DI_HID_HAS_SHIFTER)
+                    return MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_SHIFTER);
+                if (Has & DI_HID_HAS_RUDDER)
+                    return MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_RUDDERPEDALS);
+                return Type;
+
+            case DI8DEVTYPE_JOYSTICK:
+            case DI8DEVTYPE_GAMEPAD:
+                if ((Has & (DI_HID_HAS_X | DI_HID_HAS_Y)) != (DI_HID_HAS_X | DI_HID_HAS_Y))
+                    return MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_UNKNOWN);
+                return Type;
+
+            case DI8DEVTYPE_DRIVING:
+            {
+                UCHAR Pedals;
+
+                if ((Has & (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE | DI_HID_HAS_CLUTCH)) ==
+                    (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE | DI_HID_HAS_CLUTCH))
+                    Pedals = DI8DEVTYPEDRIVING_THREEPEDALS;
+                else if ((Has & (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE)) == (DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE))
+                    Pedals = DI8DEVTYPEDRIVING_DUALPEDALS;
+                else if (Has & DI_HID_HAS_Y)
+                    Pedals = DI8DEVTYPEDRIVING_COMBINEDPEDALS;
+                else
+                    Pedals = DI8DEVTYPEDRIVING_LIMITED;
+                return Type | (static_cast<ULONG>(Pedals) << 8);
+            }
+        }
+        return Type;
+    }
+
+    /*
+     * Wheels: the X axis of a device without steering steers, and the pedal layout of the type's
+     * Flags2 decides which axes accelerate and brake. Returns TRUE with the final type in Result,
+     * or FALSE with a candidate the caller still has to compare against Flags2.
+     */
+    BOOLEAN
+    ArrangeWheel(
+        _Inout_updates_(Count) PULONG Roles,
+        _In_ ULONG Count,
+        _In_reads_(Count) const ULONG* AxisMap,
+        _Inout_ PULONG Has,
+        _In_ ULONG Flags2,
+        _Out_ PULONG Result)
+    {
+        ULONG Candidate;
+
+        if ((*Has & (DI_HID_HAS_STEERING | DI_HID_HAS_X)) == DI_HID_HAS_X)
+            *Has ^= DI_HID_HAS_STEERING | DI_HID_HAS_X;
+        Candidate = (*Has & DI_HID_HAS_STEERING) ? DI8DEVTYPE_DRIVING : DI8DEVTYPE_DEVICE;
+
+        switch (Flags2 & DI_HID_PEDAL_MASK)
+        {
+            case DI_HID_PEDALS_COMBINED_Y:
+                if (*Has & DI_HID_HAS_Y)
+                {
+                    *Result = (*Has & DI_HID_HAS_STEERING) ? MAKEWORD(DI8DEVTYPE_DRIVING, DI8DEVTYPEDRIVING_COMBINEDPEDALS) : Candidate;
+                    return TRUE;
+                }
+                break;
+
+            case DI_HID_PEDALS_Y_BRAKES:
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Y, DI_HID_HAS_BRAKE, DI_HID_KIND_B, &GUID_RzAxis);
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Z, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_THROTTLE, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+                break;
+
+            case DI_HID_PEDALS_Y_ACCELERATES:
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_RZ, DI_HID_HAS_BRAKE, DI_HID_KIND_B, &GUID_RzAxis);
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Y, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+                break;
+
+            case DI_HID_PEDALS_RZ_BRAKES:
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_RZ, DI_HID_HAS_BRAKE, DI_HID_KIND_B, &GUID_RzAxis);
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Z, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+                RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_THROTTLE, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+                break;
+        }
+
+        if ((*Has & (DI_HID_HAS_Z | DI_HID_HAS_RZ | DI_HID_HAS_THROTTLE | DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE)) == 0)
+        {
+            if ((*Has & (DI_HID_HAS_STEERING | DI_HID_HAS_Y)) == (DI_HID_HAS_STEERING | DI_HID_HAS_Y))
+                Candidate = MAKEWORD(DI8DEVTYPE_DRIVING, DI8DEVTYPEDRIVING_COMBINEDPEDALS);
+            *Result = Candidate;
+            return TRUE;
+        }
+
+        /* Without a layout, guess which axes are the pedals */
+        if ((*Has & (DI_HID_HAS_Y | DI_HID_HAS_Z | DI_HID_HAS_RZ | DI_HID_HAS_ACCELERATOR | DI_HID_HAS_BRAKE)) ==
+            (DI_HID_HAS_Y | DI_HID_HAS_RZ))
+        {
+            RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Y, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+            RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_RZ, DI_HID_HAS_BRAKE, DI_HID_KIND_B, &GUID_RzAxis);
+        }
+        else
+        {
+            RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Z, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+            RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_THROTTLE, DI_HID_HAS_ACCELERATOR, DI_HID_KIND_A, &GUID_YAxis);
+            RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_RZ, DI_HID_HAS_BRAKE, DI_HID_KIND_B, &GUID_RzAxis);
+            RecastAxis(Roles, Count, AxisMap, Has, DI_HID_HAS_Y, DI_HID_HAS_BRAKE, DI_HID_KIND_B, &GUID_RzAxis);
+        }
+
+        /* With a separate accelerator, a remaining Y axis is just a slider */
+        if (*Has & DI_HID_HAS_ACCELERATOR)
+        {
+            *Has &= ~DI_HID_HAS_Y;
+            for (ULONG Instance = 0; Instance < Count; Instance++)
+            {
+                if (Roles[Instance] != DI_HID_HAS_Y)
+                    continue;
+                Roles[Instance] = DI_HID_HAS_SLIDER;
+                *Has |= DI_HID_HAS_SLIDER;
+                AxisKinds[Instance] = DI_HID_KIND_S;
+                Objects[AxisMap[Instance]].pguid = &GUID_Slider;
+            }
+        }
+
+        *Result = Candidate;
+        return FALSE;
+    }
+
+    /* Decides the DirectInput 8 type and subtype from the type settings and the axes found */
+    VOID
+    ChooseType(
+        _Inout_updates_(Count) PULONG Roles,
+        _In_ ULONG Count,
+        _In_reads_(Count) const ULONG* AxisMap,
+        _In_ ULONG Has,
+        _In_ ULONG Buttons,
+        _In_ BOOLEAN SteeringAlias)
+    {
+        JOYREGHWSETTINGS Settings = {};
+        ULONG Flags2 = 0;
+        ULONG Candidate;
+        ULONG Named;
+
+        if (LOBYTE(DevType) == DI8DEVTYPE_MOUSE)
+        {
+            if (Has & DI_HID_HAS_ABSOLUTE)
+                DevType = DIDEVTYPE_HID | MAKEWORD(DI8DEVTYPE_MOUSE, DI8DEVTYPEMOUSE_ABSOLUTE);
+            return;
+        }
+
+        if (TypeKey != nullptr)
+            DiReadValue(TypeKey, L"OEMData", &Settings, sizeof(Settings));
+        if (PropKey != nullptr)
+            DiReadValue(PropKey, L"Flags2", &Flags2, sizeof(Flags2));
+
+        /* A type the settings name outright is taken, then checked like a guess */
+        Named = FitSubtype(Flags2, Buttons, Has >> 14);
+        if (Named != 0)
+        {
+            DevType = DIDEVTYPE_HID | Named;
+        }
+        else if (Settings.dwFlags & DI_JOY_HWS_HEADTRACKER)
+        {
+            Candidate = MAKEWORD(DI8DEVTYPE_SUPPLEMENTAL, DI8DEVTYPESUPPLEMENTAL_HEADTRACKER);
+            DevType = DIDEVTYPE_HID | FitSubtype(Candidate, Buttons, Settings.dwFlags);
+            return;
+        }
+        else if (Settings.dwFlags & JOY_HWS_ISYOKE)
+        {
+            Candidate = MAKEWORD(DI8DEVTYPE_FLIGHT, DI8DEVTYPEFLIGHT_YOKE);
+            DevType = DIDEVTYPE_HID | FitSubtype(Candidate, Buttons, Settings.dwFlags);
+            return;
+        }
+        else if (Settings.dwFlags & JOY_HWS_ISGAMEPAD)
+        {
+            Candidate = RefineType(MAKEWORD(DI8DEVTYPE_GAMEPAD, DI8DEVTYPEGAMEPAD_STANDARD), Has);
+            DevType = DIDEVTYPE_HID | FitSubtype(Candidate, Buttons, Settings.dwFlags);
+            return;
+        }
+
+        if ((Settings.dwFlags & JOY_HWS_ISCARCTRL) || SteeringAlias || LOBYTE(DevType) == DI8DEVTYPE_DRIVING)
+        {
+            if (ArrangeWheel(Roles, Count, AxisMap, &Has, Flags2, &Candidate))
+            {
+                DevType = DIDEVTYPE_HID | FitSubtype(Candidate, Buttons, Settings.dwFlags);
+                return;
+            }
+        }
+        else
+        {
+            if ((Flags2 & DI_HID_Z_IS_SLIDER) && (Has & DI_HID_HAS_Z))
+            {
+                Has &= ~DI_HID_HAS_SLIDER;
+                RecastAxis(Roles, Count, AxisMap, &Has, DI_HID_HAS_Z, DI_HID_HAS_SLIDER, DI_HID_KIND_S, &GUID_Slider);
+            }
+            Candidate = DevType;
+        }
+
+        /* A guess that agrees with the settings leaves the type alone */
+        if (LOWORD(Candidate) == LOWORD(Flags2))
+            return;
+
+        if (Has & DI_HID_HAS_STEERING)
+            Candidate = RefineType(DI8DEVTYPE_DRIVING, Has);
+        else if ((Has & DI_HID_SIX_AXES) == DI_HID_SIX_AXES)
+            Candidate = MAKEWORD(DI8DEVTYPE_1STPERSON, DI8DEVTYPE1STPERSON_SIXDOF);
+        else
+            Candidate = RefineType(Candidate, Has);
+        DevType = DIDEVTYPE_HID | FitSubtype(Candidate, Buttons, Settings.dwFlags);
+    }
+
+    /*
+     * DirectInput 8 numbering: axes take their slot from the type key's Axes branch, then from the
+     * usage table, then from 6 up, and remember the role and kind they play. Button page usages
+     * are their own instance, other buttons follow the highest of them.
+     */
+    VOID
+    MungeOther8(VOID)
+    {
+        ULONG Axes = 0;
+        ULONG Povs = 0;
+        ULONG Collections = 0;
+        ULONG LooseButtons = 0;
+        LONG TopButton = 0;
+        BOOLEAN SteeringAlias = FALSE;
+        BOOLEAN Matched;
+        ULONG ButtonSlots;
+        ULONG Total;
+        ULONG Slot = 0;
+        ULONG Has = 0;
+        ULONG Buttons = 0;
+        PULONG Scratch = nullptr;
+        PULONG Map = nullptr;
+        PULONG Claims;
+        PULONG Wanted;
+        PULONG Roles;
+        PULONG AxisMap;
+        ULONG PovsAt;
+        ULONG CollectionsAt;
+
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
+        {
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            ULONG Type = Objects[Index].dwType;
+
+            if (Group == nullptr)
+                continue;
+            if (Group->Alias)
+            {
+                if ((Type & (DIDFT_AXIS | DIDFT_NODATA)) == DIDFT_AXIS && Group->UsagePage == HID_USAGE_PAGE_SIMULATION &&
+                    UsageNumber(Index, Group) == DI_HID_USAGE_STEERING)
+                {
+                    SteeringAlias = TRUE;
+                }
+                continue;
+            }
+            if (Type & DIDFT_COLLECTION)
+                Collections++;
+            else if (Type & DIDFT_NODATA)
+                continue;
+            else if (Type & DIDFT_BUTTON)
+            {
+                if (Group->UsagePage == HID_USAGE_PAGE_BUTTON)
+                {
+                    if (UsageNumber(Index, Group) > TopButton)
+                        TopButton = UsageNumber(Index, Group);
+                }
+                else
+                    LooseButtons++;
+            }
+            else if (Type & DIDFT_AXIS)
+                Axes++;
+            else if (Type & DIDFT_POV)
+                Povs++;
+        }
+
+        /* One list per kind of object, then the claims, the type key's wishes and the axis roles */
+        ButtonSlots = LooseButtons + static_cast<ULONG>(TopButton);
+        Total = Axes + Povs + Collections + ButtonSlots + 6;
+        if (FAILED(DiAllocate(sizeof(ULONG) * Total, reinterpret_cast<PVOID*>(&Map))) ||
+            FAILED(DiAllocate(sizeof(ULONG) * (Total + 2 * (Axes + 6)), reinterpret_cast<PVOID*>(&Scratch))) ||
+            FAILED(DiAllocate(Axes + 6, reinterpret_cast<PVOID*>(&AxisKinds))))
+        {
+            DiFree(reinterpret_cast<PVOID*>(&Map));
+            DiFree(reinterpret_cast<PVOID*>(&Scratch));
+            return;
+        }
+        AxisKindCount = Axes + 6;
+        Claims = Scratch;
+        Wanted = Scratch + Total;
+        Roles = Wanted + Axes + 6;
+        FillMemory(Claims, sizeof(ULONG) * Total, 0xFF);
+        FillMemory(Map, sizeof(ULONG) * Total, 0xFF);
+        PovsAt = ButtonSlots;
+        AxisMap = Map + ButtonSlots + Povs;
+        CollectionsAt = ButtonSlots + Axes + 6;
+
+        /* Axes the type key places, with the role their slot stands for */
+        Matched = ReadAxisWishes(Wanted, Axes, &Slot);
+        for (ULONG Index = 0; Matched && Index < ObjectCount; Index++)
+        {
+            const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+            ULONG Usage;
+            ULONG Claim;
+            ULONG Target;
+            ULONG Wish;
+
+            if ((Objects[Index].dwType & DIDFT_AXIS) == 0 || Group == nullptr || Group->Report != HidP_Input)
+                continue;
+
+            Claim = Group->Alias ? 0 : Index;
+            Usage = ObjectUsage(Index, Group, HidP_Input);
+            for (Wish = 0; Wish <= Slot; Wish++)
+            {
+                if (Wanted[Wish] == Usage)
+                    break;
+            }
+            if (Wish > Slot)
+                continue;
+
+            if (Claim < Total)
+                Claims[Claim] = Wish;
+            Wanted[Wish] = 0;
+
+            /* The GUID lands on the object as far past this one as this one is into its group */
+            Target = 2 * Index - Group->DataIndexMin - Base[HidP_Input];
+            if (Wish < 6)
+            {
+                const RX_DI_USAGE_SLOT* Known = DiHidFindUsageSlot(DiHidUsageKey(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_X + Wish));
+
+                if (Target < ObjectCount)
+                    Objects[Target].pguid = Known->Guid;
+                AxisKinds[Wish] = Known->Kind;
+                Roles[Wish] = Known->Has;
+                Has |= Known->Has;
+            }
+            else
+            {
+                if (Target < ObjectCount)
+                    Objects[Target].pguid = (Wish < 8) ? &GUID_Slider : &GUID_Unknown;
+                AxisKinds[Wish] = DI_HID_KIND_S;
+            }
+
+            AxisMap[Wish] = Claim;
+            Objects[Claim].dwType = (Objects[Claim].dwType & 0xFF0000FF) | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Wish));
+        }
+
+        {
+            ULONG NextCollection = 0;
+            ULONG NextButton = static_cast<ULONG>(TopButton);
+            ULONG NextPov = 0;
+            ULONG NextAxis = 6;
+
+            for (ULONG Index = 0; Index < ObjectCount; Index++)
+            {
+                const RX_DI_HID_GROUP* Group = Slots[Index].Group;
+                ULONG Original = Index;
+                ULONG Type;
+                ULONG Kept;
+
+                if (Group == nullptr || Group->Alias)
+                    continue;
+
+                Type = Objects[Index].dwType;
+                if ((Type & (DIDFT_AXIS | DIDFT_BUTTON | DIDFT_POV | DIDFT_COLLECTION)) == 0)
+                    continue;
+
+                if (Type & DIDFT_COLLECTION)
+                {
+                    Objects[Index].dwType = (Type & 0xFF0000FF) | DIDFT_MAKEINSTANCE(static_cast<USHORT>(NextCollection));
+                    if (CollectionsAt + NextCollection < Total)
+                        Map[CollectionsAt + NextCollection] = Index;
+                    NextCollection++;
+                    continue;
+                }
+                if (Type & DIDFT_NODATA)
+                    continue;
+
+                Kept = Type & 0xFF0000FF;
+                if (Type & DIDFT_BUTTON)
+                {
+                    ULONG Instance;
+
+                    if (Group->UsagePage == HID_USAGE_PAGE_BUTTON)
+                        Instance = static_cast<ULONG>(UsageNumber(Index, Group) - 1);
+                    else
+                        Instance = NextButton++;
+                    Objects[Index].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Instance));
+                    if (Instance < ButtonSlots)
+                        Map[Instance] = Index;
+                    Buttons++;
+                }
+                else if (Type & DIDFT_AXIS)
+                {
+                    const RX_DI_USAGE_SLOT* Known;
+                    const RX_DI_HID_GROUP* Last = Group;
+                    ULONG Instance = MAXULONG;
+
+                    /* Objects beyond the claim list read whatever follows it, which is never unclaimed */
+                    if (Index >= Total || Claims[Index] != MAXULONG)
+                        continue;
+                    Objects[Index].dwType = Kept;
+
+                    /* An axis without a slot of its own may borrow the slot of the aliases after it */
+                    Known = DiHidFindUsageSlot(ObjectUsage(Index, Group, Group->Report));
+                    while (Known == nullptr && Index + 1 != ObjectCount)
+                    {
+                        const RX_DI_HID_GROUP* Next = Slots[Index + 1].Group;
+
+                        if (Next == nullptr || !Next->Alias)
+                            break;
+                        Index += 1;
+                        Last = Next;
+                        Known = DiHidFindUsageSlot(ObjectUsage(Index, Next, Next->Report));
+                    }
+
+                    if (Known != nullptr)
+                    {
+                        if (Known->Slot < 6 && AxisMap[Known->Slot] == MAXULONG)
+                            Instance = Known->Slot;
+                        else if (Known->Slot == 6 && AxisMap[2] == MAXULONG)
+                            Instance = 2;
+                    }
+                    if (Instance == MAXULONG)
+                        Instance = NextAxis++;
+                    if (Instance >= AxisKindCount)
+                        continue;
+
+                    if (Known != nullptr)
+                    {
+                        AxisKinds[Instance] = Known->Kind;
+                        Roles[Instance] = Known->Has;
+                        Has |= Known->Has;
+                    }
+                    else if (Last->UsagePage == HID_USAGE_PAGE_SIMULATION)
+                    {
+                        USHORT Usage = static_cast<USHORT>(UsageNumber(Index, Last));
+
+                        /* Simulation controls without a slot still say what they are */
+                        AxisKinds[Instance] = DI_HID_KIND_S;
+                        Roles[Instance] = DI_HID_HAS_SLIDER;
+                        if (Usage == DI_HID_USAGE_CLUTCH)
+                        {
+                            AxisKinds[Instance] = DI_HID_KIND_C;
+                            Roles[Instance] = DI_HID_HAS_CLUTCH;
+                            Has |= DI_HID_HAS_CLUTCH;
+                        }
+                        else if (Usage == DI_HID_USAGE_SHIFTER)
+                        {
+                            Roles[Instance] = DI_HID_HAS_CLUTCH;
+                            Has |= DI_HID_HAS_SHIFTER;
+                        }
+                    }
+
+                    AxisMap[Instance] = Original;
+                    Objects[Original].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(Instance));
+                }
+                else
+                {
+                    Has |= DI_HID_HAS_POV;
+                    Objects[Index].dwType = Kept | DIDFT_MAKEINSTANCE(static_cast<USHORT>(NextPov));
+                    Map[PovsAt + NextPov] = Index;
+                    NextPov++;
+                }
+            }
+        }
+
+        ChooseType(Roles, Axes + 6, AxisMap, Has, Buttons, SteeringAlias);
+
+        /* Aliases keep only their alias and vendor bits */
+        for (ULONG Index = 0; Index < ObjectCount; Index++)
+        {
+            if (Slots[Index].Group != nullptr && Slots[Index].Group->Alias)
+                Objects[Index].dwType &= DIDFT_ALIAS | DIDFT_VENDORDEFINED;
+        }
+
+        DiFree(reinterpret_cast<PVOID*>(&Scratch));
+        DiFree(reinterpret_cast<PVOID*>(&Map));
+    }
+#endif
+
     /* The port a device hangs off is named by the grandparent device */
     BOOLEAN
     ReadPortName(
@@ -3664,6 +4361,9 @@ private:
     ULONG DevType = 0;
     DWORD Version = 0;
     HKEY TypeKey = nullptr;
+    HKEY PropKey = nullptr;
+    PUCHAR AxisKinds = nullptr;
+    ULONG AxisKindCount = 0;
     BOOLEAN PidDevice = FALSE;
     USHORT VendorId = 0;
     USHORT ProductId = 0;
