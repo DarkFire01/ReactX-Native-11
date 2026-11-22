@@ -23,8 +23,6 @@
 /* A 3D sound at the near distance plays this far below its buffer volume, in hundredths of a decibel */
 #define DS_3D_BASE_VOLUME   -500
 
-/* Within this distance a sound spreads around the listener instead of coming from one side */
-#define DS_3D_NEAR_SPREAD   2.5f
 
 class DsListenerFace final : public IDirectSound3DListener
 {
@@ -369,23 +367,259 @@ DsIsValidVolume(
     return Volume <= DSBVOLUME_MAX && Volume >= DSBVOLUME_MIN;
 }
 
-/* The speakers of the final mix as angles in radians, clockwise from the front */
+/* Angles kept in single precision, as the panner works with them */
+static const float DsTurn = 6.2831855f;
+static const float DsThreeQuarters = 4.712389f;
+static const float DsHalf = 3.1415927f;
+static const float DsQuarter = 1.5707964f;
+static const float DsDegreesPerRadian = 57.29578f;
+
+/* Sines of whole degrees and arc sines in hundredth and thousandth steps, kept to six decimals */
+static float DsSineTable[91];
+static float DsArcSineLow[91];
+static float DsArcSineHigh[101];
+static INIT_ONCE DsTrigOnce = INIT_ONCE_STATIC_INIT;
+
+static
+float
+DsSixDigits(
+    _In_ double Value)
+{
+    return static_cast<float>(floor(Value * 1e6 + 0.5) / 1e6);
+}
+
+static
+BOOL
+CALLBACK
+DsBuildTrigTables(
+    _Inout_ PINIT_ONCE Once,
+    _Inout_opt_ PVOID Parameter,
+    _Outptr_opt_ PVOID* Context)
+{
+    UNREFERENCED_PARAMETER(Once);
+    UNREFERENCED_PARAMETER(Parameter);
+    UNREFERENCED_PARAMETER(Context);
+
+    for (int Step = 0; Step <= 90; Step++)
+        DsSineTable[Step] = DsSixDigits(sin(Step * 3.14159265358979323846 / 180.0));
+    for (int Step = 0; Step <= 90; Step++)
+        DsArcSineLow[Step] = DsSixDigits(asin(Step / 100.0));
+    for (int Step = 0; Step <= 100; Step++)
+        DsArcSineHigh[Step] = DsSixDigits(asin(0.9 + Step / 1000.0));
+    return TRUE;
+}
+
+static
+float
+DsWrapTurn(
+    _In_ float Angle)
+{
+    while (Angle < 0.0f)
+        Angle += DsTurn;
+    while (Angle > DsTurn)
+        Angle -= DsTurn;
+    return Angle;
+}
+
+/* Sine by whole degree lookup, folding each quadrant onto the first */
+static
+float
+DsTableSin(
+    _In_ float Angle)
+{
+    Angle = DsWrapTurn(Angle);
+    if (Angle > DsThreeQuarters)
+        return -DsSineTable[static_cast<int>((DsQuarter - (Angle - DsThreeQuarters)) * DsDegreesPerRadian)];
+    if (Angle > DsHalf)
+        return -DsSineTable[static_cast<int>((Angle - DsHalf) * DsDegreesPerRadian)];
+    if (Angle > DsQuarter)
+        return DsSineTable[static_cast<int>((DsQuarter - (Angle - DsQuarter)) * DsDegreesPerRadian)];
+    return DsSineTable[static_cast<int>(Angle * DsDegreesPerRadian)];
+}
+
+static
+float
+DsTableCos(
+    _In_ float Angle)
+{
+    Angle = DsWrapTurn(Angle);
+    if (Angle > DsThreeQuarters)
+        return DsSineTable[90 - static_cast<int>((DsQuarter - (Angle - DsThreeQuarters)) * DsDegreesPerRadian)];
+    if (Angle > DsHalf)
+        return -DsSineTable[90 - static_cast<int>((Angle - DsHalf) * DsDegreesPerRadian)];
+    if (Angle > DsQuarter)
+        return -DsSineTable[90 - static_cast<int>((DsQuarter - (Angle - DsQuarter)) * DsDegreesPerRadian)];
+    return DsSineTable[90 - static_cast<int>(Angle * DsDegreesPerRadian)];
+}
+
+/* Arc sine by lookup, finer near one; anything past one reads as a quarter turn */
+static
+float
+DsTableAsin(
+    _In_ float Value)
+{
+    BOOLEAN Negative = Value < 0.0f;
+    double Wide;
+    float Result;
+
+    if (Negative)
+        Value = -Value;
+    if (Value > 1.0f)
+        return DsQuarter;
+    Wide = Value;
+    if (Value < 0.9f)
+        Result = DsArcSineLow[static_cast<int>((Wide + 0.005) * 100.0)];
+    else
+        Result = DsArcSineHigh[static_cast<int>(((Wide - 0.9) + 0.0005) * 1000.0)];
+    return Negative ? -Result : Result;
+}
+
+/* The three turns that bring the listener orientation back to facing ahead */
+struct DsTurns
+{
+    float Pitch;
+    float Yaw;
+    float Roll;
+};
+
+static
+DsTurns
+DsListenerTurns(
+    _In_ const D3DVECTOR* Front,
+    _In_ const D3DVECTOR* Top)
+{
+    DsTurns Turns;
+    float Lean = 0.0f;
+    float Spin = 0.0f;
+    float Length;
+
+    if ((Top->x != 0.0f || Top->y != 0.0f || Top->z != 0.0f) && (Length = DsLength(Top)) != 0.0f)
+    {
+        Lean = DsTableAsin(Top->z / Length);
+        if (Top->x != 0.0f)
+        {
+            Spin = static_cast<float>(atan2(static_cast<double>(Top->y), static_cast<double>(Top->x)));
+            if (Spin < 0.0f)
+                Spin += DsTurn;
+        }
+        else
+        {
+            Spin = Top->y >= 0.0f ? DsQuarter : -DsQuarter + DsTurn;
+        }
+    }
+
+    Spin -= DsQuarter;
+    Turns.Roll = Spin;
+    Turns.Pitch = Lean;
+    {
+        float SinRoll = DsTableSin(-Spin);
+        float CosRoll = DsTableCos(-Spin);
+        float Planar = Front->x * SinRoll + Front->y * CosRoll;
+        float Rise = DsTableAsin(DsTableCos(-Lean) * Front->z + DsTableSin(-Lean) * Planar);
+        float Side = Front->x * CosRoll - Front->y * SinRoll;
+
+        Turns.Yaw = Side < 0.0f ? Rise - DsQuarter : DsQuarter - Rise;
+    }
+    return Turns;
+}
+
+/* A position in the listener frame, turned by roll, pitch and yaw in that order */
+static
+D3DVECTOR
+DsHeadRelative(
+    _In_ const D3DVECTOR* Position,
+    _In_ const D3DVECTOR* Listener,
+    _In_ const DsTurns* Turns)
+{
+    D3DVECTOR Offset;
+    D3DVECTOR Result;
+    float Sin;
+    float Cos;
+    float Across;
+    float Up;
+    float Ahead;
+
+    Offset.x = Position->x - Listener->x;
+    Offset.y = Position->y - Listener->y;
+    Offset.z = Position->z - Listener->z;
+    if (Offset.x == 0.0f && Offset.y == 0.0f && Offset.z == 0.0f)
+        return Offset;
+
+    Sin = DsTableSin(-Turns->Roll);
+    Cos = DsTableCos(-Turns->Roll);
+    Across = Offset.x * Cos - Offset.y * Sin;
+    Up = Offset.x * Sin + Offset.y * Cos;
+
+    Sin = DsTableSin(-Turns->Pitch);
+    Cos = DsTableCos(-Turns->Pitch);
+    Ahead = Offset.z * Cos + Up * Sin;
+    Result.y = Up * Cos - Offset.z * Sin;
+
+    Sin = DsTableSin(-Turns->Yaw);
+    Cos = DsTableCos(-Turns->Yaw);
+    Result.x = Ahead * Sin + Across * Cos;
+    Result.z = Ahead * Cos - Across * Sin;
+    return Result;
+}
+
+/* Speaker angles in radians for the layouts the panner knows, left negative */
 static
 UINT
 DsSpeakerRadians(
-    _In_ DsDevice* Device,
+    _In_ DWORD Mask,
     _Out_writes_(DS_MAX_CHANNELS) double* Angles)
 {
-    static const double Degrees[11] = { -30.0, 30.0, 0.0, 0.0, -150.0, 150.0, -15.0, 15.0, 180.0, -110.0, 110.0 };
+    static const double Quarter = 3.14159265358979323846 / 4.0;
+    static const double Unplaced = 42.0;
+    const double* Layout = nullptr;
     UINT Count = 0;
 
-    for (UINT Slot = 0; Slot < 11 && Count < Device->Channels; Slot++)
+    static const double Stereo[] = { -2.0 * Quarter, 2.0 * Quarter };
+    static const double Quad[] = { -Quarter, Quarter, -3.0 * Quarter, 3.0 * Quarter };
+    static const double Surround[] = { -Quarter, Quarter, 0.0, 4.0 * Quarter };
+    static const double Back51[] = { -Quarter, Quarter, 0.0, Unplaced, -3.0 * Quarter, 3.0 * Quarter };
+    static const double Side51[] = { -Quarter, Quarter, 0.0, Unplaced, -2.0 * Quarter, 2.0 * Quarter };
+    static const double Side71[] = { -Quarter, Quarter, 0.0, Unplaced, -3.0 * Quarter, 3.0 * Quarter, -2.0 * Quarter, 2.0 * Quarter };
+    static const double Wide71[] = { -Quarter, Quarter, 0.0, Unplaced, -3.0 * Quarter, 3.0 * Quarter, -0.5 * Quarter, 0.5 * Quarter };
+
+    switch (Mask)
     {
-        if (Device->Mask & (1UL << Slot))
-            Angles[Count++] = Degrees[Slot] * 3.14159265358979 / 180.0;
+        case KSAUDIO_SPEAKER_MONO:
+            Angles[0] = 0.0;
+            return 1;
+        case KSAUDIO_SPEAKER_STEREO:
+            Layout = Stereo;
+            Count = 2;
+            break;
+        case KSAUDIO_SPEAKER_QUAD:
+            Layout = Quad;
+            Count = 4;
+            break;
+        case KSAUDIO_SPEAKER_SURROUND:
+            Layout = Surround;
+            Count = 4;
+            break;
+        case KSAUDIO_SPEAKER_5POINT1:
+            Layout = Back51;
+            Count = 6;
+            break;
+        case KSAUDIO_SPEAKER_5POINT1_SURROUND:
+            Layout = Side51;
+            Count = 6;
+            break;
+        case KSAUDIO_SPEAKER_7POINT1_SURROUND:
+            Layout = Side71;
+            Count = 8;
+            break;
+        case KSAUDIO_SPEAKER_7POINT1:
+            Layout = Wide71;
+            Count = 8;
+            break;
+        default:
+            return 0;
     }
-    while (Count < Device->Channels)
-        Angles[Count++] = 0.0;
+    for (UINT Index = 0; Index < Count; Index++)
+        Angles[Index] = Layout[Index];
     return Count;
 }
 
@@ -399,6 +633,8 @@ DsSpreadPower(
     _In_ double Share,
     _In_ double Angle)
 {
+    const double HalfTurn = static_cast<double>(DsHalf);
+    const double FullTurn = static_cast<double>(DsTurn);
     int Before = -1;
     int After = -1;
     double BeforeGap = -4.0;
@@ -408,10 +644,10 @@ DsSpreadPower(
     {
         double Gap = Angle - Speakers[Index];
 
-        if (Gap > 3.14159274)
-            Gap -= 6.28318548;
-        else if (Gap < -3.14159274)
-            Gap += 6.28318548;
+        if (Gap > HalfTurn)
+            Gap -= FullTurn;
+        else if (Gap < -HalfTurn)
+            Gap += FullTurn;
 
         if (Gap <= 0.0 && Gap > BeforeGap)
         {
@@ -442,7 +678,7 @@ DsSpreadPower(
     }
     else
     {
-        double Ratio = tan(BeforeGap) / tan(AfterGap);
+        double Ratio = tan(BeforeGap * static_cast<double>(DsQuarter) / (AfterGap + BeforeGap));
         double Part = Share / (Ratio + 1.0);
 
         Power[Before] += Part;
@@ -450,30 +686,163 @@ DsSpreadPower(
     }
 }
 
-/* The listener relative position of a sound, x to the right, y up, z ahead */
+/* Hundredths of a decibel of power for each speaker */
 static
-D3DVECTOR
-DsRelativePosition(
-    _In_ Ds3dBuffer* Spatial)
+VOID
+DsPanLevels(
+    _In_ const D3DVECTOR* Relative,
+    _In_ UINT Count,
+    _In_reads_(Count) const double* Speakers,
+    _Out_writes_(Count) LONG* Levels)
 {
-    const DS3DLISTENER* Listener = &Spatial->Listener->Current;
-    D3DVECTOR Offset = Spatial->Current.vPosition;
-    D3DVECTOR Right;
-    D3DVECTOR Result;
+    double Power[DS_MAX_CHANNELS] = {};
+    float Across = Relative->x;
+    float Ahead = Relative->z;
+    double Angle = atan2(static_cast<double>(Across), static_cast<double>(Ahead));
 
-    if (Spatial->Current.dwMode == DS3DMODE_HEADRELATIVE)
-        return Offset;
-    Offset.x -= Listener->vPosition.x;
-    Offset.y -= Listener->vPosition.y;
-    Offset.z -= Listener->vPosition.z;
-    Right = DsCross(&Listener->vOrientTop, &Listener->vOrientFront);
-    Result.x = Offset.x * Right.x + Offset.y * Right.y + Offset.z * Right.z;
-    Result.y = Offset.x * Listener->vOrientTop.x + Offset.y * Listener->vOrientTop.y + Offset.z * Listener->vOrientTop.z;
-    Result.z = Offset.x * Listener->vOrientFront.x + Offset.y * Listener->vOrientFront.y + Offset.z * Listener->vOrientFront.z;
-    return Result;
+    Across = fabsf(Across);
+    Ahead = fabsf(Ahead);
+    if (static_cast<double>(Across) < 0.00001 && static_cast<double>(Ahead) < 0.00001)
+    {
+        for (UINT Index = 0; Index < Count; Index++)
+            Power[Index] = 1.0 / static_cast<double>(static_cast<int>(Count));
+    }
+    else
+    {
+        double Flat = 0.0;
+        BOOLEAN Far = Across >= 2.5f || Ahead >= 2.5f;
+
+        if (!Far)
+        {
+            Flat = sqrt(static_cast<double>(Ahead * Ahead + Across * Across));
+            Far = Flat >= 2.5;
+        }
+        if (Far)
+        {
+            DsSpreadPower(Count, Speakers, Power, 1.0, Angle);
+        }
+        else
+        {
+            double Front = Flat / 5.0 + 0.5;
+
+            DsSpreadPower(Count, Speakers, Power, Front, Angle);
+            DsSpreadPower(Count, Speakers, Power, 1.0 - Front, Angle + static_cast<double>(DsHalf));
+        }
+    }
+
+    for (UINT Index = 0; Index < Count; Index++)
+        Levels[Index] = Power[Index] == 0.0 ? DSBVOLUME_MIN : static_cast<LONG>(log(Power[Index]) * 434.29448815880363);
 }
 
-/* Recomputes volume, speaker gains and doppler shift from the committed parameters */
+/* How much the cone around the sound lets through toward the listener */
+static
+float
+DsConeGain(
+    _In_ const DS3DBUFFER* Params,
+    _In_ const DS3DLISTENER* Listener)
+{
+    D3DVECTOR Toward = {};
+    float Cosine;
+    float InsideCos;
+    float OutsideCos;
+    float Volume;
+
+    if (Params->dwInsideConeAngle >= DS3D_MAXCONEANGLE)
+        return 1.0f;
+    if (Params->dwMode == DS3DMODE_NORMAL)
+    {
+        Toward.x = Listener->vPosition.x - Params->vPosition.x;
+        Toward.y = Listener->vPosition.y - Params->vPosition.y;
+        Toward.z = Listener->vPosition.z - Params->vPosition.z;
+    }
+    else if (Params->dwMode == DS3DMODE_HEADRELATIVE)
+    {
+        Toward.x = 0.0f - Params->vPosition.x;
+        Toward.y = 0.0f - Params->vPosition.y;
+        Toward.z = 0.0f - Params->vPosition.z;
+    }
+    if (Toward.x == 0.0f && Toward.y == 0.0f && Toward.z == 0.0f)
+        return 1.0f;
+
+    Cosine = (Toward.x * Params->vConeOrientation.x + Toward.y * Params->vConeOrientation.y +
+              Toward.z * Params->vConeOrientation.z) / DsLength(&Toward);
+    InsideCos = static_cast<float>(cos(static_cast<double>(static_cast<float>(Params->dwInsideConeAngle) * 0.008726646f)));
+    if (Cosine > InsideCos)
+        return 1.0f;
+    OutsideCos = static_cast<float>(cos(static_cast<double>(static_cast<float>(Params->dwOutsideConeAngle) * 0.008726646f)));
+    Volume = static_cast<float>(Params->lConeOutsideVolume);
+    if (Cosine > OutsideCos)
+        Volume *= (InsideCos - Cosine) / (InsideCos - OutsideCos);
+    return static_cast<float>(pow(2.0, static_cast<double>(Volume * 0.0016666667f)));
+}
+
+/* The playback rate after the shift from the sound and listener moving along the line between them */
+static
+DWORD
+DsDopplerRate(
+    _In_ const DS3DBUFFER* Params,
+    _In_ const DS3DLISTENER* Listener,
+    _In_ DWORD Rate)
+{
+    const D3DVECTOR* Velocity = &Params->vVelocity;
+    float Closing = 0.0f;
+    double Speed;
+    float Clamped;
+
+    if (Listener->flDopplerFactor <= 0.0f)
+        return Rate;
+    if (Listener->vVelocity.x == 0.0f && Listener->vVelocity.z == 0.0f && Listener->vVelocity.y == 0.0f &&
+        Velocity->x == 0.0f && Velocity->y == 0.0f && Velocity->z == 0.0f)
+    {
+        return Rate;
+    }
+
+    if (Params->dwMode != DS3DMODE_DISABLE)
+    {
+        D3DVECTOR Line;
+        D3DVECTOR Moving;
+
+        if (Params->dwMode == DS3DMODE_NORMAL)
+        {
+            Line.x = Params->vPosition.x - Listener->vPosition.x;
+            Line.y = Params->vPosition.y - Listener->vPosition.y;
+            Line.z = Params->vPosition.z - Listener->vPosition.z;
+            Moving.x = Velocity->x - Listener->vVelocity.x;
+            Moving.y = Velocity->y - Listener->vVelocity.y;
+            Moving.z = Velocity->z - Listener->vVelocity.z;
+        }
+        else
+        {
+            Line = Params->vPosition;
+            Moving = *Velocity;
+        }
+        if (Line.z != 0.0f || Line.x != 0.0f || Line.y != 0.0f)
+        {
+            double Squares = Params->dwMode == DS3DMODE_NORMAL ?
+                             static_cast<double>(Line.x) * Line.x + static_cast<double>(Line.y) * Line.y :
+                             static_cast<double>(Line.y) * Line.y + static_cast<double>(Line.x) * Line.x;
+            float Length = static_cast<float>(sqrt(Squares + static_cast<double>(Line.z) * Line.z));
+
+            Closing = (Line.x * Moving.x + Moving.y * Line.y + Moving.z * Line.z) / Length;
+        }
+    }
+
+    Speed = static_cast<double>(Closing) * static_cast<double>(Listener->flDistanceFactor) * 1000.0 *
+            static_cast<double>(Listener->flDopplerFactor);
+    if (Speed < -static_cast<double>(FLT_MAX))
+        Clamped = -FLT_MAX;
+    else if (Speed > static_cast<double>(FLT_MAX))
+        Clamped = FLT_MAX;
+    else
+        Clamped = static_cast<float>(Speed);
+    if (Clamped > 179830.0f)
+        Clamped = 179830.0f;
+    if (Clamped < -179830.0f)
+        Clamped = -179830.0f;
+    return static_cast<DWORD>(static_cast<float>(Rate) * 359660.0f / (Clamped + 359660.0f));
+}
+
+/* Recomputes volume, speaker levels and doppler shift from the committed parameters */
 static
 VOID
 DsApply3d(
@@ -484,143 +853,60 @@ DsApply3d(
     const DS3DBUFFER* Params = &Spatial->Current;
     const DS3DLISTENER* Listener = &Spatial->Listener->Current;
     double Speakers[DS_MAX_CHANNELS];
-    double Power[DS_MAX_CHANNELS] = {};
-    LONG Pans[DS_MAX_CHANNELS];
-    UINT Count = DsSpeakerRadians(Device, Speakers);
+    LONG Levels[DS_MAX_CHANNELS] = {};
+    UINT Count;
     LONG Volume = Spatial->Attenuation.Volume;
-    DWORD Frequency = Spatial->Frequency;
+    DWORD Rate = Spatial->Frequency;
     BOOLEAN Mute = FALSE;
 
-    if (Params->dwMode == DS3DMODE_DISABLE)
-    {
-        Buffer->Voice.SetAttenuation(&Spatial->Attenuation);
-        Buffer->Voice.SetFrequency(Frequency);
-        Buffer->Voice.SetMute(FALSE);
+    InitOnceExecuteOnce(&DsTrigOnce, DsBuildTrigTables, nullptr, nullptr);
+    Count = DsSpeakerRadians(Device->Mask, Speakers);
+    if (Count == 0)
         return;
-    }
 
+    if (Params->dwMode != DS3DMODE_DISABLE)
     {
-        D3DVECTOR Relative = DsRelativePosition(Spatial);
-        float Distance = DsLength(&Relative);
-        float Near = Params->flMinDistance;
+        D3DVECTOR Relative = {};
+        float Distance;
         float DistanceGain = 1.0f;
-        float ConeGain = 1.0f;
+        float Product;
         BOOLEAN AtMax = FALSE;
 
+        if (Params->dwMode == DS3DMODE_NORMAL)
+        {
+            DsTurns Turns = DsListenerTurns(&Listener->vOrientFront, &Listener->vOrientTop);
+
+            Relative = DsHeadRelative(&Params->vPosition, &Listener->vPosition, &Turns);
+        }
+        else
+        {
+            Relative = Params->vPosition;
+        }
+
+        Distance = (Relative.x == 0.0f && Relative.y == 0.0f && Relative.z == 0.0f) ? 0.0f : DsLength(&Relative);
         if (Distance >= Params->flMaxDistance)
         {
             Distance = Params->flMaxDistance;
             AtMax = TRUE;
         }
-        if (Distance > Near && Listener->flRolloffFactor > 0.0f)
-            DistanceGain = Near / ((Distance - Near) * Listener->flRolloffFactor + Near);
+        if (Distance > Params->flMinDistance && Listener->flRolloffFactor > 0.0f)
+            DistanceGain = Params->flMinDistance / ((Distance - Params->flMinDistance) * Listener->flRolloffFactor + Params->flMinDistance);
 
-        if (Params->dwInsideConeAngle < DS3D_MAXCONEANGLE)
-        {
-            D3DVECTOR Toward;
-            float Length;
-
-            if (Params->dwMode == DS3DMODE_HEADRELATIVE)
-            {
-                Toward.x = -Params->vPosition.x;
-                Toward.y = -Params->vPosition.y;
-                Toward.z = -Params->vPosition.z;
-            }
-            else
-            {
-                Toward.x = Listener->vPosition.x - Params->vPosition.x;
-                Toward.y = Listener->vPosition.y - Params->vPosition.y;
-                Toward.z = Listener->vPosition.z - Params->vPosition.z;
-            }
-            Length = DsLength(&Toward);
-            if (Length != 0.0f)
-            {
-                float Cosine = (Toward.x * Params->vConeOrientation.x + Toward.y * Params->vConeOrientation.y +
-                                Toward.z * Params->vConeOrientation.z) / Length;
-                float InsideCos = static_cast<float>(cos(Params->dwInsideConeAngle * 3.14159265358979 / 360.0));
-                float OutsideCos = static_cast<float>(cos(Params->dwOutsideConeAngle * 3.14159265358979 / 360.0));
-
-                if (Cosine <= InsideCos)
-                {
-                    float Share = Cosine > OutsideCos ? (InsideCos - Cosine) / (InsideCos - OutsideCos) : 1.0f;
-
-                    ConeGain = static_cast<float>(pow(10.0, Share * Params->lConeOutsideVolume / 2000.0));
-                }
-            }
-        }
-
-        if ((Spatial->MuteAtMax && AtMax) || DistanceGain * ConeGain <= 0.0f)
+        Product = DistanceGain * DsConeGain(Params, Listener);
+        if ((Spatial->MuteAtMax && AtMax) || static_cast<double>(Product) <= 0.0)
             Volume += DSBVOLUME_MIN;
         else
-            Volume += DS_3D_BASE_VOLUME - static_cast<LONG>(log(DistanceGain * ConeGain) * -868.588964);
+            Volume += DS_3D_BASE_VOLUME - static_cast<LONG>(log(static_cast<double>(Product)) * -868.588963806556);
         Mute = Volume <= DSBVOLUME_MIN;
+        Rate = DsDopplerRate(Params, Listener, Spatial->Frequency);
 
         if (Count > 1)
-        {
-            float Across = fabsf(Relative.x);
-            float Ahead = fabsf(Relative.z);
-            double Angle = atan2(Relative.x, Relative.z);
-
-            if (Across >= 0.00001f || Ahead >= 0.00001f)
-            {
-                float Flat = sqrtf(Relative.z * Relative.z + Relative.x * Relative.x);
-
-                if (Across >= DS_3D_NEAR_SPREAD || Ahead >= DS_3D_NEAR_SPREAD || Flat >= DS_3D_NEAR_SPREAD)
-                {
-                    DsSpreadPower(Count, Speakers, Power, 1.0, Angle);
-                }
-                else
-                {
-                    double Front = Flat / 5.0 + 0.5;
-
-                    DsSpreadPower(Count, Speakers, Power, Front, Angle);
-                    DsSpreadPower(Count, Speakers, Power, 1.0 - Front, Angle + 3.14159274);
-                }
-            }
-            else
-            {
-                for (UINT Index = 0; Index < Count; Index++)
-                    Power[Index] = 1.0 / Count;
-            }
-        }
-        else
-        {
-            Power[0] = 1.0;
-        }
-        for (UINT Index = 0; Index < Count; Index++)
-            Pans[Index] = Power[Index] == 0.0 ? DSBVOLUME_MIN : static_cast<LONG>(log(Power[Index]) * 434.294488);
-
-        /* Doppler shift from the speeds along the line between sound and listener */
-        if (Listener->flDopplerFactor > 0.0f)
-        {
-            D3DVECTOR Line;
-            float Closing = 0.0f;
-            float Length;
-
-            Line.x = Params->vPosition.x - (Params->dwMode == DS3DMODE_HEADRELATIVE ? 0.0f : Listener->vPosition.x);
-            Line.y = Params->vPosition.y - (Params->dwMode == DS3DMODE_HEADRELATIVE ? 0.0f : Listener->vPosition.y);
-            Line.z = Params->vPosition.z - (Params->dwMode == DS3DMODE_HEADRELATIVE ? 0.0f : Listener->vPosition.z);
-            Length = DsLength(&Line);
-            if (Length != 0.0f)
-            {
-                float VelocityX = Params->vVelocity.x - (Params->dwMode == DS3DMODE_HEADRELATIVE ? 0.0f : Listener->vVelocity.x);
-                float VelocityY = Params->vVelocity.y - (Params->dwMode == DS3DMODE_HEADRELATIVE ? 0.0f : Listener->vVelocity.y);
-                float VelocityZ = Params->vVelocity.z - (Params->dwMode == DS3DMODE_HEADRELATIVE ? 0.0f : Listener->vVelocity.z);
-
-                Closing = (Line.x * VelocityX + VelocityY * Line.y + VelocityZ * Line.z) / Length;
-            }
-            {
-                float Speed = Closing * Listener->flDistanceFactor * 1000.0f * Listener->flDopplerFactor;
-
-                Speed = DsMin(DsMax(Speed, -179830.0f), 179830.0f);
-                Frequency = static_cast<DWORD>(static_cast<float>(Spatial->Frequency) * 359660.0f / (Speed + 359660.0f));
-            }
-        }
+            DsPanLevels(&Relative, Count, Speakers, Levels);
     }
 
     Buffer->Voice.SetMute(Mute);
-    Buffer->Voice.SetFrequency(DsMin<DWORD>(DsMax<DWORD>(Frequency, DSBFREQUENCY_MIN), DSBFREQUENCY_MAX));
-    Buffer->Voice.SetSpeakerVolumes(Volume, Count, Pans);
+    Buffer->Voice.SetFrequency(DsMin<DWORD>(DsMax<DWORD>(Rate, DSBFREQUENCY_MIN), DSBFREQUENCY_MAX));
+    Buffer->Voice.SetSpeakerVolumes(Volume, Count, Levels);
 }
 
 static
