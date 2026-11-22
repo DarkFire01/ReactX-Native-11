@@ -477,6 +477,7 @@ DdRetireLocal(
 
     if (Driver != nullptr)
     {
+        DdReleaseLocalSurfaces(Local);
         DdReleaseLocalPalettes(Local);
         DdReleaseLocalClippers(Local);
         if (Driver->ExclusiveOwner == Local)

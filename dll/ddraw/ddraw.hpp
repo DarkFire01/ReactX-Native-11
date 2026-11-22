@@ -21,6 +21,7 @@ struct DdLocal;
 struct DdInterface;
 struct DdClipper;
 struct DdPalette;
+struct DdSurface;
 
 /* Which interface an object pointer stands for */
 enum class DdKind : UCHAR
@@ -161,6 +162,8 @@ struct DdDriver
 
     DdClipper* Clippers;
     DdPalette* Palettes;
+    DdSurface* Surfaces;
+    DdSurface* Primary;
 };
 
 /* One DirectDraw object as the application created it */
@@ -219,6 +222,51 @@ struct DdPalette
     DdInterface* Owner;
     BYTE* Entries;
     DdPalette* Next;
+};
+
+/* One interface pointer of a surface; each interface version keeps its own count */
+struct DdSurfaceInterface
+{
+    const VOID* Vtbl;
+    DdSurface* Surface;
+    ULONG RefCount;
+    UCHAR Version;
+    DdSurfaceInterface* Next;
+};
+
+/* A DirectDraw surface; every surface lives in system memory until the driver device backs them */
+struct DdSurface
+{
+    ULONG RefCount;
+    DdDriver* Driver;
+    DdLocal* Creator;
+    DdInterface* Owner;
+    DWORD ProcessId;
+    DDSCAPS2 Caps;
+    DDPIXELFORMAT Format;
+    DWORD Width;
+    DWORD Height;
+    LONG Pitch;
+    BYTE* Bits;
+    HANDLE Section;
+    DWORD KeyFlags;
+    DDCOLORKEY SourceKey;
+    DDCOLORKEY DestKey;
+    DDCOLORKEY SourceOverlayKey;
+    DDCOLORKEY DestOverlayKey;
+    BOOLEAN Locked;
+    RECT LockRect;
+    HDC Dc;
+    HBITMAP Bitmap;
+    HGDIOBJ OldBitmap;
+    DdPalette* Palette;
+    DdClipper* Clipper;
+    DdSurface* FlipNext;
+    DdSurface* Next;
+    DWORD Uniqueness;
+    DWORD Priority;
+    DWORD Lod;
+    DdSurfaceInterface* Interfaces;
 };
 
 /* Process wide runtime state */
@@ -454,6 +502,46 @@ DdReleasePalette(
 VOID
 DdReleaseLocalPalettes(
     _In_ DdLocal* Local);
+
+/* surface.cpp */
+HRESULT
+DdCreateSurfaceObject(
+    _In_ DdInterface* This,
+    _In_ const DDSURFACEDESC2* Desc,
+    _Out_ VOID** Result,
+    _In_opt_ IUnknown* Outer);
+
+VOID
+DdReleaseLocalSurfaces(
+    _In_ DdLocal* Local);
+
+_Ret_maybenull_
+DdSurface*
+DdSurfaceFromCom(
+    _In_opt_ VOID* Com);
+
+BOOLEAN
+DdSurfaceBusy(
+    _In_ const DdSurface* Surface);
+
+/* blit.cpp */
+HRESULT
+DdBlt(
+    _In_ DdSurface* Target,
+    _In_opt_ const RECT* TargetRect,
+    _In_opt_ DdSurface* Source,
+    _In_opt_ const RECT* SourceRect,
+    _In_ DWORD Flags,
+    _In_opt_ const DDBLTFX* Fx);
+
+HRESULT
+DdBltFast(
+    _In_ DdSurface* Target,
+    _In_ DWORD X,
+    _In_ DWORD Y,
+    _In_ DdSurface* Source,
+    _In_opt_ const RECT* SourceRect,
+    _In_ DWORD Flags);
 
 /* object.cpp */
 const VOID*

@@ -170,8 +170,9 @@ DdCreateSurface(
     _Out_ VOID** Surface,
     _In_opt_ IUnknown* Outer)
 {
-    DD_TRACE_ONCE(L"CreateSurface is not implemented yet");
-    return DDERR_UNSUPPORTED;
+    DdLockScope Lock;
+
+    return DdCreateSurfaceObject(DdFromCom(Com), static_cast<const DDSURFACEDESC2*>(Desc), Surface, Outer);
 }
 
 static
