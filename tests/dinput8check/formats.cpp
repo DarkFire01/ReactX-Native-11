@@ -7,12 +7,11 @@
 
 #include "dinput8check.hpp"
 
-/* Objects a format may ask for that the device need not have */
-#define DC_OPTIONAL         0x80000000
 #define DC_AXIS             (DIDFT_AXIS | DIDFT_ANYINSTANCE)
 #define DC_BUTTON           (DIDFT_BUTTON | DIDFT_ANYINSTANCE)
 
 static DIOBJECTDATAFORMAT DcKeyboardObjects[256];
+static DIOBJECTDATAFORMAT DcJoystickObjects[44];
 
 static DIOBJECTDATAFORMAT DcMouseObjects[] =
 {
@@ -46,9 +45,43 @@ DIDATAFORMAT DcMouseFormat = { sizeof(DIDATAFORMAT), sizeof(DIOBJECTDATAFORMAT),
 DIDATAFORMAT DcMouse2Format = { sizeof(DIDATAFORMAT), sizeof(DIOBJECTDATAFORMAT), DIDF_RELAXIS, sizeof(DIMOUSESTATE2),
                                 ARRAYSIZE(DcMouse2Objects), DcMouse2Objects };
 
+DIDATAFORMAT DcJoystickFormat = { sizeof(DIDATAFORMAT), sizeof(DIOBJECTDATAFORMAT), DIDF_ABSAXIS, sizeof(DIJOYSTATE),
+                                  ARRAYSIZE(DcJoystickObjects), DcJoystickObjects };
+
 VOID
 DcInitFormats(VOID)
 {
+    static const GUID* Axes[] =
+    {
+        &GUID_XAxis, &GUID_YAxis, &GUID_ZAxis, &GUID_RxAxis, &GUID_RyAxis, &GUID_RzAxis, &GUID_Slider, &GUID_Slider,
+    };
+
+    for (DWORD Index = 0; Index < 44; Index++)
+    {
+        DIOBJECTDATAFORMAT* Object = &DcJoystickObjects[Index];
+
+        if (Index < 8)
+        {
+            Object->pguid = Axes[Index];
+            Object->dwOfs = Index * 4;
+            Object->dwType = DC_OPTIONAL | DC_AXIS;
+            Object->dwFlags = DIDOI_ASPECTPOSITION;
+        }
+        else if (Index < 12)
+        {
+            Object->pguid = &GUID_POV;
+            Object->dwOfs = Index * 4;
+            Object->dwType = DC_OPTIONAL | DIDFT_POV | DIDFT_ANYINSTANCE;
+            Object->dwFlags = 0;
+        }
+        else
+        {
+            Object->pguid = nullptr;
+            Object->dwOfs = 48 + Index - 12;
+            Object->dwType = DC_OPTIONAL | DC_BUTTON;
+            Object->dwFlags = 0;
+        }
+    }
     for (DWORD Index = 0; Index < 256; Index++)
     {
         DcKeyboardObjects[Index].pguid = &GUID_Key;

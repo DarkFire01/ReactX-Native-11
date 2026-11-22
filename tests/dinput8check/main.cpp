@@ -5,6 +5,8 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  *
  * dinput8check [-runtime system|reactx|<path>] [check ...]
+ *
+ * The watch check prints live keyboard and mouse input and only runs when named.
  */
 
 #include "dinput8check.hpp"
@@ -717,6 +719,7 @@ static const struct
 {
     PCSTR Name;
     VOID (*Run)(VOID);
+    BOOLEAN ByHand;
 } DcChecks[] =
 {
     { "create", DcCheckCreate },
@@ -729,6 +732,13 @@ static const struct
     { "cpl", DcCheckControlPanel },
     { "createdevice", DcCheckCreateDevice },
     { "devinfo", DcCheckDeviceInfo },
+    { "objects", [] { DcRunDataChecks("objects"); } },
+    { "formats", [] { DcRunDataChecks("formats"); } },
+    { "coop", [] { DcRunDataChecks("coop"); } },
+    { "acquire", [] { DcRunDataChecks("acquire"); } },
+    { "props", [] { DcRunDataChecks("props"); } },
+    { "misc", [] { DcRunDataChecks("misc"); } },
+    { "watch", [] { DcRunDataChecks("watch"); }, TRUE },
 };
 
 static
@@ -796,7 +806,7 @@ wmain(
 
     for (const auto& Check : DcChecks)
     {
-        BOOLEAN Run = Wanted.empty();
+        BOOLEAN Run = Wanted.empty() && !Check.ByHand;
 
         for (const auto& Name : Wanted)
         {

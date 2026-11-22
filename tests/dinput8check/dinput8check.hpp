@@ -58,3 +58,11 @@ DcInitFormats(VOID);
 extern DIDATAFORMAT DcKeyboardFormat;
 extern DIDATAFORMAT DcMouseFormat;
 extern DIDATAFORMAT DcMouse2Format;
+extern DIDATAFORMAT DcJoystickFormat;
+
+/* Objects a format may ask for that the device need not have */
+#define DC_OPTIONAL         0x80000000
+
+VOID
+DcRunDataChecks(
+    _In_z_ PCSTR Name);
