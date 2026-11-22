@@ -2946,6 +2946,81 @@ DcCheckSetDesc(
     Draw7->Release();
 }
 
+/* The overlay methods on surfaces that are not overlays, which is all 64 bit Windows offers here */
+static
+VOID
+DcCheckOverlay(
+    _Inout_ DrawCheck* Check)
+{
+    LPDIRECTDRAWSURFACE7 Surfaces[3] = {};
+    LPDIRECTDRAWSURFACE Old;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDOVERLAYFX Fx;
+    RECT Rect = { 0, 0, 4, 4 };
+    DWORD Count;
+    LONG X;
+    LONG Y;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    Draw7->CreateSurface(&Desc, &Surfaces[0], nullptr);
+    Surfaces[1] = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 16, 8, 32);
+    Surfaces[2] = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 16, 8, 32);
+
+    for (LPDIRECTDRAWSURFACE7 Surface : Surfaces)
+    {
+        if (Surface == nullptr)
+        {
+            printf("create failed\n");
+            continue;
+        }
+        printf("[overlay]\n");
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        printf("update = %08lX\n", Surface->UpdateOverlay(&Rect, Surfaces[0], &Rect, DDOVER_SHOW, nullptr));
+        printf("update_hide = %08lX\n", Surface->UpdateOverlay(nullptr, Surfaces[0], nullptr, DDOVER_HIDE, nullptr));
+        printf("update_fx = %08lX\n", Surface->UpdateOverlay(&Rect, Surfaces[0], &Rect, DDOVER_DDFX | DDOVER_SHOW, &Fx));
+        printf("update_badflags = %08lX\n", Surface->UpdateOverlay(&Rect, Surfaces[0], &Rect, 0x80000000, nullptr));
+        printf("update_nodest = %08lX\n", Surface->UpdateOverlay(&Rect, nullptr, &Rect, DDOVER_SHOW, nullptr));
+        printf("set_position = %08lX\n", Surface->SetOverlayPosition(1, 2));
+        X = Y = 0x1234;
+        printf("get_position = %08lX x=%lX y=%lX\n", Surface->GetOverlayPosition(&X, &Y), X, Y);
+        Count = 0;
+        printf("enum_z = %08lX count=%lu\n", Surface->EnumOverlayZOrders(DDENUMOVERLAYZ_BACKTOFRONT, &Count,
+                                                                        DcCountAttached), Count);
+        printf("enum_z_badflags = %08lX\n", Surface->EnumOverlayZOrders(7, &Count, DcCountAttached));
+        printf("z_order = %08lX\n", Surface->UpdateOverlayZOrder(DDOVERZ_SENDTOFRONT, nullptr));
+        printf("z_order_bad = %08lX\n", Surface->UpdateOverlayZOrder(99, nullptr));
+        printf("z_order_insert = %08lX\n", Surface->UpdateOverlayZOrder(DDOVERZ_INSERTINFRONTOF, Surfaces[1]));
+        Old = nullptr;
+        Surface->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<VOID**>(&Old));
+        if (Old != nullptr)
+        {
+            printf("dirty = %08lX\n", Old->AddOverlayDirtyRect(&Rect));
+            printf("dirty_null = %08lX\n", Old->AddOverlayDirtyRect(nullptr));
+            printf("display = %08lX\n", Old->UpdateOverlayDisplay(0));
+            printf("display_flags = %08lX\n", Old->UpdateOverlayDisplay(1));
+            Old->Release();
+        }
+        printf("get_overlay_key = %08lX\n", Surface->GetColorKey(DDCKEY_DESTOVERLAY, reinterpret_cast<LPDDCOLORKEY>(&Fx)));
+    }
+
+    for (LPDIRECTDRAWSURFACE7 Surface : Surfaces)
+    {
+        if (Surface != nullptr)
+            Surface->Release();
+    }
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -2974,6 +3049,7 @@ static const DrawCheckInfo DcChecks[] =
     { "flip", DcCheckFlip },
     { "video_fill", DcCheckVideoFill },
     { "set_desc", DcCheckSetDesc },
+    { "overlay", DcCheckOverlay },
 };
 
 static
