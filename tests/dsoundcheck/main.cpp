@@ -17,6 +17,9 @@
 #include <ksmedia.h>
 #include <dsound.h>
 
+/* I3DL2 reverb is marked deprecated by the header that declares it */
+#pragma warning(disable: 4995)
+
 #include <cstdio>
 #include <math.h>
 #include <string>
@@ -1712,6 +1715,98 @@ DcCheckFullDuplex(VOID)
     }
 }
 
+/* Effects on a buffer made for them: loading, result codes, finding them again and their parameters */
+static
+VOID
+DcCheckEffects(VOID)
+{
+    static const GUID* Classes[] =
+    {
+        &GUID_DSFX_STANDARD_ECHO, &GUID_DSFX_STANDARD_CHORUS, &GUID_DSFX_STANDARD_DISTORTION, &GUID_DSFX_STANDARD_GARGLE,
+        &GUID_DSFX_STANDARD_COMPRESSOR, &GUID_DSFX_STANDARD_FLANGER, &GUID_DSFX_STANDARD_PARAMEQ,
+        &GUID_DSFX_WAVES_REVERB, &GUID_DSFX_STANDARD_I3DL2REVERB, &IID_IUnknown,
+    };
+    IDirectSound8* Sound;
+    IDirectSoundBuffer* Buffer;
+    IDirectSoundBuffer8* Buffer8 = nullptr;
+    WAVEFORMATEX Format;
+    HRESULT hr;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+    DcFormat(&Format, WAVE_FORMAT_PCM, 2, 44100, 16);
+    hr = DcMakeBuffer(Sound, DSBCAPS_CTRLFX | DSBCAPS_CTRLVOLUME, Format.nAvgBytesPerSec / 2, &Format, &Buffer);
+    printf("fx create = %08lX\n", hr);
+    if (SUCCEEDED(hr) && SUCCEEDED(Buffer->QueryInterface(IID_IDirectSoundBuffer8, reinterpret_cast<void**>(&Buffer8))))
+    {
+        for (UINT Index = 0; Index < ARRAYSIZE(Classes); Index++)
+        {
+            DSEFFECTDESC Effect = {};
+            DWORD Result = 0xCCCC;
+
+            Effect.dwSize = sizeof(Effect);
+            Effect.guidDSFXClass = *Classes[Index];
+            hr = Buffer8->SetFX(1, &Effect, &Result);
+            printf("fx set[%u] = %08lX result %lu\n", Index, hr, Result);
+        }
+        {
+            DSEFFECTDESC Effects[2] = {};
+            DWORD Results[2] = { 0xCCCC, 0xCCCC };
+            IDirectSoundFXEcho* Echo = nullptr;
+            IUnknown* Object = nullptr;
+
+            Effects[0].dwSize = sizeof(Effects[0]);
+            Effects[0].guidDSFXClass = GUID_DSFX_STANDARD_ECHO;
+            Effects[1].dwSize = sizeof(Effects[1]);
+            Effects[1].guidDSFXClass = GUID_DSFX_STANDARD_GARGLE;
+            hr = Buffer8->SetFX(2, Effects, Results);
+            printf("fx set_two = %08lX results %lu %lu\n", hr, Results[0], Results[1]);
+            Effects[0].dwFlags = 4;
+            printf("fx set_badflags = %08lX\n", Buffer8->SetFX(1, Effects, Results));
+            Effects[0].dwFlags = 0;
+            Effects[0].dwSize = 12;
+            printf("fx set_badsize = %08lX\n", Buffer8->SetFX(1, Effects, Results));
+            Effects[0].dwSize = sizeof(Effects[0]);
+            hr = Buffer8->GetObjectInPath(GUID_DSFX_STANDARD_ECHO, 0, IID_IDirectSoundFXEcho, reinterpret_cast<void**>(&Echo));
+            printf("fx getobject = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                DSFXEcho Params = {};
+
+                printf("fx echo get = %08lX\n", Echo->GetAllParameters(&Params));
+                printf("  echo %g %g %g %g %ld\n", Params.fWetDryMix, Params.fFeedback, Params.fLeftDelay, Params.fRightDelay, Params.lPanDelay);
+                Echo->Release();
+            }
+            printf("fx getobject_index1 = %08lX\n", Buffer8->GetObjectInPath(GUID_DSFX_STANDARD_ECHO, 1, IID_IUnknown, reinterpret_cast<void**>(&Object)));
+            hr = Buffer8->GetObjectInPath(GUID_All_Objects, 1, IID_IUnknown, reinterpret_cast<void**>(&Object));
+            printf("fx getobject_all1 = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+                Object->Release();
+            printf("fx getobject_badiid = %08lX\n", Buffer8->GetObjectInPath(GUID_DSFX_STANDARD_ECHO, 0, IID_IDirectSound, reinterpret_cast<void**>(&Object)));
+            Buffer8->SetVolume(DSBVOLUME_MIN);
+            Buffer8->Play(0, 0, DSBPLAY_LOOPING);
+            printf("fx set_playing = %08lX\n", Buffer8->SetFX(0, nullptr, nullptr));
+            Buffer8->Stop();
+            {
+                VOID* Part1;
+                DWORD Size1;
+
+                Buffer8->Lock(0, 100, &Part1, &Size1, nullptr, nullptr, 0);
+                printf("fx set_locked = %08lX\n", Buffer8->SetFX(0, nullptr, nullptr));
+                Buffer8->Unlock(Part1, Size1, nullptr, 0);
+            }
+            printf("fx clear = %08lX\n", Buffer8->SetFX(0, nullptr, nullptr));
+            printf("fx getobject_cleared = %08lX\n", Buffer8->GetObjectInPath(GUID_DSFX_STANDARD_ECHO, 0, IID_IUnknown, reinterpret_cast<void**>(&Object)));
+            printf("fx duplicate = %08lX\n", Sound->DuplicateSoundBuffer(Buffer, reinterpret_cast<IDirectSoundBuffer**>(&Object)));
+        }
+        Buffer8->Release();
+    }
+    if (SUCCEEDED(hr) || Buffer != nullptr)
+        Buffer->Release();
+    printf("release %lu\n", Sound->Release());
+}
+
 /* Records what the default endpoint plays, which carries the mixer output */
 class DcLoopback
 {
@@ -1971,6 +2066,8 @@ DcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 7 },
         { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 8 },
         { WAVE_FORMAT_PCM, 1, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 9 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, 0, 0, DSBCAPS_GLOBALFOCUS, 50 },
+        { WAVE_FORMAT_PCM, 2, TRUE, 0, 16, -300, 0, DSBCAPS_GLOBALFOCUS, 51 },
     };
     IDirectSound8* Sound;
 
@@ -2017,7 +2114,8 @@ DcCheckMix(VOID)
         Bytes = Format.nAvgBytesPerSec / 4 / Format.nBlockAlign * Format.nBlockAlign;
         hr = DcMakeBuffer(Sound,
                           DSBCAPS_CTRLVOLUME | Cases[Case].Focus |
-                              (Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
+                              (Cases[Case].Scene >= 50 ? DSBCAPS_CTRLFX :
+                               Cases[Case].Scene != 0 ? DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY : DSBCAPS_CTRLPAN),
                           Bytes, &Format, &Buffer);
         if (FAILED(hr))
         {
@@ -2028,7 +2126,21 @@ DcCheckMix(VOID)
         DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format);
         Buffer->Unlock(Part1, Size1, nullptr, 0);
         Buffer->SetVolume(Cases[Case].Volume);
-        if (Cases[Case].Scene != 0)
+        if (Cases[Case].Scene >= 50)
+        {
+            IDirectSoundBuffer8* Buffer8 = nullptr;
+            DSEFFECTDESC Effect = {};
+
+            Effect.dwSize = sizeof(Effect);
+            Effect.guidDSFXClass = Cases[Case].Scene == 50 ? GUID_DSFX_STANDARD_GARGLE : GUID_DSFX_STANDARD_ECHO;
+            Buffer->QueryInterface(IID_IDirectSoundBuffer8, reinterpret_cast<void**>(&Buffer8));
+            if (Buffer8 != nullptr)
+            {
+                printf("  setfx = %08lX\n", Buffer8->SetFX(1, &Effect, nullptr));
+                Buffer8->Release();
+            }
+        }
+        else if (Cases[Case].Scene != 0)
             DcSetScene(Sound, Buffer, Cases[Case].Scene);
         else
             Buffer->SetPan(Cases[Case].Pan);
@@ -2143,6 +2255,8 @@ wmain(
         DcCheckCapture();
     if (DcWant(L"duplex"))
         DcCheckFullDuplex();
+    if (DcWant(L"effects"))
+        DcCheckEffects();
 
     /* Audible, so only on request */
     if (DcSection != nullptr && _wcsicmp(DcSection, L"mix") == 0)
