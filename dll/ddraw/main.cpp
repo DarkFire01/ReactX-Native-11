@@ -279,12 +279,41 @@ struct DdFactory
     CLSID Clsid;
 };
 
-static HRESULT STDMETHODCALLTYPE DdFactoryQueryInterface(_In_ VOID* Com, _In_ REFIID Iid, _Outptr_ VOID** Object);
-static ULONG STDMETHODCALLTYPE DdFactoryAddRef(_In_ VOID* Com);
-static ULONG STDMETHODCALLTYPE DdFactoryRelease(_In_ VOID* Com);
-static HRESULT STDMETHODCALLTYPE DdFactoryCreateInstance(_In_ VOID* Com, _In_opt_ IUnknown* Outer, _In_ REFIID Iid,
-                                                         _Outptr_ VOID** Object);
-static HRESULT STDMETHODCALLTYPE DdFactoryLockServer(_In_ VOID* Com, _In_ BOOL Lock);
+static
+HRESULT
+STDMETHODCALLTYPE
+DdFactoryQueryInterface(
+    _In_ VOID* Com,
+    _In_ REFIID Iid,
+    _Outptr_ VOID** Object);
+
+static
+ULONG
+STDMETHODCALLTYPE
+DdFactoryAddRef(
+    _In_ VOID* Com);
+
+static
+ULONG
+STDMETHODCALLTYPE
+DdFactoryRelease(
+    _In_ VOID* Com);
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdFactoryCreateInstance(
+    _In_ VOID* Com,
+    _In_opt_ IUnknown* Outer,
+    _In_ REFIID Iid,
+    _Outptr_ VOID** Object);
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdFactoryLockServer(
+    _In_ VOID* Com,
+    _In_ BOOL Lock);
 
 static const VOID* const DdFactoryVtbl[] =
 {

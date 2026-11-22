@@ -1567,12 +1567,74 @@ DdEvaluateMode(
 }
 
 /* Every method of an object made by the class factory refuses until Initialize */
-static HRESULT STDMETHODCALLTYPE DdUninit0(VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdUninit1(VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdUninit2(VOID*, VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdUninit3(VOID*, VOID*, VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdUninit4(VOID*, VOID*, VOID*, VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdUninit5(VOID*, VOID*, VOID*, VOID*, VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
+static
+HRESULT
+STDMETHODCALLTYPE
+DdUninit0(
+    _In_opt_ VOID* Unused0)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdUninit1(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdUninit2(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1,
+    _In_opt_ VOID* Unused2)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdUninit3(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1,
+    _In_opt_ VOID* Unused2,
+    _In_opt_ VOID* Unused3)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdUninit4(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1,
+    _In_opt_ VOID* Unused2,
+    _In_opt_ VOID* Unused3,
+    _In_opt_ VOID* Unused4)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdUninit5(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1,
+    _In_opt_ VOID* Unused2,
+    _In_opt_ VOID* Unused3,
+    _In_opt_ VOID* Unused4,
+    _In_opt_ VOID* Unused5)
+{
+    return CO_E_NOTINITIALIZED;
+}
 
 #define DD_SLOT(Function) reinterpret_cast<const VOID*>(&Function)
 

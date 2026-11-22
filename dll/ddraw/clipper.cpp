@@ -466,9 +466,38 @@ DdClipperSetHWnd(
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE DdClipperUninit1(VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdClipperUninit2(VOID*, VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
-static HRESULT STDMETHODCALLTYPE DdClipperUninit3(VOID*, VOID*, VOID*, VOID*) { return CO_E_NOTINITIALIZED; }
+static
+HRESULT
+STDMETHODCALLTYPE
+DdClipperUninit1(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdClipperUninit2(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1,
+    _In_opt_ VOID* Unused2)
+{
+    return CO_E_NOTINITIALIZED;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+DdClipperUninit3(
+    _In_opt_ VOID* Unused0,
+    _In_opt_ VOID* Unused1,
+    _In_opt_ VOID* Unused2,
+    _In_opt_ VOID* Unused3)
+{
+    return CO_E_NOTINITIALIZED;
+}
 
 #define DD_CLIPPER_SLOT(Function) reinterpret_cast<const VOID*>(&Function)
 
