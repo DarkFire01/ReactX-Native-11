@@ -847,6 +847,251 @@ DcCheckFactory(
     printf("can_unload_end = %08lX\n", CanUnload());
 }
 
+static
+VOID
+DcPrintRegion(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_ DWORD Size,
+    _In_ const RGNDATA* Region)
+{
+    const RECT* Rects = reinterpret_cast<const RECT*>(Region->Buffer);
+
+    printf("%s = %08lX size=%lu count=%lu\n", Name, Result, Size, SUCCEEDED(Result) ? Region->rdh.nCount : 0);
+    for (DWORD Index = 0; SUCCEEDED(Result) && Index < Region->rdh.nCount && Index < 8; Index++)
+        printf("  rect %ld %ld %ld %ld\n", Rects[Index].left, Rects[Index].top, Rects[Index].right, Rects[Index].bottom);
+}
+
+static
+VOID
+DcCheckClipper(
+    _Inout_ DrawCheck* Check)
+{
+    PDC_CREATE_CLIPPER CreateClipper =
+        reinterpret_cast<PDC_CREATE_CLIPPER>(GetProcAddress(Check->Module, "DirectDrawCreateClipper"));
+    LPDIRECTDRAWCLIPPER Clipper = nullptr;
+    LPDIRECTDRAWCLIPPER Second = nullptr;
+    LPDIRECTDRAW Draw = nullptr;
+    LPDIRECTDRAW7 Draw7;
+    IUnknown* Object;
+    struct
+    {
+        RGNDATAHEADER Header;
+        RECT Rects[8];
+    } List;
+    BYTE Buffer[512];
+    RGNDATA* Region = reinterpret_cast<RGNDATA*>(Buffer);
+    RECT Bound = { 5, 5, 25, 25 };
+    HWND Window;
+    BOOL Changed;
+    DWORD Size;
+    HRESULT hr;
+
+    printf("create_clipper_flags = %08lX\n", CreateClipper(1, &Clipper, nullptr));
+    printf("create_clipper_outer = %08lX\n", CreateClipper(0, &Clipper, reinterpret_cast<IUnknown*>(1)));
+    hr = CreateClipper(0, &Clipper, nullptr);
+    printf("create_clipper = %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+
+    printf("  refs = %lu\n", DcRefCount(Clipper));
+    Object = nullptr;
+    hr = Clipper->QueryInterface(IID_IUnknown, reinterpret_cast<LPVOID*>(&Object));
+    printf("  qi_unknown = %08lX same=%d\n", hr, Object == Clipper);
+    if (Object != nullptr)
+        Object->Release();
+    printf("  qi_surface = %08lX\n", Clipper->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<LPVOID*>(&Object)));
+    printf("  initialize = %08lX\n", Clipper->Initialize(nullptr, 0));
+    Window = reinterpret_cast<HWND>(0x1);
+    hr = Clipper->GetHWnd(&Window);
+    printf("  get_hwnd = %08lX null=%d\n", hr, Window == NULL);
+    Changed = 7;
+    hr = Clipper->IsClipListChanged(&Changed);
+    printf("  changed = %08lX value=%d\n", hr, Changed);
+
+    Size = 0x1234;
+    hr = Clipper->GetClipList(nullptr, nullptr, &Size);
+    printf("  get_list_none = %08lX size=%lu\n", hr, Size);
+    printf("  set_list_flags = %08lX\n", Clipper->SetClipList(nullptr, 1));
+
+    memset(&List, 0, sizeof(List));
+    List.Header.dwSize = sizeof(List.Header);
+    List.Header.iType = RDH_RECTANGLES;
+    List.Header.nCount = 0;
+    printf("  set_list_empty = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+    List.Header.nCount = 3;
+    SetRect(&List.Rects[0], 0, 0, 10, 10);
+    SetRect(&List.Rects[1], 20, 0, 30, 10);
+    SetRect(&List.Rects[2], 0, 40, 10, 50);
+    SetRect(&List.Header.rcBound, 0, 0, 30, 50);
+    List.Header.iType = 7;
+    printf("  set_list_type = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+    List.Header.iType = RDH_RECTANGLES;
+    List.Header.dwSize = 8;
+    printf("  set_list_size = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+    List.Header.dwSize = sizeof(List.Header);
+    printf("  set_list = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+
+    Size = 0;
+    hr = Clipper->GetClipList(nullptr, nullptr, &Size);
+    printf("  get_list_size = %08lX size=%lu\n", hr, Size);
+    Size = 40;
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    hr = Clipper->GetClipList(nullptr, Region, &Size);
+    printf("  get_list_small = %08lX size=%lu count=%lu\n", hr, Size, Region->rdh.nCount);
+    Size = sizeof(Buffer);
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    hr = Clipper->GetClipList(nullptr, Region, &Size);
+    DcPrintRegion("  get_list", hr, Size, Region);
+    DcBytes("  header", Region, sizeof(RGNDATAHEADER));
+    Size = sizeof(Buffer);
+    memset(Buffer, 0xCC, sizeof(Buffer));
+    hr = Clipper->GetClipList(&Bound, Region, &Size);
+    DcPrintRegion("  get_list_bound", hr, Size, Region);
+
+    printf("  set_hwnd_flags = %08lX\n", Clipper->SetHWnd(1, Check->Window));
+    printf("  set_hwnd_bad = %08lX\n", Clipper->SetHWnd(0, reinterpret_cast<HWND>(0x1234)));
+    printf("  set_hwnd = %08lX\n", Clipper->SetHWnd(0, Check->Window));
+    hr = Clipper->GetHWnd(&Window);
+    printf("  get_hwnd_set = %08lX same=%d\n", hr, Window == Check->Window);
+    printf("  set_list_hwnd = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+    printf("  set_hwnd_null = %08lX\n", Clipper->SetHWnd(0, NULL));
+    printf("  clear_list = %08lX\n", Clipper->SetClipList(nullptr, 0));
+    hr = Clipper->GetClipList(nullptr, nullptr, &Size);
+    printf("  get_list_cleared = %08lX\n", hr);
+    printf("  release = %lu\n", Clipper->Release());
+
+    if (FAILED(Check->Create(nullptr, &Draw, nullptr)))
+        return;
+    printf("dd_clipper_flags = %08lX\n", Draw->CreateClipper(2, &Clipper, nullptr));
+    hr = Draw->CreateClipper(0, &Clipper, nullptr);
+    printf("dd_clipper = %08lX\n", hr);
+    printf("  dd_refs = %lu\n", DcRefCount(Draw));
+    if (SUCCEEDED(hr))
+    {
+        printf("  refs = %lu\n", DcRefCount(Clipper));
+        List.Header.iType = 7;
+        printf("  set_list_v1_type = %08lX\n", Clipper->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+    }
+
+    /* Releasing the object also releases the clippers it made */
+    printf("dd_release = %lu\n", Draw->Release());
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    hr = Draw7->CreateClipper(0, &Second, nullptr);
+    printf("dd7_clipper = %08lX\n", hr);
+    printf("  dd_refs = %lu\n", DcRefCount(Draw7));
+    if (SUCCEEDED(hr))
+    {
+        List.Header.iType = 7;
+        printf("  set_list_v7_type = %08lX\n", Second->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+        printf("  release = %lu\n", Second->Release());
+        printf("  dd_refs = %lu\n", DcRefCount(Draw7));
+    }
+    printf("dd7_release = %lu\n", Draw7->Release());
+}
+
+static
+VOID
+DcCheckPalette(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD FlagsList[] =
+    {
+        DDPCAPS_8BIT, DDPCAPS_4BIT, DDPCAPS_2BIT, DDPCAPS_1BIT, DDPCAPS_8BIT | DDPCAPS_ALLOW256,
+        DDPCAPS_4BIT | DDPCAPS_8BITENTRIES, DDPCAPS_1BIT | DDPCAPS_8BITENTRIES, DDPCAPS_8BIT | DDPCAPS_8BITENTRIES,
+        DDPCAPS_4BIT | DDPCAPS_ALLOW256, DDPCAPS_8BIT | DDPCAPS_ALPHA, DDPCAPS_4BIT | DDPCAPS_ALPHA | DDPCAPS_8BITENTRIES,
+        DDPCAPS_8BIT | DDPCAPS_4BIT, 0, DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE, DDPCAPS_8BIT | DDPCAPS_VSYNC,
+        DDPCAPS_8BIT | DDPCAPS_INITIALIZE, DDPCAPS_8BIT | 0x800,
+    };
+    PALETTEENTRY Entries[256];
+    PALETTEENTRY Read[256];
+    LPDIRECTDRAWPALETTE Palette;
+    LPDIRECTDRAW Draw = nullptr;
+    LPDIRECTDRAW7 Draw7;
+    IUnknown* Object;
+    DWORD Caps;
+    HRESULT hr;
+
+    for (DWORD Index = 0; Index < 256; Index++)
+    {
+        Entries[Index].peRed = static_cast<BYTE>(Index);
+        Entries[Index].peGreen = static_cast<BYTE>(255 - Index);
+        Entries[Index].peBlue = static_cast<BYTE>(Index * 3);
+        Entries[Index].peFlags = static_cast<BYTE>(Index & 7);
+    }
+
+    if (FAILED(Check->Create(nullptr, &Draw, nullptr)))
+        return;
+    printf("palette_nocoop = %08lX\n", Draw->CreatePalette(DDPCAPS_8BIT, Entries, &Palette, nullptr));
+    Draw->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    printf("palette_outer = %08lX\n", Draw->CreatePalette(DDPCAPS_8BIT, Entries, &Palette, reinterpret_cast<IUnknown*>(1)));
+
+    for (DWORD Flags : FlagsList)
+    {
+        Palette = nullptr;
+        hr = Draw->CreatePalette(Flags, Entries, &Palette, nullptr);
+        printf("palette[%08lX] = %08lX\n", Flags, hr);
+        if (FAILED(hr))
+            continue;
+
+        Caps = 0xCCCCCCCC;
+        hr = Palette->GetCaps(&Caps);
+        printf("  caps = %08lX value=%08lX\n", hr, Caps);
+        memset(Read, 0xCC, sizeof(Read));
+        hr = Palette->GetEntries(0, 0, 256, Read);
+        printf("  get_all = %08lX\n", hr);
+        memset(Read, 0xCC, sizeof(Read));
+        hr = Palette->GetEntries(0, 0, 2, Read);
+        printf("  get_two = %08lX\n", hr);
+        DcBytes("  first", Read, 8);
+        memset(Read, 0xCC, sizeof(Read));
+        if (SUCCEEDED(Palette->GetEntries(0, 0, (Caps & DDPCAPS_8BIT) ? 256 : (Caps & DDPCAPS_4BIT) ? 16 :
+                                                (Caps & DDPCAPS_2BIT) ? 4 : 2, Read)))
+            DcBytes("  entries", Read, 1024);
+        printf("  get_flags = %08lX\n", Palette->GetEntries(1, 0, 1, Read));
+        printf("  get_zero = %08lX\n", Palette->GetEntries(0, 0, 0, Read));
+        printf("  get_start = %08lX\n", Palette->GetEntries(0, 255, 2, Read));
+        printf("  set_some = %08lX\n", Palette->SetEntries(0, 1, 2, &Entries[100]));
+        printf("  set_first = %08lX\n", Palette->SetEntries(0, 0, 1, &Entries[50]));
+        printf("  set_last = %08lX\n", Palette->SetEntries(0, 255, 1, &Entries[60]));
+        printf("  set_bad = %08lX\n", Palette->SetEntries(0, 1, 300, Entries));
+        memset(Read, 0xCC, sizeof(Read));
+        if (SUCCEEDED(Palette->GetEntries(0, 0, 4, Read)))
+            DcBytes("  after_set", Read, 16);
+        memset(Read, 0xCC, sizeof(Read));
+        if (SUCCEEDED(Palette->GetEntries(0, 252, 4, Read)))
+            DcBytes("  after_set_end", Read, 16);
+        printf("  initialize = %08lX\n", Palette->Initialize(nullptr, 0, nullptr));
+        Object = nullptr;
+        hr = Palette->QueryInterface(IID_IDirectDrawPalette, reinterpret_cast<LPVOID*>(&Object));
+        printf("  qi = %08lX same=%d\n", hr, Object == Palette);
+        if (Object != nullptr)
+            Object->Release();
+        printf("  qi_bad = %08lX\n", Palette->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<LPVOID*>(&Object)));
+        printf("  refs = %lu\n", DcRefCount(Palette));
+        printf("  dd_refs = %lu\n", DcRefCount(Draw));
+        printf("  release = %lu\n", Palette->Release());
+    }
+    Draw->Release();
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    hr = Draw7->CreatePalette(DDPCAPS_8BIT, Entries, &Palette, nullptr);
+    printf("palette7 = %08lX\n", hr);
+    printf("  dd_refs = %lu\n", DcRefCount(Draw7));
+    if (SUCCEEDED(hr))
+    {
+        printf("  release = %lu\n", Palette->Release());
+        printf("  dd_refs = %lu\n", DcRefCount(Draw7));
+    }
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -861,6 +1106,8 @@ static const DrawCheckInfo DcChecks[] =
     { "identifier", DcCheckIdentifier },
     { "cooperative", DcCheckCooperative },
     { "factory", DcCheckFactory },
+    { "clipper", DcCheckClipper },
+    { "palette", DcCheckPalette },
 };
 
 static
