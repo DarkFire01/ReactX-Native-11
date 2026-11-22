@@ -1480,6 +1480,80 @@ DcCheckSurfaceOps(
     Draw7->Release();
 }
 
+/* Draws to the primary through a window clipper and reads the window back through GDI */
+static
+VOID
+DcCheckPresent(
+    _Inout_ DrawCheck* Check)
+{
+    PDC_CREATE_CLIPPER CreateClipper =
+        reinterpret_cast<PDC_CREATE_CLIPPER>(GetProcAddress(Check->Module, "DirectDrawCreateClipper"));
+    LPDIRECTDRAWCLIPPER Clipper = nullptr;
+    LPDIRECTDRAWSURFACE7 Primary = nullptr;
+    LPDIRECTDRAWSURFACE7 Source;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc = {};
+    DDBLTFX Fx = {};
+    POINT Origin = { 0, 0 };
+    RECT To;
+    HDC Dc;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    ShowWindow(Check->Window, SW_SHOWNOACTIVATE);
+    UpdateWindow(Check->Window);
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    hr = Draw7->CreateSurface(&Desc, &Primary, nullptr);
+    printf("primary = %08lX\n", hr);
+    if (FAILED(hr))
+    {
+        Draw7->Release();
+        return;
+    }
+    printf("primary_again = %08lX\n", Draw7->CreateSurface(&Desc, &Source, nullptr));
+    printf("clip_get_none = %08lX\n", Primary->GetClipper(&Clipper));
+    printf("clip_set_null = %08lX\n", Primary->SetClipper(nullptr));
+    CreateClipper(0, &Clipper, nullptr);
+    Clipper->SetHWnd(0, Check->Window);
+    printf("clip_set = %08lX\n", Primary->SetClipper(Clipper));
+    printf("dc_primary = %08lX\n", Primary->GetDC(&Dc) == S_OK ? S_OK : E_FAIL);
+
+    ClientToScreen(Check->Window, &Origin);
+    SetRect(&To, Origin.x, Origin.y, Origin.x + 16, Origin.y + 16);
+    Fx.dwSize = sizeof(Fx);
+    Fx.dwFillColor = 0x00FF8040;
+    printf("fill_primary = %08lX\n", Primary->Blt(&To, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+    GdiFlush();
+    Dc = GetDC(Check->Window);
+    printf("  pixel = %06lX\n", GetPixel(Dc, 4, 4));
+    ReleaseDC(Check->Window, Dc);
+
+    Source = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 8, 8, 32);
+    if (Source != nullptr)
+    {
+        Fx.dwFillColor = 0x00204060;
+        Source->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL, &Fx);
+        printf("copy_primary = %08lX\n", Primary->Blt(&To, Source, nullptr, DDBLT_WAIT, nullptr));
+        GdiFlush();
+        Dc = GetDC(Check->Window);
+        printf("  pixel = %06lX\n", GetPixel(Dc, 4, 4));
+        ReleaseDC(Check->Window, Dc);
+        printf("fast_primary = %08lX\n", Primary->BltFast(Origin.x, Origin.y, Source, nullptr, 0));
+        Source->Release();
+    }
+
+    printf("release = %lu\n", Primary->Release());
+    Clipper->Release();
+    ShowWindow(Check->Window, SW_HIDE);
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -1498,6 +1572,7 @@ static const DrawCheckInfo DcChecks[] =
     { "palette", DcCheckPalette },
     { "surface_create", DcCheckSurfaceCreate },
     { "surface_ops", DcCheckSurfaceOps },
+    { "present", DcCheckPresent },
 };
 
 static
