@@ -172,10 +172,9 @@ DiFindOwner(
     return nullptr;
 }
 
-static
 HRESULT
-DiTakeExclusive(
-    _In_ REFGUID Device,
+DiAcquireExclusive(
+    _In_ const GUID* Device,
     _In_opt_ HWND Window,
     _In_ DWORD Cooperation)
 {
@@ -190,7 +189,7 @@ DiTakeExclusive(
         return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
 
     WaitForSingleObject(DiGlobalMutex, INFINITE);
-    Owner = DiFindOwner(Device);
+    Owner = DiFindOwner(*Device);
     if (Owner == nullptr)
     {
         if (DiShared->OwnerCount >= DI_EXCLUSIVE_MAX)
@@ -199,7 +198,7 @@ DiTakeExclusive(
             goto Exit;
         }
         Owner = &DiShared->Owners[DiShared->OwnerCount++];
-        Owner->Device = Device;
+        Owner->Device = *Device;
     }
     else
     {
@@ -223,10 +222,9 @@ Exit:
     return Result;
 }
 
-static
 VOID
-DiDropExclusive(
-    _In_ REFGUID Device,
+DiReleaseExclusive(
+    _In_ const GUID* Device,
     _In_opt_ HWND Window,
     _In_ DWORD Cooperation)
 {
@@ -235,7 +233,7 @@ DiDropExclusive(
     if (!(Cooperation & DISCL_EXCLUSIVE) || DiShared == nullptr || DiGlobalMutex == nullptr)
         return;
     WaitForSingleObject(DiGlobalMutex, INFINITE);
-    Owner = DiFindOwner(Device);
+    Owner = DiFindOwner(*Device);
     if (Owner != nullptr && Owner->Window == Window && Owner->ProcessId == GetCurrentProcessId())
     {
         DiShared->OwnerCount -= 1;
@@ -675,7 +673,7 @@ DiDevice::Acquire()
             goto Exit;
         }
     }
-    Result = DiTakeExclusive(Instance, Window, Cooperation);
+    Result = DiAcquireExclusive(&Instance, Window, Cooperation);
     if (FAILED(Result))
         goto Exit;
 
@@ -718,7 +716,7 @@ DiDevice::Acquire()
 
 Undo:
     ReleaseEmulation();
-    DiDropExclusive(Instance, Window, Cooperation);
+    DiReleaseExclusive(&Instance, Window, Cooperation);
 Exit:
     LeaveCriticalSection(&Lock);
     return Result;
@@ -737,7 +735,7 @@ DiDevice::InternalUnacquire(VOID)
         return DI_NOEFFECT;
     }
     Flags &= ~DI_DEV_ACQUIRED;
-    DiDropExclusive(Instance, Window, Cooperation);
+    DiReleaseExclusive(&Instance, Window, Cooperation);
     Foreground = (Cooperation & DISCL_FOREGROUND) != 0;
     if (Foreground && IsIconic(Window))
         Flags |= DI_DEV_ICONIC;

@@ -148,8 +148,9 @@ DiDevice::Initialize(
     }
     if (Create == nullptr)
     {
-        Result = DIERR_DEVICENOTREG;
-        goto Exit;
+        Result = DiFindHidDevice(Guid, &Create);
+        if (FAILED(Result))
+            goto Exit;
     }
     if (Flags & DI_DEV_ACQUIRED)
     {

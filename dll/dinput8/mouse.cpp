@@ -5,6 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
+#include "dinput8.hpp"
 #include "input.hpp"
 #include "actionmap.hpp"
 

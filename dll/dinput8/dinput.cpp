@@ -454,16 +454,25 @@ DiInput::VisitDevices(
     _In_opt_ VOID* Context)
 {
     BYTE Class = LOBYTE(Type);
+    GUID* HidDevices = nullptr;
+    DWORD HidCount = 0;
+    HRESULT Result;
+
+    /* The HID list is rebuilt before anything is enumerated */
+    Result = DiListHidDevices(&HidDevices, &HidCount);
+    if (FAILED(Result))
+        return Result;
 
     AddRef();
-    for (UINT Index = (Type & DIDEVTYPE_HID) ? DI_STATIC_DEVICE_COUNT : 0; Index < DI_STATIC_DEVICE_COUNT; Index++)
+    for (UINT Index = (Type & DIDEVTYPE_HID) ? DI_STATIC_DEVICE_COUNT : 0; Index < DI_STATIC_DEVICE_COUNT + HidCount; Index++)
     {
+        const GUID* Guid = Index < DI_STATIC_DEVICE_COUNT ? DiStaticDevices[Index].Guid : &HidDevices[Index - DI_STATIC_DEVICE_COUNT];
         IDirectInputDevice8W* Device;
         DIDEVCAPS Caps;
         DIDEVICEINSTANCEW Instance;
         BOOL Continue;
 
-        if (FAILED(DiProbeDevice(this, *DiStaticDevices[Index].Guid, &Device, &Caps)))
+        if (FAILED(DiProbeDevice(this, *Guid, &Device, &Caps)))
             continue;
         if (!DiFlagsMatch(Flags, Caps.dwFlags))
         {
@@ -483,6 +492,7 @@ DiInput::VisitDevices(
             break;
     }
     Release();
+    free(HidDevices);
     return S_OK;
 }
 

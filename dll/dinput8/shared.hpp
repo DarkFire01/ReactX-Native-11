@@ -19,6 +19,15 @@ struct DI_EXCLUSIVE_OWNER
 };
 
 #define DI_EXCLUSIVE_MAX        121
+#define DI_JOYSTICK_SLOTS       16
+
+/* Force feedback gains each joystick shares across processes */
+struct DI_JOYSTICK_SLOT
+{
+    DWORD Tag;
+    DWORD GlobalGain;
+    DWORD DeviceGain;
+};
 #define DI_SHARED_SIZE          4096
 
 /* The layout is shared with other processes, so fields keep their places */
@@ -27,7 +36,7 @@ struct DI_SHARED_STATE
     DWORD OwnerCount;
     DWORD Sequence;
     DWORD UuidCounter;
-    BYTE Reserved[192];
+    DI_JOYSTICK_SLOT Joysticks[DI_JOYSTICK_SLOTS];
     DWORD ConfigChangedTime;
     DI_EXCLUSIVE_OWNER Owners[DI_EXCLUSIVE_MAX];
 };

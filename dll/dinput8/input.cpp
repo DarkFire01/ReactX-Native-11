@@ -5,14 +5,20 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
+#include "dinput8.hpp"
 #include "input.hpp"
 #include "keyboard.hpp"
 #include "shared.hpp"
 
 #include <stdlib.h>
 
-DI_EM_CLASS DiKeyboardClass = { TRUE, 256 };
-DI_EM_CLASS DiMouseClass = { FALSE, 20 };
+static BYTE DiKeyboardState[256];
+static DWORD DiKeyboardTypes[256];
+static BYTE DiMouseState[20];
+static DWORD DiMouseTypes[20];
+
+DI_EM_CLASS DiKeyboardClass = { TRUE, sizeof(DiKeyboardState), DiKeyboardState, DiKeyboardTypes };
+DI_EM_CLASS DiMouseClass = { FALSE, sizeof(DiMouseState), DiMouseState, DiMouseTypes };
 
 /* Every live instance, guarded by DiLock */
 static DI_EM_INSTANCE* DiEmFirst;
@@ -98,9 +104,8 @@ DiEmBufferEvent(
  * Applies a new native state to a class, handing each changed object to the instances that
  * listen. Axes buffer the change in relative mode and the position otherwise.
  */
-static
 VOID
-DiEmApplyState(
+DiEmPostState(
     _In_ DI_EM_CLASS* Class,
     _In_reads_bytes_(Class->DataSize) const BYTE* State,
     _In_ DWORD Time)
@@ -185,7 +190,7 @@ DiEmKeyEvent(
     CopyMemory(State, DiKeyboardClass.State, sizeof(State));
     LeaveCriticalSection(&DiLock);
     State[Code] = Value;
-    DiEmApplyState(&DiKeyboardClass, State, Time);
+    DiEmPostState(&DiKeyboardClass, State, Time);
 }
 
 /* Mouse movement and buttons, with the positions kept as running sums of the motion */
@@ -207,7 +212,7 @@ DiEmMouseEvent(
     if (DiMouseClass.ObjectTypes[8] != 0)
         *reinterpret_cast<LONG*>(State + 8) += DeltaZ;
     CopyMemory(State + 12, DiEmButtons, sizeof(DiEmButtons));
-    DiEmApplyState(&DiMouseClass, State, Time);
+    DiEmPostState(&DiMouseClass, State, Time);
 }
 
 VOID
@@ -699,7 +704,7 @@ DiEmCreate(
         {
             const DI_OBJECT* Object = &Format->Objects[Index];
 
-            if (Object->Type != 0 && !(Object->Type & DIDFT_NODATA) && Object->Offset < ARRAYSIZE(Class->ObjectTypes))
+            if (Object->Type != 0 && !(Object->Type & DIDFT_NODATA) && Object->Offset < Class->DataSize)
                 Class->ObjectTypes[Object->Offset] = Object->Type;
         }
         Class->TypesReady = TRUE;
@@ -788,6 +793,9 @@ DiEmSwitchInput(
     DI_EM_CLASS* Class = Instance->Class;
     HRESULT Result = S_OK;
 
+    if (Class->Switch != nullptr)
+        return Class->Switch(Class->Context, On);
+
     if (Class->Keyboard)
     {
         DiEmBlockKeys = On && (Instance->Flags & DI_EM_EXCLUSIVE);
@@ -875,7 +883,8 @@ DiEmAcquire(
         InterlockedDecrement(&Instance->AcquireCount);
         return Result;
     }
-    if (!Instance->Class->Keyboard && (Instance->Flags & DI_EM_EXCLUSIVE) && !Instance->CursorHidden)
+    if (!Instance->Class->Keyboard && Instance->Class->Switch == nullptr && (Instance->Flags & DI_EM_EXCLUSIVE) &&
+        !Instance->CursorHidden)
     {
         ShowCursor(FALSE);
         Instance->CursorHidden = TRUE;

@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "dinput8.hpp"
+#include "backend.hpp"
 
 /* Instance flags */
 #define DI_EM_EXCLUSIVE         0x00000001
@@ -22,16 +22,27 @@
 #define DI_EM_KEYBOARD_HOOK     0x00080000
 #define DI_EM_MOUSE_SUBCLASS    0x00100000
 
+/* Starts or stops a device that gathers its own input */
+typedef
+HRESULT
+(*PDI_EM_SWITCH)(
+    _In_ VOID* Context,
+    _In_ BOOLEAN On);
+
 /* What one kind of device looks like to every instance of it */
 struct DI_EM_CLASS
 {
     BOOLEAN Keyboard;
     DWORD DataSize;
-    BYTE State[256];
-    DWORD ObjectTypes[256];
+    BYTE* State;
+    DWORD* ObjectTypes;
     BOOLEAN TypesReady;
     LONG Acquired;
     LONG Exclusive;
+
+    /* Set for a device with its own reader, nullptr for the system keyboard and mouse */
+    PDI_EM_SWITCH Switch;
+    VOID* Context;
 };
 
 /* One buffered change, with the object index the device resolves to an application offset */
@@ -78,6 +89,13 @@ DiEmCreate(
     _In_ const DI_FORMAT* Format,
     _In_ DWORD Mode,
     _Outptr_ DI_EM_INSTANCE** Instance);
+
+/* Hands a changed native state to the acquired instances of a class */
+VOID
+DiEmPostState(
+    _In_ DI_EM_CLASS* Class,
+    _In_reads_bytes_(Class->DataSize) const BYTE* State,
+    _In_ DWORD Time);
 
 VOID
 DiEmRelease(
