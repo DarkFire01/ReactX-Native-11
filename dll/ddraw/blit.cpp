@@ -276,6 +276,75 @@ DdPresentToPrimary(
     return S_OK;
 }
 
+/* Hands a copy between two driver resources to the driver, keys and mirroring included */
+static
+HRESULT
+DdDriverCopy(
+    _In_ DdSurface* Target,
+    _In_ const RECT* To,
+    _In_ DdSurface* Source,
+    _In_ const RECT* From,
+    _In_ DWORD Flags,
+    _In_opt_ const DDBLTFX* Fx)
+{
+    DdHardware* Hardware = Target->Driver->Hardware;
+    D3DDDIARG_BLT Blt = {};
+    HRESULT hr;
+
+    Blt.hSrcResource = Source->Resource->DriverResource;
+    Blt.SrcRect = *From;
+    Blt.hDstResource = Target->Resource->DriverResource;
+    Blt.DstRect = *To;
+
+    if ((Flags & DDBLT_KEYSRCOVERRIDE) != 0)
+    {
+        Blt.Flags.SrcColorKey = TRUE;
+        Blt.ColorKey = Fx->ddckSrcColorkey.dwColorSpaceLowValue;
+    }
+    else if ((Flags & DDBLT_KEYSRC) != 0)
+    {
+        if ((Source->KeyFlags & DDCKEY_SRCBLT) == 0)
+            return DDERR_NOCOLORKEY;
+        Blt.Flags.SrcColorKey = TRUE;
+        Blt.ColorKey = Source->SourceKey.dwColorSpaceLowValue;
+    }
+    else if ((Flags & DDBLT_KEYDESTOVERRIDE) != 0)
+    {
+        Blt.Flags.DstColorKey = TRUE;
+        Blt.ColorKey = Fx->ddckDestColorkey.dwColorSpaceLowValue;
+    }
+    else if ((Flags & DDBLT_KEYDEST) != 0)
+    {
+        if ((Target->KeyFlags & DDCKEY_DESTBLT) == 0)
+            return DDERR_NOCOLORKEY;
+        Blt.Flags.DstColorKey = TRUE;
+        Blt.ColorKey = Target->DestKey.dwColorSpaceLowValue;
+    }
+
+    if ((Flags & DDBLT_DDFX) != 0)
+    {
+        if ((Fx->dwDDFX & (DDBLTFX_ROTATE90 | DDBLTFX_ROTATE180 | DDBLTFX_ROTATE270 | DDBLTFX_ZBUFFERRANGE |
+                           DDBLTFX_ZBUFFERBASEDEST)) != 0)
+        {
+            return DDERR_UNSUPPORTED;
+        }
+        Blt.Flags.MirrorLeftRight = (Fx->dwDDFX & DDBLTFX_MIRRORLEFTRIGHT) != 0;
+        Blt.Flags.MirrorUpDown = (Fx->dwDDFX & DDBLTFX_MIRRORUPDOWN) != 0;
+    }
+    if ((Flags & (DDBLT_DDROPS | DDBLT_ROTATIONANGLE)) != 0)
+        return DDERR_UNSUPPORTED;
+
+    hr = Hardware->DeviceFunctions.pfnBlt(Hardware->DriverDevice, &Blt);
+    if (FAILED(hr))
+    {
+        DdTrace(L"UMD Blt failed 0x%08lX", hr);
+        return hr;
+    }
+
+    Target->Uniqueness += 1;
+    return S_OK;
+}
+
 static
 HRESULT
 DdFillSurface(
@@ -361,6 +430,10 @@ DdBlt(
 
     if (Primary)
         return DdPresentToPrimary(Target, &Job.To, Source, &Job.From, FALSE, 0);
+
+    /* Copies between driver resources are the driver's work */
+    if (Target->Resource != nullptr && Source->Resource != nullptr)
+        return DdDriverCopy(Target, &Job.To, Source, &Job.From, Flags, Fx);
 
     if (Source->Format.dwRGBBitCount != Target->Format.dwRGBBitCount || Target->Format.dwRGBBitCount < 8)
     {
