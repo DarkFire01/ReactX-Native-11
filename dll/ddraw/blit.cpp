@@ -107,7 +107,8 @@ DdFillRect(
 static
 VOID
 DdCopyRect(
-    _In_ const DdBlitJob& Job)
+    _In_ const DdBlitJob& Job,
+    _In_ const RECT* Clip)
 {
     DWORD Size = DdBytesPerPixel(Job.Target);
     LONG TargetWidth = Job.To.right - Job.To.left;
@@ -135,7 +136,7 @@ DdCopyRect(
         SourceBits = Copy;
     }
 
-    for (Y = 0; Y < TargetHeight; Y++)
+    for (Y = Clip->top - Job.To.top; Y < Clip->bottom - Job.To.top; Y++)
     {
         SourceY = static_cast<LONG>((static_cast<LONGLONG>(2 * Y + 1) * SourceHeight) / (2 * TargetHeight));
         if (Job.MirrorY)
@@ -143,7 +144,7 @@ DdCopyRect(
         SourceRow = SourceBits + (Job.From.top + SourceY) * SourcePitch;
         TargetRow = Job.TargetBits + (Job.To.top + Y) * Job.Target->Pitch;
 
-        for (X = 0; X < TargetWidth; X++)
+        for (X = Clip->left - Job.To.left; X < Clip->right - Job.To.left; X++)
         {
             SourceX = static_cast<LONG>((static_cast<LONGLONG>(2 * X + 1) * SourceWidth) / (2 * TargetWidth));
             if (Job.MirrorX)
@@ -276,6 +277,75 @@ DdPresentToPrimary(
     return S_OK;
 }
 
+/* The parts of a target rectangle an off screen clipper's list lets through */
+struct DdClipPieces
+{
+    RECT* Rects;
+    DWORD Count;
+    RECT Whole;
+};
+
+static
+BOOLEAN
+DdClipTarget(
+    _In_ const DdSurface* Target,
+    _In_ const RECT* To,
+    _Out_ DdClipPieces* Pieces)
+{
+    const RGNDATA* List = Target->Clipper != nullptr ? Target->Clipper->ClipList : nullptr;
+    const RECT* Rects;
+    DWORD Index;
+
+    Pieces->Rects = &Pieces->Whole;
+    Pieces->Count = 1;
+    Pieces->Whole = *To;
+    if (List == nullptr || Target->Clipper->Window != NULL)
+        return TRUE;
+
+    Pieces->Rects = new (std::nothrow) RECT[List->rdh.nCount != 0 ? List->rdh.nCount : 1];
+    if (Pieces->Rects == nullptr)
+        return FALSE;
+
+    Rects = reinterpret_cast<const RECT*>(List->Buffer);
+    Pieces->Count = 0;
+    for (Index = 0; Index < List->rdh.nCount; Index++)
+    {
+        if (IntersectRect(&Pieces->Rects[Pieces->Count], &Rects[Index], To))
+            Pieces->Count += 1;
+    }
+    return TRUE;
+}
+
+static
+VOID
+DdFreeClipPieces(
+    _Inout_ DdClipPieces* Pieces)
+{
+    if (Pieces->Rects != &Pieces->Whole)
+        delete[] Pieces->Rects;
+    Pieces->Rects = nullptr;
+}
+
+/* The source rectangle that lands on one piece of the target rectangle */
+static
+VOID
+DdSourceForPiece(
+    _In_ const RECT* To,
+    _In_ const RECT* From,
+    _In_ const RECT* Piece,
+    _Out_ RECT* Part)
+{
+    LONGLONG TargetWidth = To->right - To->left;
+    LONGLONG TargetHeight = To->bottom - To->top;
+    LONGLONG SourceWidth = From->right - From->left;
+    LONGLONG SourceHeight = From->bottom - From->top;
+
+    Part->left = From->left + static_cast<LONG>((Piece->left - To->left) * SourceWidth / TargetWidth);
+    Part->right = From->left + static_cast<LONG>((Piece->right - To->left) * SourceWidth / TargetWidth);
+    Part->top = From->top + static_cast<LONG>((Piece->top - To->top) * SourceHeight / TargetHeight);
+    Part->bottom = From->top + static_cast<LONG>((Piece->bottom - To->top) * SourceHeight / TargetHeight);
+}
+
 /* Hands a copy between two driver resources to the driver, keys and mirroring included */
 static
 HRESULT
@@ -289,6 +359,8 @@ DdDriverCopy(
 {
     DdHardware* Hardware = Target->Driver->Hardware;
     D3DDDIARG_BLT Blt = {};
+    DdClipPieces Pieces;
+    DWORD Index;
     HRESULT hr;
 
     Blt.hSrcResource = Source->Resource->DriverResource;
@@ -308,18 +380,6 @@ DdDriverCopy(
         Blt.Flags.SrcColorKey = TRUE;
         Blt.ColorKey = Source->SourceKey.dwColorSpaceLowValue;
     }
-    else if ((Flags & DDBLT_KEYDESTOVERRIDE) != 0)
-    {
-        Blt.Flags.DstColorKey = TRUE;
-        Blt.ColorKey = Fx->ddckDestColorkey.dwColorSpaceLowValue;
-    }
-    else if ((Flags & DDBLT_KEYDEST) != 0)
-    {
-        if ((Target->KeyFlags & DDCKEY_DESTBLT) == 0)
-            return DDERR_NOCOLORKEY;
-        Blt.Flags.DstColorKey = TRUE;
-        Blt.ColorKey = Target->DestKey.dwColorSpaceLowValue;
-    }
 
     if ((Flags & DDBLT_DDFX) != 0)
     {
@@ -334,7 +394,18 @@ DdDriverCopy(
     if ((Flags & (DDBLT_DDROPS | DDBLT_ROTATIONANGLE)) != 0)
         return DDERR_UNSUPPORTED;
 
-    hr = Hardware->DeviceFunctions.pfnBlt(Hardware->DriverDevice, &Blt);
+    if (!DdClipTarget(Target, To, &Pieces))
+        return E_OUTOFMEMORY;
+
+    hr = S_OK;
+    for (Index = 0; Index < Pieces.Count && SUCCEEDED(hr); Index++)
+    {
+        Blt.DstRect = Pieces.Rects[Index];
+        DdSourceForPiece(To, From, &Pieces.Rects[Index], &Blt.SrcRect);
+        hr = Hardware->DeviceFunctions.pfnBlt(Hardware->DriverDevice, &Blt);
+    }
+    DdFreeClipPieces(&Pieces);
+
     if (FAILED(hr))
     {
         DdTrace(L"UMD Blt failed 0x%08lX", hr);
@@ -352,15 +423,25 @@ DdFillSurface(
     _In_ const RECT* To,
     _In_ DWORD Value)
 {
+    DdClipPieces Pieces;
     BYTE* Bits;
+    DWORD Index;
     HRESULT hr;
 
+    if (Target->Format.dwRGBBitCount < 8)
+        return DDERR_UNSUPPORTED;
+    if (!DdClipTarget(Target, To, &Pieces))
+        return E_OUTOFMEMORY;
+
     hr = DdMapSurface(Target, FALSE, &Bits);
-    if (FAILED(hr))
-        return hr;
-    DdFillRect(Target, Bits, To, Value);
-    DdUnmapSurface(Target);
-    return S_OK;
+    if (SUCCEEDED(hr))
+    {
+        for (Index = 0; Index < Pieces.Count; Index++)
+            DdFillRect(Target, Bits, &Pieces.Rects[Index], Value);
+        DdUnmapSurface(Target);
+    }
+    DdFreeClipPieces(&Pieces);
+    return hr;
 }
 
 HRESULT
@@ -374,7 +455,9 @@ DdBlt(
 {
     BOOLEAN Primary = (Target->Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0;
     DdBlitJob Job = {};
+    DdClipPieces Pieces;
     DWORD Rop = SRCCOPY;
+    DWORD Index;
     HRESULT hr;
 
     if (Target == nullptr || (Flags & ~DdBltKnownFlags) != 0)
@@ -385,6 +468,12 @@ DdBlt(
     {
         return E_INVALIDARG;
     }
+
+    /* Neither the driver nor the emulation layer offers destination color keys */
+    if ((Flags & DDBLT_KEYDEST) != 0)
+        return E_INVALIDARG;
+    if ((Flags & DDBLT_KEYDESTOVERRIDE) != 0)
+        return DDERR_NOCOLORKEYHW;
 
     Job.Target = Target;
     if (TargetRect != nullptr)
@@ -411,7 +500,7 @@ DdBlt(
         {
             if (Primary)
                 return DdPresentToPrimary(Target, &Job.To, nullptr, nullptr, TRUE, Rop == BLACKNESS ? 0 : 0xFFFFFFFF);
-            return DdFillSurface(Target, &Job.To, Rop == BLACKNESS ? 0 : 0xFFFFFFFF);
+            return DdFillSurface(Target, &Job.To, Rop == BLACKNESS ? 0 : DdKeyMask(Target));
         }
         if (Rop != SRCCOPY)
             return DDERR_NORASTEROPHW;
@@ -439,12 +528,6 @@ DdBlt(
     {
         DD_TRACE_ONCE(L"blits that convert pixel formats are not implemented yet");
         return DDERR_UNSUPPORTED;
-    }
-
-    if ((Flags & DDBLT_KEYDEST) != 0 || (Flags & DDBLT_KEYDESTOVERRIDE) != 0)
-    {
-        DD_TRACE_ONCE(L"destination color keyed blits are not implemented yet");
-        return DDERR_NOCOLORKEYHW;
     }
 
     if ((Flags & DDBLT_KEYSRCOVERRIDE) != 0)
@@ -484,7 +567,12 @@ DdBlt(
         }
     }
 
-    DdCopyRect(Job);
+    if (DdClipTarget(Target, &Job.To, &Pieces))
+    {
+        for (Index = 0; Index < Pieces.Count; Index++)
+            DdCopyRect(Job, &Pieces.Rects[Index]);
+        DdFreeClipPieces(&Pieces);
+    }
 
     if (Source != Target)
         DdUnmapSurface(Source);
