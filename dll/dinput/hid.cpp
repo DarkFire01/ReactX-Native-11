@@ -35,6 +35,7 @@
 #define DI_HID_PAGE_PID         0x0F
 
 #define DI_PRIVATE_ROOT L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\DirectInput"
+#define DI_JOY_TYPE_ROOT L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM"
 
 /* Device instance flags remembered under DeviceInstances */
 #define DI_HID_SEEN_DESCRIBED   2
@@ -685,7 +686,141 @@ typedef struct _RX_DI_HID_START
     ULONG JoystickId;
     WCHAR Path[MAX_PATH * 2];
     WCHAR InstanceId[MAX_PATH];
+    USHORT VendorId;
+    USHORT ProductId;
 } RX_DI_HID_START;
+
+/* Copies the values of one key that the target does not have yet */
+static
+LONG
+DiCopyMissingValues(
+    _In_ HKEY From,
+    _In_ HKEY To)
+{
+    DWORD Count = 0;
+    DWORD Longest = 0;
+    PWSTR Name = nullptr;
+    PBYTE Data = nullptr;
+    DWORD Room = 0;
+    LONG Error;
+
+    Error = RegQueryInfoKeyW(From, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &Count, &Longest, nullptr, nullptr, nullptr);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+    if (Longest >= 0x4000 || FAILED(DiAllocate(sizeof(WCHAR) * (Longest + 1), reinterpret_cast<PVOID*>(&Name))))
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    for (DWORD Index = 0; Index < Count; Index++)
+    {
+        DWORD NameLength = Longest + 1;
+        DWORD Present = 0;
+        DWORD Type = 0;
+        DWORD Size = 0;
+
+        Error = RegEnumValueW(From, Index, Name, &NameLength, nullptr, nullptr, nullptr, nullptr);
+        if (Error != ERROR_SUCCESS)
+            break;
+
+        /* Values the user already has win */
+        Error = RegQueryValueExW(To, Name, nullptr, nullptr, nullptr, &Present);
+        if (Error == ERROR_SUCCESS || Error == ERROR_MORE_DATA)
+        {
+            Error = ERROR_SUCCESS;
+            continue;
+        }
+
+        Error = RegQueryValueExW(From, Name, nullptr, &Type, nullptr, &Size);
+        if (Error != ERROR_SUCCESS)
+            break;
+        if (Size > Room)
+        {
+            DiFree(reinterpret_cast<PVOID*>(&Data));
+            if (FAILED(DiAllocate(Size, reinterpret_cast<PVOID*>(&Data))))
+            {
+                Error = ERROR_NOT_ENOUGH_MEMORY;
+                break;
+            }
+            Room = Size;
+        }
+
+        Error = RegQueryValueExW(From, Name, nullptr, &Type, Data, &Size);
+        if (Error == ERROR_SUCCESS)
+            Error = RegSetValueExW(To, Name, 0, Type, Data, Size);
+        if (Error != ERROR_SUCCESS)
+            break;
+    }
+
+    DiFree(reinterpret_cast<PVOID*>(&Name));
+    DiFree(reinterpret_cast<PVOID*>(&Data));
+    return Error;
+}
+
+/* Copies a key's subkeys, then its own values, stopping at the first failure */
+static
+LONG
+DiCopyKeyTree(
+    _In_ HKEY From,
+    _In_ HKEY To)
+{
+    WCHAR Name[256];
+    DWORD Count = 0;
+    LONG Error;
+
+    Error = RegQueryInfoKeyW(From, nullptr, nullptr, nullptr, &Count, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    for (DWORD Index = 0; Index < Count; Index++)
+    {
+        HKEY Target = nullptr;
+        HKEY Source = nullptr;
+
+        Error = RegEnumKeyW(From, Index, Name, _countof(Name));
+        if (Error == ERROR_SUCCESS)
+            Error = RegCreateKeyExW(To, Name, 0, nullptr, 0, MAXIMUM_ALLOWED, nullptr, &Target, nullptr);
+        if (Error != ERROR_SUCCESS)
+            return Error;
+
+        Error = RegOpenKeyExW(From, Name, 0, MAXIMUM_ALLOWED, &Source);
+        if (Error == ERROR_SUCCESS)
+        {
+            Error = DiCopyKeyTree(Source, Target);
+            RegCloseKey(Source);
+        }
+        RegCloseKey(Target);
+        if (Error != ERROR_SUCCESS)
+            return Error;
+    }
+
+    return DiCopyMissingValues(From, To);
+}
+
+/* Settings an installer put under HKLM for a device type follow the user into HKCU */
+static
+VOID
+DiCopyMachineType(
+    _In_ USHORT VendorId,
+    _In_ USHORT ProductId)
+{
+    WCHAR Path[MAX_PATH];
+    HKEY Machine = nullptr;
+    HKEY User = nullptr;
+
+    if (FAILED(StringCchPrintfW(Path, _countof(Path), DI_JOY_TYPE_ROOT L"\\VID_%04X&PID_%04X", VendorId, ProductId)))
+        return;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, MAXIMUM_ALLOWED, &Machine) == ERROR_SUCCESS &&
+        RegCreateKeyExW(HKEY_CURRENT_USER, Path, 0, nullptr, 0, MAXIMUM_ALLOWED, nullptr, &User, nullptr) == ERROR_SUCCESS)
+    {
+        if (DiCopyKeyTree(Machine, User) == ERROR_SUCCESS)
+            DiTrace(L"copied joystick type VID_%04X&PID_%04X to the user", VendorId, ProductId);
+    }
+
+    if (User != nullptr)
+        RegCloseKey(User);
+    if (Machine != nullptr)
+        RegCloseKey(Machine);
+}
 
 static
 BOOLEAN
@@ -702,6 +837,8 @@ DiHidLookup(
     {
         Start->DevType = Entry->DevType;
         Start->JoystickId = Entry->JoystickId;
+        Start->VendorId = Entry->VendorId;
+        Start->ProductId = Entry->ProductId;
         StringCchCopyW(Start->Path, _countof(Start->Path), Entry->Detail->DevicePath);
         StringCchCopyW(Start->InstanceId, _countof(Start->InstanceId), Entry->InstanceId);
         Found = TRUE;
@@ -777,6 +914,7 @@ public:
 
         if (!DiHidLookup(Instance, &Start))
             return DIERR_DEVICENOTREG;
+        DiCopyMachineType(Start.VendorId, Start.ProductId);
 
         DevType = Start.DevType;
         File = OpenDevice(FILE_FLAG_OVERLAPPED);
@@ -1192,6 +1330,7 @@ private:
         StringCchPrintfW(Type, _countof(Type), L"VID_%04X&PID_%04X", VendorId, ProductId);
         DiOpenJoyTypeKey(Type, MAXIMUM_ALLOWED, &TypeKey);
     }
+
 
     /* The type key can mark objects as actuators or triggers and override their aspect */
     VOID
