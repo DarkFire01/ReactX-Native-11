@@ -655,13 +655,47 @@ DdChargeFor(
     return Row * Surface->Height;
 }
 
+/* Asks the driver for a resource of one level; the newer entry point when the interface has it */
+static
+HRESULT
+DdDriverCreateResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdResource* Resource,
+    _In_ const D3DDDI_SURFACEINFO* Level)
+{
+    const D3DDDI_DEVICEFUNCS& Funcs = Hardware->DeviceFunctions;
+    D3DDDIARG_CREATERESOURCE2 Create = {};
+    HRESULT hr;
+
+    Create.Format = Resource->Format;
+    Create.Pool = Resource->Pool;
+    Create.pSurfList = Level;
+    Create.SurfCount = Resource->SurfaceCount;
+    Create.MipLevels = Resource->MipLevels;
+    Create.hResource = Resource;
+    Create.Flags = Resource->Flags;
+    Create.Rotation = D3DDDI_ROTATION_IDENTITY;
+
+    if (Hardware->DriverVersion > DdAlwaysCreateResource2Version ||
+        (Funcs.pfnCreateResource2 != nullptr && Hardware->DriverVersion >= DdCreateResource2Version))
+    {
+        hr = Funcs.pfnCreateResource2(Hardware->DriverDevice, &Create);
+    }
+    else
+    {
+        hr = Funcs.pfnCreateResource(Hardware->DriverDevice, reinterpret_cast<D3DDDIARG_CREATERESOURCE*>(&Create));
+    }
+
+    if (SUCCEEDED(hr))
+        Resource->DriverResource = Create.hResource;
+    return hr;
+}
+
 HRESULT
 DdCreateSurfaceResource(
     _In_ DdHardware* Hardware,
     _Inout_ DdSurface* Surface)
 {
-    const D3DDDI_DEVICEFUNCS& Funcs = Hardware->DeviceFunctions;
-    D3DDDIARG_CREATERESOURCE2 Create = {};
     D3DDDI_SURFACEINFO Level = {};
     DdResource* Resource;
     ULONGLONG Charge;
@@ -709,25 +743,7 @@ DdCreateSurfaceResource(
     Level.Width = Surface->Width;
     Level.Height = Surface->Height;
 
-    Create.Format = Resource->Format;
-    Create.Pool = Resource->Pool;
-    Create.pSurfList = &Level;
-    Create.SurfCount = Resource->SurfaceCount;
-    Create.MipLevels = Resource->MipLevels;
-    Create.hResource = Resource;
-    Create.Flags = Resource->Flags;
-    Create.Rotation = D3DDDI_ROTATION_IDENTITY;
-
-    if (Hardware->DriverVersion > DdAlwaysCreateResource2Version ||
-        (Funcs.pfnCreateResource2 != nullptr && Hardware->DriverVersion >= DdCreateResource2Version))
-    {
-        hr = Funcs.pfnCreateResource2(Hardware->DriverDevice, &Create);
-    }
-    else
-    {
-        hr = Funcs.pfnCreateResource(Hardware->DriverDevice, reinterpret_cast<D3DDDIARG_CREATERESOURCE*>(&Create));
-    }
-
+    hr = DdDriverCreateResource(Hardware, Resource, &Level);
     if (FAILED(hr))
     {
         DdTrace(L"UMD CreateResource failed 0x%08lX for a %lux%lu surface of format %u", hr, Surface->Width,
@@ -736,7 +752,6 @@ DdCreateSurfaceResource(
         return hr;
     }
 
-    Resource->DriverResource = Create.hResource;
     if (Resource->DriverResource != NULL)
     {
         Resource->Charged = static_cast<UINT>(Charge);
@@ -836,4 +851,83 @@ DdUnlockSurfaceResource(
     if (FAILED(hr))
         DdTrace(L"UMD Unlock failed 0x%08lX", hr);
     return hr;
+}
+
+/* A driver resource over a system memory surface's own pixels, made the first time the driver must touch them */
+HRESULT
+DdCreateSystemResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface)
+{
+    D3DDDI_SURFACEINFO Level = {};
+    DdResource* Resource;
+    HRESULT hr;
+
+    if (Surface->SystemResource != nullptr)
+        return S_OK;
+    if (!DdDriverCanCreate(Hardware, &Surface->Caps, &Surface->Format))
+        return E_FAIL;
+
+    Resource = new (std::nothrow) DdResource;
+    if (Resource == nullptr)
+        return E_OUTOFMEMORY;
+    ZeroMemory(Resource, sizeof(*Resource));
+
+    Resource->Format = DdDriverFormat(&Surface->Format);
+    Resource->Pool = D3DDDIPOOL_SYSTEMMEM;
+    Resource->Flags = DdDriverFlags(&Surface->Caps);
+    Resource->SurfaceCount = 1;
+
+    Level.Width = Surface->Width;
+    Level.Height = Surface->Height;
+    Level.pSysMem = Surface->Bits;
+    Level.SysMemPitch = static_cast<UINT>(Surface->Pitch);
+
+    hr = DdDriverCreateResource(Hardware, Resource, &Level);
+    if (FAILED(hr) || Resource->DriverResource == NULL)
+    {
+        DdTrace(L"UMD CreateResource failed 0x%08lX over a %lux%lu system memory surface", hr, Surface->Width,
+                Surface->Height);
+        delete Resource;
+        return E_FAIL;
+    }
+
+    Surface->SystemResource = Resource;
+    return S_OK;
+}
+
+VOID
+DdDestroySystemResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface)
+{
+    DdResource* Resource = Surface->SystemResource;
+
+    if (Resource == nullptr)
+        return;
+
+    DdWaitForDriver(Hardware, Surface);
+    Hardware->DeviceFunctions.pfnDestroyResource(Hardware->DriverDevice, Resource->DriverResource);
+    delete Resource;
+    Surface->SystemResource = nullptr;
+}
+
+/* A driver lock waits for the copies queued on a system memory surface; nothing else does */
+VOID
+DdWaitForDriver(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface)
+{
+    D3DDDIARG_UNLOCK Unlock = {};
+    D3DDDIARG_LOCK Lock = {};
+
+    if (!Surface->DriverPending || Surface->SystemResource == nullptr)
+        return;
+
+    Surface->DriverPending = FALSE;
+    Lock.hResource = Surface->SystemResource->DriverResource;
+    if (FAILED(Hardware->DeviceFunctions.pfnLock(Hardware->DriverDevice, &Lock)))
+        return;
+    Unlock.hResource = Lock.hResource;
+    Hardware->DeviceFunctions.pfnUnlock(Hardware->DriverDevice, &Unlock);
 }

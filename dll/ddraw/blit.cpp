@@ -346,6 +346,16 @@ DdSourceForPiece(
     Part->bottom = From->top + static_cast<LONG>((Piece->bottom - To->top) * SourceHeight / TargetHeight);
 }
 
+static
+HANDLE
+DdDriverHandle(
+    _In_ const DdSurface* Surface)
+{
+    if (Surface->Resource != nullptr)
+        return Surface->Resource->DriverResource;
+    return Surface->SystemResource->DriverResource;
+}
+
 /* Hands a copy between two driver resources to the driver, keys and mirroring included */
 static
 HRESULT
@@ -363,9 +373,9 @@ DdDriverCopy(
     DWORD Index;
     HRESULT hr;
 
-    Blt.hSrcResource = Source->Resource->DriverResource;
+    Blt.hSrcResource = DdDriverHandle(Source);
     Blt.SrcRect = *From;
-    Blt.hDstResource = Target->Resource->DriverResource;
+    Blt.hDstResource = DdDriverHandle(Target);
     Blt.DstRect = *To;
 
     if ((Flags & DDBLT_KEYSRCOVERRIDE) != 0)
@@ -412,8 +422,48 @@ DdDriverCopy(
         return hr;
     }
 
+    if (Target->SystemResource != nullptr)
+        Target->DriverPending = TRUE;
+    if (Source->SystemResource != nullptr)
+        Source->DriverPending = TRUE;
     Target->Uniqueness += 1;
     return S_OK;
+}
+
+/* The driver only promises plain same size copies across the bus; anything more is emulated */
+static
+BOOLEAN
+DdDriverTakesBusCopy(
+    _In_ DWORD Flags,
+    _In_opt_ const DDBLTFX* Fx,
+    _In_ const RECT* To,
+    _In_ const RECT* From)
+{
+    if ((Flags & (DDBLT_KEYSRC | DDBLT_KEYSRCOVERRIDE | DDBLT_DDFX | DDBLT_DDROPS | DDBLT_ROTATIONANGLE)) != 0)
+        return FALSE;
+    if ((Flags & DDBLT_ROP) != 0 && Fx->dwROP != SRCCOPY)
+        return FALSE;
+    return To->right - To->left == From->right - From->left && To->bottom - To->top == From->bottom - From->top;
+}
+
+/* A copy between video and system memory, after the system memory side gets its driver resource */
+static
+HRESULT
+DdBusCopy(
+    _In_ DdSurface* Target,
+    _In_ const RECT* To,
+    _In_ DdSurface* Source,
+    _In_ const RECT* From,
+    _In_ DWORD Flags,
+    _In_opt_ const DDBLTFX* Fx)
+{
+    DdSurface* System = Target->Resource == nullptr ? Target : Source;
+    HRESULT hr;
+
+    hr = DdCreateSystemResource(Target->Driver->Hardware, System);
+    if (FAILED(hr))
+        return E_FAIL;
+    return DdDriverCopy(Target, To, Source, From, Flags, Fx);
 }
 
 static
@@ -523,6 +573,11 @@ DdBlt(
     /* Copies between driver resources are the driver's work */
     if (Target->Resource != nullptr && Source->Resource != nullptr)
         return DdDriverCopy(Target, &Job.To, Source, &Job.From, Flags, Fx);
+    if ((Target->Resource != nullptr) != (Source->Resource != nullptr) &&
+        DdDriverTakesBusCopy(Flags, Fx, &Job.To, &Job.From))
+    {
+        return DdBusCopy(Target, &Job.To, Source, &Job.From, Flags, Fx);
+    }
 
     if (Source->Format.dwRGBBitCount != Target->Format.dwRGBBitCount || Target->Format.dwRGBBitCount < 8)
     {

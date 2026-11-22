@@ -291,6 +291,8 @@ struct DdSurface
     BYTE* Bits;
     HANDLE Section;
     DdResource* Resource;
+    DdResource* SystemResource;
+    BOOLEAN DriverPending;
     DWORD KeyFlags;
     DDCOLORKEY SourceKey;
     DDCOLORKEY DestKey;
@@ -490,6 +492,21 @@ DdLockSurfaceResource(
 
 HRESULT
 DdUnlockSurfaceResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface);
+
+HRESULT
+DdCreateSystemResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface);
+
+VOID
+DdDestroySystemResource(
+    _In_ DdHardware* Hardware,
+    _Inout_ DdSurface* Surface);
+
+VOID
+DdWaitForDriver(
     _In_ DdHardware* Hardware,
     _Inout_ DdSurface* Surface);
 

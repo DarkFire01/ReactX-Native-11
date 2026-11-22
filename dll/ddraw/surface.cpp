@@ -180,6 +180,8 @@ DdFreeSurfaceMemory(
 {
     if (Surface->Resource != nullptr)
         DdDestroySurfaceResource(Surface->Driver->Hardware, Surface);
+    if (Surface->SystemResource != nullptr)
+        DdDestroySystemResource(Surface->Driver->Hardware, Surface);
     if (Surface->Bits != nullptr)
         UnmapViewOfFile(Surface->Bits);
     if (Surface->Section != NULL)
@@ -645,6 +647,7 @@ DdLockSurface(
     }
     else
     {
+        DdWaitForDriver(Surface->Driver->Hardware, Surface);
         Rows = Rect != nullptr ? Rect : &Whole;
         Bits = Surface->Bits + Rows->top * Surface->Pitch + (Rows->left * Surface->Format.dwRGBBitCount) / 8;
     }
@@ -697,6 +700,7 @@ DdMapSurface(
 {
     if (Surface->Resource == nullptr)
     {
+        DdWaitForDriver(Surface->Driver->Hardware, Surface);
         *Bits = Surface->Bits;
         return S_OK;
     }
@@ -1080,9 +1084,14 @@ DdSurfaceGetDC(
         return DDERR_CANTCREATEDC;
 
     if (Surface->Resource != nullptr)
+    {
         hr = DdCreateResourceDc(Surface);
+    }
     else
+    {
+        DdWaitForDriver(Surface->Driver->Hardware, Surface);
         hr = DdCreateSectionDc(Surface);
+    }
     if (FAILED(hr))
         return hr;
 
