@@ -9,6 +9,34 @@
 
 static const GUID* DcDataDevices[] = { &GUID_SysKeyboard, &GUID_SysMouse, &GUID_SysKeyboardEm2, &GUID_SysMouseEm2 };
 
+/* The system devices and every HID device, for the checks that only read or set per process state */
+static
+const std::vector<const GUID*>&
+DcReadDevices(VOID)
+{
+    static std::vector<GUID> Hid;
+    static std::vector<const GUID*> List;
+
+    if (!List.empty())
+        return List;
+    for (const GUID* Guid : DcDataDevices)
+        List.push_back(Guid);
+
+    IDirectInput8W* Wide = DcCreateWide();
+
+    if (Wide == nullptr)
+        return List;
+    Wide->EnumDevices(DI8DEVCLASS_ALL | DIDEVTYPE_HID, [](LPCDIDEVICEINSTANCEW Info, VOID* Context) -> BOOL
+    {
+        static_cast<std::vector<GUID>*>(Context)->push_back(Info->guidInstance);
+        return DIENUM_CONTINUE;
+    }, &Hid, DIEDFL_ALLDEVICES);
+    Wide->Release();
+    for (const GUID& Guid : Hid)
+        List.push_back(&Guid);
+    return List;
+}
+
 static
 VOID
 DcPrintObjectW(
@@ -100,7 +128,7 @@ DcCheckObjects(VOID)
 
     if (Wide == nullptr || Ansi == nullptr)
         return;
-    for (const GUID* Guid : DcDataDevices)
+    for (const GUID* Guid : DcReadDevices())
     {
         IDirectInputDevice8W* Device = DcOpen(Wide, Guid);
         IDirectInputDevice8A* DeviceA = nullptr;
@@ -258,7 +286,7 @@ DcCheckFormats(VOID)
 
     if (Wide == nullptr)
         return;
-    for (const GUID* Guid : DcDataDevices)
+    for (const GUID* Guid : DcReadDevices())
     {
         IDirectInputDevice8W* Device = DcOpen(Wide, Guid);
         DIDATAFORMAT Format;
@@ -351,7 +379,7 @@ DcCheckCooperation(VOID)
         return;
     Child = CreateWindowExW(0, L"STATIC", L"child", WS_CHILD, 0, 0, 4, 4, DcWindow, nullptr, GetModuleHandleW(nullptr),
                             nullptr);
-    for (const GUID* Guid : DcDataDevices)
+    for (const GUID* Guid : DcReadDevices())
     {
         IDirectInputDevice8W* Device = DcOpen(Wide, Guid);
 
@@ -394,7 +422,7 @@ DcCheckAcquire(VOID)
 
     if (Wide == nullptr)
         return;
-    for (const GUID* Guid : DcDataDevices)
+    for (const GUID* Guid : DcReadDevices())
     {
         IDirectInputDevice8W* Device = DcOpen(Wide, Guid);
         BOOLEAN Keyboard = IsEqualGUID(*Guid, GUID_SysKeyboard) || IsEqualGUID(*Guid, GUID_SysKeyboardEm2);
