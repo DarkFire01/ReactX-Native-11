@@ -34,6 +34,9 @@
 /* Physical interface device page, which describes force feedback effects */
 #define DI_HID_PAGE_PID         0x0F
 
+/* Head tracker flag in a joystick type's hardware settings, newer than the headers */
+#define DI_JOY_HWS_HEADTRACKER  0x02000000
+
 #define DI_PRIVATE_ROOT L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\DirectInput"
 #define DI_JOY_TYPE_ROOT L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM"
 
@@ -947,6 +950,7 @@ public:
         if (FAILED(hr))
             return hr;
         ApplyTypeAttributes();
+        ApplyTypeKind();
 
         Source.State = State;
         Source.Types = nullptr;
@@ -1331,6 +1335,31 @@ private:
         DiOpenJoyTypeKey(Type, MAXIMUM_ALLOWED, &TypeKey);
     }
 
+    /* The joystick type settings say what kind of stick a HID joystick is */
+    VOID
+    ApplyTypeKind(VOID)
+    {
+        JOYREGHWSETTINGS Settings = {};
+        UCHAR Kind;
+
+        if (LOBYTE(DevType) != DIDEVTYPE_JOYSTICK)
+            return;
+        if (TypeKey != nullptr)
+            DiReadValue(TypeKey, L"OEMData", &Settings, sizeof(Settings));
+
+        if (Settings.dwFlags & JOY_HWS_ISYOKE)
+            Kind = DIDEVTYPEJOYSTICK_FLIGHTSTICK;
+        else if (Settings.dwFlags & JOY_HWS_ISGAMEPAD)
+            Kind = DIDEVTYPEJOYSTICK_GAMEPAD;
+        else if (Settings.dwFlags & JOY_HWS_ISCARCTRL)
+            Kind = DIDEVTYPEJOYSTICK_WHEEL;
+        else if (Settings.dwFlags & DI_JOY_HWS_HEADTRACKER)
+            Kind = DIDEVTYPEJOYSTICK_HEADTRACKER;
+        else
+            return;
+
+        DevType = DIDEVTYPE_HID | MAKEWORD(DIDEVTYPE_JOYSTICK, Kind);
+    }
 
     /* The type key can mark objects as actuators or triggers and override their aspect */
     VOID
