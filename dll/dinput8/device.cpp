@@ -96,8 +96,6 @@ DiDevice::Reset(VOID)
     if (Event != nullptr)
         CloseHandle(Event);
     Event = nullptr;
-    if (Emulation != nullptr)
-        DiEmRelease(Emulation);
     Emulation = nullptr;
     delete Backend;
     Backend = nullptr;
