@@ -1,8 +1,10 @@
 nt_add_usermode_dll(dinput8
     DEF dinput8.def
     SOURCES
+        actionmap.cpp
         apps.cpp
         devdata.cpp
+        devmap.cpp
         device.cpp
         devprop.cpp
         dinput.cpp

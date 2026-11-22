@@ -80,7 +80,8 @@ DiSharedClose(VOID);
 
 VOID
 DiRegisterApplication(
-    _In_ DWORD Version);
+    _In_ DWORD Version,
+    _In_ BOOLEAN UsesMapper);
 
 HRESULT
 DiLaunchControlPanel(
@@ -356,6 +357,20 @@ public:
     RunControlPanel(
         _In_opt_ HWND Window,
         _In_ DWORD Flags) = 0;
+
+    /* Maps the actions no stored map covered to the device's own idea of them */
+    virtual
+    HRESULT
+    BuildDefaultActionMap(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_ DWORD Flags,
+        _In_ REFGUID Instance)
+    {
+        UNREFERENCED_PARAMETER(Format);
+        UNREFERENCED_PARAMETER(Flags);
+        UNREFERENCED_PARAMETER(Instance);
+        return E_NOTIMPL;
+    }
 };
 
 typedef

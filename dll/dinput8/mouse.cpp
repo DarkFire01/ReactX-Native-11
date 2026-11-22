@@ -6,6 +6,7 @@
  */
 
 #include "input.hpp"
+#include "actionmap.hpp"
 
 /* The mouse layout: three axes, then up to eight buttons */
 #define DI_MOUSE_DATA_SIZE          20
@@ -203,6 +204,16 @@ public:
         UNREFERENCED_PARAMETER(Owner);
         UNREFERENCED_PARAMETER(Flags);
         return DiLaunchControlPanel(L"mouse");
+    }
+
+    HRESULT
+    BuildDefaultActionMap(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_ DWORD Flags,
+        _In_ REFGUID Device) override
+    {
+        UNREFERENCED_PARAMETER(Flags);
+        return DiBuildSystemDefaultMap(Format, DI_SEMANTIC_MOUSE, Device, &NativeFormat, DI_MOUSE_AXES);
     }
 
     HRESULT

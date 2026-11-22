@@ -290,7 +290,7 @@ DiCreateHelper(
     Result = DiCreateInput(Outer, Outer != nullptr ? IID_IUnknown : Riid, reinterpret_cast<VOID**>(&Created));
     if (FAILED(Result))
         return Result;
-    DiRegisterApplication(Version);
+    DiRegisterApplication(Version, FALSE);
     if (Outer != nullptr)
         return Result;
 

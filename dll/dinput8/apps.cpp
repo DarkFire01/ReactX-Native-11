@@ -112,7 +112,8 @@ DiReadAppHacks(
 
 VOID
 DiRegisterApplication(
-    _In_ DWORD Version)
+    _In_ DWORD Version,
+    _In_ BOOLEAN UsesMapper)
 {
     WCHAR Module[MAX_PATH];
     WCHAR FullPath[MAX_PATH];
@@ -121,7 +122,7 @@ DiRegisterApplication(
     HKEY Base = nullptr;
     HKEY Key = nullptr;
     DWORD State = DiAppNone;
-    DWORD UsesMapper = 0;
+    DWORD Mapper = UsesMapper ? 1 : 0;
     DWORD Size;
 
     if (DiLastNotice == DiAppMapper)
@@ -174,7 +175,7 @@ DiRegisterApplication(
         }
         else if (Stored != 0)
         {
-            UsesMapper = 1;
+            Mapper = 1;
             State = DiAppMapper;
         }
         else
@@ -185,7 +186,7 @@ DiRegisterApplication(
         Key = nullptr;
     }
 
-    if (State == DiAppNew || (State == DiAppKnown && UsesMapper != 0))
+    if (State == DiAppNew || (State == DiAppKnown && Mapper != 0))
     {
         if (FAILED(DiOpenWritableKey(Base, Id, &Key)))
         {
@@ -193,15 +194,15 @@ DiRegisterApplication(
             goto Close;
         }
         DiSetString(Key, L"Name", FileName);
-        RegSetValueExW(Key, L"UsesMapper", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&UsesMapper), sizeof(UsesMapper));
+        RegSetValueExW(Key, L"UsesMapper", 0, REG_BINARY, reinterpret_cast<const BYTE*>(&Mapper), sizeof(Mapper));
         RegCloseKey(Key);
         Key = nullptr;
-        if (UsesMapper != 0)
+        if (Mapper != 0)
             State = DiAppMapper;
     }
 
     if (DiLastNotice == State ||
-        FAILED(DiOpenWritableKey(Base, UsesMapper ? L"MostRecentMapperApplication" : L"MostRecentApplication", &Key)))
+        FAILED(DiOpenWritableKey(Base, Mapper ? L"MostRecentMapperApplication" : L"MostRecentApplication", &Key)))
     {
         State = DiAppNone;
     }

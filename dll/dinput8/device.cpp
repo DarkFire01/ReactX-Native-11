@@ -28,6 +28,7 @@ DiDevice::DiDevice(
     Emulation = nullptr;
     Instance = GUID_NULL;
     Version = 0;
+    DevType = 0;
     CapsFlags = 0;
     Flags = 0;
     Window = nullptr;
@@ -107,6 +108,7 @@ DiDevice::Reset(VOID)
     AxisOffsets = nullptr;
     Baseline = nullptr;
     AxisCount = 0;
+    DevType = 0;
     CapsFlags = 0;
     Flags = 0;
     Window = nullptr;
@@ -189,6 +191,7 @@ DiDevice::Initialize(
         goto Exit;
     }
     PolledResult = (Caps.dwFlags & DIDC_POLLEDDEVICE) ? DI_POLLEDDEVICE : DI_OK;
+    DevType = Caps.dwDevType;
     CapsFlags = Emulation != nullptr && (Emulation->Flags & DI_EM_ACTIVE) ? DIDC_EMULATED : 0;
     Instance = Guid;
     Version = NewVersion;
@@ -654,78 +657,6 @@ DiDevice::Escape(
     if (Backend == nullptr)
         return DIERR_NOTINITIALIZED;
     return DIERR_UNSUPPORTED;
-}
-
-/* Action mapping */
-
-STDMETHODIMP
-DiDevice::BuildActionMap(
-    _Inout_ LPDIACTIONFORMATW Format,
-    _In_opt_z_ LPCWSTR UserName,
-    _In_ DWORD MapFlags)
-{
-    UNREFERENCED_PARAMETER(Format);
-    UNREFERENCED_PARAMETER(UserName);
-    UNREFERENCED_PARAMETER(MapFlags);
-    DI_TRACE_ONCE(L"BuildActionMap is not implemented");
-    return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::BuildActionMap(
-    _Inout_ LPDIACTIONFORMATA Format,
-    _In_opt_z_ LPCSTR UserName,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(Format);
-    UNREFERENCED_PARAMETER(UserName);
-    UNREFERENCED_PARAMETER(Flags);
-    DI_TRACE_ONCE(L"BuildActionMap is not implemented");
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
-}
-
-STDMETHODIMP
-DiDevice::SetActionMap(
-    _In_ LPDIACTIONFORMATW Format,
-    _In_opt_z_ LPCWSTR UserName,
-    _In_ DWORD MapFlags)
-{
-    UNREFERENCED_PARAMETER(Format);
-    UNREFERENCED_PARAMETER(UserName);
-    UNREFERENCED_PARAMETER(MapFlags);
-    DI_TRACE_ONCE(L"SetActionMap is not implemented");
-    return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::SetActionMap(
-    _In_ LPDIACTIONFORMATA Format,
-    _In_opt_z_ LPCSTR UserName,
-    _In_ DWORD Flags)
-{
-    UNREFERENCED_PARAMETER(Format);
-    UNREFERENCED_PARAMETER(UserName);
-    UNREFERENCED_PARAMETER(Flags);
-    DI_TRACE_ONCE(L"SetActionMap is not implemented");
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
-}
-
-STDMETHODIMP
-DiDevice::GetImageInfo(
-    _Inout_ LPDIDEVICEIMAGEINFOHEADERW Header)
-{
-    UNREFERENCED_PARAMETER(Header);
-    DI_TRACE_ONCE(L"GetImageInfo is not implemented");
-    return Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::GetImageInfo(
-    _Inout_ LPDIDEVICEIMAGEINFOHEADERA Header)
-{
-    UNREFERENCED_PARAMETER(Header);
-    DI_TRACE_ONCE(L"GetImageInfo is not implemented");
-    return Owner->Backend == nullptr ? DIERR_NOTINITIALIZED : E_NOTIMPL;
 }
 
 HRESULT

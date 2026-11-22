@@ -6,6 +6,7 @@
  */
 
 #include "device.hpp"
+#include "actionmap.hpp"
 
 /* Where a property may be used */
 #define DI_PF_OBJECT_ONLY       0x01
@@ -231,8 +232,7 @@ DiDevice::DefaultGetProperty(
             }
             break;
         case 25:
-            reinterpret_cast<LPDIPROPSTRING>(Header)->wsz[0] = L'\0';
-            return S_FALSE;
+            return DiGetDeviceUser(Instance, reinterpret_cast<LPDIPROPSTRING>(Header)->wsz);
         case DI_PROP_MAX_BUFFER:
             Value->dwData = MaxBufferSize;
             return DI_OK;

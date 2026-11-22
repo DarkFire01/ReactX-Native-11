@@ -270,6 +270,7 @@ public:
     DI_EM_INSTANCE* Emulation;
     GUID Instance;
     DWORD Version;
+    DWORD DevType;
     DWORD CapsFlags;
     DWORD Flags;
     HWND Window;
@@ -537,6 +538,39 @@ private:
         _In_ DWORD Object,
         _In_ DWORD How,
         _Inout_ LPDIDEVICEOBJECTINSTANCEW Info);
+
+    BOOLEAN
+    HasTypeKey(VOID);
+
+    HRESULT
+    CheckDeviceMap(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_ BOOLEAN TakeAppMapped,
+        _Out_ DWORD* Comms);
+
+    HRESULT
+    BuildMapCore(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_ DWORD MapFlags);
+
+    HRESULT
+    SetMapCore(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_opt_z_ PCSTR AnsiUser,
+        _In_opt_z_ PCWSTR WideUser,
+        _In_ DWORD MapFlags);
+
+    HRESULT
+    ParseMapFormat(
+        _In_ LPCDIACTIONFORMATW Format);
+
+    HRESULT
+    ApplyMapFormat(
+        _In_ LPCDIACTIONFORMATW Format);
+
+    HRESULT
+    GetImageInfoCore(
+        _Inout_ LPDIDEVICEIMAGEINFOHEADERW Header);
 
     friend class AnsiFace;
 };

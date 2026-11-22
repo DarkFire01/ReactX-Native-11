@@ -7,6 +7,7 @@
 
 #include "keyboard.hpp"
 #include "input.hpp"
+#include "actionmap.hpp"
 
 #include <stdlib.h>
 
@@ -281,6 +282,16 @@ public:
         UNREFERENCED_PARAMETER(Window);
         UNREFERENCED_PARAMETER(Flags);
         return DiLaunchControlPanel(L"keyboard");
+    }
+
+    HRESULT
+    BuildDefaultActionMap(
+        _Inout_ LPDIACTIONFORMATW Format,
+        _In_ DWORD Flags,
+        _In_ REFGUID Device) override
+    {
+        UNREFERENCED_PARAMETER(Flags);
+        return DiBuildSystemDefaultMap(Format, DI_SEMANTIC_KEYBOARD, Device, &NativeFormat, 0);
     }
 
     HRESULT
