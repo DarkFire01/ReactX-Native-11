@@ -248,6 +248,32 @@ public:
         return nullptr;
     }
 
+    /* The joystick configuration lives in a helper aggregated into this object on first use */
+    HRESULT
+    QueryExtra(
+        _In_ REFIID Riid,
+        _Outptr_ VOID** Object) override
+    {
+        HRESULT Result = S_OK;
+
+        *Object = nullptr;
+        if (!IsEqualIID(Riid, IID_IDirectInputJoyConfig8))
+            return E_NOINTERFACE;
+        EnterCriticalSection(&Lock);
+        if (JoyConfig == nullptr)
+        {
+            IUnknown* Created = nullptr;
+
+            Result = DiCreateJoyConfig(Controller, &Created);
+            if (SUCCEEDED(Result))
+                JoyConfig = Created;
+        }
+        LeaveCriticalSection(&Lock);
+        if (FAILED(Result))
+            return Result;
+        return JoyConfig->QueryInterface(Riid, Object);
+    }
+
     HRESULT
     CreateDeviceCore(
         _In_ REFGUID Guid,

@@ -85,6 +85,12 @@ HRESULT
 DiLaunchControlPanel(
     _In_z_ PCWSTR Applet);
 
+/* The IDirectInputJoyConfig8 helper shared with DirectInput 7, aggregated into Outer */
+HRESULT
+DiCreateJoyConfig(
+    _In_ IUnknown* Outer,
+    _Outptr_ IUnknown** Inner);
+
 /* Records an exclusive owner in the section every process shares */
 HRESULT
 DiAcquireExclusive(
