@@ -95,6 +95,54 @@ struct NineLockRange
     UINT Size;
 };
 
+/* A surface as the Direct3D 12 present recording takes it */
+struct NinePresentPlane
+{
+    ID3D12Resource* Resource;
+    UINT Subresource;
+};
+
+/* State Direct3D 12 keeps between recording a present and submitting it */
+struct NinePresentRecord
+{
+    BYTE Opaque[1060];
+    UINT Initialized;
+    BYTE Reserved[12];
+    UINT VidPnSourceId;
+};
+static_assert(sizeof(NinePresentRecord) == 1080, "Direct3D 12 fills 1080 bytes of present record");
+
+/* Present models the recording takes */
+static constexpr UINT NinePresentModelFlip = 2;
+static constexpr UINT NinePresentModelBlt = 4;
+
+/* Present recording Direct3D 12 offers on its direct command lists */
+struct DECLSPEC_UUID("b0b9e70e-59ce-4415-8116-c8c826b1e599") DECLSPEC_NOVTABLE
+INinePresentCommandList : public IUnknown
+{
+    STDMETHOD_(VOID, Reserved)() = 0;
+    STDMETHOD_(VOID, RecordPresent)(
+        _In_ ID3D12CommandQueue* Queue,
+        _In_reads_(PlaneCount) const NinePresentPlane* Planes,
+        _In_ UINT PlaneCount,
+        _In_opt_ ID3D12Resource* Destination,
+        _In_opt_ VOID* Reserved1,
+        _In_ UINT Reserved2,
+        _In_ UINT Model,
+        _In_ UINT FlipInterval,
+        _Out_ BOOL* CommandsAdded,
+        _Inout_ NinePresentRecord* Record) = 0;
+};
+
+/* Present submission Direct3D 12 offers on its direct queues */
+struct DECLSPEC_UUID("c2c09af9-15ce-4c87-bb98-44323032fa7f") DECLSPEC_NOVTABLE
+INinePresentQueue : public IUnknown
+{
+    STDMETHOD(SubmitPresent)(
+        _In_ D3DKMT_PRESENT* KmtPresent,
+        _In_ NinePresentRecord* Record) = 0;
+};
+
 struct NineDevice
 {
     NineAdapter* Adapter;
@@ -127,6 +175,12 @@ struct NineDevice
     /* Objects the runtime registered as its own, which share without reopening */
     std::mutex WrappedLock;
     std::set<IUnknown*> Wrapped;
+
+    /* The present the runtime's present callback comes back for, and what recording it needs */
+    const D3DDDIARG_PRESENT1* PendingPresent;
+    TL::MaxFrameLatencyHelper Latency;
+    NinePresentRecord Record;
+    TL::unique_comptr<INinePresentQueue> PresentQueue;
 };
 
 /* What d3d9.dll passes beside an open of a shared resource */
@@ -326,6 +380,19 @@ NineBlt(
 VOID
 NineUnbindOutputs(
     _Inout_ NineResource* Resource);
+
+/* present.cpp */
+HRESULT
+APIENTRY
+NinePresent1(
+    _In_ HANDLE hDevice,
+    _In_ D3DDDIARG_PRESENT1* Args);
+
+HRESULT
+APIENTRY
+NineKernelPresent(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DKMT_PRESENT* KmtPresent);
 
 /* share.cpp */
 UINT

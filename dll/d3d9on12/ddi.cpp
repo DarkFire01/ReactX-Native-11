@@ -230,7 +230,7 @@ NineFillDeviceFuncs(
     Functions->pfnCheckCounterInfo = NineCheckCounterInfo;
     Functions->pfnCheckCounter = NineAlwaysDone<>;
     NINE_MISSING(pfnUpdateSubresourceUP, 135);
-    NINE_MISSING(pfnPresent1, 136);
+    Functions->pfnPresent1 = NinePresent1;
     Functions->pfnCheckPresentDurationSupport = NineFixedAnswer<NotDone>;
     Functions->pfnSetMarker = NineAlwaysDone<>;
     Functions->pfnSetMarkerMode = NineAlwaysDone<>;

@@ -184,6 +184,7 @@ NineInitDevice(
         Device->Context.emplace(0, Options, Device->Device12, Device->Queue, Callbacks, 0,
                                 NineContextArgs(Device->Adapter));
         Device->Sharing.emplace(*Device->Context, SharingFlags);
+        Device->Latency.Init(&*Device->Context);
 
         Device->Context->SetNumViewports(1);
         Device->Context->SetNumScissorRects(1);

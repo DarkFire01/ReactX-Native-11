@@ -38,7 +38,7 @@ static const NinePrivateTable NinePrivate =
     reinterpret_cast<PVOID>(NineMissingEntry<1>),
     reinterpret_cast<PVOID>(NineMissingEntry<2>),
     reinterpret_cast<PVOID>(NineMissingEntry<3>),
-    reinterpret_cast<PVOID>(NineMissingEntry<4>),
+    reinterpret_cast<PVOID>(NineKernelPresent),
     reinterpret_cast<PVOID>(NineMissingEntry<5>),
     reinterpret_cast<PVOID>(NineMissingEntry<6>),
     reinterpret_cast<PVOID>(NineMissingEntry<7>),
