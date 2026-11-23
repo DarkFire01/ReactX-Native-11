@@ -218,30 +218,56 @@ RxToDdiResource(
     Ddi.Flags = (D3D12DDI_RESOURCE_FLAGS_0003)DdiFlags;
 }
 
-/* What the driver says a resource needs, in the API's form */
+/*
+ * The optimizations a resource asks the driver for. Layouts must come out the same every time when the
+ * caller only asks for sizes, and for buffers; a committed texture may get any layout the driver likes.
+ */
+static
+UINT
+RxOptimizationFlags(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ BOOLEAN SizeQuery,
+    _In_ D3D12_HEAP_FLAGS HeapFlags)
+{
+    BOOLEAN IsBuffer = Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+    UINT Optimization = 0;
+
+    if ((HeapFlags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0)
+        Optimization |= D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_PRIMARY;
+    if (SizeQuery || IsBuffer)
+        Optimization |= D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_DETERMINISTIC;
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0)
+        Optimization |= D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_SHADER_RESOURCE;
+    if (Desc.SampleDesc.Count == 1 && (Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0 &&
+        (IsBuffer || (Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0))
+    {
+        Optimization |= D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_UNORDERED_ACCESS;
+    }
+
+    return Optimization;
+}
+
+/* What the driver says a resource needs, in the API's form, and the layout it picked */
 static
 D3D12_RESOURCE_ALLOCATION_INFO
 RxAllocationInfo(
     _In_ RxDevice12& Device,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
-    _In_ const D3D12DDIARG_CREATERESOURCE_0111& Ddi)
+    _In_ const D3D12DDIARG_CREATERESOURCE_0111& Ddi,
+    _In_ BOOLEAN SizeQuery,
+    _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout)
 {
     D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Info = {};
     D3D12_RESOURCE_ALLOCATION_INFO Result;
-    UINT Optimization = D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_DETERMINISTIC;
+    UINT Optimization = RxOptimizationFlags(Desc, SizeQuery, HeapFlags);
     UINT64 Alignment;
     UINT64 Size;
 
-    if ((Desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0)
-        Optimization |= D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_SHADER_RESOURCE;
-    if (Desc.SampleDesc.Count == 1 && (Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0 &&
-        (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER || (Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0))
-    {
-        Optimization |= D3D12DDI_RESOURCE_OPTIMIZATION_FLAG_UNORDERED_ACCESS;
-    }
-
     Device.Ddi().pfnCheckResourceAllocationInfo(Device.Handle(), &Ddi, (D3D12DDI_RESOURCE_OPTIMIZATION_FLAGS)Optimization,
                                                 (UINT32)Desc.Alignment, 1, &Info);
+    if (DriverLayout != nullptr)
+        *DriverLayout = Info.Layout;
 
     Alignment = Desc.Alignment;
     if (Info.ResourceDataAlignment > Alignment)
@@ -292,7 +318,7 @@ RxAllocationInfoForDescs(
 
         RxFillResourceDefaults(Desc);
         RxToDdiResource(Desc, Ddi);
-        Info = RxAllocationInfo(Device, Desc, Ddi);
+        Info = RxAllocationInfo(Device, Desc, Ddi, TRUE, D3D12_HEAP_FLAG_NONE, nullptr);
 
         Offset = RxAlignUp(Total.SizeInBytes, Info.Alignment);
         Total.SizeInBytes = Offset + Info.SizeInBytes;
@@ -435,7 +461,6 @@ RxResource::Initialize(
     Flags = RxImplicitHeapFlags(HeapFlags, Desc);
 
     RxToDdiResource(Desc, DdiResource);
-    DdiResource.InitialBarrierLayout = RxInitialLayout(InitialState);
 
     if (Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR && Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
     {
@@ -449,9 +474,11 @@ RxResource::Initialize(
         DdiResource.pRowMajorLayout = &RowMajor;
     }
 
-    Info = RxAllocationInfo(Device, Desc, DdiResource);
+    /* The size check sees no initial layout; creation then takes the layout the driver chose */
+    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
     if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
         return E_OUTOFMEMORY;
+    DdiResource.InitialBarrierLayout = RxInitialLayout(InitialState);
 
     Custom = Properties.Type == D3D12_HEAP_TYPE_CUSTOM ? Properties : RxCustomProperties(Device, Properties.Type);
 
@@ -510,6 +537,8 @@ RxResource::Initialize(
         }
     }
 
+    /* Sized once for the heap object and once for the resource it carries, as the system core does */
+    Sizes = Ddi.pfnCalcPrivateHeapAndResourceSizes(Device.Handle(), &DdiHeap, &DdiResource, NoSession);
     Sizes = Ddi.pfnCalcPrivateHeapAndResourceSizes(Device.Handle(), &DdiHeap, &DdiResource, NoSession);
     DriverHeap.pDrvPrivate = HeapMemory.Allocate(Sizes.Heap);
     DriverResource.pDrvPrivate = ResourceMemory.Allocate(Sizes.Resource);
