@@ -251,6 +251,18 @@ RxImmediateContext::LoadPipelineDefaults()
 }
 
 VOID
+RxImmediateContext::EmptyDriverStates()
+{
+    static const FLOAT DefaultFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
+    D3D10DDI_HDEVICE Driver = Device.GetDriverDevice();
+
+    Funcs.pfnSetBlendState(Driver, D3D10DDI_HBLENDSTATE{}, DefaultFactor, 0xFFFFFFFF);
+    Funcs.pfnSetDepthStencilState(Driver, D3D10DDI_HDEPTHSTENCILSTATE{}, 0);
+    Funcs.pfnSetRasterizerState(Driver, D3D10DDI_HRASTERIZERSTATE{});
+}
+
+VOID
 RxImmediateContext::ReleaseBindings()
 {
     Pipeline = {};

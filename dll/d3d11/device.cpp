@@ -53,7 +53,9 @@ RxDevice::~RxDevice()
 
     DeleteCriticalSection(&ThreadLock);
 
-    /* Bound objects and defaults destroy driver objects, so they go while the driver device lives */
+    /* The driver sees its state bindings emptied first, then bound objects and defaults go while it lives */
+    if (IsDriverDeviceCreated)
+        Context.EmptyDriverStates();
     Context.ReleaseBindings();
     Defaults = {};
 

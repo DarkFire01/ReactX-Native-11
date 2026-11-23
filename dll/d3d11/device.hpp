@@ -212,6 +212,10 @@ public:
     VOID
     LoadPipelineDefaults();
 
+    /* Sends the driver null blend, depth stencil and rasterizer states as the device goes away */
+    VOID
+    EmptyDriverStates();
+
     /* Drops every binding; the device does this before it goes away */
     VOID
     ReleaseBindings();
