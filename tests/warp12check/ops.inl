@@ -631,3 +631,38 @@ SceneOpsAtom(
 {
     return TcOpsRun(Device, Result, TcOpsAtomSource, "atoms", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
 }
+
+/* Samples far outside the unit square and below zero, where power of two sizes wrap texel indices instead of coordinates */
+static const char TcOpsAddressSource[] =
+    "[numthreads(64, 1, 1)] void address(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 256;\n"
+    "    float2 Uv = float2((t % 8) * 3.731 - 17.2, (t / 8) * -5.117 + 9.3);\n"
+    "    float2 Far = Uv * 4099.37 + float2(0.3, -0.7);\n"
+    "    float2 Near = float2(-0.0013 * t, 0.00007 * t - 0.002);\n"
+    "    Out.Store4(Base, asuint(Image.SampleLevel(Smooth, Uv, 0)));\n"
+    "    Out.Store4(Base + 16, asuint(Image.SampleLevel(Smooth, Far, 0)));\n"
+    "    Out.Store4(Base + 32, asuint(Image.SampleLevel(Mirror, Uv, 0, int2(-3, 2))));\n"
+    "    Out.Store4(Base + 48, asuint(Image.SampleLevel(Mirror, Far, 0)));\n"
+    "    Out.Store4(Base + 64, asuint(Image.SampleLevel(Smooth, Near, 1)));\n"
+    "    Out.Store4(Base + 80, asuint(Image.SampleLevel(Smooth, Near, 0, int2(-2, 3))));\n"
+    "    Out.Store4(Base + 96, asuint(Image.SampleLevel(Point, Uv * 0.07, 0, int2(2, -1))));\n"
+    "    Out.Store(Base + 112, asuint(Floats.SampleLevel(Smooth, Uv, 0)));\n"
+    "    Out.Store(Base + 116, asuint(Floats.SampleLevel(Smooth, Far, 0)));\n"
+    "    Out.Store(Base + 120, asuint(Floats.SampleLevel(Mirror, -Uv, 0)));\n"
+    "    Out.Store(Base + 124, asuint(Floats.SampleCmpLevelZero(Compare, Uv * 0.2, 0.5)));\n"
+    "    Out.Store4(Base + 128, asuint(Image.GatherGreen(Smooth, Uv)));\n"
+    "    Out.Store4(Base + 144, asuint(Image.GatherBlue(Smooth, Far, int2(-1, 1))));\n"
+    "    Out.Store4(Base + 160, asuint(Layers.SampleLevel(Smooth, float3(Far, t % 3), 0)));\n"
+    "    Out.Store4(Base + 176, asuint(Floats.Gather(Smooth, Near * 7.0)));\n"
+    "    Out.Store4(Base + 192, asuint(Image.SampleLevel(Smooth, Uv * 1e6, 0)));\n"
+    "}\n";
+
+static
+HRESULT
+SceneOpsAddress(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsAddressSource, "address", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+}
