@@ -2000,8 +2000,11 @@ D9Device::GetFrontBufferData(
     _In_ UINT SwapChain,
     _Out_ IDirect3DSurface9* DestSurface)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9_DEVICE_LOCK();
+
+    if (NotReset || SwapChain != 0)
+        return D3DERR_INVALIDCALL;
+    return ImplicitChain->GetFrontBufferData(DestSurface);
 }
 
 STDMETHODIMP

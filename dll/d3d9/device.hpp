@@ -1193,6 +1193,10 @@ public:
     DriverColorFill(
         _In_ const D3DDDIARG_COLORFILL* Args);
 
+    /* What the kernel last said about the device running, as the error a call returns */
+    HRESULT
+    ExecutionStatus(VOID);
+
     /* The display GDI device contexts over surface memory are made for */
     PCSTR
     DisplayName() const
@@ -1999,9 +2003,6 @@ private:
 
     HRESULT
     ReadDriverAnswers(VOID);
-
-    HRESULT
-    ExecutionStatus(VOID);
 
     HRESULT
     QueryDeviceState(

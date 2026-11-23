@@ -6,6 +6,7 @@
  */
 
 #include "device.hpp"
+#include "kmt.hpp"
 
 typedef NTSTATUS (APIENTRY* PD9_GET_SCAN_LINE)(D3DKMT_GETSCANLINE*);
 
@@ -255,8 +256,70 @@ STDMETHODIMP
 D9SwapChain::GetFrontBufferData(
     _In_ IDirect3DSurface9* Destination)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+    D9Surface* Target = static_cast<D9Surface*>(Destination);
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_CREATEDCFROMMEMORY Create = {};
+    D3DKMT_DESTROYDCFROMMEMORY Destroy = {};
+    D3DLOCKED_RECT Locked = {};
+    D3DDISPLAYMODE Screen = {};
+    PCSTR Display = Device->DisplayName();
+    HDC ScreenDc;
+    HRESULT hr;
+
+    if (Target == nullptr || Target->Owner() != Device || Kmt == nullptr || Kmt->CreateDCFromMemory == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    /* A windowed chain copies what the screen shows into an A8R8G8B8 memory surface at least as large */
+    const D3DSURFACE_DESC& Desc = Target->Describe();
+    if (Desc.Format != D3DFMT_A8R8G8B8 || Desc.Type != D3DRTYPE_SURFACE ||
+        (Desc.Pool != D3DPOOL_SYSTEMMEM && Desc.Pool != D3DPOOL_SCRATCH))
+    {
+        D9_TRACE_ONCE(L"GetFrontBufferData: the destination must be an A8R8G8B8 memory surface");
+        return D3DERR_INVALIDCALL;
+    }
+    hr = GetDisplayMode(&Screen);
+    if (FAILED(hr))
+        return hr;
+    if (Desc.Width < Screen.Width || Desc.Height < Screen.Height)
+    {
+        D9_TRACE_ONCE(L"GetFrontBufferData: the destination is smaller than the screen");
+        return D3DERR_INVALIDCALL;
+    }
+
+    hr = Target->LockRect(&Locked, nullptr, 0);
+    if (FAILED(hr))
+        return hr;
+    if (Display[0] == '\\' && Display[1] == '\\' && Display[2] == '.')
+        ScreenDc = CreateDCA(nullptr, Display, nullptr, nullptr);
+    else
+        ScreenDc = CreateDCA(Display, nullptr, nullptr, nullptr);
+    Create.pMemory = Locked.pBits;
+    Create.Format = D3DDDIFMT_A8R8G8B8;
+    Create.Width = Desc.Width;
+    Create.Height = Desc.Height;
+    Create.Pitch = static_cast<UINT>(Locked.Pitch);
+    Create.hDeviceDc = ScreenDc;
+    if (!NT_SUCCESS(Kmt->CreateDCFromMemory(&Create)))
+    {
+        hr = D3DERR_INVALIDCALL;
+    }
+    else
+    {
+        hr = BitBlt(Create.hDc, 0, 0, static_cast<INT>(Screen.Width), static_cast<INT>(Screen.Height), ScreenDc, 0,
+                    0, SRCCOPY) ? S_OK : D3DERR_INVALIDCALL;
+        Destroy.hDc = Create.hDc;
+        Destroy.hBitmap = Create.hBitmap;
+        Kmt->DestroyDCFromMemory(&Destroy);
+        if (SUCCEEDED(hr))
+            hr = Device->ExecutionStatus();
+    }
+    if (ScreenDc != NULL)
+        DeleteDC(ScreenDc);
+    Target->UnlockRect();
+    if (FAILED(hr))
+        D9Trace(L"GetFrontBufferData: the screen could not be copied");
+    return hr;
 }
 
 STDMETHODIMP
