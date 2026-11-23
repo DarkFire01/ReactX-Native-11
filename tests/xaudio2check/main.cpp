@@ -2763,7 +2763,8 @@ static
 VOID
 XcApoLocks(
     _In_z_ PCSTR Name,
-    _In_ IXAPO* Apo)
+    _In_ IXAPO* Apo,
+    _In_ UINT MaxChannels = 64)
 {
     static const struct
     {
@@ -2800,6 +2801,8 @@ XcApoLocks(
         XAPO_LOCKFORPROCESS_PARAMETERS OutLock;
         HRESULT hr;
 
+        if (Pairs[Index].InChannels > MaxChannels)
+            continue;
         XcPcm(&In, Pairs[Index].Tag, Pairs[Index].InChannels, Pairs[Index].InRate, Pairs[Index].Tag == WAVE_FORMAT_PCM ? 16 : 32);
         XcPcm(&Out, Pairs[Index].Tag, Pairs[Index].OutChannels, Pairs[Index].OutRate, Pairs[Index].Tag == WAVE_FORMAT_PCM ? 16 : 32);
         InLock.pFormat = &In;
@@ -3067,7 +3070,8 @@ XcCreateFx(
     _In_ REFCLSID Clsid,
     _In_reads_bytes_opt_(InitSize) const VOID* InitData,
     _In_ UINT32 InitSize,
-    _In_ BOOLEAN Report)
+    _In_ BOOLEAN Report,
+    _In_ UINT MaxChannels = 64)
 {
     PXC_CREATE_FX CreateFx = reinterpret_cast<PXC_CREATE_FX>(GetProcAddress(XcModule, "CreateFX"));
     IUnknown* Object = nullptr;
@@ -3086,7 +3090,7 @@ XcCreateFx(
         if (SUCCEEDED(Object->QueryInterface(IID_PPV_ARGS(&Apo))))
         {
             XcApoFormats(Name, Apo);
-            XcApoLocks(Name, Apo);
+            XcApoLocks(Name, Apo, MaxChannels);
             Apo->Release();
             Apo = nullptr;
         }
@@ -3369,6 +3373,127 @@ XcCheckLimiter(VOID)
 
 static
 VOID
+XcCheckFxReverb(VOID)
+{
+    static const FXREVERB_PARAMETERS Settings[] =
+    {
+        { 0.5f, 0.2f },
+        { 1.0f, 1.0f },
+        { 0.0f, 0.0001f },
+        { 0.3f, 0.0f },
+        { 0.75f, 0.9f },
+        { 0.9f, 0.6f },
+        { 0.1428f, 0.45f },
+    };
+    XcApoRun& Run = *new XcApoRun();
+    IXAPO* Apo = XcCreateFx("fxreverb", __uuidof(FXReverb), &Settings[0], sizeof(Settings[0]), TRUE, 6);
+
+    if (Apo == nullptr)
+        return;
+    XcApoParameters("fxreverb parameters", Apo, sizeof(FXREVERB_PARAMETERS));
+    printf("fxreverb initialize = %08lX\n", Apo->Initialize(&Settings[0], 1));
+
+    /* Parameters set before the lock give way to the defaults it writes */
+    XcApoSet(Apo, &Settings[1], sizeof(Settings[1]));
+    Run.Apo = Apo;
+    Run.InChannels = 2;
+    Run.OutChannels = 2;
+    Run.Frames = 480;
+    Run.InPlace = FALSE;
+    Run.Amplitude = 0.5f;
+    Run.Seed = 5;
+    printf("fxreverb lock = %08lX\n", XcApoLock(&Run, 48000));
+    XcApoParameters("fxreverb parameters locked", Apo, sizeof(FXREVERB_PARAMETERS));
+    for (UINT Block = 0; Block < 3; Block++)
+        XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoParameters("fxreverb parameters processed", Apo, sizeof(FXREVERB_PARAMETERS));
+    Run.InPlace = TRUE;
+    for (UINT Index = 0; Index < ARRAYSIZE(Settings); Index++)
+    {
+        XcApoSet(Apo, &Settings[Index], sizeof(Settings[Index]));
+        XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    }
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_SILENT, TRUE);
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+
+    /* Short blocks: a single frame and an empty one right after a new room size */
+    XcApoSet(Apo, &Settings[4], sizeof(Settings[4]));
+    Run.Frames = 1;
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Settings[0], sizeof(Settings[0]));
+    Run.Frames = 0;
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    Run.Frames = 480;
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->Reset();
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("fxreverb", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+
+    Run.InChannels = 1;
+    Run.OutChannels = 1;
+    Run.Frames = 441;
+    Run.Block = 0;
+    printf("fxreverb lock mono = %08lX\n", XcApoLock(&Run, 44100));
+    XcApoParameters("fxreverb parameters mono", Apo, sizeof(FXREVERB_PARAMETERS));
+    XcApoBlock("fxreverb mono", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Settings[6], sizeof(Settings[6]));
+    for (UINT Block = 0; Block < 12; Block++)
+        XcApoBlock("fxreverb mono", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+
+    /* With an LFE in the layout that channel passes through without the combs */
+    {
+        WAVEFORMATEXTENSIBLE Format;
+        XAPO_LOCKFORPROCESS_PARAMETERS Lock;
+
+        XcExtensible(&Format, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 2, 22050, 32, 32, SPEAKER_FRONT_LEFT | SPEAKER_LOW_FREQUENCY);
+        Lock.pFormat = &Format.Format;
+        Lock.MaxFrameCount = 220;
+        Run.InChannels = 2;
+        Run.OutChannels = 2;
+        Run.Frames = 220;
+        Run.Block = 0;
+        printf("fxreverb lock lfe = %08lX\n", Apo->LockForProcess(1, &Lock, 1, &Lock));
+        XcApoBlock("fxreverb lfe", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoSet(Apo, &Settings[2], sizeof(Settings[2]));
+        XcApoBlock("fxreverb lfe", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoBlock("fxreverb lfe", &Run, XAPO_BUFFER_VALID, TRUE);
+        Apo->UnlockForProcess();
+        XcExtensible(&Format, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 2, 32000, 32, 32, SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_LEFT);
+        Run.Block = 0;
+        printf("fxreverb lock lfe first = %08lX\n", Apo->LockForProcess(1, &Lock, 1, &Lock));
+        XcApoSet(Apo, &Settings[3], sizeof(Settings[3]));
+        for (UINT Block = 0; Block < 4; Block++)
+            XcApoBlock("fxreverb lfe first", &Run, XAPO_BUFFER_VALID, TRUE);
+        Apo->UnlockForProcess();
+    }
+
+    /* Locks only check the format against the base rules, so wider layouts run with fewer combs */
+    {
+        static const UINT32 Wide[] = { 3, 6 };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Wide); Index++)
+        {
+            Run.InChannels = Wide[Index];
+            Run.OutChannels = Wide[Index];
+            Run.Frames = 120;
+            Run.Block = 0;
+            printf("fxreverb lock %u = %08lX\n", Wide[Index], XcApoLock(&Run, 24000));
+            XcApoSet(Apo, &Settings[Index * 3], sizeof(Settings[0]));
+            for (UINT Block = 0; Block < 12; Block++)
+                XcApoBlock(Wide[Index] == 3 ? "fxreverb three" : "fxreverb six", &Run, XAPO_BUFFER_VALID, TRUE);
+            Apo->UnlockForProcess();
+        }
+    }
+    printf("fxreverb release %lu\n", Apo->Release());
+    delete &Run;
+}
+
+static
+VOID
 XcCheckApos(VOID)
 {
     PXC_CREATE_APO CreateMeter = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, "CreateAudioVolumeMeter"));
@@ -3384,6 +3509,7 @@ XcCheckApos(VOID)
     XcCheckEq();
     XcCheckEcho();
     XcCheckLimiter();
+    XcCheckFxReverb();
     Engine->Release();
 }
 
@@ -3585,10 +3711,11 @@ XcAttachFx(
         150.0f, 0.5f, 1.0f, 900.0f, 0.3f, 0.5f, 3000.0f, 1.0f, 1.0f, 9000.0f, 0.6f, 0.7f,
     };
     static const FXECHO_PARAMETERS Echo = { 0.5f, 0.4f, 30.0f };
+    static const FXREVERB_PARAMETERS Reverb = { 0.6f, 0.1f };
     PXC_CREATE_FX CreateFx = reinterpret_cast<PXC_CREATE_FX>(GetProcAddress(XcModule, "CreateFX"));
-    const CLSID* Classes[] = { &__uuidof(FXMasteringLimiter), &__uuidof(FXEQ), &__uuidof(FXEcho) };
-    const VOID* Values[] = { &Limiter, &Eq, &Echo };
-    const UINT32 Sizes[] = { sizeof(Limiter), sizeof(Eq), sizeof(Echo) };
+    const CLSID* Classes[] = { &__uuidof(FXMasteringLimiter), &__uuidof(FXEQ), &__uuidof(FXEcho), &__uuidof(FXReverb) };
+    const VOID* Values[] = { &Limiter, &Eq, &Echo, &Reverb };
+    const UINT32 Sizes[] = { sizeof(Limiter), sizeof(Eq), sizeof(Echo), sizeof(Reverb) };
     IUnknown* Object = nullptr;
     XAUDIO2_EFFECT_DESCRIPTOR Effect;
     XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
@@ -3625,6 +3752,7 @@ XcCheckMix(VOID)
         XcRouteLimiter,
         XcRouteEq,
         XcRouteEcho,
+        XcRouteFxReverb,
     };
     static const struct
     {
@@ -3685,6 +3813,8 @@ XcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 6, 48000, 16, XcRouteLimiter, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
         { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteEq, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
         { WAVE_FORMAT_PCM, 2, 44100, 16, XcRouteEcho, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteFxReverb, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 32000, 16, XcRouteFxReverb, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
     };
     static BYTE Data[48000 * 6 * 4];
 
