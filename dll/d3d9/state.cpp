@@ -100,8 +100,8 @@ D9Device::SendStateValue(
 {
     D3DDDIARG_RENDERSTATE Args = {};
 
-    /* Vertex fog turning on or off makes a device that keeps state bind its declaration again */
-    if ((State == D3DRS_FOGENABLE || State == D3DRS_FOGVERTEXMODE) && (BehaviorFlags & D3DCREATE_PUREDEVICE) == 0)
+    /* Vertex fog turning on or off makes the device bind its declaration again */
+    if (State == D3DRS_FOGENABLE || State == D3DRS_FOGVERTEXMODE)
     {
         BOOLEAN Fogged = RenderStates[D3DRS_FOGENABLE] != 0 && RenderStates[D3DRS_FOGVERTEXMODE] != 0;
 

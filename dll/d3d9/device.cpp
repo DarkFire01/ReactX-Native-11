@@ -1231,7 +1231,9 @@ D9Device::ResetCommon(
         return S_OK;
     }
 
+    /* The converters and the switch between them start over as on a new device */
     ClearConstants();
+    StartShaderSwitch();
     SetDefaultState(Parameters);
     SendInitialState();
     StartPixelConverter();
