@@ -48,8 +48,13 @@ DcFactory::~DcFactory(VOID)
     if (DcGlobalFactory == this)
         DcGlobalFactory = nullptr;
 
-    for (DcAdapter* Adapter : Adapters)
-        Adapter->Release();
+    /* Highest LUID first, the order the system tears its adapter map down in */
+    for (size_t Remaining = Adapters.size(); Remaining > 0; Remaining -= 1)
+    {
+        size_t Index = Remaining - 1;
+
+        Adapters[Index]->Release();
+    }
 }
 
 static
