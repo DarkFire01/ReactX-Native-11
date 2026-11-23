@@ -132,6 +132,9 @@ struct D9Resource
     UINT LevelCount;
     D3DDDIMULTISAMPLE_TYPE MultisampleType;
     UINT MultisampleQuality;
+
+    /* A flip model buffer the compositor opens by its NT handle */
+    BOOLEAN Composed;
 };
 
 class D9TextureCore;
@@ -390,6 +393,46 @@ protected:
     LONG RefCount = 0;
 };
 
+/* What a swap chain surface is to the compositor: nothing, the small target presents clear, or a buffer it
+   shows */
+enum class D9SurfaceRole : UINT
+{
+    Plain,
+    CompositionTarget,
+    CompositionBuffer,
+};
+
+/* The compositor entry points flip model chains use; win32u and dwmapi export them without a header */
+struct D9CompositionCalls
+{
+    NTSTATUS (APIENTRY* Bind)(HANDLE, DWORD, DWORD, VOID*, VOID*, VOID*);
+    NTSTATUS (APIENTRY* Unbind)(HANDLE, DWORD);
+    NTSTATUS (APIENTRY* Notify)(HANDLE, D3DKMT_PRESENTHISTORYTOKEN*);
+    NTSTATUS (APIENTRY* QueryStatistics)(HANDLE, VOID*);
+    HRESULT (WINAPI* CreateSurfaceHandle)(DWORD, SECURITY_ATTRIBUTES*, HANDLE*);
+    HRESULT (WINAPI* AllocateSecurity)(PSECURITY_DESCRIPTOR*, DWORD);
+    VOID (WINAPI* FreeSecurity)(PSECURITY_DESCRIPTOR);
+};
+
+/* Resolved once; any entry may be missing */
+const D9CompositionCalls*
+D9Composition(VOID);
+
+/* What a flip model chain hands the device for one present */
+struct D9ComposedPresent
+{
+    HANDLE Surface;
+    UINT64 BindingId;
+    UINT64 FenceValue;
+    HANDLE FenceHandle;
+    UINT SwapChainIndex;
+    UINT FlipInterval;
+    DWORD Flags;
+    const RGNDATA* DirtyRegion;
+    UINT Width;
+    UINT Height;
+};
+
 /* A surface the device made: back buffers, the automatic depth buffer and the surfaces applications ask for */
 class D9Surface final : public IDirect3DSurface9, public D9Child
 {
@@ -493,6 +536,14 @@ public:
         return Resource != nullptr ? Resource->ShareHandle : 0;
     }
 
+    /* A flip model swap chain says what the surface is for before Create */
+    VOID
+    AssignRole(
+        _In_ D9SurfaceRole Assigned)
+    {
+        Role = Assigned;
+    }
+
     /* IUnknown */
     STDMETHOD(QueryInterface)(
         _In_ REFIID Iid,
@@ -579,6 +630,7 @@ private:
     BOOLEAN CountedDefault = FALSE;
     D9PrivateData Private;
     D9ShareRequest Sharing = {};
+    D9SurfaceRole Role = D9SurfaceRole::Plain;
     LONG PinCount = 0;
     BOOLEAN Orphaned = FALSE;
 
@@ -1111,6 +1163,32 @@ private:
     VOID
     RotateBuffers(VOID);
 
+    BOOLEAN
+    MatchesDirectFlip(VOID) const;
+
+    HRESULT
+    CreateClearTargets(VOID);
+
+    HRESULT
+    CreateComposition(
+        _In_ PSECURITY_DESCRIPTOR Security,
+        _In_ BOOLEAN DirectFlip);
+
+    HRESULT
+    BindComposition(VOID);
+
+    VOID
+    ReleaseComposition(VOID);
+
+    HRESULT
+    PresentComposed(
+        _In_opt_ const RGNDATA* DirtyRegion,
+        _In_ DWORD Flags);
+
+    HRESULT
+    ComposedStats(
+        _Out_ D3DPRESENTSTATS* Stats);
+
     UINT Index;
     HWND FocusWindow;
     D3DPRESENT_PARAMETERS Parameters = {};
@@ -1125,6 +1203,26 @@ private:
     UINT FlipPresents = 0;
     UINT StatsReported = 0;
     BOOLEAN StatsDisjoint = FALSE;
+
+    /* The compositor's view of a flip model chain: the NT handle of each buffer, the target and depth buffer
+       presents clear, the fence and its handle, the composition surface and its binding */
+    BOOLEAN Composed = FALSE;
+    HANDLE BufferHandles[D3DPRESENT_BACK_BUFFERS_MAX_EX + 1] = {};
+    D9Surface* ClearTarget = nullptr;
+    D9Surface* ClearDepth = nullptr;
+    D3DKMT_HANDLE Fence = 0;
+    HANDLE FenceHandle = NULL;
+    UINT64 FenceValue = 0;
+    HANDLE CompositionSurface = NULL;
+    UINT64 BindingId = 0;
+    BOOLEAN DirectFlipBound = FALSE;
+    UINT ComposedIndex = 0;
+
+    /* What the compositor last reported, and the device present count when this chain last presented */
+    D3DPRESENTSTATS CachedStats = {};
+    D3DPRESENTSTATS LastStats = {};
+    UINT PresentMark = 0;
+    LARGE_INTEGER PresentTime = {};
 };
 
 /* Vertex and index buffers share everything but their description */
@@ -1826,7 +1924,8 @@ public:
         _In_opt_ VOID* Memory,
         _In_ UINT MemoryPitch,
         _In_opt_ const D9ShareRequest* Share,
-        _Out_ D9Resource* Resource);
+        _Out_ D9Resource* Resource,
+        _In_ D9SurfaceRole Role = D9SurfaceRole::Plain);
 
     HRESULT
     CreateDriverBuffer(
@@ -2031,6 +2130,41 @@ public:
         _In_ HWND Window,
         _In_ const RECT* From,
         _In_ const RECT* To);
+
+    /* A flip model present: the back buffer goes to the compositor with the token the chain describes */
+    HRESULT
+    PresentToCompositor(
+        _In_ D9Resource* Source,
+        _In_ const D9ComposedPresent* Present);
+
+    /* The semaphore flip model chains share; each chain that binds holds it once */
+    HANDLE
+    AcquireFlipSemaphore(VOID);
+
+    VOID
+    ReleaseFlipSemaphore(VOID);
+
+    UINT
+    PresentCount() const
+    {
+        return PresentsMade;
+    }
+
+    LARGE_INTEGER
+    PresentTime() const
+    {
+        return LastPresentTime;
+    }
+
+    /* Whether as many presents as the limit allows are still in flight */
+    BOOLEAN
+    PresentLimitReached(VOID);
+
+    /* Swaps the bound targets and depth buffer with the ones given, as presents of the flip model do */
+    VOID
+    ExchangeTargets(
+        _Inout_updates_(D9MaxRenderTargets) D9Surface** Targets,
+        _Inout_ D9Surface** Depth);
 
     VOID
     ReleaseWindowSurface(VOID);
@@ -3218,7 +3352,8 @@ private:
     HRESULT
     DriverPresent(
         _In_opt_ HANDLE SourceResource,
-        _In_opt_ HANDLE TargetResource);
+        _In_opt_ HANDLE TargetResource,
+        _In_ UINT DriverFlags);
 
     HRESULT
     OpenWindowSurface(
@@ -3296,6 +3431,17 @@ private:
     BOOLEAN SoftwareVertices;
     INT GpuPriority = 0;
     UINT FrameLatency = 3;
+
+    /* Flip model chains share one semaphore that limits presents in flight; the device counts every present */
+    HANDLE FlipSemaphore = NULL;
+    UINT FlipSemaphoreUsers = 0;
+    UINT64 FlipSemaphoreId = 0;
+    UINT PresentsMade = 0;
+    LARGE_INTEGER LastPresentTime = {};
+
+    /* The kernel's limit of queued presents, and how far it moved since the semaphore last followed it */
+    UINT PresentLimit = 3;
+    INT PresentLimitChange = 0;
 
     /* Copies of PendingPresent the driver may report later from its own thread */
     SRWLOCK PresentQueueLock = SRWLOCK_INIT;

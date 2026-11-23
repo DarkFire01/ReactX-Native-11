@@ -267,6 +267,14 @@ public:
         return IsEx;
     }
 
+    _Ret_maybenull_
+    const D9Adapter*
+    AdapterEntry(
+        _In_ UINT Adapter) const
+    {
+        return Adapter < AdapterCount ? &Adapters[Adapter] : nullptr;
+    }
+
     HRESULT
     ValidateReset(
         _In_ UINT Adapter,

@@ -1476,6 +1476,10 @@ D9Device::SetMaximumFrameLatency(
             D9Trace(L"D3DKMTSetQueuedLimit(%u) failed 0x%08lX", Limit.QueuedPresentLimit, Status);
             return D9HresultFromStatus(Status);
         }
+
+        /* The flip model semaphore catches up on the next present */
+        PresentLimitChange += static_cast<INT>(Limit.QueuedPresentLimit) - static_cast<INT>(PresentLimit);
+        PresentLimit = Limit.QueuedPresentLimit;
     }
 
     FrameLatency = MaxLatency;

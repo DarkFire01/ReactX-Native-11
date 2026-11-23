@@ -295,7 +295,8 @@ D9Device::TakeQueuedPresent(
 HRESULT
 D9Device::DriverPresent(
     _In_opt_ HANDLE SourceResource,
-    _In_opt_ HANDLE TargetResource)
+    _In_opt_ HANDLE TargetResource,
+    _In_ UINT DriverFlags)
 {
     UINT Interval = DriverVersion < D9FlipIntervalVersion ? 1 : 0;
     D3DDDIARG_PRESENTSURFACE Surface = {};
@@ -312,7 +313,7 @@ D9Device::DriverPresent(
         Present1.phSrcResources = &Surface;
         Present1.SrcResources = 1;
         Present1.hDstResource = TargetResource;
-        Present1.Flags.Value = PendingPresent.Flags.Value & 7;
+        Present1.Flags.Value = DriverFlags;
         Present1.FlipInterval = static_cast<D3DDDI_FLIPINTERVAL_TYPE>(Interval);
         Present1.BackBufferMultiplicity = 1;
         hr = DdiPresent1(&Present1) ? S_OK : DeviceFunctions.pfnPresent1(DriverDevice, &Present1);
@@ -321,7 +322,7 @@ D9Device::DriverPresent(
     {
         Present.hSrcResource = SourceResource;
         Present.hDstResource = TargetResource;
-        Present.Flags.Value = PendingPresent.Flags.Value & 7;
+        Present.Flags.Value = DriverFlags;
         Present.FlipInterval = static_cast<D3DDDI_FLIPINTERVAL_TYPE>(Interval);
         hr = DeviceFunctions.pfnPresent(DriverDevice, &Present);
     }
@@ -415,7 +416,7 @@ D9Device::PresentCallback(
 
     if (Lost)
         return S_OK;
-    if (!TakeQueuedPresent(&Queued) || (Present->Flags.Value & 7) == 0)
+    if (!TakeQueuedPresent(&Queued) || ((Present->Flags.Value & 7) == 0 && !Present->Flags.RedirectedFlip))
         return E_INVALIDARG;
 
     Present->hContext = DriverVersion <= 1 ? ContextHandle : D9KernelContext(Args->hContext);
@@ -455,7 +456,8 @@ D9Device::SubmitPresentCallback(
 
     if (Lost)
         return S_OK;
-    if (!TakeQueuedPresent(&Queued) || (Present->Flags.Value & 7) == 0 || Args->BroadcastHwQueueCount == 0 ||
+    if (!TakeQueuedPresent(&Queued) || ((Present->Flags.Value & 7) == 0 && !Present->Flags.RedirectedFlip) ||
+        Args->BroadcastHwQueueCount == 0 ||
         Args->BroadcastHwQueueCount > D3DDDI_MAX_BROADCAST_CONTEXT + 1)
     {
         return E_INVALIDARG;
@@ -546,8 +548,277 @@ D9Device::PresentToWindow(
     Present->PresentHistoryToken.Token.Blt.EventId = UpdateId;
 
     /* The driver is flushed on both sides of the present */
-    hr = DriverPresent(Source->DriverResource, WindowSurface != nullptr ? WindowSurface->DriverResource : NULL);
+    hr = DriverPresent(Source->DriverResource, WindowSurface != nullptr ? WindowSurface->DriverResource : NULL,
+                       Present->Flags.Value & 7);
     FlushDriver();
+    if (Lost)
+        return D3DERR_DEVICELOST;
+    return hr;
+}
+
+/* Flip model presents */
+
+/* The ordinals dwmapi gives its security descriptor helpers */
+static constexpr WORD D9AllocateSecurityOrdinal = 136;
+static constexpr WORD D9FreeSecurityOrdinal = 137;
+
+/* Driver interfaces past this wait on the present limit themselves and tell the compositor early */
+static constexpr UINT D9EarlyNotifyVersion = 0x6000;
+
+/* Driver interfaces past this hear about flexible refresh on flip model presents */
+static constexpr UINT D9FlexibleRefreshVersion = 0x8000;
+
+/* The flip model semaphore: its access, its largest count and how long a present waits on it */
+static constexpr DWORD D9SemaphoreAccess = SYNCHRONIZE | SEMAPHORE_MODIFY_STATE;
+static constexpr LONG D9SemaphoreMaximum = 31;
+static constexpr DWORD D9PresentLimitWait = 2000;
+
+const D9CompositionCalls*
+D9Composition(VOID)
+{
+    static D9CompositionCalls Calls;
+    static INIT_ONCE Once = INIT_ONCE_STATIC_INIT;
+    BOOL Pending = FALSE;
+    HMODULE User;
+    HMODULE Dwm;
+    HMODULE Composition;
+
+    if (!InitOnceBeginInitialize(&Once, 0, &Pending, nullptr) || !Pending)
+        return &Calls;
+
+    User = LoadLibraryW(L"win32u.dll");
+    Dwm = LoadLibraryW(L"dwmapi.dll");
+    Composition = LoadLibraryW(L"dcomp.dll");
+    if (User != NULL)
+    {
+        Calls.Bind = reinterpret_cast<decltype(Calls.Bind)>(GetProcAddress(User, "NtBindCompositionSurface"));
+        Calls.Unbind = reinterpret_cast<decltype(Calls.Unbind)>(GetProcAddress(User, "NtUnBindCompositionSurface"));
+        Calls.Notify = reinterpret_cast<decltype(Calls.Notify)>(
+            GetProcAddress(User, "NtNotifyPresentToCompositionSurface"));
+        Calls.QueryStatistics = reinterpret_cast<decltype(Calls.QueryStatistics)>(
+            GetProcAddress(User, "NtQueryCompositionSurfaceStatistics"));
+    }
+    if (Dwm != NULL)
+    {
+        Calls.AllocateSecurity = reinterpret_cast<decltype(Calls.AllocateSecurity)>(
+            GetProcAddress(Dwm, MAKEINTRESOURCEA(D9AllocateSecurityOrdinal)));
+        Calls.FreeSecurity = reinterpret_cast<decltype(Calls.FreeSecurity)>(
+            GetProcAddress(Dwm, MAKEINTRESOURCEA(D9FreeSecurityOrdinal)));
+    }
+    if (Composition != NULL)
+    {
+        Calls.CreateSurfaceHandle = reinterpret_cast<decltype(Calls.CreateSurfaceHandle)>(
+            GetProcAddress(Composition, "DCompositionCreateSurfaceHandle"));
+    }
+    if (Calls.Bind == nullptr || Calls.CreateSurfaceHandle == nullptr || Calls.AllocateSecurity == nullptr)
+        D9Trace(L"the compositor entry points for flip model presents are missing");
+    InitOnceComplete(&Once, 0, nullptr);
+    return &Calls;
+}
+
+/* The semaphore starts at the present limit; DWM waits on it too, so it carries DWM's security */
+HANDLE
+D9Device::AcquireFlipSemaphore(VOID)
+{
+    const D9CompositionCalls* Calls = D9Composition();
+    SECURITY_ATTRIBUTES Attributes = {};
+    PSECURITY_DESCRIPTOR Security = nullptr;
+
+    if (FlipSemaphore == NULL)
+    {
+        FlipSemaphoreId = 1;
+        FlipSemaphoreUsers = 0;
+        Attributes.nLength = sizeof(Attributes);
+        if (Calls->AllocateSecurity != nullptr && SUCCEEDED(Calls->AllocateSecurity(&Security, D9SemaphoreAccess)))
+        {
+            Attributes.lpSecurityDescriptor = Security;
+            FlipSemaphore = CreateSemaphoreExA(&Attributes, static_cast<LONG>(PresentLimit), D9SemaphoreMaximum,
+                                               nullptr, 0, D9SemaphoreAccess);
+            if (Calls->FreeSecurity != nullptr)
+                Calls->FreeSecurity(Security);
+        }
+        if (FlipSemaphore == NULL)
+            D9Trace(L"the flip model present semaphore could not be made");
+    }
+    FlipSemaphoreUsers += 1;
+    return FlipSemaphore;
+}
+
+VOID
+D9Device::ReleaseFlipSemaphore(VOID)
+{
+    if (FlipSemaphore == NULL)
+        return;
+
+    FlipSemaphoreUsers -= 1;
+    if (FlipSemaphoreUsers == 0)
+    {
+        CloseHandle(FlipSemaphore);
+        FlipSemaphore = NULL;
+        FlipSemaphoreId = 0;
+    }
+}
+
+/* A present the semaphore cannot take right now would have to wait */
+BOOLEAN
+D9Device::PresentLimitReached(VOID)
+{
+    DWORD Wait;
+
+    if (FlipSemaphore == NULL)
+        return FALSE;
+
+    Wait = WaitForSingleObject(FlipSemaphore, 0);
+    if (Wait == WAIT_TIMEOUT)
+        return TRUE;
+    if (Wait == WAIT_OBJECT_0)
+        ReleaseSemaphore(FlipSemaphore, 1, nullptr);
+    return FALSE;
+}
+
+/* Swaps the bound targets with the given ones; the driver hears of them before they are next used */
+VOID
+D9Device::ExchangeTargets(
+    _Inout_updates_(D9MaxRenderTargets) D9Surface** Targets,
+    _Inout_ D9Surface** Depth)
+{
+    D9Surface* Held;
+
+    for (UINT Index = 0; Index < Caps.NumSimultaneousRTs && Index < D9MaxRenderTargets; Index++)
+    {
+        Held = RenderTargets[Index];
+        RenderTargets[Index] = Targets[Index];
+        Targets[Index] = Held;
+        TargetsDirty |= 1UL << Index;
+    }
+    Held = DepthStencil;
+    DepthStencil = *Depth;
+    *Depth = Held;
+    DepthDirty = TRUE;
+}
+
+/* Brings the semaphore in line with a changed present limit, taking counts one at a time when it shrank */
+static
+VOID
+D9FollowPresentLimit(
+    _In_ HANDLE Semaphore,
+    _Inout_ INT* Change)
+{
+    if (*Change == 0)
+        return;
+
+    if (*Change > 0)
+    {
+        if (!ReleaseSemaphore(Semaphore, *Change, nullptr))
+            D9Trace(L"the flip model present limit could not be raised");
+    }
+    else
+    {
+        for (INT Taken = 0; Taken < -*Change; Taken++)
+        {
+            if (WaitForSingleObject(Semaphore, D9PresentLimitWait) == WAIT_TIMEOUT)
+                break;
+        }
+    }
+    *Change = 0;
+}
+
+/* The token tells the compositor which buffer to show, when it is ready and what part of it changed */
+HRESULT
+D9Device::PresentToCompositor(
+    _In_ D9Resource* Source,
+    _In_ const D9ComposedPresent* Composed)
+{
+    const D9CompositionCalls* Calls = D9Composition();
+    D3DKMT_PRESENT* Present = &PendingPresent;
+    D3DKMT_FLIPMODEL_PRESENTHISTORYTOKEN* Flip;
+    BOOLEAN DoNotWait = (Composed->Flags & D3DPRESENT_DONOTWAIT) != 0;
+    BOOLEAN NotifiesEarly = DriverVersion > D9EarlyNotifyVersion;
+    const RGNDATA* Dirty = Composed->DirtyRegion;
+    D3DDDI_PRESENTFLAGS DriverFlags = {};
+    NTSTATUS Status;
+    HRESULT hr;
+
+    ZeroMemory(Present, sizeof(*Present));
+    Present->Flags.RedirectedFlip = TRUE;
+    Present->Flags.FlipDoNotWait = DoNotWait;
+    Present->PresentLimitSemaphore = FlipSemaphore;
+    if (FlipSemaphore != NULL)
+        D9FollowPresentLimit(FlipSemaphore, &PresentLimitChange);
+
+    /* Drivers that notify early take a count here; for older ones the kernel waits on the semaphore */
+    if (NotifiesEarly && FlipSemaphore != NULL)
+    {
+        if (WaitForSingleObject(FlipSemaphore, DoNotWait ? 0 : D9PresentLimitWait) == WAIT_TIMEOUT && DoNotWait)
+        {
+            ZeroMemory(Present, sizeof(*Present));
+            return D3DERR_WASSTILLDRAWING;
+        }
+        Present->PresentLimitSemaphore = NULL;
+    }
+
+    PresentsMade += 1;
+    Present->PresentHistoryToken.Model = D3DKMT_PM_REDIRECTED_FLIP;
+    Present->PresentHistoryToken.CompositionBindingId = Composed->BindingId;
+    Flip = &Present->PresentHistoryToken.Token.Flip;
+    Flip->FenceValue = Composed->FenceValue;
+    Flip->hLogicalSurface = reinterpret_cast<ULONG64>(Composed->Surface);
+    Flip->SwapChainIndex = Composed->SwapChainIndex;
+    Flip->PresentLimitSemaphoreId = FlipSemaphoreId;
+    Flip->FlipInterval = static_cast<D3DDDI_FLIPINTERVAL_TYPE>(Composed->FlipInterval);
+    Flip->PresentCount = PresentsMade;
+    Flip->Rotation = D3DDDI_ROTATION_IDENTITY;
+    Flip->hSyncObject = Composed->FenceHandle;
+
+    /* A buffer kept on screen changed nothing; up to fifteen dirty rectangles pass on, anything else is the
+       whole buffer */
+    if ((Composed->Flags & D3DPRESENT_DONOTFLIP) == 0)
+    {
+        if (Dirty != nullptr && Dirty->rdh.nCount >= 1 && Dirty->rdh.nCount <= _countof(Flip->DirtyRegions.Rects))
+        {
+            Flip->DirtyRegions.NumRects = Dirty->rdh.nCount;
+            CopyMemory(Flip->DirtyRegions.Rects, Dirty->Buffer, Dirty->rdh.nCount * sizeof(RECT));
+        }
+        else
+        {
+            Flip->DirtyRegions.NumRects = 1;
+            SetRect(&Flip->DirtyRegions.Rects[0], 0, 0, Composed->Width, Composed->Height);
+        }
+    }
+    SetRect(&Flip->SourceRect, 0, 0, Composed->Width, Composed->Height);
+    Flip->DestWidth = Composed->Width;
+    Flip->DestHeight = Composed->Height;
+    SetRect(&Flip->TargetRect, 0, 0, Composed->Width, Composed->Height);
+    Flip->Transform[0] = 1.0f;
+    Flip->Transform[3] = 1.0f;
+
+    if (NotifiesEarly && Calls->Notify != nullptr)
+    {
+        Status = Calls->Notify(Composed->Surface, &Present->PresentHistoryToken);
+        if (!NT_SUCCESS(Status))
+        {
+            D9Trace(L"NtNotifyPresentToCompositionSurface failed 0x%08lX", Status);
+            if (FlipSemaphore != NULL)
+                ReleaseSemaphore(FlipSemaphore, 1, nullptr);
+            PresentsMade -= 1;
+            ZeroMemory(Present, sizeof(*Present));
+            return D9HresultFromStatus(Status);
+        }
+        Flip->Flags.CompSurfaceNotifiedEarly = TRUE;
+    }
+    Present->PresentCount = PresentsMade;
+    Present->Flags.PresentCountValid = TRUE;
+
+    DriverFlags.Blt = TRUE;
+    if (DriverVersion > D9FlexibleRefreshVersion)
+        DriverFlags.AllowFlexibleRefresh = Composed->FlipInterval <= 1;
+    hr = DriverPresent(Source->DriverResource, NULL, DriverFlags.Value);
+    if (FAILED(hr))
+    {
+        PresentsMade -= 1;
+        return hr;
+    }
+    QueryPerformanceCounter(&LastPresentTime);
     if (Lost)
         return D3DERR_DEVICELOST;
     return hr;

@@ -13,6 +13,21 @@ typedef NTSTATUS (APIENTRY* PD9_GET_SCAN_LINE)(D3DKMT_GETSCANLINE*);
 /* A present flag the runtime keeps for itself and lets through */
 static constexpr DWORD D9PresentFlagsRuntime = 0x80000000;
 
+/* Windowed flip model chains with buffers this small also look the adapter up, as the runtime does */
+static constexpr UINT64 D9IdentifiedBufferArea = 0x10000;
+
+static
+BOOLEAN
+D9ComposesDirectly(
+    _In_ const D3DPRESENT_PARAMETERS* Parameters);
+
+static
+HRESULT
+D9ShareWithCompositor(
+    _In_ D3DKMT_HANDLE Object,
+    _In_ PSECURITY_DESCRIPTOR Security,
+    _Out_ HANDLE* Handle);
+
 D9SwapChain::D9SwapChain(
     _In_ D9Device* Owner,
     _In_ UINT Position)
@@ -35,13 +50,19 @@ D9SwapChain::~D9SwapChain()
     ReleaseBuffers();
 }
 
-/* The buffers go newest first */
+/* The buffers go newest first, after what the compositor held */
 VOID
 D9SwapChain::ReleaseBuffers(VOID)
 {
+    ReleaseComposition();
     while (BackBufferCount > 0)
     {
         BackBufferCount -= 1;
+        if (BufferHandles[BackBufferCount] != NULL)
+        {
+            CloseHandle(BufferHandles[BackBufferCount]);
+            BufferHandles[BackBufferCount] = NULL;
+        }
         BackBuffers[BackBufferCount]->Abandon();
         BackBuffers[BackBufferCount] = nullptr;
     }
@@ -80,10 +101,13 @@ D9SwapChain::Reset(
     _Inout_ D3DPRESENT_PARAMETERS* Requested)
 {
     HWND Target = Requested->hDeviceWindow != NULL ? Requested->hDeviceWindow : FocusWindow;
+    const D9CompositionCalls* Calls = D9Composition();
+    PSECURITY_DESCRIPTOR Security = nullptr;
     D3DSURFACE_DESC Desc = {};
     RECT Client = {};
+    BOOLEAN DirectFlip = FALSE;
     UINT Count;
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
     if (Requested->BackBufferCount == 0)
         Requested->BackBufferCount = 1;
@@ -110,6 +134,35 @@ D9SwapChain::Reset(
     Cursor.Release();
     ReleaseBuffers();
     Device->FlushDriver();
+    Parameters = *Requested;
+    FlipPresents = 0;
+    StatsReported = 0;
+    StatsDisjoint = FALSE;
+    PresentMark = 0;
+    ComposedIndex = 0;
+    FenceValue = 0;
+    ZeroMemory(&CachedStats, sizeof(CachedStats));
+    ZeroMemory(&LastStats, sizeof(LastStats));
+
+    /* A flip model chain the compositor shows needs DWM's security on what it shares */
+    Composed = D9ComposesDirectly(Requested);
+    if (Composed)
+    {
+        DirectFlip = MatchesDirectFlip();
+        hr = Calls->AllocateSecurity != nullptr ? Calls->AllocateSecurity(&Security, GENERIC_ALL) : E_NOTIMPL;
+        if (FAILED(hr))
+        {
+            Composed = FALSE;
+            return hr;
+        }
+        if (static_cast<UINT64>(Requested->BackBufferWidth) * Requested->BackBufferHeight < D9IdentifiedBufferArea)
+        {
+            D3DADAPTER_IDENTIFIER9 Identifier;
+
+            Device->Owner()->GetAdapterIdentifier(Device->AdapterInfo()->Ordinal, 0, &Identifier);
+        }
+    }
+
     Desc.Format = Requested->BackBufferFormat;
     Desc.Type = D3DRTYPE_SURFACE;
     Desc.Usage = D3DUSAGE_RENDERTARGET;
@@ -130,19 +183,36 @@ D9SwapChain::Reset(
                                                           Requested->SwapEffect == D3DSWAPEFFECT_DISCARD);
 
         if (Surface == nullptr)
-            return E_OUTOFMEMORY;
+        {
+            hr = E_OUTOFMEMORY;
+            break;
+        }
         BackBuffers[BackBufferCount] = Surface;
         BackBufferCount += 1;
 
-        hr = Surface->Create();
-        if (FAILED(hr))
-            return hr;
-    }
+        if (Composed)
+        {
+            D3DKMT_UMDFILENAMEINFO Name;
 
-    Parameters = *Requested;
-    FlipPresents = 0;
-    StatsReported = 0;
-    StatsDisjoint = FALSE;
+            D9QueryUmdName(Device->AdapterInfo()->KernelAdapter, KMTUMDVERSION_DX9, &Name);
+            Surface->AssignRole(D9SurfaceRole::CompositionBuffer);
+        }
+        hr = Surface->Create();
+        if (SUCCEEDED(hr) && Composed)
+            hr = D9ShareWithCompositor(Surface->DriverResource()->KernelResource, Security, &BufferHandles[Buffer]);
+        if (FAILED(hr))
+            break;
+    }
+    if (SUCCEEDED(hr) && Composed)
+        hr = CreateClearTargets();
+    if (SUCCEEDED(hr) && Composed)
+        hr = CreateComposition(Security, DirectFlip);
+    if (SUCCEEDED(hr) && Composed)
+        hr = BindComposition();
+    if (Security != nullptr && Calls->FreeSecurity != nullptr)
+        Calls->FreeSecurity(Security);
+    if (FAILED(hr))
+        return hr;
 
     /* The cursor starts in the middle of the back buffers, or of the display a fullscreen chain takes */
     if (Parameters.Windowed)
@@ -199,6 +269,7 @@ D9ValidatePresent(
     _In_ BOOLEAN IsEx,
     _In_opt_ const RECT* SourceRect,
     _In_opt_ const RECT* DestRect,
+    _In_opt_ HWND WindowOverride,
     _In_opt_ const RGNDATA* DirtyRegion,
     _In_ DWORD Flags)
 {
@@ -206,8 +277,8 @@ D9ValidatePresent(
 
     if (Swap == D3DSWAPEFFECT_FLIP && (SourceRect != nullptr || DestRect != nullptr || DirtyRegion != nullptr))
         return D3DERR_INVALIDCALL;
-    if (Swap == D3DSWAPEFFECT_FLIPEX &&
-        (SourceRect != nullptr || DestRect != nullptr || (Flags & D3DPRESENT_LINEAR_CONTENT) != 0))
+    if (Swap == D3DSWAPEFFECT_FLIPEX && (SourceRect != nullptr || DestRect != nullptr || WindowOverride != NULL ||
+                                         (Flags & D3DPRESENT_LINEAR_CONTENT) != 0))
     {
         return D3DERR_INVALIDCALL;
     }
@@ -243,7 +314,8 @@ D9SwapChain::PresentWindowed(
     RECT Client = {};
     HRESULT hr;
 
-    hr = D9ValidatePresent(&Parameters, Device->IsExtended(), SourceRect, DestRect, DirtyRegion, Flags);
+    hr = D9ValidatePresent(&Parameters, Device->IsExtended(), SourceRect, DestRect, WindowOverride, DirtyRegion,
+                           Flags);
     if (FAILED(hr))
     {
         D9_TRACE_ONCE(L"Present: flags 0x%08lX do not fit the swap chain", Flags);
@@ -251,6 +323,8 @@ D9SwapChain::PresentWindowed(
     }
     if (BackBufferCount == 0 || (Parameters.SwapEffect & 0x40000000) != 0)
         return S_OK;
+    if (Composed)
+        return PresentComposed(DirtyRegion, Flags);
 
     SetRect(&From, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
     if (SourceRect != nullptr && !IntersectRect(&From, &From, SourceRect))
@@ -453,7 +527,10 @@ D9SwapChain::GetLastPresentCount(
         *Count = 0;
         return S_OK;
     }
-    *Count = Parameters.SwapEffect == D3DSWAPEFFECT_FLIPEX ? FlipPresents : 0;
+    if (Parameters.SwapEffect != D3DSWAPEFFECT_FLIPEX)
+        *Count = 0;
+    else
+        *Count = Composed ? PresentMark : FlipPresents;
     return S_OK;
 }
 
@@ -478,6 +555,8 @@ D9SwapChain::GetPresentStats(
     }
     if (Parameters.SwapEffect != D3DSWAPEFFECT_FLIPEX)
         return D3DERR_NOTAVAILABLE;
+    if (Composed)
+        return ComposedStats(Stats);
     if (StatsReported == FlipPresents)
         return S_OK;
     if (StatsDisjoint)
@@ -496,4 +575,605 @@ D9SwapChain::GetDisplayModeEx(
     if (Mode == nullptr)
         return D3DERR_INVALIDCALL;
     return Device->Owner()->GetAdapterDisplayModeEx(Device->AdapterInfo()->Ordinal, Mode, Rotation);
+}
+
+/* Flip model composition */
+
+/* What the composition objects are opened with, and how many buffers one binding takes */
+static constexpr DWORD D9SharedObjectAccess = STANDARD_RIGHTS_REQUIRED | GENERIC_READ | GENERIC_WRITE | GENERIC_ALL;
+static constexpr DWORD D9CompositionSurfaceAccess = 3;
+static constexpr UINT D9BindableBuffers = 31;
+static constexpr UINT D9ClearTargetSize = 16;
+
+/* Display drivers of this model and later get a monitored fence the compositor waits on */
+static constexpr UINT D9MonitoredFenceModel = 2000;
+
+/* A display configuration query only the runtime makes, and where its answer says the output is cloned */
+static constexpr UINT D9OutputInfoType = 0xFFFFFFFE;
+static constexpr UINT D9OutputInfoSize = 0x808;
+static constexpr UINT D9OutputInfoClone = 1644;
+
+/* The layout NtBindCompositionSurface reads */
+static constexpr UINT D9BindInfoSize = 0x518;
+static constexpr UINT D9BindMonitor = 0x10;
+static constexpr UINT D9BindOpacity = 0x4C;
+static constexpr UINT D9BindScaleX = 0x50;
+static constexpr UINT D9BindScaleY = 0x5C;
+static constexpr UINT D9BindFlags = 0x90;
+static constexpr UINT D9BindKind = 0x98;
+static constexpr UINT D9BindBufferCount = 0x9C;
+static constexpr UINT D9BindBuffers = 0xA0;
+static constexpr UINT D9BindWindow = 0x480;
+static constexpr UINT D9BindSemaphore = 0x488;
+static constexpr UINT D9BindFence = 0x490;
+static constexpr DWORD D9BindDirectFlip = 0x10;
+static constexpr DWORD D9BindOverlays = 0x40;
+static constexpr DWORD D9BindWindowed = 0x200;
+
+/* One buffer of the binding: its NT handle and the adapter it lives on */
+struct D9BoundBuffer
+{
+    HANDLE Handle;
+    LUID Adapter;
+    UINT64 Reserved[2];
+};
+
+static_assert(sizeof(D9BoundBuffer) == 32);
+
+/* The kernel's statistics of a composition surface, as far as Direct3D 9 reads them */
+static constexpr UINT D9SurfaceStatisticsSize = 80;
+static constexpr UINT D9StatisticsPresentCount = 0x18;
+static constexpr UINT D9StatisticsPresentRefresh = 0x1C;
+static constexpr UINT D9StatisticsSyncRefresh = 0x20;
+static constexpr UINT D9StatisticsSyncTime = 0x28;
+
+template <class Value>
+static
+inline
+VOID
+D9PutField(
+    _Out_writes_bytes_(Offset + sizeof(Value)) BYTE* Block,
+    _In_ UINT Offset,
+    _In_ Value Field)
+{
+    CopyMemory(Block + Offset, &Field, sizeof(Field));
+}
+
+template <class Value>
+static
+inline
+Value
+D9GetField(
+    _In_reads_bytes_(Offset + sizeof(Value)) const BYTE* Block,
+    _In_ UINT Offset)
+{
+    Value Field;
+
+    CopyMemory(&Field, Block + Offset, sizeof(Field));
+    return Field;
+}
+
+/* Flip model presents of a windowed chain go through the compositor unless the buffers need a copy first */
+static
+BOOLEAN
+D9ComposesDirectly(
+    _In_ const D3DPRESENT_PARAMETERS* Parameters)
+{
+    return Parameters->SwapEffect == D3DSWAPEFFECT_FLIPEX && Parameters->Windowed &&
+           (Parameters->Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) == 0 &&
+           Parameters->MultiSampleType == D3DMULTISAMPLE_NONE && D9IsFlipExFormat(Parameters->BackBufferFormat);
+}
+
+static
+inline
+BOOLEAN
+D9SameLuid(
+    _In_ const LUID& Left,
+    _In_ const LUID& Right)
+{
+    return Left.LowPart == Right.LowPart && Left.HighPart == Right.HighPart;
+}
+
+/* Whether an output shows the buffers unscaled: same size, not cloned for a small chain, rotated only when the
+   application handles rotation */
+static
+BOOLEAN
+D9OutputFitsBuffers(
+    _In_ const D9Adapter* Entry,
+    _In_ const D3DPRESENT_PARAMETERS* Parameters)
+{
+    BYTE Info[D9OutputInfoSize] = {};
+    DISPLAYCONFIG_DEVICE_INFO_HEADER* Header = reinterpret_cast<DISPLAYCONFIG_DEVICE_INFO_HEADER*>(Info);
+    D3DKMT_CURRENTDISPLAYMODE Current = {};
+
+    Header->type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(D9OutputInfoType);
+    Header->size = D9OutputInfoSize;
+    Header->adapterId = Entry->AdapterLuid;
+    Header->id = Entry->SourceId;
+    if (DisplayConfigGetDeviceInfo(Header) != ERROR_SUCCESS)
+        return FALSE;
+    if (Parameters->BackBufferCount <= 2 && (D9GetField<DWORD>(Info, D9OutputInfoClone) != 0 ||
+                                             D9GetField<DWORD>(Info, D9OutputInfoClone + 4) != 0))
+    {
+        return FALSE;
+    }
+
+    Current.VidPnSourceId = Entry->SourceId;
+    if (!NT_SUCCESS(D9QueryKernel(Entry->KernelAdapter, KMTQAITYPE_CURRENTDISPLAYMODE, &Current, sizeof(Current))))
+        return FALSE;
+    if (Current.DisplayMode.Width != Parameters->BackBufferWidth ||
+        Current.DisplayMode.Height != Parameters->BackBufferHeight)
+    {
+        return FALSE;
+    }
+    return Current.DisplayMode.DisplayOrientation == D3DDDI_ROTATION_IDENTITY ||
+           (Parameters->Flags & D3DPRESENTFLAG_NOAUTOROTATE) != 0;
+}
+
+/* A hardware device can flip a chain straight to the screen when an output of its adapter matches the buffers;
+   the window's own output is tried first */
+BOOLEAN
+D9SwapChain::MatchesDirectFlip(VOID) const
+{
+    const D9Adapter* Ours = Device->AdapterInfo();
+    const D9Enum* Enum = Device->Owner();
+    MONITORINFOEXA Monitor = {};
+    HMONITOR Shown;
+    const D9Adapter* Entry;
+
+    if (Device->Type() != D3DDEVTYPE_HAL || !Ours->DirectFlip)
+        return FALSE;
+
+    Shown = MonitorFromWindow(Window(), MONITOR_DEFAULTTONULL);
+    Monitor.cbSize = sizeof(Monitor);
+    if (Shown != NULL && GetMonitorInfoA(Shown, &Monitor))
+    {
+        for (UINT Position = 0; (Entry = Enum->AdapterEntry(Position)) != nullptr; Position++)
+        {
+            if (lstrcmpA(Monitor.szDevice, Entry->DeviceName) != 0)
+                continue;
+            if (D9SameLuid(Entry->AdapterLuid, Ours->AdapterLuid) && D9OutputFitsBuffers(Entry, &Parameters))
+                return TRUE;
+            break;
+        }
+    }
+    for (UINT Position = 0; (Entry = Enum->AdapterEntry(Position)) != nullptr; Position++)
+    {
+        if (D9SameLuid(Entry->AdapterLuid, Ours->AdapterLuid) && D9OutputFitsBuffers(Entry, &Parameters))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* An NT handle the compositor opens a buffer or the fence by */
+static
+HRESULT
+D9ShareWithCompositor(
+    _In_ D3DKMT_HANDLE Object,
+    _In_ PSECURITY_DESCRIPTOR Security,
+    _Out_ HANDLE* Handle)
+{
+    OBJECT_ATTRIBUTES Attributes = {};
+    NTSTATUS Status;
+
+    *Handle = NULL;
+    Attributes.Length = sizeof(Attributes);
+    Attributes.SecurityDescriptor = Security;
+    Status = RxGetKmtThunks()->ShareObjects(1, &Object, &Attributes, D9SharedObjectAccess, Handle);
+    if (!NT_SUCCESS(Status))
+    {
+        D9Trace(L"D3DKMTShareObjects failed 0x%08lX for a flip model object", Status);
+        return D9HresultFromStatus(Status);
+    }
+    return S_OK;
+}
+
+/* The small target and depth buffer presents bind while the compositor takes the back buffer */
+HRESULT
+D9SwapChain::CreateClearTargets(VOID)
+{
+    D3DSURFACE_DESC Desc = {};
+    HRESULT hr;
+
+    Desc.Format = D3DFMT_A8R8G8B8;
+    Desc.Type = D3DRTYPE_SURFACE;
+    Desc.Usage = D3DUSAGE_RENDERTARGET;
+    Desc.Pool = D3DPOOL_DEFAULT;
+    Desc.Width = D9ClearTargetSize;
+    Desc.Height = D9ClearTargetSize;
+    ClearTarget = new (std::nothrow) D9Surface(Device, static_cast<IDirect3DSwapChain9*>(this), &Desc, FALSE);
+    if (ClearTarget == nullptr)
+        return E_OUTOFMEMORY;
+    ClearTarget->AssignRole(D9SurfaceRole::CompositionTarget);
+    hr = ClearTarget->Create();
+    if (FAILED(hr))
+        return hr;
+
+    Desc.Format = D3DFMT_D24S8;
+    Desc.Usage = D3DUSAGE_DEPTHSTENCIL;
+    ClearDepth = new (std::nothrow) D9Surface(Device, static_cast<IDirect3DSwapChain9*>(this), &Desc, FALSE);
+    if (ClearDepth == nullptr)
+        return E_OUTOFMEMORY;
+    return ClearDepth->Create();
+}
+
+/* The fence the compositor waits on before it shows a buffer, and the composition surface the chain binds */
+HRESULT
+D9SwapChain::CreateComposition(
+    _In_ PSECURITY_DESCRIPTOR Security,
+    _In_ BOOLEAN DirectFlip)
+{
+    const D9CompositionCalls* Calls = D9Composition();
+    D3DKMT_CREATESYNCHRONIZATIONOBJECT2 Create = {};
+    NTSTATUS Status;
+    HRESULT hr;
+
+    if (BackBufferCount > D9BindableBuffers)
+    {
+        D9_TRACE_ONCE(L"CreateDevice: %u flip model buffers are more than the compositor binds", BackBufferCount);
+        return E_INVALIDARG;
+    }
+
+    Create.hDevice = Device->KernelDevice();
+    Create.Info.Flags.Shared = TRUE;
+    Create.Info.Flags.NtSecuritySharing = TRUE;
+    Create.Info.Flags.D3DDDI_SYNCHRONIZATIONOBJECT_FLAGS_RESERVED0 = TRUE;
+    if (Device->AdapterInfo()->DriverModel >= D9MonitoredFenceModel)
+    {
+        Create.Info.Type = D3DDDI_MONITORED_FENCE;
+        Create.Info.Flags.NoGPUAccess = TRUE;
+        Create.Info.MonitoredFence.InitialFenceValue = FenceValue;
+    }
+    else
+    {
+        Create.Info.Type = D3DDDI_FENCE;
+        Create.Info.Fence.FenceValue = FenceValue;
+    }
+    Status = RxGetKmtThunks()->CreateSynchronizationObject2(&Create);
+    if (!NT_SUCCESS(Status))
+    {
+        D9Trace(L"D3DKMTCreateSynchronizationObject2 failed 0x%08lX for the flip model fence", Status);
+        return D9HresultFromStatus(Status);
+    }
+    Fence = Create.hSyncObject;
+
+    hr = D9ShareWithCompositor(Fence, Security, &FenceHandle);
+    if (FAILED(hr))
+        return hr;
+
+    if (CompositionSurface == NULL)
+    {
+        hr = Calls->CreateSurfaceHandle != nullptr ?
+             Calls->CreateSurfaceHandle(D9CompositionSurfaceAccess, nullptr, &CompositionSurface) : E_NOTIMPL;
+        if (FAILED(hr))
+        {
+            D9Trace(L"the composition surface could not be made (0x%08lX)", hr);
+            return hr;
+        }
+    }
+    DirectFlipBound = DirectFlip;
+    return S_OK;
+}
+
+/* What the monitor search looks for and finds */
+struct D9MonitorSearch
+{
+    PCSTR Name;
+    HMONITOR Found;
+};
+
+/* Stops at the monitor named, or at one GDI cannot describe */
+static
+BOOL
+CALLBACK
+D9FindMonitor(
+    _In_ HMONITOR Monitor,
+    _In_opt_ HDC Dc,
+    _In_opt_ LPRECT Area,
+    _In_ LPARAM Context)
+{
+    D9MonitorSearch* Search = reinterpret_cast<D9MonitorSearch*>(Context);
+    MONITORINFO Plain = {};
+    MONITORINFOEXA Named = {};
+
+    UNREFERENCED_PARAMETER(Dc);
+    UNREFERENCED_PARAMETER(Area);
+    Plain.cbSize = sizeof(Plain);
+    Named.cbSize = sizeof(Named);
+    if (!GetMonitorInfoA(Monitor, &Plain) || !GetMonitorInfoA(Monitor, &Named))
+        return FALSE;
+    if (strcmp(Search->Name, Named.szDevice) != 0)
+        return TRUE;
+    Search->Found = Monitor;
+    return FALSE;
+}
+
+/* The monitor GDI shows the adapter's output on */
+static
+HMONITOR
+D9MonitorOfDisplay(
+    _In_z_ PCSTR DisplayName)
+{
+    D9MonitorSearch Search = { DisplayName, NULL };
+
+    EnumDisplayMonitors(NULL, nullptr, D9FindMonitor, reinterpret_cast<LPARAM>(&Search));
+    return Search.Found;
+}
+
+/* Hands the compositor the buffers, the window they show in, the present limit and the fence */
+HRESULT
+D9SwapChain::BindComposition(VOID)
+{
+    const D9CompositionCalls* Calls = D9Composition();
+    const D9Adapter* Adapter = Device->AdapterInfo();
+    BYTE Block[sizeof(DWORD) * 2 + D9BindInfoSize] = {};
+    BYTE* Info = Block + sizeof(DWORD) * 2;
+    HANDLE Semaphore = Device->AcquireFlipSemaphore();
+    D9BoundBuffer Bound = {};
+    DWORD Flags = DirectFlipBound ? D9BindDirectFlip : 0;
+    LUID Luid = {};
+    NTSTATUS Status;
+
+    if (Device->Type() == D3DDEVTYPE_HAL && Adapter->MultiPlaneOverlay)
+        Flags |= D9BindOverlays;
+    Flags |= D9BindWindowed;
+
+    D9PutField(Info, D9BindMonitor, D9MonitorOfDisplay(Adapter->DeviceName));
+    D9PutField(Info, D9BindOpacity, 1UL);
+    D9PutField(Info, D9BindScaleX, 1.0f);
+    D9PutField(Info, D9BindScaleY, 1.0f);
+    D9PutField(Info, D9BindFlags, Flags);
+    D9PutField(Info, D9BindKind, 2UL);
+    D9PutField(Info, D9BindBufferCount, BackBufferCount);
+    Device->Owner()->GetAdapterLUID(Adapter->Ordinal, &Luid);
+    for (UINT Buffer = 0; Buffer < BackBufferCount; Buffer++)
+    {
+        Bound.Handle = BufferHandles[Buffer];
+        Bound.Adapter = Luid;
+        D9PutField(Info, D9BindBuffers + Buffer * static_cast<UINT>(sizeof(Bound)), Bound);
+    }
+    D9PutField(Info, D9BindWindow, Window());
+    D9PutField(Info, D9BindSemaphore, Semaphore);
+    D9PutField(Info, D9BindFence, FenceHandle);
+
+    if (Calls->Bind == nullptr)
+        return E_NOTIMPL;
+    D9PutField(Block, 0, 2UL);
+    Status = Calls->Bind(CompositionSurface, 1, 0, nullptr, Block, Info);
+    if (!NT_SUCCESS(Status))
+    {
+        D9Trace(L"NtBindCompositionSurface failed 0x%08lX", Status);
+        return HRESULT_FROM_NT(Status);
+    }
+    BindingId = D9GetField<UINT64>(Info, 0);
+    StatsDisjoint = TRUE;
+    return S_OK;
+}
+
+/* Unbinds and lets go of everything the compositor knew; the buffers follow in ReleaseBuffers */
+VOID
+D9SwapChain::ReleaseComposition(VOID)
+{
+    const D9CompositionCalls* Calls = D9Composition();
+    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT Destroy = {};
+
+    if (!Composed)
+        return;
+
+    if (BackBufferCount > 0)
+    {
+        if (CompositionSurface != NULL && Calls->Unbind != nullptr)
+        {
+            NTSTATUS Status = Calls->Unbind(CompositionSurface, 1);
+
+            if (!NT_SUCCESS(Status))
+                D9Trace(L"NtUnBindCompositionSurface failed 0x%08lX", Status);
+        }
+        BindingId = 0;
+        if (CompositionSurface != NULL)
+        {
+            CloseHandle(CompositionSurface);
+            CompositionSurface = NULL;
+        }
+        if (Fence != 0)
+        {
+            Destroy.hSyncObject = Fence;
+            RxGetKmtThunks()->DestroySynchronizationObject(&Destroy);
+            Fence = 0;
+            if (FenceHandle != NULL)
+            {
+                CloseHandle(FenceHandle);
+                FenceHandle = NULL;
+            }
+        }
+        Device->ReleaseFlipSemaphore();
+    }
+    if (ClearTarget != nullptr)
+    {
+        ClearTarget->Abandon();
+        ClearTarget = nullptr;
+    }
+    if (ClearDepth != nullptr)
+    {
+        ClearDepth->Abandon();
+        ClearDepth = nullptr;
+    }
+    Composed = FALSE;
+}
+
+/* A flip model present: the small target is cleared so the driver lets go of the back buffer, the compositor
+   gets the buffer, and the buffers move one place as a flip does */
+HRESULT
+D9SwapChain::PresentComposed(
+    _In_opt_ const RGNDATA* DirtyRegion,
+    _In_ DWORD Flags)
+{
+    BOOLEAN KeepBuffer = (Flags & D3DPRESENT_DONOTFLIP) != 0;
+    D9Surface* Saved[D9MaxRenderTargets] = {};
+    D9Surface* SavedDepth = nullptr;
+    D9ComposedPresent Present = {};
+    D9Surface* Source;
+    D3DVIEWPORT9 Viewport = {};
+    D3DVIEWPORT9 Small = {};
+    RECT Scissor = {};
+    RECT SmallScissor = {};
+    RECT Client = {};
+    HRESULT hr;
+
+    /* Each dirty rectangle check looks at the first rectangle, as the runtime always has */
+    if (DirtyRegion != nullptr)
+    {
+        const RECT* First = reinterpret_cast<const RECT*>(DirtyRegion->Buffer);
+
+        for (DWORD Checked = 0; Checked < DirtyRegion->rdh.nCount; Checked++)
+        {
+            if (First->top < DirtyRegion->rdh.rcBound.top || First->bottom > DirtyRegion->rdh.rcBound.bottom ||
+                First->left < DirtyRegion->rdh.rcBound.left || First->right > DirtyRegion->rdh.rcBound.right)
+            {
+                D9_TRACE_ONCE(L"Present: a dirty rectangle lies outside the region's bounds");
+                return D3DERR_INVALIDCALL;
+            }
+        }
+    }
+
+    if ((Flags & D3DPRESENT_DONOTWAIT) != 0 && Device->PresentLimitReached())
+        return D3DERR_WASSTILLDRAWING;
+
+    if (KeepBuffer)
+    {
+        Present.SwapChainIndex = ComposedIndex != 0 ? ComposedIndex - 1 : BackBufferCount - 1;
+        Present.FenceValue = FenceValue;
+        Source = BackBuffers[BackBufferCount - 1];
+    }
+    else
+    {
+        Present.SwapChainIndex = ComposedIndex;
+        Present.FenceValue = FenceValue + 1;
+        Source = BackBuffers[0];
+    }
+    Present.Surface = CompositionSurface;
+    Present.BindingId = BindingId;
+    Present.FenceHandle = Fence != 0 ? FenceHandle : NULL;
+    Present.Flags = Flags;
+    Present.DirtyRegion = DirtyRegion;
+    Present.Width = Parameters.BackBufferWidth;
+    Present.Height = Parameters.BackBufferHeight;
+    switch (Parameters.PresentationInterval)
+    {
+    case D3DPRESENT_INTERVAL_IMMEDIATE:
+        Present.FlipInterval = 0;
+        break;
+    case D3DPRESENT_INTERVAL_TWO:
+        Present.FlipInterval = 2;
+        break;
+    case D3DPRESENT_INTERVAL_THREE:
+        Present.FlipInterval = 3;
+        break;
+    case D3DPRESENT_INTERVAL_FOUR:
+        Present.FlipInterval = 4;
+        break;
+    default:
+        Present.FlipInterval = 1;
+        break;
+    }
+    if ((Flags & D3DPRESENT_FORCEIMMEDIATE) != 0)
+        Present.FlipInterval = 0;
+
+    /* The driver must not render to the buffer the compositor reads, so the small target takes its place */
+    if (!KeepBuffer)
+    {
+        Device->GetViewport(&Viewport);
+        Small.Width = D9ClearTargetSize;
+        Small.Height = D9ClearTargetSize;
+        Device->SetViewport(&Small);
+        Device->GetScissorRect(&Scissor);
+        SetRect(&SmallScissor, 0, 0, D9ClearTargetSize, D9ClearTargetSize);
+        Device->SetScissorRect(&SmallScissor);
+        Saved[0] = ClearTarget;
+        SavedDepth = ClearDepth;
+        Device->ExchangeTargets(Saved, &SavedDepth);
+        Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFFFFFFFF, 0.0f, 0);
+        Device->SetViewport(&Viewport);
+        Device->SetScissorRect(&Scissor);
+    }
+
+    hr = Device->PresentToCompositor(Source->DriverResource(), &Present);
+    if (FAILED(hr))
+    {
+        if (!KeepBuffer)
+            Device->ExchangeTargets(Saved, &SavedDepth);
+        return hr;
+    }
+
+    if (hr == S_PRESENT_OCCLUDED)
+        StatsDisjoint = TRUE;
+    if (Device->KeepsPresentStats())
+    {
+        PresentMark = Device->PresentCount();
+        PresentTime = Device->PresentTime();
+    }
+    if (Device->IsExtended() && GetClientRect(Window(), &Client) && IsRectEmpty(&Client))
+        hr = S_PRESENT_OCCLUDED;
+
+    if (!KeepBuffer && BackBufferCount > 1)
+    {
+        HANDLE Moving = BufferHandles[0];
+
+        RotateBuffers();
+        for (UINT Remaining = BackBufferCount; Remaining > 0; Remaining -= 1)
+        {
+            HANDLE Held = BufferHandles[Remaining - 1];
+
+            BufferHandles[Remaining - 1] = Moving;
+            Moving = Held;
+        }
+        Device->ExchangeTargets(Saved, &SavedDepth);
+    }
+    if (!KeepBuffer)
+    {
+        ComposedIndex += 1;
+        if (ComposedIndex >= BackBufferCount)
+            ComposedIndex = 0;
+        if (CompositionSurface != NULL)
+            FenceValue += 1;
+    }
+    return hr;
+}
+
+/* Until the chain presents again the last statistics stand; otherwise the compositor says what it showed */
+HRESULT
+D9SwapChain::ComposedStats(
+    _Out_ D3DPRESENTSTATS* Stats)
+{
+    const D9CompositionCalls* Calls = D9Composition();
+    BYTE Block[D9SurfaceStatisticsSize] = {};
+    HRESULT hr = S_OK;
+    NTSTATUS Status;
+
+    if (CachedStats.PresentCount == PresentMark)
+    {
+        *Stats = CachedStats;
+        LastStats = CachedStats;
+        return S_OK;
+    }
+
+    if (StatsDisjoint)
+    {
+        StatsDisjoint = FALSE;
+        hr = D3DERR_PRESENT_STATISTICS_DISJOINT;
+    }
+    Status = Calls->QueryStatistics != nullptr ? Calls->QueryStatistics(CompositionSurface, Block) : STATUS_NOT_IMPLEMENTED;
+    if (!NT_SUCCESS(Status))
+    {
+        *Stats = LastStats;
+    }
+    else
+    {
+        Stats->PresentCount = D9GetField<UINT>(Block, D9StatisticsPresentCount);
+        Stats->PresentRefreshCount = D9GetField<UINT>(Block, D9StatisticsPresentRefresh);
+        Stats->SyncRefreshCount = D9GetField<UINT>(Block, D9StatisticsSyncRefresh);
+        Stats->SyncQPCTime.QuadPart = D9GetField<LONGLONG>(Block, D9StatisticsSyncTime);
+    }
+    LastStats = *Stats;
+    return hr;
 }

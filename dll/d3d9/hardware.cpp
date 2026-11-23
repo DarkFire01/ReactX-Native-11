@@ -122,7 +122,8 @@ D9FillShareRecord(
     Record->Height = Resource->Height;
     Record->DxgiFormat = Single ? D9DxgiShareFormat(Resource->Format) : 0;
     Record->ArraySize = 1;
-    Record->Primary = Resource->Flags.Primary;
+    Record->NtShared = Resource->Composed;
+    Record->Primary = Resource->Flags.Primary || Resource->Composed;
     Record->Format = Resource->Format;
     Record->Type = Resource->Type;
     Record->Usage = Resource->ShareUsage;
@@ -352,7 +353,8 @@ D9Device::AllocateCallback(
             D9FillShareRecord(Resource, &Record);
             Create.pPrivateRuntimeData = &Record;
             Create.PrivateRuntimeDataSize = sizeof(Record);
-            Create.Flags.SwapChainBackBuffer = Resource->Flags.Primary;
+            Create.Flags.SwapChainBackBuffer = Resource->Flags.Primary || Resource->Composed;
+            Create.Flags.NtSecuritySharing = Resource->Composed;
         }
         if (Resource->KernelResource == 0)
         {
@@ -1284,9 +1286,11 @@ D9Device::CreateDriverSurface(
     _In_opt_ VOID* Memory,
     _In_ UINT MemoryPitch,
     _In_opt_ const D9ShareRequest* Share,
-    _Out_ D9Resource* Resource)
+    _Out_ D9Resource* Resource,
+    _In_ D9SurfaceRole Role)
 {
     D3DDDI_SURFACEINFO Surface = {};
+    D9ShareRequest Composed = {};
 
     ZeroMemory(Resource, sizeof(*Resource));
     Resource->Format = static_cast<D3DDDIFORMAT>(D9DriverDepthFormat(Adapter, Desc->Format));
@@ -1294,7 +1298,30 @@ D9Device::CreateDriverSurface(
     Resource->Width = Desc->Width;
     Resource->Height = Desc->Height;
     D9SurfaceFlags(Desc, Lockable, Discard, &Resource->Flags);
-    D9ApplyShare(Resource, Share, D3DRTYPE_SURFACE);
+
+    /* Flip model surfaces are single level textures; the buffers the compositor shows are shared by NT handle */
+    if (Role == D9SurfaceRole::Plain)
+    {
+        D9ApplyShare(Resource, Share, D3DRTYPE_SURFACE);
+    }
+    else
+    {
+        Resource->Flags.Texture = TRUE;
+        Resource->MipLevels = 1;
+        if (Role == D9SurfaceRole::CompositionBuffer)
+        {
+            Composed.Mode = D9ShareMode::Create;
+            Composed.Usage = D3DUSAGE_RENDERTARGET | D3DUSAGE_RESTRICT_SHARED_RESOURCE | D3DUSAGE_NONSECURE |
+                             D9ShareUsageModern;
+            Resource->Flags2.IsDisplayable = TRUE;
+            Resource->Composed = TRUE;
+            D9ApplyShare(Resource, &Composed, D3DRTYPE_TEXTURE);
+        }
+        else
+        {
+            D9ApplyShare(Resource, nullptr, D3DRTYPE_TEXTURE);
+        }
+    }
 
     Surface.Width = Desc->Width;
     Surface.Height = Desc->Height;
