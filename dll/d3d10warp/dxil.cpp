@@ -349,6 +349,10 @@ private:
     Memory(
         _In_ llvm::Instruction *Instruction);
 
+    BOOLEAN
+    SharedAtomic(
+        _In_ llvm::Instruction *Instruction);
+
     hlsl::DxilModule &Dxil;
     hlsl::OP *Op;
     RxTokens Decls;
@@ -1015,6 +1019,9 @@ RxLowering::Lower(
         case llvm::Instruction::Load:
         case llvm::Instruction::Store:
             return Memory(Instruction);
+        case llvm::Instruction::AtomicRMW:
+        case llvm::Instruction::AtomicCmpXchg:
+            return SharedAtomic(Instruction);
         default:
             return FALSE;
     }
@@ -1164,6 +1171,53 @@ RxLowering::Memory(
         Emit(D3D11_SB_OPCODE_STORE_RAW, { RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, 1, { Shared->second }),
                                           Address, Source(Instruction->getOperand(0)) });
     }
+    return TRUE;
+}
+
+/* Atomics on group shared memory; a compare exchange also reports whether it stored */
+BOOLEAN
+RxLowering::SharedAtomic(
+    _In_ llvm::Instruction *Instruction)
+{
+    llvm::AtomicCmpXchgInst *Exchange = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(Instruction);
+    llvm::Value *Pointer = Exchange ? Exchange->getPointerOperand() : llvm::cast<llvm::AtomicRMWInst>(Instruction)->getPointerOperand();
+    RX_POINTER Place;
+    RxTokens Address;
+    RxTokens Region;
+    UINT Opcode;
+
+    if (!Resolve(Pointer, &Place))
+        return FALSE;
+
+    auto Shared = SharedRegisters.find(Place.Base);
+
+    if (Shared == SharedRegisters.end())
+        return FALSE;
+    Address = Offset(Place, 1);
+    Region = RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, 1, { Shared->second });
+    if (Exchange != nullptr)
+    {
+        UINT Register = ResultRegister(Instruction);
+
+        Emit(D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH, { Temp(Register, RxMaskMode, 1), Region, Address, Source(Exchange->getCompareOperand()),
+                                                    Source(Exchange->getNewValOperand()) });
+        Emit(D3D10_SB_OPCODE_IEQ, { Temp(Register, RxMaskMode, 2), Temp(Register, RxSelectMode, 0), Source(Exchange->getCompareOperand()) });
+        return TRUE;
+    }
+    switch (llvm::cast<llvm::AtomicRMWInst>(Instruction)->getOperation())
+    {
+        case llvm::AtomicRMWInst::Xchg: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_EXCH; break;
+        case llvm::AtomicRMWInst::Add: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_IADD; break;
+        case llvm::AtomicRMWInst::And: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_AND; break;
+        case llvm::AtomicRMWInst::Or: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_OR; break;
+        case llvm::AtomicRMWInst::Xor: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_XOR; break;
+        case llvm::AtomicRMWInst::Max: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_IMAX; break;
+        case llvm::AtomicRMWInst::Min: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_IMIN; break;
+        case llvm::AtomicRMWInst::UMax: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_UMAX; break;
+        case llvm::AtomicRMWInst::UMin: Opcode = D3D11_SB_OPCODE_IMM_ATOMIC_UMIN; break;
+        default: return FALSE;
+    }
+    Emit(Opcode, { Dest(Instruction), Region, Address, Source(Instruction->getOperand(1)) });
     return TRUE;
 }
 
@@ -1602,6 +1656,42 @@ RxLowering::LowerResource(
             else
                 Emit(D3D11_SB_OPCODE_GATHER4_PO, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw),
                                                    Temp(Offsets, RxSwizzleMode, RxXyzw), Resource, SamplerOperand });
+            return TRUE;
+        }
+        case OpCode::AtomicBinOp:
+        case OpCode::AtomicCompareExchange:
+        {
+            static const UINT Opcodes[] = { D3D11_SB_OPCODE_IMM_ATOMIC_IADD, D3D11_SB_OPCODE_IMM_ATOMIC_AND, D3D11_SB_OPCODE_IMM_ATOMIC_OR,
+                                            D3D11_SB_OPCODE_IMM_ATOMIC_XOR, D3D11_SB_OPCODE_IMM_ATOMIC_IMIN, D3D11_SB_OPCODE_IMM_ATOMIC_IMAX,
+                                            D3D11_SB_OPCODE_IMM_ATOMIC_UMIN, D3D11_SB_OPCODE_IMM_ATOMIC_UMAX, D3D11_SB_OPCODE_IMM_ATOMIC_EXCH };
+            BOOLEAN Exchange = Code == OpCode::AtomicCompareExchange;
+            UINT First = Exchange ? 2 : 3;
+            UINT Kind = Handle.Kind;
+            UINT Count = (Kind == (UINT)hlsl::DXIL::ResourceKind::StructuredBuffer) ? 2 :
+                         (Kind == (UINT)hlsl::DXIL::ResourceKind::RawBuffer || Kind == (UINT)hlsl::DXIL::ResourceKind::TypedBuffer) ? 1 :
+                         RxCoordinates(Kind);
+            RxTokens Target = ResourceOperand(Handle, RxMaskMode, 1);
+            UINT Operation;
+
+            Address = GatherRange(Call, First, Count);
+            if (Exchange)
+            {
+                Emit(D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH, { Dest(Call), Target, Temp(Address, RxSwizzleMode, RxXyzw),
+                                                            Source(Call->getArgOperand(5)), Source(Call->getArgOperand(6)) });
+                return TRUE;
+            }
+            Operation = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(2))->getZExtValue();
+            if (Operation >= ARRAYSIZE(Opcodes))
+                return FALSE;
+            Emit(Opcodes[Operation], { Dest(Call), Target, Temp(Address, RxSwizzleMode, RxXyzw), Source(Call->getArgOperand(6)) });
+            return TRUE;
+        }
+        case OpCode::BufferUpdateCounter:
+        {
+            INT Step = (INT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(2))->getSExtValue();
+
+            Emit((Step > 0) ? D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC : D3D11_SB_OPCODE_IMM_ATOMIC_CONSUME,
+                 { Dest(Call), ResourceOperand(Handle, RxMaskMode, 1) });
             return TRUE;
         }
         case OpCode::GetDimensions:
