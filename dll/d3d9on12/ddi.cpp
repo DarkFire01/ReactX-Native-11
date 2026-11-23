@@ -149,7 +149,7 @@ NineFillDeviceFuncs(
     NINE_MISSING(pfnSetStreamSourceFreq, 52);
     Functions->pfnSetConvolutionKernelMono = NineFixedAnswer<NotDone>;
     Functions->pfnComposeRects = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnBlt, 55);
+    Functions->pfnBlt = NineBlt;
     Functions->pfnColorFill = NineColorFill;
     NINE_MISSING(pfnDepthFill, 57);
     NINE_MISSING(pfnCreateQuery, 58);

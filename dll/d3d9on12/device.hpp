@@ -280,6 +280,13 @@ NineColorFill(
     _In_ HANDLE hDevice,
     _In_ const D3DDDIARG_COLORFILL* Args);
 
+/* blit.cpp */
+HRESULT
+APIENTRY
+NineBlt(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_BLT* Args);
+
 /* Takes a resource out of every render target and depth slot it is bound to */
 VOID
 NineUnbindOutputs(

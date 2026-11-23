@@ -2,6 +2,7 @@ nt_add_usermode_dll(d3d9on12
     DEF d3d9on12.def
     SOURCES
         adapter.cpp
+        blit.cpp
         caps.cpp
         ddi.cpp
         device.cpp
