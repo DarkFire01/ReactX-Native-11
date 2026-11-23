@@ -1811,10 +1811,74 @@ public:
                 StringCchPrintfW(Name, MAX_PATH, L"VID_%04X&PID_%04X", VendorId, ProductId);
                 return S_OK;
             }
+
+            /* The whole type is compared, so the HID flag keeps every device past this */
+            case DI_PROP_TYPE_MAP_FILE:
+                if (DevType == DI8DEVTYPE_MOUSE || DevType == DI8DEVTYPE_KEYBOARD)
+                    return E_NOTIMPL;
+                return ReadMapFile(reinterpret_cast<LPDIPROPSTRING>(Header)->wsz);
 #endif
         }
         return E_NOTIMPL;
     }
+
+#if DIRECTINPUT_VERSION >= 0x0800
+    /* The device image and map file a type names, which must live in the DirectX input folder */
+    HRESULT
+    ReadMapFile(
+        _Out_writes_(MAX_PATH) PWSTR Path)
+    {
+        WCHAR Folder[MAX_PATH + 1] = {};
+        WCHAR Joined[MAX_PATH] = {};
+        WCHAR Drive[3] = {};
+        DWORD Type = 0;
+        DWORD Size = MAX_PATH * sizeof(WCHAR);
+        DWORD Length;
+        LONG Error;
+        UINT FolderLength;
+
+        Error = RegQueryValueExW(PropKey, L"OEMMapFile", nullptr, &Type, reinterpret_cast<PBYTE>(Path), &Size);
+        if (Error == ERROR_SUCCESS && Type != REG_SZ)
+            Error = ERROR_INVALID_DATA;
+        if (Error == ERROR_SUCCESS)
+        {
+            Length = Size / sizeof(WCHAR);
+            if (Length == 0)
+                Path[0] = L'\0';
+            else if (Path[Length - 1] != L'\0' && Length >= MAX_PATH)
+                Error = ERROR_MORE_DATA;
+            else if (Path[Length - 1] != L'\0')
+                Path[Length] = L'\0';
+        }
+        if (Error == ERROR_MORE_DATA)
+            Path[MAX_PATH - 1] = L'\0';
+        else if (Error != ERROR_SUCCESS)
+            Path[0] = L'\0';
+
+        if (Error == ERROR_SUCCESS && Path[0] != L'\0')
+        {
+            FolderLength = GetSystemDirectoryW(Folder, MAX_PATH + 1);
+            if (FolderLength < 0xF5)
+                CopyMemory(Folder + FolderLength, L"\\DIRECTX\\DINPUT", 15 * sizeof(WCHAR));
+
+            /* A bare name is looked for in that folder */
+            _wsplitpath_s(Path, Drive, _countof(Drive), nullptr, 0, nullptr, 0, nullptr, 0);
+            if (Drive[0] != L'\0')
+                StringCchCopyW(Joined, _countof(Joined), Path);
+            else
+                StringCchPrintfW(Joined, _countof(Joined), L"%s\\%s", Folder, Path);
+
+            if (GetFullPathNameW(Joined, MAX_PATH, Path, nullptr) <= MAX_PATH &&
+                _wcsnicmp(Path, Folder, lstrlenW(Folder)) == 0)
+            {
+                return S_OK;
+            }
+        }
+
+        ZeroMemory(Path, MAX_PATH * sizeof(WCHAR));
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+#endif
 
     HRESULT
     SetProperty(

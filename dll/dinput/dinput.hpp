@@ -44,6 +44,7 @@
 
 /* Private property ids, below the range the headers define */
 #define DI_PROP_ENABLE_OBJECT   0xFFFB
+#define DI_PROP_TYPE_MAP_FILE   0xFFFD
 #define DI_PROP_MAX_BUFFER      0xFFFF
 
 /* RX_DI_SINK flags */
