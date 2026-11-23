@@ -591,6 +591,43 @@ CkReadBack(
     Copy->Release();
 }
 
+/* Copies out of a multisampled target: the whole surface resolves, a part of it is drawn */
+static
+VOID
+CkMultisample(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Target,
+    _In_ IDirect3DSurface9* Flush)
+{
+    IDirect3DSurface9* Samples = nullptr;
+    RECT Inner = { 8, 8, 40, 32 };
+    RECT Part = { 4, 4, 36, 28 };
+    RECT Moved = { 20, 12, 52, 36 };
+    HRESULT hr;
+
+    printf("== multisample\n");
+    hr = Device->CreateRenderTarget(64, 48, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_4_SAMPLES, 0, FALSE, &Samples, nullptr);
+    printf("multisampled CreateRenderTarget hr %08lX\n", hr);
+    if (Samples == nullptr)
+        return;
+
+    hr = Device->ColorFill(Samples, nullptr, 0xFF204060);
+    printf("ColorFill hr %08lX\n", hr);
+    hr = Device->ColorFill(Samples, &Inner, 0xFFC08040);
+    printf("inner ColorFill hr %08lX\n", hr);
+
+    hr = Device->StretchRect(Samples, nullptr, Target, nullptr, D3DTEXF_NONE);
+    printf("whole StretchRect hr %08lX\n", hr);
+    CkReadBack(Device, Target, Flush, "resolved");
+
+    hr = Device->ColorFill(Target, nullptr, 0xFF000000);
+    printf("clear ColorFill hr %08lX\n", hr);
+    hr = Device->StretchRect(Samples, &Part, Target, &Moved, D3DTEXF_NONE);
+    printf("part StretchRect hr %08lX\n", hr);
+    CkReadBack(Device, Target, Flush, "part");
+    Samples->Release();
+}
+
 /* Reaches the Direct3D 12 device and a surface's resource through IDirect3DDevice9On12, then hands it back */
 static
 VOID
@@ -789,6 +826,7 @@ CkScene(
         hr = Device->StretchRect(Back, &Source, Target, &Dest, D3DTEXF_POINT);
         printf("StretchRect hr %08lX\n", hr);
         CkReadBack(Device, Target, Flush, "target");
+        CkMultisample(Device, Target, Flush);
     }
 
     hr = Device->Present(nullptr, nullptr, nullptr, nullptr);
