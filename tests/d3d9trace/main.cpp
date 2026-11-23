@@ -1994,6 +1994,249 @@ TrScenarioDeviceFlip(
     Plain->Release();
 }
 
+/* Locks a surface, writes a pattern when it may, and prints what the lock answered */
+static
+VOID
+TrLockSurface(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DSurface9* Surface,
+    _In_opt_ const RECT* Rect,
+    _In_ DWORD Flags)
+{
+    D3DLOCKED_RECT Locked = {};
+    HRESULT hr = Surface->LockRect(&Locked, Rect, Flags);
+
+    TrCloseLine();
+    printf("api LockRect %s = %08lX pitch %d %s\n", Name, hr, Locked.Pitch, Locked.pBits != nullptr ? "mem" : "nomem");
+    if (FAILED(hr))
+        return;
+    if ((Flags & D3DLOCK_READONLY) == 0 && Locked.pBits != nullptr)
+        *static_cast<DWORD*>(Locked.pBits) = 0x11223344;
+    TrApi("UnlockRect", Surface->UnlockRect());
+}
+
+/* Prints a surface's description, or that the call made none */
+static
+VOID
+TrDescribeSurface(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_opt_ IDirect3DSurface9* Surface)
+{
+    D3DSURFACE_DESC Desc = {};
+
+    TrCloseLine();
+    if (Surface == nullptr)
+    {
+        printf("api %s = %08lX null\n", Name, Result);
+        return;
+    }
+    Surface->GetDesc(&Desc);
+    printf("api %s = %08lX fmt %u usage %08lX pool %u ms %u:%lu size %ux%u\n", Name, Result, Desc.Format, Desc.Usage,
+           Desc.Pool, Desc.MultiSampleType, Desc.MultiSampleQuality, Desc.Width, Desc.Height);
+}
+
+/* Standalone surfaces of every kind, the calls that refuse them, and their locks */
+static
+VOID
+TrSurfaceWork(
+    _In_ IDirect3DDevice9* Device,
+    _In_opt_ IDirect3DDevice9Ex* DeviceEx)
+{
+    static const struct
+    {
+        PCSTR Name;
+        D3DFORMAT Format;
+        D3DPOOL Pool;
+        UINT Width;
+        UINT Height;
+    } Plains[] =
+    {
+        { "plain sysmem", D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, 16, 8 },
+        { "plain default", D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 16, 8 },
+        { "plain scratch", D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH, 16, 8 },
+        { "plain managed", D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, 16, 8 },
+        { "plain unknown", D3DFMT_UNKNOWN, D3DPOOL_SYSTEMMEM, 16, 8 },
+        { "plain dxt1", D3DFMT_DXT1, D3DPOOL_SYSTEMMEM, 16, 8 },
+        { "plain dxt1 odd", D3DFMT_DXT1, D3DPOOL_SYSTEMMEM, 10, 8 },
+        { "plain r5g6b5 default", D3DFMT_R5G6B5, D3DPOOL_DEFAULT, 7, 5 },
+        { "plain zero", D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 8 },
+        { "plain d16", D3DFMT_D16, D3DPOOL_DEFAULT, 16, 8 },
+        { "plain yuy2", D3DFMT_YUY2, D3DPOOL_DEFAULT, 16, 8 },
+    };
+    IDirect3DSurface9* Surface = nullptr;
+    RECT Part = { 2, 1, 10, 5 };
+    HRESULT hr;
+
+    TrPhase("surfaces plain");
+    for (const auto& Case : Plains)
+    {
+        Surface = nullptr;
+        hr = Device->CreateOffscreenPlainSurface(Case.Width, Case.Height, Case.Format, Case.Pool, &Surface, nullptr);
+        TrDescribeSurface(Case.Name, hr, Surface);
+        if (Surface == nullptr)
+            continue;
+        TrLockSurface("full", Surface, nullptr, 0);
+        TrLockSurface("part", Surface, &Part, D3DLOCK_READONLY);
+        TrCloseLine();
+        printf("api Release = %lu\n", Surface->Release());
+    }
+
+    TrPhase("surfaces target");
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &Surface, nullptr);
+    TrDescribeSurface("target lockable", hr, Surface);
+    if (Surface != nullptr)
+    {
+        TrLockSurface("full", Surface, nullptr, 0);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(32, 16, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    TrDescribeSurface("target", hr, Surface);
+    if (Surface != nullptr)
+    {
+        TrLockSurface("full", Surface, nullptr, 0);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_4_SAMPLES, 0, FALSE, &Surface, nullptr);
+    TrDescribeSurface("target ms4", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_4_SAMPLES, 0, TRUE, &Surface, nullptr);
+    TrDescribeSurface("target ms4 lockable", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(32, 16, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    TrDescribeSurface("target depth format", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+
+    TrPhase("surfaces depth");
+    Surface = nullptr;
+    hr = Device->CreateDepthStencilSurface(32, 16, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    TrDescribeSurface("depth", hr, Surface);
+    if (Surface != nullptr)
+    {
+        TrLockSurface("full", Surface, nullptr, 0);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateDepthStencilSurface(32, 16, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, TRUE, &Surface, nullptr);
+    TrDescribeSurface("depth discard", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = Device->CreateDepthStencilSurface(32, 16, D3DFMT_D16_LOCKABLE, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface,
+                                           nullptr);
+    TrDescribeSurface("depth lockable", hr, Surface);
+    if (Surface != nullptr)
+    {
+        TrLockSurface("full", Surface, nullptr, 0);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateDepthStencilSurface(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    TrDescribeSurface("depth color format", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+
+    if (DeviceEx == nullptr)
+        return;
+
+    TrPhase("surfaces ex");
+    Surface = nullptr;
+    hr = DeviceEx->CreateRenderTargetEx(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr, 0);
+    TrDescribeSurface("target ex", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = DeviceEx->CreateRenderTargetEx(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr,
+                                        D3DUSAGE_RESTRICTED_CONTENT);
+    TrDescribeSurface("target ex restricted", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = DeviceEx->CreateRenderTargetEx(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr,
+                                        D3DUSAGE_DYNAMIC);
+    TrDescribeSurface("target ex dynamic", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = DeviceEx->CreateOffscreenPlainSurfaceEx(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, nullptr, 0);
+    TrDescribeSurface("plain ex", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+    Surface = nullptr;
+    hr = DeviceEx->CreateDepthStencilSurfaceEx(32, 16, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr,
+                                               0);
+    TrDescribeSurface("depth ex", hr, Surface);
+    if (Surface != nullptr)
+        Surface->Release();
+}
+
+/* Standalone surfaces on a windowed extended device */
+static
+VOID
+TrScenarioSurfaces(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("surfaces create");
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                     nullptr, &Device);
+    TrApi("CreateDeviceEx", hr);
+    if (Device != nullptr)
+    {
+        TrSurfaceWork(Device, Device);
+        TrPhase("surfaces release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+}
+
+/* The same surfaces on a device of the plain object, whose driver calls go through the batch */
+static
+VOID
+TrScenarioSurfacesPlain(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("surfaces create");
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    TrApi("CreateDevice", hr);
+    if (Device != nullptr)
+    {
+        TrSurfaceWork(Device, nullptr);
+        TrPhase("surfaces release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -2006,6 +2249,8 @@ static const TrScenario TrScenarios[] =
     { "device_plain", TrScenarioDevicePlain },
     { "device_hardware", TrScenarioDeviceHardware },
     { "device_flip", TrScenarioDeviceFlip },
+    { "surfaces", TrScenarioSurfaces },
+    { "surfaces_plain", TrScenarioSurfacesPlain },
 };
 
 static
