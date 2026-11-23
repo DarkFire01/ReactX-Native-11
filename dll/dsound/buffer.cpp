@@ -494,6 +494,18 @@ DsSecondary::Initialize(
     Wave = DsCopyFormat(Format);
     if (Wave == nullptr)
         return E_OUTOFMEMORY;
+
+    /* 3D and direct out buffers need the endpoint layout; copies only look at 3D */
+    {
+        BOOLEAN Fixed = (Flags & DSBCAPS_CTRL3D) != 0;
+
+        if (Source == nullptr && Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE && Format->nChannels > 2 &&
+            reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(Format)->dwChannelMask == 0)
+        {
+            Fixed = TRUE;
+        }
+        Owner->Device->PlaceBuffer(Format, Fixed);
+    }
     hr = InitializeVoice(Wave, Source);
     HeapFree(GetProcessHeap(), 0, Wave);
     if (FAILED(hr))
@@ -567,7 +579,7 @@ DsSecondary::InitializeVoice(
         }
         else
         {
-            if (Wave->nChannels != Owner->Device->Channels)
+            if (Wave->nChannels != Owner->Device->EndpointChannels)
                 return DSERR_BADFORMAT;
             if (Flags & (DSBCAPS_CTRL3D | DSBCAPS_CTRLPAN))
                 return E_INVALIDARG;
@@ -582,6 +594,7 @@ DsSecondary::InitializeVoice(
     else if (!(Flags & DS_BUFFER_SINKIN) && Version < DS_VERSION_8)
         DsFillSilence(Data, Bytes, Wave->wBitsPerSample);
 
+    Voice.Secondary = TRUE;
     return Voice.Setup(Owner->Device, Wave, Data, Bytes);
 }
 

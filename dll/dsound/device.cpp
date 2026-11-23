@@ -311,6 +311,11 @@ DsDevice::DsDevice()
     Rate = 48000;
     Channels = 2;
     Mask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    EndpointChannels = Channels;
+    EndpointMask = Mask;
+    LayoutChosen = FALSE;
+    LayoutLocked = FALSE;
+    Secondaries = 0;
     Pan = 0;
     Global = nullptr;
     Endpoint = nullptr;
@@ -318,6 +323,7 @@ DsDevice::DsDevice()
     Render = nullptr;
     Volume = nullptr;
     MixFormat = nullptr;
+    StreamFormat = nullptr;
     FloatOutput = FALSE;
     BufferFrames = 0;
     Quantum = 480;
@@ -393,7 +399,9 @@ DsDevice::Open(
         Mask = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(MixFormat)->dwChannelMask;
     else
         Mask = MixFormat->nChannels == 1 ? SPEAKER_FRONT_CENTER : SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
-    FloatOutput = DsFormatTag(MixFormat) == WAVE_FORMAT_IEEE_FLOAT && MixFormat->wBitsPerSample == 32;
+    EndpointChannels = Channels;
+    EndpointMask = Mask;
+    StreamFormat = MixFormat;
     Quantum = (Rate + DS_QUANTA_PER_SECOND / 2) / DS_QUANTA_PER_SECOND;
 
     /* The primary buffer format starts at 22 kHz 8 bit stereo */
@@ -408,7 +416,7 @@ DsDevice::Open(
     if (Global == nullptr)
         return E_OUTOFMEMORY;
 
-    Scratch = static_cast<float*>(HeapAlloc(GetProcessHeap(), 0, Quantum * Channels * sizeof(float)));
+    Scratch = static_cast<float*>(HeapAlloc(GetProcessHeap(), 0, Quantum * DS_MAX_CHANNELS * sizeof(float)));
     if (Scratch == nullptr)
         return E_OUTOFMEMORY;
     return S_OK;
@@ -417,7 +425,7 @@ DsDevice::Open(
 DWORD
 DsDevice::SpeakerConfig(VOID)
 {
-    switch (Mask)
+    switch (EndpointMask)
     {
         case 0:
             return 0;
@@ -459,6 +467,7 @@ DsDevice::StartStreaming(VOID)
     if (Failed || Client == nullptr)
         return Failed ? DSERR_NODRIVER : S_OK;
 
+    ChooseStreamFormat();
     hr = Client->GetDevicePeriod(&Period, &Minimum);
     if (FAILED(hr))
         Period = 100000;
@@ -466,7 +475,7 @@ DsDevice::StartStreaming(VOID)
     Duration = Packets * ((Rate * Period + 5000000) / 10000000) * 10000000 / Rate;
 
     hr = Client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
-                            Duration, 0, MixFormat, nullptr);
+                            Duration, 0, StreamFormat, nullptr);
     if (FAILED(hr))
     {
         DsTrace(L"cannot initialize the shared mode stream (0x%08lX)", hr);
@@ -490,7 +499,7 @@ DsDevice::StartStreaming(VOID)
         return E_OUTOFMEMORY;
     Client->SetEventHandle(Event);
 
-    /* The stream opens on silence, leaving one quantum of room for the first mix */
+    /* The stream opens on silence, leaving one quantum of room for the first mix the thread makes */
     if (BufferFrames > Quantum)
     {
         BYTE* Target = nullptr;
@@ -498,7 +507,7 @@ DsDevice::StartStreaming(VOID)
         if (SUCCEEDED(Render->GetBuffer(BufferFrames - Quantum, &Target)))
             Render->ReleaseBuffer(BufferFrames - Quantum, AUDCLNT_BUFFERFLAGS_SILENT);
     }
-    Pump();
+    SetEvent(Event);
     hr = Client->Start();
     if (FAILED(hr))
     {
@@ -511,6 +520,141 @@ DsDevice::StartStreaming(VOID)
         return HRESULT_FROM_WIN32(GetLastError());
     Streaming = TRUE;
     return S_OK;
+}
+
+/* The stream carries the final mix as it is when the engine takes that layout, and the endpoint layout otherwise */
+VOID
+DsDevice::ChooseStreamFormat(VOID)
+{
+    WAVEFORMATEX* Closest = nullptr;
+    HRESULT hr;
+
+    StreamFormat = MixFormat;
+    if (LayoutChosen && !LayoutLocked && (Channels != EndpointChannels || Mask != EndpointMask))
+    {
+        OwnFormat.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        OwnFormat.Format.nChannels = static_cast<WORD>(Channels);
+        OwnFormat.Format.nSamplesPerSec = Rate;
+        OwnFormat.Format.wBitsPerSample = 32;
+        OwnFormat.Format.nBlockAlign = static_cast<WORD>(Channels * sizeof(float));
+        OwnFormat.Format.nAvgBytesPerSec = Rate * OwnFormat.Format.nBlockAlign;
+        OwnFormat.Format.cbSize = sizeof(OwnFormat) - sizeof(OwnFormat.Format);
+        OwnFormat.Samples.wValidBitsPerSample = 32;
+        OwnFormat.dwChannelMask = Mask;
+        OwnFormat.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+
+        hr = Client->IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, &OwnFormat.Format, &Closest);
+        CoTaskMemFree(Closest);
+        if (hr == S_OK)
+            StreamFormat = &OwnFormat.Format;
+        else
+            DsTrace(L"the engine takes no %u channel mix (0x%08lX), locking the endpoint layout", Channels, hr);
+    }
+    if (StreamFormat == MixFormat)
+        LockLayout();
+    FloatOutput = DsFormatTag(StreamFormat) == WAVE_FORMAT_IEEE_FLOAT && StreamFormat->wBitsPerSample == 32;
+}
+
+/* Stops the stream and its thread and starts over with a fresh audio client */
+VOID
+DsDevice::CloseStream(VOID)
+{
+    HRESULT hr;
+
+    if (Thread != nullptr)
+    {
+        SetEvent(Quit);
+        WaitForSingleObject(Thread, INFINITE);
+        CloseHandle(Thread);
+        Thread = nullptr;
+    }
+    if (Client != nullptr)
+        Client->Stop();
+    if (Volume != nullptr)
+        Volume->Release();
+    if (Render != nullptr)
+        Render->Release();
+    if (Client != nullptr)
+        Client->Release();
+    if (Event != nullptr)
+        CloseHandle(Event);
+    if (Quit != nullptr)
+        CloseHandle(Quit);
+    Volume = nullptr;
+    Render = nullptr;
+    Client = nullptr;
+    Event = nullptr;
+    Quit = nullptr;
+    Streaming = FALSE;
+    StreamFormat = MixFormat;
+
+    hr = Endpoint->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr, reinterpret_cast<void**>(&Client));
+    if (FAILED(hr))
+    {
+        DsTrace(L"cannot activate the audio client again (0x%08lX)", hr);
+        Client = nullptr;
+        Failed = TRUE;
+    }
+}
+
+/* From here on the final mix is the endpoint layout, and voices built for another layout start over */
+VOID
+DsDevice::LockLayout(VOID)
+{
+    BOOLEAN Moved = Channels != EndpointChannels || Mask != EndpointMask;
+    BOOLEAN Restart = Streaming && StreamFormat != MixFormat;
+
+    if (LayoutLocked)
+        return;
+    if (Restart)
+        CloseStream();
+
+    Lock();
+    LayoutChosen = TRUE;
+    LayoutLocked = TRUE;
+    Channels = EndpointChannels;
+    Mask = EndpointMask;
+    Unlock();
+
+    if (Moved)
+    {
+        DsTrace(L"final mix locked to the endpoint layout of %u channels", Channels);
+        for (DsVoice* Voice = Voices; Voice != nullptr; Voice = Voice->Next)
+            Voice->Rebuild();
+    }
+    if (Restart)
+        StartStreaming();
+}
+
+/* A buffer wider than a stereo endpoint, or narrower than a surround one, keeps the final mix in its own layout */
+VOID
+DsDevice::PlaceBuffer(
+    _In_ const WAVEFORMATEX* Format,
+    _In_ BOOLEAN Fixed)
+{
+    BOOLEAN Surround = EndpointChannels > 2;
+    BOOLEAN Own = !Fixed && (Surround ? Format->nChannels <= 2 : Format->nChannels > 2);
+
+    if (!LayoutChosen)
+    {
+        if (!Own)
+        {
+            LockLayout();
+            return;
+        }
+        Lock();
+        LayoutChosen = TRUE;
+        Channels = Surround ? 2 : Format->nChannels;
+        Mask = Surround ? KSAUDIO_SPEAKER_STEREO : DsChannelMask(Format);
+        Unlock();
+        DsTrace(L"final mix takes the %u channel layout of the first buffer", Channels);
+        return;
+    }
+
+    if (!LayoutLocked && !Own)
+        LockLayout();
+    if (Secondaries >= 2)
+        UseCubicRates();
 }
 
 VOID
@@ -527,6 +671,8 @@ DsDevice::AddVoice(
     Lock();
     Voice->Next = Voices;
     Voices = Voice;
+    if (Voice->Secondary)
+        Secondaries += 1;
     Unlock();
 }
 
@@ -551,6 +697,8 @@ DsDevice::RemoveVoice(
         if (*Link == Voice)
         {
             *Link = Voice->Next;
+            if (Voice->Secondary)
+                Secondaries -= 1;
             break;
         }
     }
@@ -596,13 +744,13 @@ DsDevice::Pump(VOID)
         }
 
         RenderQuantum(Scratch);
-        if (FloatOutput && MixFormat->nChannels == Channels)
+        if (FloatOutput && StreamFormat->nChannels == Channels)
         {
             memcpy(Target, Scratch, Quantum * Channels * sizeof(float));
         }
         else
         {
-            UINT Stride = MixFormat->nChannels;
+            UINT Stride = StreamFormat->nChannels;
 
             for (UINT Frame = 0; Frame < Quantum; Frame++)
             {

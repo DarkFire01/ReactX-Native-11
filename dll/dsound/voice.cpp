@@ -174,6 +174,13 @@ DsVoice::SetState(
     }
     State = NewState;
     Device->Unlock();
+
+    /* Starting a buffer while more than two exist moves the device to the cubic converter */
+    if (Secondary && !Device->CubicRates && Device->Secondaries > 2)
+    {
+        Device->UseCubicRates();
+        DsTrace(L"play with %lu buffers moved the device to the cubic converter", Device->Secondaries);
+    }
     return Device->StartStreaming();
 }
 
@@ -263,7 +270,7 @@ DsVoice::StartCubic(VOID)
 /* Each output speaker takes the left, right or overall amplitude depending on its side of the room */
 VOID
 DsVoice::SetAttenuation(
-    _In_ const DsAttenuation* Attenuation)
+    _In_ const DsAttenuation* Level)
 {
     static const DWORD LeftSide = SPEAKER_FRONT_LEFT | SPEAKER_BACK_LEFT | SPEAKER_FRONT_LEFT_OF_CENTER | SPEAKER_SIDE_LEFT |
                                   SPEAKER_TOP_FRONT_LEFT | SPEAKER_TOP_BACK_LEFT;
@@ -272,9 +279,16 @@ DsVoice::SetAttenuation(
     static const DWORD Middle = SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_CENTER | SPEAKER_TOP_CENTER |
                                 SPEAKER_TOP_FRONT_CENTER | SPEAKER_TOP_BACK_CENTER;
     float Built[DS_MAX_CHANNELS * DS_MAX_CHANNELS];
-    UINT OutChannels = Device->Channels;
+    UINT OutChannels;
     DWORD InMask = DsChannelMask(Format);
-    DWORD OutMask = Device->Mask;
+    DWORD OutMask;
+
+    Device->Lock();
+    Attenuation = *Level;
+    HasAttenuation = TRUE;
+    OutChannels = Device->Channels;
+    OutMask = Device->Mask;
+    Device->Unlock();
 
     if ((Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE && InMask == 0) || OutMask == 0 ||
         FAILED(DsBuildChannelMatrix(Channels, OutChannels, InMask, OutMask, Built)))
@@ -298,11 +312,11 @@ DsVoice::SetAttenuation(
 
             Remaining &= ~Speaker;
             if (Speaker & LeftSide)
-                Gain = static_cast<float>(Attenuation->LeftAmplitude) * DsAmplitudeScale;
+                Gain = static_cast<float>(Level->LeftAmplitude) * DsAmplitudeScale;
             else if (Speaker & RightSide)
-                Gain = static_cast<float>(Attenuation->RightAmplitude) * DsAmplitudeScale;
+                Gain = static_cast<float>(Level->RightAmplitude) * DsAmplitudeScale;
             else if (Speaker & Middle)
-                Gain = static_cast<float>(Attenuation->VolumeAmplitude) * DsAmplitudeScale;
+                Gain = static_cast<float>(Level->VolumeAmplitude) * DsAmplitudeScale;
 
             for (UINT In = 0; In < Channels; In++)
                 Built[Out * Channels + In] *= Gain;
@@ -310,6 +324,18 @@ DsVoice::SetAttenuation(
     }
 
     CommitMatrix(Built);
+}
+
+VOID
+DsVoice::Rebuild(VOID)
+{
+    if (!HasAttenuation)
+        return;
+    Device->Lock();
+    MatrixReady = FALSE;
+    Resampler.Reset();
+    Device->Unlock();
+    SetAttenuation(&Attenuation);
 }
 
 /* New coefficients fade in over a few milliseconds from whatever was last in effect, once the voice has played */
@@ -344,6 +370,7 @@ DsVoice::SetSpeakerVolumes(
     float Built[DS_MAX_CHANNELS * DS_MAX_CHANNELS] = {};
     float Overall = static_cast<float>(DsDecibelsToAmplitude(Volume)) * DsAmplitudeScale;
 
+    HasAttenuation = FALSE;
     for (UINT Out = 0; Out < Count && Out < Device->Channels; Out++)
     {
         float Gain = static_cast<float>(DsDecibelsToAmplitude(Levels[Out])) * DsAmplitudeScale * Overall;

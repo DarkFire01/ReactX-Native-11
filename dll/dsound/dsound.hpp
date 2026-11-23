@@ -495,7 +495,11 @@ public:
 
     VOID
     SetAttenuation(
-        _In_ const DsAttenuation* Attenuation);
+        _In_ const DsAttenuation* Level);
+
+    /* Builds the matrix again from the last attenuation, after the final mix layout changed */
+    VOID
+    Rebuild(VOID);
 
     VOID
     SetMute(
@@ -559,6 +563,9 @@ public:
     float Previous[DS_MAX_CHANNELS * DS_MAX_CHANNELS];
     float Mixed[DS_MAX_CHANNELS * DS_MAX_CHANNELS];
     BOOLEAN MatrixReady;
+    BOOLEAN Secondary;
+    BOOLEAN HasAttenuation;
+    DsAttenuation Attenuation;
     ULONG RampLeft;
     ULONG RampTotal;
     DsResampler Resampler;
@@ -606,6 +613,12 @@ public:
     VOID
     UseCubicRates(VOID);
 
+    /* Settles the final mix layout for a new secondary buffer before its voice is set up */
+    VOID
+    PlaceBuffer(
+        _In_ const WAVEFORMATEX* Format,
+        _In_ BOOLEAN Fixed);
+
     VOID
     Kick(VOID);
 
@@ -632,8 +645,17 @@ public:
 
     /* Set for good once any buffer changes rate by more than a fifth of a percent */
     BOOLEAN CubicRates;
+
+    /* The final mix layout voices mix into, which can differ from the endpoint until it is locked */
     UINT Channels;
     DWORD Mask;
+    UINT EndpointChannels;
+    DWORD EndpointMask;
+    BOOLEAN LayoutChosen;
+    BOOLEAN LayoutLocked;
+
+    /* Secondary buffer voices that exist on the device, playing or not */
+    ULONG Secondaries;
     LONG Pan;
     WAVEFORMATEX* Global;
 
@@ -651,11 +673,22 @@ private:
     RenderQuantum(
         _Out_writes_(Quantum * Channels) float* Output);
 
+    VOID
+    LockLayout(VOID);
+
+    VOID
+    ChooseStreamFormat(VOID);
+
+    VOID
+    CloseStream(VOID);
+
     IMMDevice* Endpoint;
     IAudioClient* Client;
     IAudioRenderClient* Render;
     ISimpleAudioVolume* Volume;
     WAVEFORMATEX* MixFormat;
+    WAVEFORMATEXTENSIBLE OwnFormat;
+    const WAVEFORMATEX* StreamFormat;
     BOOLEAN FloatOutput;
     UINT32 BufferFrames;
     UINT Quantum;
