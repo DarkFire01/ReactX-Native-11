@@ -1158,6 +1158,42 @@ D9Device::DriverVolBlt(
         D9Trace(L"UMD VolBlt failed 0x%08lX", hr);
 }
 
+/* Copies a byte range of a managed buffer's system memory copy into its video memory copy */
+VOID
+D9Device::DriverBufBlt(
+    _In_ D9Resource* Destination,
+    _In_ D9Resource* Source,
+    _In_ UINT Offset,
+    _In_ UINT Size)
+{
+    D3DDDIARG_BUFFERBLT1 Blt = {};
+    HRESULT hr;
+
+    Blt.hDstResource = Destination->DriverResource;
+    Blt.hSrcResource = Source->DriverResource;
+    Blt.Offset = Offset;
+    Blt.SrcRange.Offset = Offset;
+    Blt.SrcRange.Size = Size;
+
+    DrainBatch();
+    if (DeviceFunctions.pfnBufBlt1 != nullptr)
+    {
+        hr = DeviceFunctions.pfnBufBlt1(DriverDevice, &Blt);
+    }
+    else
+    {
+        D3DDDIARG_BUFFERBLT Old = {};
+
+        Old.hDstResource = Blt.hDstResource;
+        Old.hSrcResource = Blt.hSrcResource;
+        Old.Offset = Blt.Offset;
+        Old.SrcRange = Blt.SrcRange;
+        hr = DeviceFunctions.pfnBufBlt(DriverDevice, &Old);
+    }
+    if (FAILED(hr))
+        D9Trace(L"UMD BufBlt failed 0x%08lX", hr);
+}
+
 VOID
 D9Device::DriverGenerateMips(
     _In_ D9Resource* Resource,

@@ -50,6 +50,17 @@ struct D9Resource
 
 class D9TextureCore;
 
+/* Managed resources keep a system memory copy and drop their video memory copy when evicted */
+class D9ManagedResource
+{
+public:
+    virtual
+    VOID
+    Evict(VOID) = 0;
+
+    D9ManagedResource* NextManaged = nullptr;
+};
+
 /* Driver calls a batch records instead of making them */
 enum class D9BatchCall : UINT
 {
@@ -502,7 +513,7 @@ struct D9Subresource
 static constexpr UINT D9DirtyRegionLimit = 6;
 
 /* The state and behavior the three texture interfaces share */
-class D9TextureCore : public D9Child
+class D9TextureCore : public D9Child, public D9ManagedResource
 {
 public:
     D9TextureCore(
@@ -573,12 +584,10 @@ public:
 
     /* Managed textures drop their video copy, and make it again before use */
     VOID
-    Evict(VOID);
+    Evict(VOID) override;
 
     VOID
     Upload(VOID);
-
-    D9TextureCore* NextManaged = nullptr;
 
 protected:
     HRESULT
@@ -788,7 +797,7 @@ private:
 
 /* Vertex and index buffers share everything but their description */
 template <class Interface, class Description>
-class D9Buffer final : public Interface, public D9Child
+class D9Buffer final : public Interface, public D9Child, public D9ManagedResource
 {
 public:
     D9Buffer(
@@ -856,7 +865,19 @@ public:
     STDMETHOD(GetDesc)(
         _Out_ Description* Result) override;
 
+    VOID
+    Evict(VOID) override;
+
 private:
+    BOOLEAN
+    IsManaged() const
+    {
+        return Pool == D3DPOOL_MANAGED || Pool == static_cast<D3DPOOL>(6);
+    }
+
+    VOID
+    Upload(VOID);
+
     BOOLEAN
     IsVertex() const
     {
@@ -879,6 +900,11 @@ private:
     BOOLEAN LockedAsync = FALSE;
 
     D9PrivateData Private;
+
+    /* A managed buffer's video memory copy, and the byte range its next upload copies */
+    D9Resource* VideoResource = nullptr;
+    UINT DirtyStart = 0;
+    UINT DirtyEnd = 0;
 };
 
 typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
@@ -1135,11 +1161,18 @@ public:
 
     VOID
     TrackManaged(
-        _In_ D9TextureCore* Texture);
+        _In_ D9ManagedResource* Resource);
 
     VOID
     ForgetManaged(
-        _In_ D9TextureCore* Texture);
+        _In_ D9ManagedResource* Resource);
+
+    VOID
+    DriverBufBlt(
+        _In_ D9Resource* Destination,
+        _In_ D9Resource* Source,
+        _In_ UINT Offset,
+        _In_ UINT Size);
 
     D3DDDI_POOL
     BufferPlacement(
@@ -2167,8 +2200,8 @@ private:
     /* Textures bound to the pixel samplers, the displacement map sampler and the vertex samplers */
     IDirect3DBaseTexture9* Textures[D9TextureSlotCount] = {};
 
-    /* Managed textures, which EvictManagedResources walks */
-    D9TextureCore* ManagedTextures = nullptr;
+    /* Managed textures and buffers, which EvictManagedResources walks */
+    D9ManagedResource* ManagedResources = nullptr;
 
     /* Default pool resources the application holds, and a failed reset the device waits to see undone */
     LONG DefaultResources = 0;

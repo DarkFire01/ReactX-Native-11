@@ -1806,21 +1806,21 @@ D9Device::UnbindTextures(VOID)
 
 VOID
 D9Device::TrackManaged(
-    _In_ D9TextureCore* Texture)
+    _In_ D9ManagedResource* Resource)
 {
-    Texture->NextManaged = ManagedTextures;
-    ManagedTextures = Texture;
+    Resource->NextManaged = ManagedResources;
+    ManagedResources = Resource;
 }
 
 VOID
 D9Device::ForgetManaged(
-    _In_ D9TextureCore* Texture)
+    _In_ D9ManagedResource* Resource)
 {
-    for (D9TextureCore** Link = &ManagedTextures; *Link != nullptr; Link = &(*Link)->NextManaged)
+    for (D9ManagedResource** Link = &ManagedResources; *Link != nullptr; Link = &(*Link)->NextManaged)
     {
-        if (*Link != Texture)
+        if (*Link != Resource)
             continue;
-        *Link = Texture->NextManaged;
+        *Link = Resource->NextManaged;
         return;
     }
 }
@@ -1830,7 +1830,7 @@ D9Device::EvictManagedResources()
 {
     D9_DEVICE_LOCK();
 
-    for (D9TextureCore* Texture = ManagedTextures; Texture != nullptr; Texture = Texture->NextManaged)
-        Texture->Evict();
+    for (D9ManagedResource* Resource = ManagedResources; Resource != nullptr; Resource = Resource->NextManaged)
+        Resource->Evict();
     return S_OK;
 }

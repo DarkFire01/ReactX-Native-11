@@ -51,10 +51,17 @@ D9Buffer<Interface, Description>::~D9Buffer()
 {
     if (Pool == D3DPOOL_DEFAULT)
         Device->NoteDefaultResource(FALSE);
+    if (IsManaged())
+        Device->ForgetManaged(this);
     if (Resource != nullptr)
     {
         Device->DestroyDriverSurface(Resource);
         delete Resource;
+    }
+    if (VideoResource != nullptr)
+    {
+        Device->DestroyDriverSurface(VideoResource);
+        delete VideoResource;
     }
     if (Memory != nullptr)
         _aligned_free(Memory);
@@ -74,11 +81,19 @@ D9Buffer<Interface, Description>::Create(
         ZeroMemory(Memory, Length);
     }
 
+    HRESULT hr;
+
     Resource = new (std::nothrow) D9Resource();
     if (Resource == nullptr)
         return E_OUTOFMEMORY;
-    return Device->CreateBufferResource(Format, Length, D9BufferFlags(IsVertex(), Usage), Fvf, Placement, Memory,
-                                        Resource);
+    hr = Device->CreateBufferResource(Format, Length, D9BufferFlags(IsVertex(), Usage), Fvf, Placement, Memory,
+                                      Resource);
+    if (SUCCEEDED(hr) && IsManaged())
+    {
+        DirtyEnd = Length;
+        Device->TrackManaged(this);
+    }
+    return hr;
 }
 
 template <class Interface, class Description>
@@ -193,6 +208,57 @@ template <class Interface, class Description>
 STDMETHODIMP_(VOID)
 D9Buffer<Interface, Description>::PreLoad()
 {
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    Upload();
+}
+
+/* Makes the video memory copy of a managed buffer, which is write only, then copies the range that changed */
+template <class Interface, class Description>
+VOID
+D9Buffer<Interface, Description>::Upload(VOID)
+{
+    UINT Flags;
+    HRESULT hr;
+
+    if (!IsManaged())
+        return;
+
+    if (VideoResource == nullptr)
+    {
+        VideoResource = new (std::nothrow) D9Resource();
+        if (VideoResource == nullptr)
+            return;
+        Flags = Resource->Flags.Value | D9BufferFlags(IsVertex(), D3DUSAGE_WRITEONLY);
+        hr = Device->CreateBufferResource(Format, Length, Flags, Fvf, D3DDDIPOOL_VIDEOMEMORY, nullptr, VideoResource);
+        if (FAILED(hr))
+        {
+            D9Trace(L"the video copy of a managed buffer could not be made (0x%08lX)", hr);
+            delete VideoResource;
+            VideoResource = nullptr;
+            return;
+        }
+        DirtyStart = 0;
+        DirtyEnd = Length;
+    }
+    if (DirtyEnd > DirtyStart)
+        Device->DriverBufBlt(VideoResource, Resource, DirtyStart, DirtyEnd - DirtyStart);
+    DirtyStart = 0;
+    DirtyEnd = 0;
+}
+
+template <class Interface, class Description>
+VOID
+D9Buffer<Interface, Description>::Evict(VOID)
+{
+    if (VideoResource == nullptr)
+        return;
+
+    Device->DestroyDriverSurface(VideoResource);
+    delete VideoResource;
+    VideoResource = nullptr;
+    DirtyStart = 0;
+    DirtyEnd = Length;
 }
 
 template <class Interface, class Description>
@@ -228,6 +294,23 @@ D9Buffer<Interface, Description>::Lock(
         return hr;
     }
     LockedAsync = Asynchronous;
+
+    /* A writing lock of a managed buffer widens the range its next upload copies */
+    if (IsManaged() && (Flags & (D3DLOCK_READONLY | D3DLOCK_NO_DIRTY_UPDATE)) == 0)
+    {
+        UINT End = SizeToLock != 0 && OffsetToLock + SizeToLock < Length ? OffsetToLock + SizeToLock : Length;
+
+        if (DirtyEnd <= DirtyStart)
+        {
+            DirtyStart = OffsetToLock;
+            DirtyEnd = End;
+        }
+        else
+        {
+            DirtyStart = OffsetToLock < DirtyStart ? OffsetToLock : DirtyStart;
+            DirtyEnd = End > DirtyEnd ? End : DirtyEnd;
+        }
+    }
 
     /* The driver already moved a ranged vertex buffer lock to its offset */
     if (Memory != nullptr)
