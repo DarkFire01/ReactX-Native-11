@@ -788,8 +788,18 @@ DsDevice::LockLayout(VOID)
 
     if (LayoutLocked)
         return;
+
+    /* Every buffer stops, which fires its stop notification, and plays on from there once the stream is back */
     if (Restart)
+    {
+        for (DsVoice* Voice = Voices; Voice != nullptr; Voice = Voice->Next)
+        {
+            Voice->HeldState = Voice->Secondary ? Voice->GetState() : 0;
+            if (Voice->HeldState != 0)
+                Voice->SetState(0);
+        }
         CloseStream();
+    }
 
     Lock();
     LayoutChosen = TRUE;
@@ -805,7 +815,15 @@ DsDevice::LockLayout(VOID)
             Voice->Rebuild();
     }
     if (Restart)
+    {
+        for (DsVoice* Voice = Voices; Voice != nullptr; Voice = Voice->Next)
+        {
+            if (Voice->HeldState != 0)
+                Voice->SetState(Voice->HeldState);
+            Voice->HeldState = 0;
+        }
         StartStreaming();
+    }
 }
 
 /* A buffer wider than a stereo endpoint, or narrower than a surround one, keeps the final mix in its own layout */

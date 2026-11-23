@@ -561,6 +561,9 @@ public:
     float Mixed[DS_MAX_CHANNELS * DS_MAX_CHANNELS];
     BOOLEAN MatrixReady;
     BOOLEAN Secondary;
+
+    /* The state a buffer goes back to once the stream reopens in another layout */
+    ULONG HeldState;
     BOOLEAN HasAttenuation;
     DsAttenuation Attenuation;
     ULONG RampLeft;
