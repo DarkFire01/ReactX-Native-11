@@ -331,27 +331,6 @@ RxOfferAllocationsCb12(
     return RxHresultFromStatus(RxGetKmtThunks()->OfferAllocations(&Offer));
 }
 
-/* This runtime makes no scheduling groups, so the driver never has one to make contexts for */
-static
-HRESULT
-APIENTRY
-RxCreateSchedulingGroupContextCb12(
-    _In_ D3D12DDI_HRTSCHEDULINGGROUP_0050 hRTSchedulingGroup,
-    _Inout_ D3DDDICB_CREATECONTEXT* Args)
-{
-    return E_INVALIDARG;
-}
-
-static
-HRESULT
-APIENTRY
-RxCreateSchedulingGroupContextVirtualCb12(
-    _In_ D3D12DDI_HRTSCHEDULINGGROUP_0050 hRTSchedulingGroup,
-    _Inout_ D3DDDICB_CREATECONTEXTVIRTUAL* Args)
-{
-    return E_INVALIDARG;
-}
-
 /* Driver work the runtime runs on its own threads */
 struct RxBackgroundWork
 {
@@ -436,8 +415,8 @@ RxBuildCoreLayerCallbacks(VOID)
     Table.pfnOfferAllocationsCb = RxOfferAllocationsCb12;
     Table.pfnAllocateCb = RxAllocateCb0022;
     Table.pfnDeallocateCb = RxDeallocateCb0022;
-    Table.pfnCreateSchedulingGroupContextCb = RxCreateSchedulingGroupContextCb12;
-    Table.pfnCreateSchedulingGroupContextVirtualCb = RxCreateSchedulingGroupContextVirtualCb12;
+    Table.pfnCreateSchedulingGroupContextCb = RxSchedulingGroup::CreateContextCb;
+    Table.pfnCreateSchedulingGroupContextVirtualCb = RxSchedulingGroup::CreateContextVirtualCb;
     Table.pfnCreateHwQueueCb = RxCommandQueue::CreateHwQueueCb;
     Table.pfnQueueBackgroundProcessingWorkCb = RxQueueBackgroundWorkCb12;
     Table.pfnCreateNativeFenceCb = RxCreateNativeFenceCb12;

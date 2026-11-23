@@ -13,6 +13,7 @@
 #include <malloc.h>
 
 class RxDevice12;
+class RxSchedulingGroup;
 
 /* The one DDI revision this runtime drives: release 8, build 118 */
 constexpr UINT RxDdiInterface12 = D3D12DDI_INTERFACE_VERSION_R8;
@@ -375,6 +376,33 @@ public:
         return RemovedReason;
     }
 
+    /* Queue flags the driver lets global realtime queues use */
+    UINT
+    GetRealtimeQueueFlags() const
+    {
+        return RealtimeQueueFlags;
+    }
+
+    /* A group with room for a queue of this type, made when none has room; holds one use */
+    HRESULT
+    JoinSchedulingGroup(
+        _In_ D3D12_COMMAND_LIST_TYPE Type,
+        _In_ UINT NodeMask,
+        _In_ const GUID& Creator,
+        _Outptr_result_maybenull_ RxSchedulingGroup** Group);
+
+    VOID
+    LeaveSchedulingGroup(
+        _In_ RxSchedulingGroup* Group,
+        _In_ D3D12_COMMAND_LIST_TYPE Type);
+
+    /* Compute queues the driver puts beside one direct queue, 0 when it groups nothing */
+    UINT
+    GetComputeQueuesPerGroup() const
+    {
+        return ComputeQueuesPerGroup;
+    }
+
 private:
     RxDevice12() = default;
     ~RxDevice12();
@@ -417,6 +445,10 @@ private:
     RxPagingQueue12 PagingQueue = {};
     volatile LONG64 CommandListCounter = 0;
     HRESULT RemovedReason = S_OK;
+    UINT RealtimeQueueFlags = 0;
+    UINT ComputeQueuesPerGroup = 0;
+    SRWLOCK GroupLock = SRWLOCK_INIT;
+    RxSchedulingGroup* OpenGroups = nullptr;
     RxPrivateDataStore PrivateData;
 };
 

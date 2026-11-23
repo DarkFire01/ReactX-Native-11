@@ -33,7 +33,10 @@ RxCommandQueue::Create(
     if (Created == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Created->Initialize(Desc);
+    /* Grouped queues share the group's contexts; a group comes before the queue it serves */
+    hr = Device.JoinSchedulingGroup(Desc.Type, 1, GUID_NULL, &Created->Group);
+    if (SUCCEEDED(hr))
+        hr = Created->Initialize(Desc);
     if (FAILED(hr))
     {
         Created->Release();
@@ -68,8 +71,6 @@ RxCommandQueue::Initialize(
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3D12DDIARG_CREATECOMMANDQUEUE_0050 Args = {};
     D3D12DDI_HRTCOMMANDQUEUE Runtime;
-    D3DKMT_SETCONTEXTINPROCESSSCHEDULINGPRIORITY InProcess;
-    UINT Index;
     HRESULT hr;
 
     Desc = QueueDesc;
@@ -77,6 +78,8 @@ RxCommandQueue::Initialize(
 
     Args.QueueFlags = RxQueueFlagsOf(Desc.Type);
     Args.NodeMask = 1;
+    if (Group != nullptr)
+        Args.SchedulingGroup = Group->GetDriverHandle();
 
     Memory.Allocate(Ddi.pfnCalcPrivateCommandQueueSize(Device.Handle(), &Args));
     DriverQueue.pDrvPrivate = Memory.Get();
@@ -95,13 +98,60 @@ RxCommandQueue::Initialize(
     }
     IsDriverQueueCreated = TRUE;
 
-    if (RxGetKmtThunks()->SetContextInProcessSchedulingPriority != nullptr)
+    /* A grouped queue's contexts belong to the group, which keeps its own priority */
+    if (Group != nullptr)
+        return S_OK;
+
+    return ApplyPriority();
+}
+
+/* Priority calls only fail on bad parameters or missing rights; other statuses pass */
+static
+HRESULT
+RxPriorityResult(
+    _In_ NTSTATUS Status)
+{
+    if (Status == STATUS_INVALID_PARAMETER)
+        return E_INVALIDARG;
+    if (Status == STATUS_ACCESS_DENIED)
+        return E_ACCESSDENIED;
+
+    return Status == STATUS_SUCCESS ? S_OK : S_FALSE;
+}
+
+HRESULT
+RxCommandQueue::ApplyPriority()
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    HRESULT hr;
+    UINT Index;
+
+    if (Desc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME && Kmt->SetContextSchedulingPriority != nullptr)
     {
         for (Index = 0; Index < ContextCount; Index++)
         {
+            D3DKMT_SETCONTEXTSCHEDULINGPRIORITY Global;
+
+            /* The realtime band, top level */
+            Global.hContext = Contexts[Index];
+            Global.Priority = 0x4000001E;
+            hr = RxPriorityResult(Kmt->SetContextSchedulingPriority(&Global));
+            if (FAILED(hr))
+                return hr;
+        }
+    }
+
+    if (Kmt->SetContextInProcessSchedulingPriority != nullptr)
+    {
+        for (Index = 0; Index < ContextCount; Index++)
+        {
+            D3DKMT_SETCONTEXTINPROCESSSCHEDULINGPRIORITY InProcess;
+
             InProcess.hContext = Contexts[Index];
             InProcess.Priority = Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_NORMAL ? 1 : 0;
-            RxGetKmtThunks()->SetContextInProcessSchedulingPriority(&InProcess);
+            hr = RxPriorityResult(Kmt->SetContextInProcessSchedulingPriority(&InProcess));
+            if (FAILED(hr))
+                return hr;
         }
     }
 
@@ -129,6 +179,9 @@ RxCommandQueue::~RxCommandQueue()
         DestroyContext.hContext = Contexts[Index];
         RxGetKmtThunks()->DestroyContext(&DestroyContext);
     }
+
+    if (Group != nullptr)
+        Device.LeaveSchedulingGroup(Group, Desc.Type);
 }
 
 HRESULT
@@ -150,6 +203,20 @@ RxCommandQueue::QueryInterface(
 
     *ppvObject = nullptr;
     return E_NOINTERFACE;
+}
+
+/* Software contexts and hardware queues on group contexts do not mix in one queue */
+BOOLEAN
+RxCommandQueue::NoteContextKind(
+    _In_ D3DDDI_CREATECONTEXTFLAGS Flags)
+{
+    if (Flags.HwQueueSupported)
+        return TRUE;
+    if (UsesGroupContexts)
+        return FALSE;
+
+    HasSoftwareContexts = TRUE;
+    return TRUE;
 }
 
 BOOLEAN
@@ -185,10 +252,13 @@ RxCommandQueue::CreateContextCb(
         return E_INVALIDARG;
     }
 
+    if (!Self->NoteContextKind(Args->Flags))
+        return E_INVALIDARG;
+
     Create.hDevice = Self->Device.KernelDevice();
     Create.NodeOrdinal = Args->NodeOrdinal;
     Create.EngineAffinity = Args->EngineAffinity;
-    Create.Flags = Args->Flags;
+    Create.Flags.HwQueueSupported = Args->Flags.HwQueueSupported;
     if ((Self->Desc.Flags & D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT) != 0)
         Create.Flags.DisableGpuTimeout = TRUE;
     Create.pPrivateDriverData = Args->pPrivateDriverData;
@@ -229,6 +299,9 @@ RxCommandQueue::CreateContextVirtualCb(
     {
         return E_INVALIDARG;
     }
+
+    if (!Self->NoteContextKind(Args->Flags))
+        return E_INVALIDARG;
 
     Create.hDevice = Self->Device.KernelDevice();
     Create.NodeOrdinal = Args->NodeOrdinal;
@@ -274,10 +347,17 @@ RxCommandQueue::CreateHwQueueCb(
     NTSTATUS Status;
 
     if (Self->CreatingThread != GetCurrentThreadId() || Args->Flags.Value >= RxReservedContextFlags ||
-        !Self->OwnsContext(Context) || Self->HwQueueCount == RxMaxQueueEngines12 ||
-        RxGetKmtThunks()->CreateHwQueue == nullptr)
+        Self->HwQueueCount == RxMaxQueueEngines12 || RxGetKmtThunks()->CreateHwQueue == nullptr)
     {
         return E_INVALIDARG;
+    }
+
+    /* A hardware queue may sit on a group context only when the queue made no software contexts */
+    if (!Self->OwnsContext(Context))
+    {
+        if (Self->Group == nullptr || !Self->Group->OwnsContext(Context) || Self->HasSoftwareContexts)
+            return E_INVALIDARG;
+        Self->UsesGroupContexts = TRUE;
     }
 
     Create.hHwContext = Context;

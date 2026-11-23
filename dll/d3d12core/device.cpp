@@ -264,6 +264,33 @@ RxDevice12::QueryDeviceCaps()
     if (FAILED(hr))
         return hr;
 
+    {
+        D3D12DDICAPS_UMD_BASED_COMMAND_QUEUE_PRIORITY_DATA_0023 Priority = {};
+
+        /* Only the seven queue flag bits are allowed in the answer */
+        hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_0023_UMD_BASED_COMMAND_QUEUE_PRIORITY, nullptr, &Priority,
+                              sizeof(Priority));
+        if (FAILED(hr) || (Priority.SupportedQueueFlagsForGlobalRealtimeQueues & ~0x7F) != 0)
+        {
+            RX_TRACE(L"driver queue priority caps query failed 0x%08lX", hr);
+            return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+        }
+        RealtimeQueueFlags = Priority.SupportedQueueFlagsForGlobalRealtimeQueues;
+    }
+
+    {
+        D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050 Scheduling = {};
+
+        hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_0050_HARDWARE_SCHEDULING_CAPS, nullptr, &Scheduling,
+                              sizeof(Scheduling));
+        if (FAILED(hr))
+        {
+            RX_TRACE(L"driver hardware scheduling caps query failed 0x%08lX", hr);
+            return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+        }
+        ComputeQueuesPerGroup = Scheduling.ComputeQueuesPer3DQueue;
+    }
+
     /* Shader visible heap limits; drivers without the query keep the tier limits */
     HasHeapLimits = SUCCEEDED(Adapter->GetCaps(D3D12DDICAPS_TYPE_OPTIONS_0102, nullptr, &HeapLimits,
                                                 sizeof(HeapLimits)));
@@ -654,6 +681,32 @@ RxDevice12::GetDescriptorHandleIncrementSize(
 
 /* Object creation */
 
+/* Global realtime queues need the right to raise base priority, held and enabled */
+static
+BOOLEAN
+RxCanRaisePriority(VOID)
+{
+    HANDLE Token = NULL;
+    PRIVILEGE_SET Wanted = {};
+    BOOL Held = FALSE;
+    BOOLEAN Result = FALSE;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &Token))
+        return FALSE;
+
+    Wanted.PrivilegeCount = 1;
+    Wanted.Control = PRIVILEGE_SET_ALL_NECESSARY;
+    Wanted.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (LookupPrivilegeValueA(NULL, "SeIncreaseBasePriorityPrivilege", &Wanted.Privilege[0].Luid) &&
+        PrivilegeCheck(Token, &Wanted, &Held))
+    {
+        Result = Held != FALSE;
+    }
+
+    CloseHandle(Token);
+    return Result;
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDevice12::CreateCommandQueue(
@@ -673,6 +726,15 @@ RxDevice12::CreateCommandQueue(
     hr = RxCommandQueue::Validate(*pDesc);
     if (FAILED(hr))
         return hr;
+
+    if (pDesc->Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
+    {
+        if (!RxCanRaisePriority())
+            return DXGI_ERROR_ACCESS_DENIED;
+        if ((RxQueueFlagsOf(pDesc->Type) & ~RealtimeQueueFlags) != 0)
+            return DXGI_ERROR_UNSUPPORTED;
+    }
+
     if (ppCommandQueue == nullptr)
         return E_UNEXPECTED;
 

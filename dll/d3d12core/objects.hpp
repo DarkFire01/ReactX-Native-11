@@ -15,6 +15,111 @@ class RxResource;
 /* Kernel contexts and hardware queues one API queue can own */
 constexpr UINT RxMaxQueueEngines12 = 8;
 
+/* Hardware scheduled contexts one direct queue and a few compute queues share */
+class RxSchedulingGroup
+{
+public:
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ UINT NodeMask,
+        _In_ const GUID& Creator,
+        _Outptr_ RxSchedulingGroup** Group);
+
+    VOID
+    AddUse()
+    {
+        InterlockedIncrement(&Uses);
+    }
+
+    VOID
+    ReleaseUse()
+    {
+        if (InterlockedDecrement(&Uses) == 0)
+            delete this;
+    }
+
+    BOOLEAN
+    IsFor(
+        _In_ UINT Node,
+        _In_ const GUID& Creator) const
+    {
+        return NodeIndex == Node && IsEqualGUID(CreatorId, Creator);
+    }
+
+    /* Whether a queue of this type still fits; the device lock is held */
+    BOOLEAN
+    HasRoomFor(
+        _In_ D3D12_COMMAND_LIST_TYPE Type) const;
+
+    /* Counts a queue in; TRUE when the group had none before */
+    BOOLEAN
+    Attach(
+        _In_ D3D12_COMMAND_LIST_TYPE Type);
+
+    /* Counts a queue out; TRUE when the group has none left */
+    BOOLEAN
+    Detach(
+        _In_ D3D12_COMMAND_LIST_TYPE Type);
+
+    D3D12DDI_HSCHEDULINGGROUP_0050
+    GetDriverHandle() const
+    {
+        return DriverGroup;
+    }
+
+    BOOLEAN
+    OwnsContext(
+        _In_ D3DKMT_HANDLE Context) const;
+
+    static
+    HRESULT
+    APIENTRY
+    CreateContextCb(
+        _In_ D3D12DDI_HRTSCHEDULINGGROUP_0050 hRTSchedulingGroup,
+        _Inout_ D3DDDICB_CREATECONTEXT* Args);
+
+    static
+    HRESULT
+    APIENTRY
+    CreateContextVirtualCb(
+        _In_ D3D12DDI_HRTSCHEDULINGGROUP_0050 hRTSchedulingGroup,
+        _Inout_ D3DDDICB_CREATECONTEXTVIRTUAL* Args);
+
+    /* Link in the device's list of groups open to new queues */
+    RxSchedulingGroup* Next = nullptr;
+
+private:
+    RxSchedulingGroup(
+        _In_ RxDevice12& Owner,
+        _In_ UINT NodeMask,
+        _In_ const GUID& Creator);
+
+    ~RxSchedulingGroup();
+
+    HRESULT
+    Initialize();
+
+    BOOLEAN
+    CanMakeContext(
+        _In_ D3DDDI_CREATECONTEXTFLAGS Flags) const;
+
+    RxDevice12& Device;
+    LONG Uses = 1;
+    UINT Mask;
+    UINT NodeIndex;
+    GUID CreatorId;
+    UINT DirectQueues = 0;
+    UINT ComputeQueues = 0;
+    RxDriverMemory12 Memory;
+    D3D12DDI_HSCHEDULINGGROUP_0050 DriverGroup = {};
+    BOOLEAN IsDriverGroupCreated = FALSE;
+    DWORD CreatingThread = 0;
+    D3DKMT_HANDLE Contexts[RxMaxQueueEngines12] = {};
+    UINT ContextCount = 0;
+};
+
 class RxCommandQueue final : public RxDeviceChild12<ID3D12CommandQueue>
 {
 public:
@@ -82,7 +187,17 @@ private:
     OwnsContext(
         _In_ D3DKMT_HANDLE Context) const;
 
+    HRESULT
+    ApplyPriority();
+
+    BOOLEAN
+    NoteContextKind(
+        _In_ D3DDDI_CREATECONTEXTFLAGS Flags);
+
     D3D12_COMMAND_QUEUE_DESC Desc = {};
+    RxSchedulingGroup* Group = nullptr;
+    BOOLEAN HasSoftwareContexts = FALSE;
+    BOOLEAN UsesGroupContexts = FALSE;
     RxDriverMemory12 Memory;
     D3D12DDI_HCOMMANDQUEUE DriverQueue = {};
     BOOLEAN IsDriverQueueCreated = FALSE;
