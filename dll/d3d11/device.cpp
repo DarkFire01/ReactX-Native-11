@@ -59,6 +59,13 @@ RxDevice::~RxDevice()
     if (IsDriverDeviceCreated)
         DeviceFuncs.pfnDestroyDevice(DriverDevice);
 
+    if (LayerQueue != nullptr)
+        LayerQueue->Release();
+    if (LayerPrivate != nullptr)
+        LayerPrivate->Release();
+    if (LayerDevice12 != nullptr)
+        LayerDevice12->Release();
+
     /* Whatever the driver never deallocated goes with the kernel device */
     for (RxRuntimeResource* Resource : OrphanedResources)
     {
@@ -226,12 +233,27 @@ RxDevice::Initialize(
              DriverSize,
              RetrieveSubObject != nullptr ? L"present" : L"absent");
 
+    if (Adapter->IsLayer())
+    {
+        hr = AttachLayer();
+        if (FAILED(hr))
+            return hr;
+    }
+
     /* A new device starts with its default states bound, like the D3D11 runtime's */
     hr = BuildStockStates();
     if (FAILED(hr))
     {
         RX_TRACE(L"creating the default states failed 0x%08lX", hr);
         return hr;
+    }
+
+    /* A layer device asks for its virtual address limits once its defaults exist */
+    if (LayerDevice12 != nullptr)
+    {
+        D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT Address = {};
+
+        LayerDevice12->CheckFeatureSupport(D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT, &Address, sizeof(Address));
     }
     Context.LoadPipelineDefaults();
     return S_OK;

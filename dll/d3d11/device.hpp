@@ -903,6 +903,14 @@ private:
     HRESULT
     BuildStockStates();
 
+    /* Takes the D3D12 objects behind the layer and asks for what a new layer device caches */
+    HRESULT
+    AttachLayer();
+
+    /* Asks the driver once for every format the runtime caches, with each multisample count */
+    VOID
+    WarmFormatCaches();
+
     /* The driver's own caps for a format, asked once */
     UINT
     GetDriverFormatCaps(
@@ -954,6 +962,12 @@ private:
     D3DWDDM2_6DDI_DEVICEFUNCS DeviceFuncs = {};
     DXGI1_6_1_DDI_BASE_FUNCTIONS DxgiFuncs = {};
     PFND3D10DDI_RETRIEVESUBOBJECT RetrieveSubObject = nullptr;
+
+    /* Only for devices on the D3D11 on 12 layer */
+    IOn12DdiDevice* LayerDevice = nullptr;
+    ID3D12Device5* LayerDevice12 = nullptr;
+    IUnknown* LayerPrivate = nullptr;
+    ID3D12CommandQueue* LayerQueue = nullptr;
 
     SRWLOCK VideoLock = SRWLOCK_INIT;
     BOOLEAN IsVideoQueried = FALSE;
