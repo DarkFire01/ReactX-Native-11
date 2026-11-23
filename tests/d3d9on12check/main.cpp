@@ -56,6 +56,30 @@ struct CkState
 
 static CkState Ck;
 
+/* Keeps what was printed before a crash and names where it happened on stderr */
+static
+LONG
+WINAPI
+CkCrashFilter(
+    _In_ EXCEPTION_POINTERS* Exception)
+{
+    const EXCEPTION_RECORD* Record = Exception->ExceptionRecord;
+    WCHAR Name[MAX_PATH] = L"?";
+    HMODULE Module = NULL;
+    ULONG_PTR Offset = reinterpret_cast<ULONG_PTR>(Record->ExceptionAddress);
+
+    fflush(stdout);
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(Record->ExceptionAddress), &Module))
+    {
+        GetModuleFileNameW(Module, Name, _countof(Name));
+        Offset -= reinterpret_cast<ULONG_PTR>(Module);
+    }
+    fwprintf(stderr, L"unhandled exception %08lX at %s+0x%Ix\n", Record->ExceptionCode, Name, Offset);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static
 VOID
 CkDump(
@@ -860,6 +884,7 @@ wmain(
     }
 
     setvbuf(stdout, nullptr, _IOFBF, 1 << 16);
+    SetUnhandledExceptionFilter(CkCrashFilter);
     Driver = CkDriverPath(Runtime);
     if (!Driver.empty() && LoadLibraryW(Driver.c_str()) == NULL)
     {
