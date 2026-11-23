@@ -2259,6 +2259,509 @@ SceneWireframe(
     return hr;
 }
 
+/* A 64x64 eight bit target with its RTV, cleared, bound and set up for the draw scenes */
+struct TcFrame
+{
+    HRESULT
+    Create(
+        _In_ ID3D12Device *Device,
+        _In_ TcQueue *Queue,
+        _In_reads_(4) const FLOAT *Clear,
+        _In_ UINT Width,
+        _In_ UINT Samples,
+        _Inout_ TcDrawKit *Kit)
+    {
+        Target = Kit->Keep(TcTarget(Device, DXGI_FORMAT_R8G8B8A8_UNORM, Width, 64, Samples, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                    D3D12_RESOURCE_STATE_RENDER_TARGET));
+        Rtvs = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2, FALSE, Kit);
+        if (Target == NULL || Rtvs == NULL)
+            return E_OUTOFMEMORY;
+        Rtv = Rtvs->GetCPUDescriptorHandleForHeapStart();
+        Device->CreateRenderTargetView(Target, NULL, Rtv);
+        Queue->List->ClearRenderTargetView(Rtv, Clear, 0, NULL);
+        return S_OK;
+    }
+
+    /* Moves the target to copy source and reads it back */
+    HRESULT
+    Finish(
+        _In_ ID3D12Device *Device,
+        _In_ TcQueue *Queue,
+        _Inout_ TcResult *Result)
+    {
+        HRESULT hr;
+
+        TcBarrier(Queue->List, Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        hr = Queue->Submit();
+        TcAppend(Result, &hr, sizeof(hr));
+        if (SUCCEEDED(hr))
+            hr = TcReadTexture(Device, Queue, Target, 1, Result);
+        return hr;
+    }
+
+    ID3D12Resource *Target = NULL;
+    ID3D12DescriptorHeap *Rtvs = NULL;
+    D3D12_CPU_DESCRIPTOR_HANDLE Rtv = {};
+};
+
+/* Depth and stencil tests with a D24S8 buffer, an occlusion query and pipeline statistics */
+static
+HRESULT
+SceneDepth(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcFrame Frame;
+    TcQueue Queue;
+    ID3D12Resource *Depth;
+    ID3D12DescriptorHeap *Dsvs;
+    ID3D12PipelineState *Write;
+    ID3D12PipelineState *Equal;
+    ID3D12PipelineState *Behind;
+    ID3D12QueryHeap *Occlusion = NULL;
+    ID3D12QueryHeap *Statistics = NULL;
+    ID3D12Resource *Answers;
+    D3D12_CPU_DESCRIPTOR_HANDLE Dsv;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Frame.Create(Device, &Queue, Clear, 64, 1, &Kit);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    Depth = Kit.Keep(TcTarget(Device, DXGI_FORMAT_D24_UNORM_S8_UINT, 64, 64, 1, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+    Dsvs = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, FALSE, &Kit);
+    Answers = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_FLAG_NONE));
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+        D3D12_QUERY_HEAP_DESC Queries = { D3D12_QUERY_HEAP_TYPE_OCCLUSION, 2 };
+
+        Desc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        Desc.DepthStencilState.DepthEnable = TRUE;
+        Desc.DepthStencilState.StencilEnable = TRUE;
+        Desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
+        Desc.DepthStencilState.BackFace = Desc.DepthStencilState.FrontFace;
+        Write = TcPipeline(Device, Desc, &Kit);
+        Desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_INCR;
+        Desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_EQUAL;
+        Desc.DepthStencilState.BackFace = Desc.DepthStencilState.FrontFace;
+        Equal = TcPipeline(Device, Desc, &Kit);
+        Desc.DepthStencilState.StencilEnable = FALSE;
+        Desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        Desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        Behind = TcPipeline(Device, Desc, &Kit);
+        Device->CreateQueryHeap(&Queries, IID_PPV_ARGS(&Occlusion));
+        Kit.Keep(Occlusion);
+        Queries.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+        Queries.Count = 1;
+        Device->CreateQueryHeap(&Queries, IID_PPV_ARGS(&Statistics));
+        Kit.Keep(Statistics);
+    }
+    if (Depth == NULL || Dsvs == NULL || Answers == NULL || Write == NULL || Equal == NULL || Behind == NULL || Occlusion == NULL || Statistics == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    Dsv = Dsvs->GetCPUDescriptorHandleForHeapStart();
+    Device->CreateDepthStencilView(Depth, NULL, Dsv);
+    Queue.List->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
+    Queue.List->OMSetRenderTargets(1, &Frame.Rtv, FALSE, &Dsv);
+    Queue.List->BeginQuery(Statistics, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+    Setup.Bind(Queue.List, 64, 64, 0);
+    Queue.List->SetPipelineState(Write);
+    Queue.List->OMSetStencilRef(3);
+    Queue.List->DrawInstanced(6, 1, 0, 0);
+    Setup.Bind(Queue.List, 64, 64, 1);
+    Queue.List->SetPipelineState(Equal);
+    Queue.List->BeginQuery(Occlusion, D3D12_QUERY_TYPE_OCCLUSION, 0);
+    Queue.List->DrawInstanced(6, 1, 2, 0);
+    Queue.List->EndQuery(Occlusion, D3D12_QUERY_TYPE_OCCLUSION, 0);
+    Setup.Bind(Queue.List, 64, 64, 2);
+    Queue.List->SetPipelineState(Behind);
+    Queue.List->BeginQuery(Occlusion, D3D12_QUERY_TYPE_BINARY_OCCLUSION, 1);
+    Queue.List->DrawIndexedInstanced(9, 1, 0, 0, 0);
+    Queue.List->EndQuery(Occlusion, D3D12_QUERY_TYPE_BINARY_OCCLUSION, 1);
+    Queue.List->EndQuery(Statistics, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+    Queue.List->ResolveQueryData(Occlusion, D3D12_QUERY_TYPE_OCCLUSION, 0, 1, Answers, 0);
+    Queue.List->ResolveQueryData(Occlusion, D3D12_QUERY_TYPE_BINARY_OCCLUSION, 1, 1, Answers, 8);
+    Queue.List->ResolveQueryData(Statistics, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0, 1, Answers, 16);
+    TcBarrier(Queue.List, Depth, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    hr = Frame.Finish(Device, &Queue, Result);
+    if (SUCCEEDED(hr))
+        hr = TcReadTexture(Device, &Queue, Depth, 2, Result);
+    if (SUCCEEDED(hr))
+        TcReadback(Answers, 16 + sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS), Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* Alpha blending, blend factors and write masks */
+static
+HRESULT
+SceneBlend(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.2f, 0.4f, 0.6f, 0.8f };
+    static const FLOAT Factor[4] = { 0.25f, 0.5f, 0.75f, 0.125f };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcFrame Frame;
+    TcQueue Queue;
+    ID3D12PipelineState *States[3];
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Frame.Create(Device, &Queue, Clear, 64, 1, &Kit);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+        D3D12_RENDER_TARGET_BLEND_DESC *Blend = &Desc.BlendState.RenderTarget[0];
+
+        Blend->BlendEnable = TRUE;
+        Blend->SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        Blend->DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        Blend->SrcBlendAlpha = D3D12_BLEND_ONE;
+        Blend->DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        States[0] = TcPipeline(Device, Desc, &Kit);
+        Blend->SrcBlend = D3D12_BLEND_BLEND_FACTOR;
+        Blend->DestBlend = D3D12_BLEND_INV_BLEND_FACTOR;
+        Blend->BlendOp = D3D12_BLEND_OP_REV_SUBTRACT;
+        Blend->BlendOpAlpha = D3D12_BLEND_OP_MAX;
+        States[1] = TcPipeline(Device, Desc, &Kit);
+        Blend->SrcBlend = D3D12_BLEND_ONE;
+        Blend->DestBlend = D3D12_BLEND_ONE;
+        Blend->BlendOp = D3D12_BLEND_OP_ADD;
+        Blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_ALPHA;
+        States[2] = TcPipeline(Device, Desc, &Kit);
+    }
+    if (States[0] == NULL || States[1] == NULL || States[2] == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    Queue.List->OMSetRenderTargets(1, &Frame.Rtv, FALSE, NULL);
+    Queue.List->OMSetBlendFactor(Factor);
+    for (UINT Index = 0; Index < 3; Index++)
+    {
+        Setup.Bind(Queue.List, 64, 64, Index);
+        Queue.List->SetPipelineState(States[Index]);
+        Queue.List->DrawInstanced(6, 1, Index, 0);
+    }
+    hr = Frame.Finish(Device, &Queue, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* Four sample targets with alpha to coverage, read sample by sample through Texture2DMS loads */
+static
+HRESULT
+SceneMultisample(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcFrame Samples;
+    TcFrame Spread;
+    TcQueue Queue;
+    ID3DBlob *Quad = NULL;
+    ID3DBlob *Load = NULL;
+    ID3D12PipelineState *Plain;
+    ID3D12PipelineState *Coverage;
+    ID3D12PipelineState *Reader;
+    ID3D12DescriptorHeap *Views;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    if (SUCCEEDED(hr))
+        hr = TcCompile("vsquad", "vs_5_0", &Quad);
+    Kit.Keep(Quad);
+    if (SUCCEEDED(hr))
+        hr = TcCompile("psms", "ps_5_0", &Load);
+    Kit.Keep(Load);
+    if (SUCCEEDED(hr))
+        hr = Samples.Create(Device, &Queue, Clear, 16, 4, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Spread.Create(Device, &Queue, Clear, 64, 1, &Kit);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    Views = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, TRUE, &Kit);
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+
+        Desc.SampleDesc.Count = 4;
+        Plain = TcPipeline(Device, Desc, &Kit);
+        Desc.BlendState.AlphaToCoverageEnable = TRUE;
+        Coverage = TcPipeline(Device, Desc, &Kit);
+        Desc = TcPipelineDesc(Setup.Signature, Quad, Load);
+        Desc.InputLayout.NumElements = 0;
+        Reader = TcPipeline(Device, Desc, &Kit);
+    }
+    if (Views == NULL || Plain == NULL || Coverage == NULL || Reader == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    Queue.List->OMSetRenderTargets(1, &Samples.Rtv, FALSE, NULL);
+    Setup.Bind(Queue.List, 16, 64, 0);
+    Queue.List->SetPipelineState(Plain);
+    Queue.List->DrawInstanced(6, 1, 0, 0);
+    Setup.Bind(Queue.List, 16, 64, 3);
+    Queue.List->SetPipelineState(Coverage);
+    Queue.List->DrawInstanced(6, 1, 2, 0);
+    TcBarrier(Queue.List, Samples.Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Device->CreateShaderResourceView(Samples.Target, NULL, Views->GetCPUDescriptorHandleForHeapStart());
+    Queue.List->SetDescriptorHeaps(1, &Views);
+    Queue.List->OMSetRenderTargets(1, &Spread.Rtv, FALSE, NULL);
+    Setup.Bind(Queue.List, 64, 64, 0);
+    Queue.List->SetGraphicsRootDescriptorTable(2, Views->GetGPUDescriptorHandleForHeapStart());
+    Queue.List->SetPipelineState(Reader);
+    Queue.List->DrawInstanced(3, 1, 0, 0);
+    hr = Spread.Finish(Device, &Queue, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* A texture sampled through a descriptor table and a sampler heap, next to the static point sampler */
+static
+HRESULT
+SceneTexture(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcFrame Frame;
+    TcQueue Queue;
+    ID3D12Resource *Image;
+    ID3D12Resource *Upload;
+    ID3D12DescriptorHeap *Views;
+    ID3D12DescriptorHeap *Samplers;
+    ID3D12PipelineState *State;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Frame.Create(Device, &Queue, Clear, 64, 1, &Kit);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    Image = Kit.Keep(TcTexture(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 16, 16, 1, 1, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST));
+    Upload = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, 16 * 256, D3D12_RESOURCE_FLAG_NONE));
+    Views = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4, TRUE, &Kit);
+    Samplers = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 2, TRUE, &Kit);
+    State = TcPipeline(Device, TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Textured), &Kit);
+    if (Image == NULL || Upload == NULL || Views == NULL || Samplers == NULL || State == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    hr = TcFill(Upload, 16 * 256, 21);
+    if (FAILED(hr))
+        return hr;
+    {
+        D3D12_TEXTURE_COPY_LOCATION To = {};
+        D3D12_TEXTURE_COPY_LOCATION From = {};
+        D3D12_SAMPLER_DESC Sampler = {};
+
+        To.pResource = Image;
+        To.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        From.pResource = Upload;
+        From.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        From.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        From.PlacedFootprint.Footprint.Width = 16;
+        From.PlacedFootprint.Footprint.Height = 16;
+        From.PlacedFootprint.Footprint.Depth = 1;
+        From.PlacedFootprint.Footprint.RowPitch = 256;
+        Queue.List->CopyTextureRegion(&To, 0, 0, 0, &From, NULL);
+        TcBarrier(Queue.List, Image, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        Device->CreateShaderResourceView(Image, NULL, TcHandle(Device, Views, 2));
+        Sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        Sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        Sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        Sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        Sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        Device->CreateSampler(&Sampler, TcHandle(Device, Samplers, 1));
+    }
+    {
+        ID3D12DescriptorHeap *Heaps[2] = { Views, Samplers };
+
+        Queue.List->SetDescriptorHeaps(2, Heaps);
+    }
+    Queue.List->OMSetRenderTargets(1, &Frame.Rtv, FALSE, NULL);
+    Setup.Bind(Queue.List, 64, 64, 0);
+    Queue.List->SetGraphicsRootDescriptorTable(2, TcGpuHandle(Device, Views, 2));
+    Queue.List->SetGraphicsRootDescriptorTable(3, TcGpuHandle(Device, Samplers, 1));
+    Queue.List->SetPipelineState(State);
+    Queue.List->DrawInstanced(6, 1, 0, 0);
+    Setup.Bind(Queue.List, 64, 64, 2);
+    Queue.List->SetGraphicsRootDescriptorTable(2, TcGpuHandle(Device, Views, 2));
+    Queue.List->SetGraphicsRootDescriptorTable(3, TcGpuHandle(Device, Samplers, 1));
+    Queue.List->DrawInstanced(3, 1, 5, 0);
+    hr = Frame.Finish(Device, &Queue, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* Compute writes into a root UAV and a table UAV, with group shared memory, then indirect dispatches with root constants */
+static
+HRESULT
+SceneCompute(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const UINT Commands[2][4] = { { 100, 2, 1, 1 }, { 1000, 1, 1, 1 } };
+    static const UINT CommandCount = 2;
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcQueue Queue;
+    ID3DBlob *Shader = NULL;
+    ID3D12RootSignature *Signature = NULL;
+    ID3D12PipelineState *State = NULL;
+    ID3D12CommandSignature *Indirect = NULL;
+    ID3D12Resource *Output;
+    ID3D12Resource *Picture;
+    ID3D12Resource *Input;
+    ID3D12Resource *Arguments;
+    ID3D12Resource *Count;
+    ID3D12Resource *Readback;
+    ID3D12DescriptorHeap *Views;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = TcCompile("cs", "cs_5_0", &Shader);
+    Kit.Keep(Shader);
+    if (SUCCEEDED(hr))
+    {
+        D3D12_DESCRIPTOR_RANGE Range = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0, 0 };
+        D3D12_ROOT_PARAMETER Parameters[4] = {};
+        D3D12_ROOT_SIGNATURE_DESC Desc = {};
+
+        Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        Parameters[0].Constants.Num32BitValues = 1;
+        Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        Parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        Parameters[3].DescriptorTable.NumDescriptorRanges = 1;
+        Parameters[3].DescriptorTable.pDescriptorRanges = &Range;
+        Desc.NumParameters = ARRAYSIZE(Parameters);
+        Desc.pParameters = Parameters;
+        hr = TcRootSignature(Device, &Desc, &Signature);
+    }
+    Kit.Keep(Signature);
+    if (SUCCEEDED(hr))
+    {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC Desc = {};
+
+        Desc.pRootSignature = Signature;
+        Desc.CS = TcCode(Shader);
+        hr = Device->CreateComputePipelineState(&Desc, IID_PPV_ARGS(&State));
+    }
+    Kit.Keep(State);
+    if (SUCCEEDED(hr))
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC Arguments[2] = {};
+        D3D12_COMMAND_SIGNATURE_DESC Desc = {};
+
+        Arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        Arguments[0].Constant.Num32BitValuesToSet = 1;
+        Arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        Desc.ByteStride = sizeof(Commands[0]);
+        Desc.NumArgumentDescs = 2;
+        Desc.pArgumentDescs = Arguments;
+        hr = Device->CreateCommandSignature(&Desc, Signature, IID_PPV_ARGS(&Indirect));
+    }
+    Kit.Keep(Indirect);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    Output = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, 1024, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
+    Picture = Kit.Keep(TcTexture(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 16, 16, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+    Input = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, 256, D3D12_RESOURCE_FLAG_NONE));
+    Arguments = Kit.Keep(TcUpload(Device, Commands, sizeof(Commands)));
+    Count = Kit.Keep(TcUpload(Device, &CommandCount, sizeof(CommandCount)));
+    Readback = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, 1024, D3D12_RESOURCE_FLAG_NONE));
+    Views = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, TRUE, &Kit);
+    if (Output == NULL || Picture == NULL || Input == NULL || Arguments == NULL || Count == NULL || Readback == NULL || Views == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    hr = TcFill(Input, 256, 5);
+    if (FAILED(hr))
+        return hr;
+    Device->CreateUnorderedAccessView(Picture, NULL, NULL, TcHandle(Device, Views, 1));
+    Queue.List->SetDescriptorHeaps(1, &Views);
+    Queue.List->SetComputeRootSignature(Signature);
+    Queue.List->SetPipelineState(State);
+    Queue.List->SetComputeRoot32BitConstant(0, 7, 0);
+    Queue.List->SetComputeRootUnorderedAccessView(1, Output->GetGPUVirtualAddress());
+    Queue.List->SetComputeRootShaderResourceView(2, Input->GetGPUVirtualAddress());
+    Queue.List->SetComputeRootDescriptorTable(3, TcGpuHandle(Device, Views, 1));
+    Queue.List->Dispatch(2, 2, 1);
+    hr = Queue.Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    TcBarrier(Queue.List, Output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Queue.List->CopyResource(Readback, Output);
+    hr = Queue.Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        TcReadback(Readback, 1024, Result);
+
+    /* Each indirect command sets the base constant, then dispatches */
+    TcBarrier(Queue.List, Output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Queue.List->SetDescriptorHeaps(1, &Views);
+    Queue.List->SetComputeRootSignature(Signature);
+    Queue.List->SetPipelineState(State);
+    Queue.List->SetComputeRootUnorderedAccessView(1, Output->GetGPUVirtualAddress());
+    Queue.List->SetComputeRootShaderResourceView(2, Input->GetGPUVirtualAddress());
+    Queue.List->SetComputeRootDescriptorTable(3, TcGpuHandle(Device, Views, 1));
+    Queue.List->ExecuteIndirect(Indirect, 3, Arguments, 0, Count, 0);
+    TcBarrier(Queue.List, Output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    TcBarrier(Queue.List, Picture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Queue.List->CopyResource(Readback, Output);
+    hr = Queue.Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        TcReadback(Readback, 1024, Result);
+    if (SUCCEEDED(hr))
+        hr = TcReadTexture(Device, &Queue, Picture, 1, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "ddi", SceneDdi },
@@ -2270,6 +2773,11 @@ static const TcScene Scenes[] =
     { "present", ScenePresent },
     { "draw", SceneDraw },
     { "wireframe", SceneWireframe },
+    { "depth", SceneDepth },
+    { "blend", SceneBlend },
+    { "msaa", SceneMultisample },
+    { "texture", SceneTexture },
+    { "compute", SceneCompute },
 };
 
 static
