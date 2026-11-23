@@ -956,6 +956,27 @@ D9Device::ResetCommon(
     if (Parameters == nullptr)
         return D3DERR_INVALIDCALL;
 
+    /* The extended device looks at its state first: a removed device stays removed, a failing one rereads its caps */
+    if (IsEx)
+    {
+        hr = QueryDeviceState(NULL);
+        if (hr == D3DERR_DEVICEREMOVED)
+            return hr;
+        if (FAILED(hr))
+        {
+            D9Adapter* Answers = D9CopyAdapter(Adapter);
+
+            if (Answers != nullptr)
+            {
+                Answers->Functions = AdapterFunctions;
+                Answers->DriverAdapter = DriverAdapter;
+                D9RereadDriverCaps(Answers, IsEx);
+                D9FreeDriverAnswers(Answers);
+                delete Answers;
+            }
+        }
+    }
+
     hr = Enum->ValidateReset(Adapter->Ordinal, DeviceType, BehaviorFlags, Parameters, FullscreenMode);
     if (FAILED(hr))
         return hr;
@@ -965,12 +986,14 @@ D9Device::ResetCommon(
         return D3DERR_NOTAVAILABLE;
     }
 
-    /* The depth buffer goes before the back buffers; the swap chain flushes the driver before making new ones */
+    /* The depth buffer goes before the back buffers, then the device gives up any display it owned */
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     DepthStencil = nullptr;
     delete AutoDepthStencil;
     AutoDepthStencil = nullptr;
+    ImplicitChain->ReleaseBuffers();
+    ReleaseVidPnOwnership();
 
     hr = ImplicitChain->Reset(Parameters);
     if (SUCCEEDED(hr))
@@ -1006,9 +1029,37 @@ D9Device::ResetEx(
     return ResetCommon(PresentationParameters, FullscreenDisplayMode);
 }
 
-/* Whether the device window can be seen; with no window, whether the display itself is on */
-STDMETHODIMP
-D9Device::CheckDeviceState(
+/* What the kernel says about the device running: a stopped device is removed, a faulted one hung */
+HRESULT
+D9Device::ExecutionStatus(VOID)
+{
+    typedef NTSTATUS (APIENTRY* PD9_GET_DEVICE_STATE)(D3DKMT_GETDEVICESTATE*);
+    static PD9_GET_DEVICE_STATE GetState = reinterpret_cast<PD9_GET_DEVICE_STATE>(
+        GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTGetDeviceState"));
+    D3DKMT_GETDEVICESTATE State = {};
+
+    State.hDevice = DeviceHandle;
+    State.StateType = D3DKMT_DEVICESTATE_EXECUTION;
+    if (GetState != nullptr && NT_SUCCESS(GetState(&State)))
+        ExecutionState = State.ExecutionState;
+
+    switch (ExecutionState)
+    {
+    case D3DKMT_DEVICEEXECUTION_STOPPED:
+        return D3DERR_DEVICEREMOVED;
+    case D3DKMT_DEVICEEXECUTION_HUNG:
+    case D3DKMT_DEVICEEXECUTION_ERROR_OUTOFMEMORY:
+    case D3DKMT_DEVICEEXECUTION_ERROR_DMAFAULT:
+    case D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT:
+        return D3DERR_DEVICEHUNG;
+    default:
+        return S_OK;
+    }
+}
+
+/* Whether the device window can be seen; with no window, whether the display is on and not taken */
+HRESULT
+D9Device::QueryDeviceState(
     _In_opt_ HWND DestinationWindow)
 {
     typedef BOOLEAN (APIENTRY* PD9_CHECK_EXCLUSIVE)(VOID);
@@ -1017,39 +1068,85 @@ D9Device::CheckDeviceState(
         GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTCheckExclusiveOwnership"));
     static PD9_CHECK_POWER CheckPower = reinterpret_cast<PD9_CHECK_POWER>(
         GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTCheckMonitorPowerState"));
-    D9_DEVICE_LOCK();
     D3DKMT_CHECKMONITORPOWERSTATE Power = {};
+    BOOLEAN Occluded = FALSE;
+    BOOLEAN Showing = FALSE;
     RECT Client = {};
     NTSTATUS Status;
+    HRESULT hr;
 
-    if (!IsEx)
-        return D3DERR_INVALIDCALL;
     if (Lost)
         return D3DERR_DEVICELOST;
 
+    hr = ExecutionStatus();
+    if (FAILED(hr))
+    {
+        Lost = TRUE;
+        return hr;
+    }
+
+    /* A windowed device has no exclusive display, so only the window decides */
     if (DestinationWindow != NULL)
     {
-        if (GetClientRect(DestinationWindow, &Client) && IsRectEmpty(&Client))
+        if (GetClientRect(DestinationWindow, &Client) && (Client.left >= Client.right || Client.top >= Client.bottom))
             return S_PRESENT_OCCLUDED;
-        return D9CheckOcclusion(DestinationWindow);
+        hr = D9CheckOcclusion(DestinationWindow);
+        if (FAILED(hr) || hr == S_PRESENT_OCCLUDED)
+            return hr;
+        return ModeChanged ? S_PRESENT_MODE_CHANGED : S_OK;
     }
 
     if (CheckExclusive != nullptr && CheckExclusive())
         return S_PRESENT_OCCLUDED;
-    if (CheckPower == nullptr)
-        return S_OK;
 
     Power.hAdapter = Adapter->KernelAdapter;
     Power.VidPnSourceId = Adapter->SourceId;
-    Status = CheckPower(&Power);
-    if (Status == static_cast<NTSTATUS>(0xC01E0005) || Status == static_cast<NTSTATUS>(0xC01E0006) ||
-        Status == static_cast<NTSTATUS>(0x801E0000))
+    Status = CheckPower != nullptr ? CheckPower(&Power) : STATUS_NOT_SUPPORTED;
+    if (Status == STATUS_GRAPHICS_PRESENT_MODE_CHANGED)
+        ModeChanged = TRUE;
+    else if (Status == STATUS_GRAPHICS_PRESENT_OCCLUDED || Status == STATUS_GRAPHICS_LINK_CONFIGURATION_IN_PROGRESS)
+        Occluded = TRUE;
+    else if (Status == STATUS_NOT_SUPPORTED)
+        Showing = TRUE;
+    else
     {
-        return S_PRESENT_OCCLUDED;
+        hr = D9HresultFromStatus(Status);
+        if (FAILED(hr))
+            return hr;
+        Showing = TRUE;
     }
-    if (Status == STATUS_INVALID_PARAMETER || NT_SUCCESS(Status))
-        return S_OK;
-    return D9HresultFromStatus(Status);
+
+    if (Occluded && !Showing)
+        return S_PRESENT_OCCLUDED;
+    return ModeChanged ? S_PRESENT_MODE_CHANGED : S_OK;
+}
+
+STDMETHODIMP
+D9Device::CheckDeviceState(
+    _In_opt_ HWND DestinationWindow)
+{
+    D9_DEVICE_LOCK();
+
+    if (!IsEx)
+        return D3DERR_INVALIDCALL;
+    return QueryDeviceState(DestinationWindow);
+}
+
+/* Gives up every display source the device owned; windowed devices own none, so this only tells the kernel */
+VOID
+D9Device::ReleaseVidPnOwnership(VOID)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_SETVIDPNSOURCEOWNER1 Owner = {};
+    NTSTATUS Status;
+
+    if (Kmt == nullptr || Kmt->SetVidPnSourceOwner1 == nullptr)
+        return;
+
+    Owner.Version0.hDevice = DeviceHandle;
+    Status = Kmt->SetVidPnSourceOwner1(&Owner);
+    if (!NT_SUCCESS(Status))
+        D9Trace(L"releasing the display sources failed 0x%08lX", Status);
 }
 
 STDMETHODIMP

@@ -258,9 +258,10 @@ public:
         _Out_ D3DDISPLAYMODEEX* Mode,
         _Out_opt_ D3DDISPLAYROTATION* Rotation) override;
 
-private:
     VOID
     ReleaseBuffers(VOID);
+
+private:
 
     UINT Index;
     HWND FocusWindow;
@@ -1046,6 +1047,16 @@ private:
     ReadDriverAnswers(VOID);
 
     HRESULT
+    ExecutionStatus(VOID);
+
+    HRESULT
+    QueryDeviceState(
+        _In_opt_ HWND DestinationWindow);
+
+    VOID
+    ReleaseVidPnOwnership(VOID);
+
+    HRESULT
     CreateDriverDevice(
         _In_ BOOLEAN Windowed);
 
@@ -1151,6 +1162,10 @@ private:
     HANDLE DriverDevice = NULL;
     BOOLEAN UsesFlush1 = FALSE;
     BOOLEAN Lost = FALSE;
+
+    /* The last execution state the kernel reported, and whether a display mode change was seen */
+    D3DKMT_DEVICEEXECUTION_STATE ExecutionState = static_cast<D3DKMT_DEVICEEXECUTION_STATE>(0);
+    BOOLEAN ModeChanged = FALSE;
 
     /* The present the driver is about to report through its callback */
     D3DKMT_PRESENT PendingPresent = {};

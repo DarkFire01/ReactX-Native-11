@@ -692,6 +692,20 @@ D9DesktopAccessible(VOID)
     return !State.ResetState.DesktopSwitched;
 }
 
+/* The two capability passes; the plain runtime first makes sure the desktop is its own */
+BOOLEAN
+D9RereadDriverCaps(
+    _Inout_ D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx)
+{
+    if (!IsEx && !D9DesktopAccessible())
+    {
+        D9Trace(L"the desktop of %S is not accessible", Adapter->DeviceName);
+        return FALSE;
+    }
+    return D9QueryDriverCaps(Adapter, FALSE) && D9QueryDriverCaps(Adapter, TRUE);
+}
+
 /* Everything read through a freshly opened driver adapter: kernel facts, then two capability passes */
 BOOLEAN
 D9ReadDriverAnswers(
@@ -700,14 +714,7 @@ D9ReadDriverAnswers(
 {
     D3DKMT_DRIVERVERSION Version = KMT_DRIVERVERSION_WDDM_1_0;
 
-    if (!D9QueryKernelFacts(Adapter))
-        return FALSE;
-    if (!IsEx && !D9DesktopAccessible())
-    {
-        D9Trace(L"the desktop of %S is not accessible", Adapter->DeviceName);
-        return FALSE;
-    }
-    if (!D9QueryDriverCaps(Adapter, FALSE) || !D9QueryDriverCaps(Adapter, TRUE))
+    if (!D9QueryKernelFacts(Adapter) || !D9RereadDriverCaps(Adapter, IsEx))
         return FALSE;
 
     Adapter->Wddm11Plus = NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_DRIVERVERSION, &Version,

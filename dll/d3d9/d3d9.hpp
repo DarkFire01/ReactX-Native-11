@@ -426,6 +426,11 @@ D9DriverUpdating(
     _In_ D3DKMT_HANDLE Adapter);
 
 BOOLEAN
+D9RereadDriverCaps(
+    _Inout_ D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx);
+
+BOOLEAN
 D9ReadDriverAnswers(
     _Inout_ D9Adapter* Adapter,
     _In_ BOOLEAN IsEx);
