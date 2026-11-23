@@ -2076,15 +2076,34 @@ D9Device::SetDepthStencilSurface(
 STDMETHODIMP
 D9Device::BeginScene()
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9_DEVICE_LOCK();
+    D3DDDIARG_RENDERSTATE Capture = {};
+
+    if (NotReset || InScene)
+        return D3DERR_INVALIDCALL;
+
+    /* The driver hears of a scene through the scene capture state */
+    Capture.State = D3DDDIRS_SCENECAPTURE;
+    Capture.Value = TRUE;
+    DdiRenderState(&Capture);
+    InScene = TRUE;
+    return S_OK;
 }
 
 STDMETHODIMP
 D9Device::EndScene()
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9_DEVICE_LOCK();
+    D3DDDIARG_RENDERSTATE Capture = {};
+
+    if (NotReset || !InScene)
+        return D3DERR_INVALIDCALL;
+
+    InScene = FALSE;
+    Capture.State = D3DDDIRS_SCENECAPTURE;
+    Capture.Value = FALSE;
+    DdiRenderState(&Capture);
+    return S_OK;
 }
 
 STDMETHODIMP

@@ -2217,4 +2217,7 @@ private:
     /* Default pool resources the application holds, and a failed reset the device waits to see undone */
     LONG DefaultResources = 0;
     BOOLEAN NotReset = FALSE;
+
+    /* Between BeginScene and EndScene */
+    BOOLEAN InScene = FALSE;
 };
