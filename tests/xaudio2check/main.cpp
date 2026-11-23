@@ -4463,6 +4463,118 @@ XcPrintTap(VOID)
     }
 }
 
+/* What the runtime asked ActivateAudioInterfaceAsync for, which is how a stream follows the default device */
+typedef HRESULT (STDAPICALLTYPE* PXC_ACTIVATE_ASYNC)(LPCWSTR, REFIID, PROPVARIANT*, IActivateAudioInterfaceCompletionHandler*,
+                                                     IActivateAudioInterfaceAsyncOperation**);
+
+static const GUID XcRenderClass = { 0xE6327CAD, 0xDCEC, 0x4949, { 0xAE, 0x8A, 0x99, 0x1E, 0x97, 0x6A, 0x79, 0xD2 } };
+static PXC_ACTIVATE_ASYNC XcActivateAsync;
+static UINT32 XcActivations;
+static CHAR XcActivationLog[512];
+
+static
+HRESULT
+STDAPICALLTYPE
+XcActivateHook(
+    _In_ LPCWSTR Path,
+    _In_ REFIID Iid,
+    _In_opt_ PROPVARIANT* Parameters,
+    _In_ IActivateAudioInterfaceCompletionHandler* Handler,
+    _COM_Outptr_ IActivateAudioInterfaceAsyncOperation** Operation)
+{
+    WCHAR Render[40];
+    SIZE_T Length = strlen(XcActivationLog);
+
+    StringFromGUID2(XcRenderClass, Render, ARRAYSIZE(Render));
+    sprintf_s(XcActivationLog + Length, sizeof(XcActivationLog) - Length, "  activate %s iid %08lX vt %u size %lu\n",
+              _wcsicmp(Path, Render) == 0 ? "render class" : "device", Iid.Data1, Parameters != nullptr ? Parameters->vt : 0,
+              Parameters != nullptr && Parameters->vt == VT_BLOB ? Parameters->blob.cbSize : 0);
+    XcActivations += 1;
+    return XcActivateAsync(Path, Iid, Parameters, Handler, Operation);
+}
+
+/* Points the runtime's import of ActivateAudioInterfaceAsync at the hook */
+static
+BOOLEAN
+XcHookActivation(VOID)
+{
+    BYTE* Base = reinterpret_cast<BYTE*>(XcModule);
+    IMAGE_NT_HEADERS* Headers = reinterpret_cast<IMAGE_NT_HEADERS*>(Base + reinterpret_cast<IMAGE_DOS_HEADER*>(Base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY* Directory = &Headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    HMODULE Library = LoadLibraryW(L"mmdevapi.dll");
+    void* Real = Library != nullptr ? reinterpret_cast<void*>(GetProcAddress(Library, "ActivateAudioInterfaceAsync")) : nullptr;
+
+    if (Real == nullptr || Directory->VirtualAddress == 0)
+        return FALSE;
+    XcActivateAsync = reinterpret_cast<PXC_ACTIVATE_ASYNC>(Real);
+    for (IMAGE_IMPORT_DESCRIPTOR* Import = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(Base + Directory->VirtualAddress);
+         Import->Name != 0; Import++)
+    {
+        void** Slots = reinterpret_cast<void**>(Base + Import->FirstThunk);
+
+        for (; *Slots != nullptr; Slots++)
+        {
+            void* Original;
+
+            if (*Slots == Real)
+            {
+                XcPatchSlot(Slots, reinterpret_cast<void*>(XcActivateHook), &Original);
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
+/* A default mastering voice goes through the virtual default device unless told not to */
+static
+VOID
+XcCheckRouting(VOID)
+{
+    static const struct
+    {
+        UINT32 Flags;
+        BOOLEAN ById;
+    } Cases[] =
+    {
+        { 0, FALSE },
+        { XAUDIO2_NO_VIRTUAL_AUDIO_CLIENT, FALSE },
+        { 0, TRUE },
+    };
+    IMMDeviceEnumerator* Enumerator = nullptr;
+    IMMDevice* Endpoint = nullptr;
+    PWSTR DeviceId = nullptr;
+
+    printf("routing hook %u\n", XcHookActivation());
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&Enumerator))) &&
+        SUCCEEDED(Enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &Endpoint)))
+        Endpoint->GetId(&DeviceId);
+    for (UINT Case = 0; Case < ARRAYSIZE(Cases); Case++)
+    {
+        IXAudio2* Engine = nullptr;
+        IXAudio2MasteringVoice* Master = nullptr;
+        HRESULT hr;
+
+        XcActivations = 0;
+        XcActivationLog[0] = '\0';
+        XcTapStart();
+        if (FAILED(XcCreate(&Engine, 0)))
+            break;
+        hr = Engine->CreateMasteringVoice(&Master, XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, Cases[Case].Flags,
+                                          Cases[Case].ById ? DeviceId : nullptr);
+        printf("routing[%u] flags %08X by id %u = %08lX activations %u streams %u\n", Case, Cases[Case].Flags,
+               Cases[Case].ById, hr, XcActivations, XcTap.Streams);
+        printf("%s", XcActivationLog);
+        Engine->Release();
+        XcTapStop();
+    }
+    CoTaskMemFree(DeviceId);
+    if (Endpoint != nullptr)
+        Endpoint->Release();
+    if (Enumerator != nullptr)
+        Enumerator->Release();
+}
+
 /* The mastering voice device stage: rate and layout conversion to the endpoint stream */
 static
 VOID
@@ -4548,6 +4660,7 @@ XcCheckDevice(VOID)
         XcStreamEnded = nullptr;
         XcPrintTap();
     }
+    XcCheckRouting();
 }
 
 /* Whether passes run over a window, which only needs the windows to sit well clear of the idle delay */
