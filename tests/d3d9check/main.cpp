@@ -3340,6 +3340,113 @@ NcCheckCopies(
     Plain->Release();
 }
 
+static
+VOID
+NcPrintGamma(
+    _In_z_ PCSTR Name,
+    _In_ const D3DGAMMARAMP* Ramp)
+{
+    DWORD Hash = 2166136261UL;
+
+    for (UINT Index = 0; Index < sizeof(*Ramp); Index++)
+        Hash = (Hash ^ reinterpret_cast<const BYTE*>(Ramp)[Index]) * 16777619UL;
+    printf("%s = red %04X %04X %04X green %04X blue %04X hash %08lX\n", Name, Ramp->red[0], Ramp->red[1],
+           Ramp->red[255], Ramp->green[128], Ramp->blue[255], Hash);
+}
+
+/* Gamma ramps a windowed chain keeps; the display's own gamma never changes for them */
+static
+VOID
+NcCheckGammaOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ const D3DPRESENT_PARAMETERS* Parameters)
+{
+    D3DPRESENT_PARAMETERS Again = *Parameters;
+    D3DGAMMARAMP Ramp;
+    D3DGAMMARAMP Other;
+    char Name[64];
+
+    memset(&Ramp, 0xCC, sizeof(Ramp));
+    Device->GetGammaRamp(0, &Ramp);
+    sprintf_s(Name, "%s_initial", Prefix);
+    NcPrintGamma(Name, &Ramp);
+
+    for (UINT Index = 0; Index < 256; Index++)
+    {
+        Ramp.red[Index] = static_cast<WORD>(Index * 257);
+        Ramp.green[Index] = static_cast<WORD>(65535 - Index * 257);
+        Ramp.blue[Index] = static_cast<WORD>(Index * 100);
+        Other.red[Index] = static_cast<WORD>(Index * 3);
+        Other.green[Index] = static_cast<WORD>(Index * 5);
+        Other.blue[Index] = static_cast<WORD>(Index * 7);
+    }
+    Device->SetGammaRamp(0, D3DSGR_NO_CALIBRATION, &Ramp);
+    memset(&Ramp, 0, sizeof(Ramp));
+    Device->GetGammaRamp(0, &Ramp);
+    sprintf_s(Name, "%s_set", Prefix);
+    NcPrintGamma(Name, &Ramp);
+
+    Device->SetGammaRamp(0, D3DSGR_CALIBRATE, &Other);
+    Device->GetGammaRamp(0, &Ramp);
+    sprintf_s(Name, "%s_calibrate", Prefix);
+    NcPrintGamma(Name, &Ramp);
+
+    Device->SetGammaRamp(1, 0, &Ramp);
+    Device->SetGammaRamp(0, 0, nullptr);
+    Device->SetGammaRamp(0, 0x80, &Other);
+    Device->GetGammaRamp(0, &Ramp);
+    sprintf_s(Name, "%s_flags", Prefix);
+    NcPrintGamma(Name, &Ramp);
+
+    memset(&Ramp, 0xCC, sizeof(Ramp));
+    Device->GetGammaRamp(1, &Ramp);
+    sprintf_s(Name, "%s_chain1", Prefix);
+    NcPrintGamma(Name, &Ramp);
+
+    printf("%s_reset = %08lX\n", Prefix, Device->Reset(&Again));
+    Device->GetGammaRamp(0, &Ramp);
+    sprintf_s(Name, "%s_after_reset", Prefix);
+    NcPrintGamma(Name, &Ramp);
+}
+
+static
+VOID
+NcCheckGamma(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Made = Parameters;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                   &DeviceEx);
+    printf("gamma_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckGammaOn("gamma_ex", DeviceEx, &Parameters);
+        printf("gamma_ex_release = %lu\n", DeviceEx->Release());
+    }
+    Made = Parameters;
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, &Device);
+    printf("gamma_create_plain = %08lX\n", hr);
+    if (Device != nullptr)
+    {
+        NcCheckGammaOn("gamma_plain", Device, &Parameters);
+        printf("gamma_plain_release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -3363,6 +3470,7 @@ static const NineCheckInfo NcChecks[] =
     { "reset", NcCheckReset },
     { "resources", NcCheckResources },
     { "copies", NcCheckCopies },
+    { "gamma", NcCheckGamma },
 };
 
 static

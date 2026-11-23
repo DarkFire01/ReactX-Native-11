@@ -3225,6 +3225,19 @@ TrCopyWork(
             }
         }
 
+        TrPhase("copies gamma");
+        {
+            D3DGAMMARAMP Ramp = {};
+
+            Device->GetGammaRamp(0, &Ramp);
+            Ramp.red[1] = 0x1234;
+            Device->SetGammaRamp(0, D3DSGR_NO_CALIBRATION, &Ramp);
+            Device->SetGammaRamp(0, D3DSGR_CALIBRATE, &Ramp);
+            Device->GetGammaRamp(0, &Ramp);
+            TrCloseLine();
+            printf("api GetGammaRamp = %04X %04X\n", Ramp.red[1], Ramp.green[255]);
+        }
+
         TrPhase("copies scene");
         TrApi("BeginScene", Device->BeginScene());
         TrApi("BeginScene again", Device->BeginScene());
