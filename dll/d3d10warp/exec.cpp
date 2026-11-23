@@ -217,6 +217,15 @@ private:
 
     VOID
     Texture(
+        _In_ const RX_WARP_INSTRUCTION &Instruction,
+        _In_opt_ const RX_WARP_OPERAND *Clamp = nullptr);
+
+    VOID
+    TextureFeedback(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
+    FullyMapped(
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
@@ -812,6 +821,25 @@ RxWarpMachine::Execute(VOID)
             case D3D11_SB_OPCODE_EVAL_CENTROID:
                 if (Active != 0)
                     Evaluate(Instruction);
+                break;
+            case D3DWDDM1_3_SB_OPCODE_SAMPLE_CLAMP_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_SAMPLE_B_CLAMP_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_SAMPLE_C_CLAMP_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_SAMPLE_D_CLAMP_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_SAMPLE_L_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_SAMPLE_C_LZ_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_LD_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_LD_MS_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_GATHER4_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_GATHER4_C_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_GATHER4_PO_FEEDBACK:
+            case D3DWDDM1_3_SB_OPCODE_GATHER4_PO_C_FEEDBACK:
+                if (Active != 0)
+                    TextureFeedback(Instruction);
+                break;
+            case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
+                if (Active != 0)
+                    FullyMapped(Instruction);
                 break;
             default:
                 if (Active != 0)
@@ -1641,10 +1669,85 @@ RxWarpMapComponents(
     }
 }
 
+/* The residency status a sample of a fully resident resource leaves */
+static constexpr UINT RxWarpResidentStatus = 1;
+
+/*
+ * The status forms carry a residency status after the destination and, for the clamp forms, a
+ * lowest level of detail last; with every page resident the status reads as fully mapped.
+ */
 VOID
-RxWarpMachine::Texture(
+RxWarpMachine::TextureFeedback(
     _In_ const RX_WARP_INSTRUCTION &Instruction)
 {
+    static const UINT16 Plain[][2] =
+    {
+        { D3DWDDM1_3_SB_OPCODE_SAMPLE_CLAMP_FEEDBACK, D3D10_SB_OPCODE_SAMPLE },
+        { D3DWDDM1_3_SB_OPCODE_SAMPLE_B_CLAMP_FEEDBACK, D3D10_SB_OPCODE_SAMPLE_B },
+        { D3DWDDM1_3_SB_OPCODE_SAMPLE_C_CLAMP_FEEDBACK, D3D10_SB_OPCODE_SAMPLE_C },
+        { D3DWDDM1_3_SB_OPCODE_SAMPLE_D_CLAMP_FEEDBACK, D3D10_SB_OPCODE_SAMPLE_D },
+        { D3DWDDM1_3_SB_OPCODE_SAMPLE_L_FEEDBACK, D3D10_SB_OPCODE_SAMPLE_L },
+        { D3DWDDM1_3_SB_OPCODE_SAMPLE_C_LZ_FEEDBACK, D3D10_SB_OPCODE_SAMPLE_C_LZ },
+        { D3DWDDM1_3_SB_OPCODE_LD_FEEDBACK, D3D10_SB_OPCODE_LD },
+        { D3DWDDM1_3_SB_OPCODE_LD_MS_FEEDBACK, D3D10_SB_OPCODE_LD_MS },
+        { D3DWDDM1_3_SB_OPCODE_GATHER4_FEEDBACK, D3D10_1_SB_OPCODE_GATHER4 },
+        { D3DWDDM1_3_SB_OPCODE_GATHER4_C_FEEDBACK, D3D11_SB_OPCODE_GATHER4_C },
+        { D3DWDDM1_3_SB_OPCODE_GATHER4_PO_FEEDBACK, D3D11_SB_OPCODE_GATHER4_PO },
+        { D3DWDDM1_3_SB_OPCODE_GATHER4_PO_C_FEEDBACK, D3D11_SB_OPCODE_GATHER4_PO_C },
+    };
+    RX_WARP_INSTRUCTION Base = Instruction;
+    RX_WARP_LANE_VALUES Status = {};
+    UINT Clamped = (Instruction.Opcode >= D3DWDDM1_3_SB_OPCODE_SAMPLE_CLAMP_FEEDBACK &&
+                    Instruction.Opcode <= D3DWDDM1_3_SB_OPCODE_SAMPLE_C_CLAMP_FEEDBACK) ? 1 : 0;
+    UINT Count = Instruction.OperandCount;
+
+    if (Count < 3 + Clamped)
+        return;
+    for (UINT Index = 0; Index < ARRAYSIZE(Plain); Index++)
+    {
+        if (Plain[Index][0] == Instruction.Opcode)
+            Base.Opcode = Plain[Index][1];
+    }
+    for (UINT Index = 2; Index < Count - Clamped; Index++)
+        Base.Operands[Index - 1] = Instruction.Operands[Index];
+    Base.OperandCount = (UINT8)(Count - 1 - Clamped);
+    Texture(Base, Clamped ? &Instruction.Operands[Count - 1] : nullptr);
+
+    if (Instruction.Operands[1].Type == D3D10_SB_OPERAND_TYPE_NULL)
+        return;
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Component = 0; Component < 4; Component++)
+            Status[Lane][Component] = RxWarpResidentStatus;
+    }
+    Store(Instruction, 1, Status, FALSE);
+}
+
+/* A status of zero means some page was missing */
+VOID
+RxWarpMachine::FullyMapped(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Status;
+    RX_WARP_LANE_VALUES Result;
+
+    if (Instruction.OperandCount < 2)
+        return;
+    FetchAll(Instruction.Operands[1], TRUE, Status);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Component = 0; Component < 4; Component++)
+            Result[Lane][Component] = (Status[Lane][Component] != 0) ? UINT_MAX : 0;
+    }
+    Store(Instruction, 0, Result, FALSE);
+}
+
+VOID
+RxWarpMachine::Texture(
+    _In_ const RX_WARP_INSTRUCTION &Instruction,
+    _In_opt_ const RX_WARP_OPERAND *Clamp)
+{
+    RX_WARP_LANE_VALUES Lowest = {};
     RX_WARP_LANE_VALUES Address = {};
     RX_WARP_LANE_VALUES Result = {};
     RX_WARP_LANE_VALUES Extra = {};
@@ -1810,6 +1913,8 @@ RxWarpMachine::Texture(
         memcpy(DerivX, Extra, sizeof(DerivX));
         FetchAll(Instruction.Operands[5], FALSE, DerivY);
     }
+    if (Clamp != nullptr)
+        FetchAll(*Clamp, FALSE, Lowest);
 
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
     {
@@ -1818,6 +1923,8 @@ RxWarpMachine::Texture(
 
         if (!(Active & (1u << Lane)))
             continue;
+        Request.Clamped = (Clamp != nullptr);
+        Request.LodClamp = RxWarpAsFloat(Lowest[Lane][0]);
 
         switch (Opcode)
         {

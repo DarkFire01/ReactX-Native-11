@@ -276,6 +276,27 @@ private:
         _In_ llvm::Value *Handle,
         _In_ const RX_HANDLE &Range);
 
+    /* A register for the status a resource access returns when the program reads it, UINT_MAX otherwise */
+    UINT
+    StatusRegister(
+        _In_ const llvm::Value *Value)
+    {
+        UINT Register;
+
+        for (const llvm::User *User : Value->users())
+        {
+            const llvm::ExtractValueInst *Extract = llvm::dyn_cast<llvm::ExtractValueInst>(User);
+
+            if (Extract != nullptr && Extract->getIndices()[0] == 4)
+            {
+                Register = Fresh4();
+                StatusSlots[Value] = Register * 4;
+                return Register;
+            }
+        }
+        return UINT_MAX;
+    }
+
     UINT
     ResultRegister(
         _In_ const llvm::Value *Value)
@@ -358,6 +379,7 @@ private:
     RxTokens Decls;
     RxTokens Body;
     std::unordered_map<const llvm::Value *, UINT> Slots;
+    std::unordered_map<const llvm::Value *, UINT> StatusSlots;     /* the residency status a resource access returns last */
     std::unordered_map<const llvm::Value *, UINT> SharedRegisters;
     std::unordered_map<const llvm::Value *, UINT> Arrays;
     std::unordered_map<UINT64, UINT> Bases;
@@ -992,7 +1014,13 @@ RxLowering::Lower(
         case llvm::Instruction::ExtractValue:
         {
             llvm::ExtractValueInst *Extract = llvm::cast<llvm::ExtractValueInst>(Instruction);
+            auto Status = StatusSlots.find(Extract->getAggregateOperand());
 
+            if (Extract->getIndices()[0] == 4 && Status != StatusSlots.end())
+            {
+                Slots[Instruction] = Status->second;
+                return TRUE;
+            }
             Slots[Instruction] = SlotOf(Extract->getAggregateOperand()) + Extract->getIndices()[0];
             return TRUE;
         }
@@ -1439,6 +1467,9 @@ RxLowering::LowerCall(
                                            (Code == OpCode::Cos) ? Dest(Call) : RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}),
                                            Source(Call->getArgOperand(1)) });
             return TRUE;
+        case OpCode::CheckAccessFullyMapped:
+            Emit(D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED, { Dest(Call), Source(Call->getArgOperand(1)) });
+            return TRUE;
         case OpCode::Dot2:
         case OpCode::Dot3:
         case OpCode::Dot4:
@@ -1494,18 +1525,6 @@ RxLowering::InputCoordinates(
     }
     *Operand = RxRegister(D3D10_SB_OPERAND_TYPE_INPUT, RxSwizzleMode, Swizzle, { Row });
     return TRUE;
-}
-
-/* A level of detail clamp the executor has no form for: anything but none or zero */
-BOOLEAN
-RxClamped(
-    _In_ llvm::Value *Clamp)
-{
-    llvm::ConstantFP *Fixed = llvm::dyn_cast<llvm::ConstantFP>(Clamp);
-
-    if (llvm::isa<llvm::UndefValue>(Clamp))
-        return FALSE;
-    return Fixed == nullptr || !Fixed->isZero();
 }
 
 /* Spatial axes of a texture kind: what gradients and gather offsets cover */
@@ -1580,18 +1599,66 @@ RxLowering::LowerResource(
                          (Code == OpCode::SampleGrad) ? 16 : 0;
             RxTokens SamplerOperand;
             RxTokens Coordinates;
+            BOOLEAN Clamped;
+            UINT Status;
 
             if (!HandleOf(Call->getArgOperand(2), &Sampler) || !RxOffsets(Call, 7, &Extended))
                 return FALSE;
-            if (Clamp != 0 && RxClamped(Call->getArgOperand(Clamp)))
-                return FALSE;
+            Clamped = Clamp != 0 && !llvm::isa<llvm::UndefValue>(Call->getArgOperand(Clamp));
             if (!InputCoordinates(Call, 3, Count, &Coordinates))
             {
                 Address = GatherRange(Call, 3, Count);
                 Coordinates = Temp(Address, RxSwizzleMode, RxXyzw);
             }
             Result = ResultRegister(Call);
+            Status = StatusRegister(Call);
             SamplerOperand = RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Sampler.Slot });
+
+            /* A level clamp or a status the program reads takes the residency forms */
+            if (Clamped || Status != UINT_MAX)
+            {
+                RxTokens Feedback = (Status != UINT_MAX) ? Temp(Status, RxMaskMode, 1) : RxBare(D3D10_SB_OPERAND_TYPE_NULL, {});
+                RxTokens Lowest = Clamped ? Source(Call->getArgOperand(Clamp)) : RxImmediate(0xFF800000);
+                BOOLEAN Single = (Code == OpCode::SampleCmp || Code == OpCode::SampleCmpLevelZero);
+                RxTokens Target = Temp(Result, RxMaskMode, Single ? 1 : 0xF);
+                RxTokens Resource = Single ? ResourceOperand(Handle, RxSelectMode, 0) : ResourceOperand(Handle);
+                const RxTokens *Offsets = Extended.empty() ? nullptr : &Extended;
+
+                switch (Code)
+                {
+                    case OpCode::Sample:
+                        Emit(D3DWDDM1_3_SB_OPCODE_SAMPLE_CLAMP_FEEDBACK, { Target, Feedback, Coordinates, Resource, SamplerOperand, Lowest },
+                             0, Offsets);
+                        break;
+                    case OpCode::SampleBias:
+                        Emit(D3DWDDM1_3_SB_OPCODE_SAMPLE_B_CLAMP_FEEDBACK, { Target, Feedback, Coordinates, Resource, SamplerOperand,
+                                                                             Source(Call->getArgOperand(10)), Lowest }, 0, Offsets);
+                        break;
+                    case OpCode::SampleCmp:
+                        Emit(D3DWDDM1_3_SB_OPCODE_SAMPLE_C_CLAMP_FEEDBACK, { Target, Feedback, Coordinates, Resource, SamplerOperand,
+                                                                             Source(Call->getArgOperand(10)), Lowest }, 0, Offsets);
+                        break;
+                    case OpCode::SampleGrad:
+                    {
+                        UINT Across = GatherRange(Call, 10, RxSpatialAxes(Handle.Kind));
+                        UINT Down = GatherRange(Call, 13, RxSpatialAxes(Handle.Kind));
+
+                        Emit(D3DWDDM1_3_SB_OPCODE_SAMPLE_D_CLAMP_FEEDBACK, { Target, Feedback, Coordinates, Resource, SamplerOperand,
+                                                                             Temp(Across, RxSwizzleMode, RxXyzw), Temp(Down, RxSwizzleMode, RxXyzw),
+                                                                             Lowest }, 0, Offsets);
+                        break;
+                    }
+                    case OpCode::SampleLevel:
+                        Emit(D3DWDDM1_3_SB_OPCODE_SAMPLE_L_FEEDBACK, { Target, Feedback, Coordinates, Resource, SamplerOperand,
+                                                                       Source(Call->getArgOperand(10)) }, 0, Offsets);
+                        break;
+                    default:
+                        Emit(D3DWDDM1_3_SB_OPCODE_SAMPLE_C_LZ_FEEDBACK, { Target, Feedback, Coordinates, Resource, SamplerOperand,
+                                                                          Source(Call->getArgOperand(10)) }, 0, Offsets);
+                        break;
+                }
+                return TRUE;
+            }
             switch (Code)
             {
                 case OpCode::Sample:

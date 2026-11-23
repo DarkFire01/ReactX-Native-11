@@ -27,6 +27,8 @@ typedef struct _RX_WARP_SAMPLE_REQUEST
     BOOLEAN Gather;
     UINT GatherComponent;
     UINT Sample;            /* ld_ms */
+    BOOLEAN Clamped;        /* the shader gave a lowest level of detail */
+    FLOAT LodClamp;
 } RX_WARP_SAMPLE_REQUEST;
 
 VOID

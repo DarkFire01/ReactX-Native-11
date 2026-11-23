@@ -934,6 +934,8 @@ RxWarpSample(
         Lod = RxWarpRawLod(&Extent, &Shape, Dx, Dy) + Request->Bias + Desc->MipLODBias;
     else
         Lod = 0.0f;
+    if (Request->Clamped && Lod < Request->LodClamp)
+        Lod = Request->LodClamp;
     Lod = RxWarpClampLod(Request, Lod);
 
     /* Gathers always read the most detailed level with a bilinear footprint */

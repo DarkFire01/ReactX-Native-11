@@ -15,7 +15,7 @@ class RxWarpView;
 /* Lanes run together; in pixel shaders they are one 2x2 quad: top left, top right, bottom left, bottom right */
 static constexpr UINT RxWarpLanes = 4;
 static constexpr UINT RxWarpMaxRegisters = 32;
-static constexpr UINT RxWarpMaxOperands = 7;
+static constexpr UINT RxWarpMaxOperands = 8;
 static constexpr UINT RxWarpConstantBufferSlots = 14;
 
 static constexpr UINT8 RxWarpNoRelative = 0xFF;
