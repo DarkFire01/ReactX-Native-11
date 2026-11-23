@@ -165,7 +165,6 @@ XaWmaSetTurn(
 }
 
 /* Decodes the next run and level of a channel's coefficients */
-static
 BOOLEAN
 XaWmaNextRun(
     _Inout_ XaWmaDecoder* Decoder,

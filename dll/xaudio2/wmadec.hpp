@@ -205,6 +205,15 @@ struct XaWmaChannel
     float* Coefs;
     INT32 Fill;
 
+    /* Levels as decoded, before the inverse quantizer, when the tile codes fewer than all coefficients */
+    INT32* Levels;
+    INT32 CodedCount;
+
+    /* Bands filled with noise; slot 0 counts them, the band index picks the others */
+    UINT8 NoiseMarks[XA_WMA_MAX_BANDS + 1];
+    INT32 NoisePowers[XA_WMA_MAX_BANDS];
+    float NoiseWeights[XA_WMA_MAX_BANDS];
+
     /* WMA Pro: the mask as sent, at MaskSize, and resampled to the current subframe */
     BOOLEAN HasMask;
     BOOLEAN MaskSent;
@@ -269,6 +278,18 @@ struct XaWmaDecoder
     INT32 MaskSize;
     INT32 CoefIndex;
     XaWmaRun RunLevel;
+
+    /* Noise substitution: where noise starts in hertz, per tile level and in the current tile */
+    BOOLEAN NoiseSub;
+    float NoiseFrequency;
+    float NoiseScale;
+    INT32 NoiseBandAt[XA_WMA_MAX_LEVELS];
+    INT32 NoiseStart;
+    INT32 NoiseBand;
+
+    /* Noise generator; a reset leaves it running */
+    INT32 NoiseLast;
+    UINT32 NoiseSeed;
 
     /* Output in each channel's buffer runs from Read to End */
     INT32 Read;
@@ -365,6 +386,36 @@ XaWmaBuildBands(
 
 VOID
 XaWmaSetTurn(
+    _Inout_ XaWmaChannel* Channel);
+
+BOOLEAN
+XaWmaNextRun(
+    _Inout_ XaWmaDecoder* Decoder,
+    _In_ const XaWmaChannel* Channel);
+
+/* Noise substitution and integer level tiles */
+HRESULT
+XaWmaSetupNoise(
+    _Inout_ XaWmaDecoder* Decoder);
+
+VOID
+XaWmaEnterNoiseTile(
+    _Inout_ XaWmaDecoder* Decoder,
+    _In_ UINT32 Level,
+    _In_ INT32 Size);
+
+HRESULT
+XaWmaReadNoiseHeader(
+    _Inout_ XaWmaDecoder* Decoder);
+
+HRESULT
+XaWmaDecodeLevels(
+    _Inout_ XaWmaDecoder* Decoder,
+    _Inout_ XaWmaChannel* Channel);
+
+HRESULT
+XaWmaQuantizeMid(
+    _Inout_ XaWmaDecoder* Decoder,
     _Inout_ XaWmaChannel* Channel);
 
 HRESULT

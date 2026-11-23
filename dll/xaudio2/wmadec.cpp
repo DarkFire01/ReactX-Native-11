@@ -49,27 +49,6 @@ XaWmaLog2(
     return Result;
 }
 
-/* Whether the encoder fills some bands of the stream with noise instead of coding them */
-static
-BOOLEAN
-XaWmaNoiseFilled(
-    _In_ const XaWmaDecoder* Decoder)
-{
-    UINT32 Rate = Decoder->Layout.Rate;
-    double Bits = Decoder->Standard.BitsPerSample;
-    double Weighted = Decoder->Standard.WeightedBitsPerSample;
-
-    if (Rate > 48000)
-        return FALSE;
-    if (Rate >= 44100)
-        return Weighted < 0.61;
-    if (Rate >= 22050)
-        return Weighted < 1.16;
-    if (Rate >= 8000 && Rate < 11025)
-        return Bits <= 0.75;
-    return TRUE;
-}
-
 /* Whether the decoder can reconstruct the stream; anything else only drains */
 static
 BOOLEAN
@@ -80,8 +59,7 @@ XaWmaDecodable(
         return FALSE;
     if (Decoder->Layout.Version == XA_WMA_PRO)
         return Decoder->Layout.FrameSamples != 0;
-    return Decoder->Layout.Version == XA_WMA_STANDARD_MAX && Decoder->Standard.SuperFrames && Decoder->Standard.Bark &&
-           !XaWmaNoiseFilled(Decoder);
+    return Decoder->Layout.Version == XA_WMA_STANDARD_MAX && Decoder->Standard.SuperFrames && Decoder->Standard.Bark;
 }
 
 static
@@ -218,6 +196,9 @@ XaWmaEnterTile(
         Decoder->LowIndex = static_cast<INT32>(Decoder->Standard.LowCutoff) * Channel->Size / Decoder->FrameSize;
         Decoder->HighIndex = static_cast<INT32>(Decoder->Standard.HighCutoff) * Channel->Size / Decoder->FrameSize;
         Channel->Width = Decoder->HighIndex - Decoder->LowIndex;
+        Channel->CodedCount = Channel->Width;
+        if (Decoder->NoiseSub)
+            XaWmaEnterNoiseTile(Decoder, Level, Channel->Size);
         XaWmaSetTurn(Channel);
 
         if (Channel->Fill + Channel->Size > Decoder->FrameSize)
@@ -306,6 +287,48 @@ XaWmaHasSignal(
 }
 
 /**
+ * @brief Decodes the levels of every coded channel, then runs the inverse quantizer on each.
+ */
+static
+HRESULT
+XaWmaDecodeQuantized(
+    _Inout_ XaWmaDecoder* Decoder)
+{
+    UINT32 Channels = Decoder->Layout.Channels;
+    HRESULT hr;
+
+    for (UINT32 Index = 0; Index < Channels; Index++)
+    {
+        XaWmaChannel* Channel = &Decoder->Channels[Index];
+
+        if (!Channel->Coded)
+            continue;
+        if (Channel->CodedCount < 0 || Channel->CodedCount > Channel->Size)
+            return XA_WMA_E_CORRUPT;
+        memset(Channel->Levels, 0, sizeof(*Channel->Levels) * Channel->CodedCount);
+        hr = XaWmaDecodeLevels(Decoder, Channel);
+        if (FAILED(hr))
+            return hr;
+        if (Decoder->FirstTile)
+        {
+            for (INT32 Slot = 0; Slot < Channel->CodedCount && !Channel->Audible; Slot++)
+                Channel->Audible = Channel->Levels[Slot] != 0;
+        }
+    }
+    for (UINT32 Index = 0; Index < Channels; Index++)
+    {
+        XaWmaChannel* Channel = &Decoder->Channels[Index];
+
+        if (!Channel->Coded)
+            continue;
+        hr = XaWmaQuantizeMid(Decoder, Channel);
+        if (FAILED(hr))
+            return hr;
+    }
+    return S_OK;
+}
+
+/**
  * @brief Decodes one tile: its header, masks and coefficients, then runs the inverse transform.
  */
 static
@@ -358,7 +381,9 @@ XaWmaDecodeTile(
             Decoder->QuantIndex += static_cast<INT32>(Bit);
         } while (Bit == XA_WMA_QUANT_MORE);
         Decoder->EscapeBits = XaWmaEscapeBits(Decoder->QuantIndex);
-        hr = XaWmaReadMasks(Decoder);
+        hr = Decoder->NoiseSub ? XaWmaReadNoiseHeader(Decoder) : S_OK;
+        if (SUCCEEDED(hr))
+            hr = XaWmaReadMasks(Decoder);
         if (FAILED(hr))
             return hr;
     }
@@ -371,19 +396,28 @@ XaWmaDecodeTile(
         memset(Channel->Coefs, 0, sizeof(*Channel->Coefs) * Channel->Size);
         Channel->Audible = FALSE;
     }
-    Decoder->CoefIndex = Decoder->LowIndex - 1;
-    for (UINT32 Index = 0; Index < Channels; Index++)
+    if (Decoder->NoiseSub)
     {
-        XaWmaChannel* Channel = &Decoder->Channels[Index];
-
-        if (!Channel->Coded)
-            continue;
-        hr = XaWmaReconstruct(Decoder, Channel);
+        hr = XaWmaDecodeQuantized(Decoder);
         if (FAILED(hr))
-            return Decoder->Reader.Dry ? XA_WMA_E_STARVED : hr;
+            return hr;
+    }
+    else
+    {
         Decoder->CoefIndex = Decoder->LowIndex - 1;
-        if (Decoder->FirstTile)
-            Channel->Audible = XaWmaHasSignal(Channel);
+        for (UINT32 Index = 0; Index < Channels; Index++)
+        {
+            XaWmaChannel* Channel = &Decoder->Channels[Index];
+
+            if (!Channel->Coded)
+                continue;
+            hr = XaWmaReconstruct(Decoder, Channel);
+            if (FAILED(hr))
+                return Decoder->Reader.Dry ? XA_WMA_E_STARVED : hr;
+            Decoder->CoefIndex = Decoder->LowIndex - 1;
+            if (Decoder->FirstTile)
+                Channel->Audible = XaWmaHasSignal(Channel);
+        }
     }
 
     if (Decoder->MidSide && AnyCoded)
@@ -668,11 +702,16 @@ XaWmaCreate(
         Created->MidBook = &XaWmaBooks[BookIndex][0];
         Created->SideBook = &XaWmaBooks[BookIndex][1];
         XaWmaBuildBands(Created);
+        hr = XaWmaSetupNoise(Created);
         for (UINT32 Index = 0; Index < Layout.Channels && SUCCEEDED(hr); Index++)
         {
-            Created->Channels[Index].Book = Created->MidBook;
-            Created->Channels[Index].Pcm = new (std::nothrow) float[3 * Created->FrameSize / 2];
-            if (Created->Channels[Index].Pcm == nullptr)
+            XaWmaChannel* Channel = &Created->Channels[Index];
+
+            Channel->Book = Created->MidBook;
+            Channel->Pcm = new (std::nothrow) float[3 * Created->FrameSize / 2];
+            if (Created->NoiseSub)
+                Channel->Levels = new (std::nothrow) INT32[Created->FrameSize];
+            if (Channel->Pcm == nullptr || (Created->NoiseSub && Channel->Levels == nullptr))
                 hr = E_OUTOFMEMORY;
         }
         if (SUCCEEDED(hr))
@@ -700,7 +739,10 @@ XaWmaFree(
     XaWmaReaderFree(Decoder);
     XaWmaFreeTransform(Decoder->Transform);
     for (UINT32 Index = 0; Index < XA_WMA_MAX_CHANNELS; Index++)
+    {
         delete[] Decoder->Channels[Index].Pcm;
+        delete[] Decoder->Channels[Index].Levels;
+    }
     delete Decoder;
 }
 
