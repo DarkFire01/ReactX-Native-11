@@ -947,6 +947,25 @@ DiHidLookup(
     return Found;
 }
 
+#if DIRECTINPUT_VERSION >= 0x0800
+/* Opens a key with every right the user has, settling for reading when writing is not allowed */
+static
+BOOLEAN
+DiOpenExistingKey(
+    _In_ HKEY Parent,
+    _In_z_ PCWSTR Name,
+    _Out_ HKEY* Key)
+{
+    LONG Error = RegOpenKeyExW(Parent, Name, 0, MAXIMUM_ALLOWED, Key);
+
+    if (Error == ERROR_ACCESS_DENIED)
+        Error = RegOpenKeyExW(Parent, Name, 0, KEY_READ, Key);
+    if (Error != ERROR_SUCCESS)
+        *Key = nullptr;
+    return Error == ERROR_SUCCESS;
+}
+#endif
+
 /* Link collections are filed after the three HID report kinds */
 #define DI_HID_REPORT_COLLECTION 3
 #define DI_HID_REPORT_KINDS      4
@@ -2206,10 +2225,10 @@ private:
         {
             HKEY Root;
 
-            /* Only read here, the key exists once the device was described */
-            if (RegOpenKeyExW(HKEY_CURRENT_USER, DI_PRIVATE_ROOT, 0, KEY_READ, &Root) == ERROR_SUCCESS)
+            /* The system would create a missing key here, this only opens what is there */
+            if (DiOpenExistingKey(HKEY_CURRENT_USER, DI_PRIVATE_ROOT, &Root))
             {
-                if (RegOpenKeyExW(Root, Type, 0, KEY_READ, &PropKey) != ERROR_SUCCESS)
+                if (!DiOpenExistingKey(Root, Type, &PropKey))
                     PropKey = nullptr;
                 RegCloseKey(Root);
             }
