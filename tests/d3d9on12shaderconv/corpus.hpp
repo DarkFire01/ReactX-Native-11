@@ -379,4 +379,29 @@ static const ScCase ScCorpus[] =
         "mov o3, r0\n",
         { ScInput(0, 0, 0, 0), ScInput(5, 0, 1, 0) }, 2
     },
+    {
+        "vs30_texldl", FALSE, 0,
+        "vs_3_0\n"
+        "dcl_position v0\n"
+        "dcl_texcoord v1\n"
+        "dcl_2d s0\n"
+        "dcl_cube s1\n"
+        "dcl_volume s2\n"
+        "dcl_2d s3\n"
+        "dcl_position o0\n"
+        "dcl_texcoord o1\n"
+        "dcl_texcoord1 o2\n"
+        "dcl_texcoord2 o3\n"
+        "texldl r0, v1, s0\n"
+        "texldl r1, v1.wzyx, s1\n"
+        "texldl r2.xy, r0, s2\n"
+        "texldl r3, r1, s3\n"
+        "setp_gt p0, r0, c0\n"
+        "(p0.y) texldl r3.yz, r2, s0\n"
+        "mov o0, v0\n"
+        "mov o1, r0\n"
+        "add o2, r1, r2\n"
+        "mov o3, r3\n",
+        { ScInput(0, 0, 0, 0), ScInput(5, 0, 1, 0) }, 2
+    },
 };
