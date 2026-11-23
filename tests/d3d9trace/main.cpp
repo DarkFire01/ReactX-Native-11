@@ -6638,6 +6638,14 @@ static constexpr DWORD TrVertexLight = 0xFD;
 static constexpr DWORD TrVertexEnable = 0xFC;
 static constexpr DWORD TrVertexMaterial = 0xFB;
 
+/* Sets with this stage number set a clip plane from the table */
+static constexpr DWORD TrVertexClip = 0xFA;
+
+static const FLOAT TrVertexPlanes[][4] =
+{
+    { 1.0f, 0.0f, 0.0f, 0.25f }, { 0.25f, -1.0f, 0.5f, 0.125f }, { 0.0f, 0.0f, 0.0f, 0.0f },
+};
+
 /* Lights: directional, point, spot, and a second directional */
 static const D3DLIGHT9 TrVertexLights[] =
 {
@@ -6741,6 +6749,7 @@ static const TrFixedSet TrVertexBaseline[] =
     { TrFixedRender, D3DRS_LIGHTING, FALSE }, { TrFixedRender, D3DRS_FOGENABLE, FALSE },
     { TrVertexEnable, 1, FALSE }, { TrVertexEnable, 2, FALSE }, { TrVertexEnable, 3, FALSE },
     { TrVertexEnable, 4, FALSE }, { TrVertexMaterial, 1, 0 }, { TrFixedRender, D3DRS_COLORVERTEX, TRUE },
+    { TrFixedRender, D3DRS_CLIPPLANEENABLE, 0 },
     { TrFixedRender, D3DRS_LOCALVIEWER, TRUE }, { TrFixedRender, D3DRS_AMBIENT, 0 },
     { TrFixedRender, D3DRS_SPECULARENABLE, FALSE }, { TrFixedRender, D3DRS_NORMALIZENORMALS, FALSE },
     { TrFixedRender, D3DRS_WRAP0, 0 }, { TrFixedRender, D3DRS_WRAP1, 0 },
@@ -7096,6 +7105,19 @@ static const TrVertexCase TrVertexCases[] =
       TrVertexScattered },
     { "declared scattered points", 0, TRUE,
       { { TrFixedRender, D3DRS_POINTSCALEENABLE, TRUE } }, TrVertexScattered },
+    { "clip planes", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE,
+      { { TrVertexClip, 1, 0 }, { TrVertexClip, 2, 1 }, { TrFixedRender, D3DRS_CLIPPLANEENABLE, 3 },
+        { TrVertexTransform, D3DTS_VIEW, 2 }, { TrVertexTransform, D3DTS_PROJECTION, 3 } } },
+    { "clip plane moved", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE,
+      { { TrFixedRender, D3DRS_CLIPPLANEENABLE, 2 }, { TrVertexClip, 2, 0 },
+        { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "clip plane off", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE,
+      { { TrVertexClip, 1, 2 }, { TrVertexClip, 2, 2 } } },
+    { "transformed after untransformed", D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX2, FALSE,
+      { { 0, D3DTSS_TEXCOORDINDEX, 1 }, { TrFixedRender, D3DRS_WRAP1, D3DWRAP_V } } },
+    { "untransformed again", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2, FALSE,
+      { { 0, D3DTSS_TEXCOORDINDEX, 1 }, { TrFixedRender, D3DRS_WRAP1, D3DWRAP_V },
+        { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2 } } },
     { "default again", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE, {} },
 };
 
@@ -7122,6 +7144,10 @@ TrVertexApply(
         else if (Set.Stage == TrVertexEnable)
         {
             TrApi("LightEnable", Device->LightEnable(Set.Type - 1, Set.Value));
+        }
+        else if (Set.Stage == TrVertexClip)
+        {
+            TrApi("SetClipPlane", Device->SetClipPlane(Set.Type - 1, TrVertexPlanes[Set.Value]));
         }
         else if (Set.Stage == TrVertexMaterial)
         {
