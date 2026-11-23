@@ -1946,6 +1946,54 @@ TrScenarioDeviceHardware(
     Plain->Release();
 }
 
+/* A flip swap chain presented twice, so the second frame renders into the buffer the first flip moved in */
+static
+VOID
+TrScenarioDeviceFlip(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    IDirect3DSurface9* Before = nullptr;
+    IDirect3DSurface9* After = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_FLIP;
+    Parameters.BackBufferCount = 2;
+    Parameters.BackBufferFormat = D3DFMT_X8R8G8B8;
+    Parameters.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+
+    TrPhase("flip create");
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    TrApi("CreateDevice", hr);
+    if (Device != nullptr)
+    {
+        TrPhase("flip frames");
+        TrApi("GetBackBuffer 0", Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Before));
+        TrApi("GetBackBuffer 2", Device->GetBackBuffer(0, 2, D3DBACKBUFFER_TYPE_MONO, &After));
+        TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+        TrApi("Present", Device->Present(nullptr, nullptr, nullptr, nullptr));
+        TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF304050, 1.0f, 0));
+        TrApi("Present", Device->Present(nullptr, nullptr, nullptr, nullptr));
+        TrApi("GetBackBuffer 0", Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &After));
+        TrCloseLine();
+        printf("api same back buffer = %d\n", Before != nullptr && Before == After);
+        if (After != nullptr)
+            After->Release();
+        if (Before != nullptr)
+            Before->Release();
+
+        TrPhase("flip release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -1957,6 +2005,7 @@ static const TrScenario TrScenarios[] =
     { "device", TrScenarioDevice },
     { "device_plain", TrScenarioDevicePlain },
     { "device_hardware", TrScenarioDeviceHardware },
+    { "device_flip", TrScenarioDeviceFlip },
 };
 
 static
