@@ -346,6 +346,123 @@ OcCheckTraceCreate(
     OcPrintTrace(Check, "destroy", Tr12End());
 }
 
+/* A committed D3D12 texture or buffer the wrap checks hand to D3D11 */
+static
+HRESULT
+OcMakeResource(
+    _In_ OnCheck& Check,
+    _In_ BOOLEAN IsBuffer,
+    _In_ D3D12_RESOURCE_FLAGS Flags,
+    _In_ D3D12_RESOURCE_STATES State,
+    _Outptr_ ID3D12Resource** Resource)
+{
+    D3D12_HEAP_PROPERTIES Heap = {};
+    D3D12_RESOURCE_DESC Desc = {};
+
+    Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    Desc.Dimension = IsBuffer ? D3D12_RESOURCE_DIMENSION_BUFFER : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Desc.Width = IsBuffer ? 4096 : 64;
+    Desc.Height = 1;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.Format = IsBuffer ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R8G8B8A8_UNORM;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = IsBuffer ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR : D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    Desc.Flags = Flags;
+    if (!IsBuffer)
+        Desc.Height = 32;
+
+    return Check.Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc, State, nullptr,
+                                                 IID_PPV_ARGS(Resource));
+}
+
+/* wrap: CreateWrappedResource, ReleaseWrappedResources and AcquireWrappedResources rules */
+static
+VOID
+OcCheckWrap(
+    _In_ OnCheck& Check)
+{
+    ComPtr<ID3D11Device> Device;
+    ComPtr<ID3D11On12Device> On12;
+    ComPtr<ID3D11DeviceContext> Context;
+    ComPtr<ID3D12Resource> Texture;
+    ComPtr<ID3D12Resource> Buffer;
+    ComPtr<ID3D11Texture2D> Wrapped;
+    ComPtr<ID3D11Buffer> WrappedBuffer;
+    ComPtr<ID3D11Resource> Plain;
+    D3D11_RESOURCE_FLAGS Flags = {};
+    D3D11_TEXTURE2D_DESC Desc = {};
+    D3D11_BUFFER_DESC BufferDesc = {};
+    ID3D11Resource* List[1];
+    HRESULT hr;
+
+    Tr12Reset();
+    if (FAILED(Check.Make(D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS, &Device)))
+        return;
+    Device.As(&On12);
+    Device->GetImmediateContext(&Context);
+
+    OcMakeResource(Check, FALSE, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON, &Texture);
+    OcMakeResource(Check, TRUE, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, &Buffer);
+    Tr12Name(Texture.Get(), "tex");
+    Tr12Name(Buffer.Get(), "buf");
+
+    /* A null resource is left out: the system layer dereferences it */
+    Flags.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    hr = On12->CreateWrappedResource(Texture.Get(), &Flags, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                     D3D12_RESOURCE_STATE_PRESENT, IID_PPV_ARGS(&WrappedBuffer));
+    Check.Report("wrong_iid", "0x%08lX %d", hr, WrappedBuffer == nullptr);
+
+    Flags.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    hr = On12->CreateWrappedResource(Texture.Get(), &Flags, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                     D3D12_RESOURCE_STATE_PRESENT, IID_PPV_ARGS(&Wrapped));
+    Check.Report("uav_without_flag", "0x%08lX", hr);
+    Wrapped.Reset();
+
+    Tr12Begin();
+    Flags.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    hr = On12->CreateWrappedResource(Texture.Get(), &Flags, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                     D3D12_RESOURCE_STATE_PRESENT, IID_PPV_ARGS(&Wrapped));
+    OcPrintTrace(Check, "wrap", Tr12End());
+    Check.Report("texture", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+
+    Wrapped->GetDesc(&Desc);
+    Check.Report("texture_desc", "%ux%u mips %u array %u fmt %u ms %u/%u usage %u bind 0x%X cpu 0x%X misc 0x%X",
+                 Desc.Width, Desc.Height, Desc.MipLevels, Desc.ArraySize, Desc.Format, Desc.SampleDesc.Count,
+                 Desc.SampleDesc.Quality, Desc.Usage, Desc.BindFlags, Desc.CPUAccessFlags, Desc.MiscFlags);
+
+    Flags.BindFlags = 0;
+    hr = On12->CreateWrappedResource(Buffer.Get(), &Flags, D3D12_RESOURCE_STATE_COPY_DEST,
+                                     D3D12_RESOURCE_STATE_COMMON, IID_PPV_ARGS(&WrappedBuffer));
+    Check.Report("buffer", "0x%08lX", hr);
+    if (SUCCEEDED(hr))
+    {
+        WrappedBuffer->GetDesc(&BufferDesc);
+        Check.Report("buffer_desc", "%u usage %u bind 0x%X cpu 0x%X misc 0x%X stride %u", BufferDesc.ByteWidth,
+                     BufferDesc.Usage, BufferDesc.BindFlags, BufferDesc.CPUAccessFlags, BufferDesc.MiscFlags,
+                     BufferDesc.StructureByteStride);
+    }
+
+    List[0] = Wrapped.Get();
+    Tr12Begin();
+    On12->ReleaseWrappedResources(List, 1);
+    Context->Flush();
+    OcPrintTrace(Check, "release", Tr12End());
+
+    Tr12Begin();
+    On12->AcquireWrappedResources(List, 1);
+    Context->Flush();
+    OcPrintTrace(Check, "acquire", Tr12End());
+
+    Tr12Begin();
+    Wrapped.Reset();
+    WrappedBuffer.Reset();
+    Context->Flush();
+    OcPrintTrace(Check, "drop", Tr12End());
+}
+
 typedef VOID (*PFN_OC_CHECK)(OnCheck&);
 
 struct CheckInfo
@@ -359,6 +476,7 @@ static const CheckInfo Checks[] =
     { "create", OcCheckCreate },
     { "device", OcCheckDevice },
     { "trace_create", OcCheckTraceCreate },
+    { "wrap", OcCheckWrap },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */

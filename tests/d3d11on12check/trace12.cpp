@@ -14,6 +14,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -568,7 +569,7 @@ private:
 
         if (Found != Tr.Buffers.begin())
         {
-            --Found;
+            Found = std::prev(Found);
             if (Value >= Found->first && Value < Found->first + Found->second.Size)
                 return TrFormat("%s+0x%llX", Found->second.Name.c_str(), Value - Found->first);
         }
