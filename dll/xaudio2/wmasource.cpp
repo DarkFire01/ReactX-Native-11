@@ -361,13 +361,15 @@ XaWmaFill(
         }
         else
         {
-            SHORT* Out = XaWmaReserve(Wma, Wma->ReadyFrames);
+            /* A read is sized in bytes by the decode step's frame count, so each takes a fraction of it */
+            UINT32 Frames = XaMax(Wma->ReadyFrames / Wma->FrameBytes, 1u);
+            SHORT* Out = XaWmaReserve(Wma, Frames);
             UINT32 Produced = 0;
             UINT32 Kept;
 
             if (Out == nullptr)
                 return E_OUTOFMEMORY;
-            hr = XaWmaReadPcm(Wma->Decoder, Wma->ReadyFrames, Out, &Produced, &Wma->State);
+            hr = XaWmaReadPcm(Wma->Decoder, Frames, Out, &Produced, &Wma->State);
             if (FAILED(hr))
                 return hr;
             Kept = XaWmaTrim(Wma, Out, Wma->FrameBytes * Produced);
