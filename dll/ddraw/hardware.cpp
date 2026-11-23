@@ -7,22 +7,10 @@
 
 #include "ddraw.hpp"
 
-/* The adapter identity packet the display configuration returns for its private query */
-static constexpr DISPLAYCONFIG_DEVICE_INFO_TYPE DdIdentityPacketType =
-    static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(0xFFFFFFFE);
-static constexpr UINT32 DdIdentityPacketSize = 0x808;
-static constexpr SIZE_T DdIdentityVendorOffset = 0x344;
-static constexpr SIZE_T DdIdentityDeviceOffset = 0x348;
-static constexpr SIZE_T DdIdentitySubSysLowOffset = 0x34C;
-static constexpr SIZE_T DdIdentitySubSysHighOffset = 0x350;
-static constexpr SIZE_T DdIdentityRevisionOffset = 0x354;
-static constexpr SIZE_T DdIdentityModelOffset = 0x358;
-
 /* Driver models whose OpenAdapter wants the oldest runtime versions first */
 static constexpr UINT DdLegacyModel = 1200;
 static constexpr DWORD DdVendorAmd = 0x1002;
 static constexpr DWORD DdVendorQualcomm = 0x4D4F4351;
-static constexpr UINT DdFallbackModel = 1000;
 
 /* DirectDraw opens the user mode driver at the DirectX 7 interface */
 static constexpr UINT DdUmdInterface = 7;
@@ -168,40 +156,6 @@ DdQueryAdapterInfoCb2(
                                              Args->PrivateDriverDataSize));
 }
 
-/* Reads the private adapter packet; the driver model field decides OpenAdapter's first version */
-static
-BOOLEAN
-DdReadIdentityPacket(
-    _In_ const LUID& AdapterLuid,
-    _In_ UINT32 SourceId,
-    _Out_writes_bytes_(DdIdentityPacketSize) BYTE* Packet)
-{
-    const RxDisplayConfigRoutines* Config = RxGetDisplayConfig();
-    DISPLAYCONFIG_DEVICE_INFO_HEADER* Header = reinterpret_cast<DISPLAYCONFIG_DEVICE_INFO_HEADER*>(Packet);
-
-    ZeroMemory(Packet, DdIdentityPacketSize);
-    Header->type = DdIdentityPacketType;
-    Header->size = DdIdentityPacketSize;
-    Header->adapterId = AdapterLuid;
-    Header->id = SourceId;
-
-    if (Config == nullptr)
-        return FALSE;
-    return Config->GetDeviceInfo(Header) == ERROR_SUCCESS;
-}
-
-static
-DWORD
-DdPacketValue(
-    _In_reads_bytes_(DdIdentityPacketSize) const BYTE* Packet,
-    _In_ SIZE_T Offset)
-{
-    DWORD Value;
-
-    memcpy(&Value, Packet + Offset, sizeof(Value));
-    return Value;
-}
-
 static
 BOOLEAN
 DdOpenDriverAdapter(
@@ -209,11 +163,10 @@ DdOpenDriverAdapter(
 {
     PFND3DDDI_OPENADAPTER OpenAdapter;
     D3DDDIARG_OPENADAPTER Args;
-    BYTE* Packet;
-    UINT Model = DdFallbackModel;
+    RxAdapterIdentity* Identity;
+    UINT Model = RxDefaultDriverModel;
     UINT First = 0;
     UINT Index;
-    DWORD Vendor;
     HRESULT hr = E_FAIL;
 
     OpenAdapter = reinterpret_cast<PFND3DDDI_OPENADAPTER>(GetProcAddress(Hardware->Module, "OpenAdapter"));
@@ -223,17 +176,16 @@ DdOpenDriverAdapter(
         return FALSE;
     }
 
-    Packet = new (std::nothrow) BYTE[DdIdentityPacketSize];
-    if (Packet != nullptr)
+    Identity = new (std::nothrow) RxAdapterIdentity;
+    if (Identity != nullptr)
     {
-        if (DdReadIdentityPacket(Hardware->AdapterLuid, Hardware->VidPnSourceId, Packet))
+        if (RxReadAdapterIdentity(Hardware->AdapterLuid, Hardware->VidPnSourceId, Identity))
         {
-            Model = DdPacketValue(Packet, DdIdentityModelOffset);
-            Vendor = DdPacketValue(Packet, DdIdentityVendorOffset);
-            if (Model == DdLegacyModel && (Vendor == DdVendorAmd || Vendor == DdVendorQualcomm))
+            Model = Identity->DriverModel;
+            if (Model == DdLegacyModel && (Identity->VendorId == DdVendorAmd || Identity->VendorId == DdVendorQualcomm))
                 First = DdLegacyFirstVersion;
         }
-        delete[] Packet;
+        delete Identity;
     }
     Hardware->IsOldDisplayModel = Model < DdLegacyModel;
 
@@ -582,7 +534,7 @@ DdReadAdapterIdentity(
     D3DKMT_OPENADAPTERFROMHDC Open = {};
     D3DKMT_UMDFILENAMEINFO FileName = {};
     D3DKMT_CLOSEADAPTER Close;
-    BYTE* Packet;
+    RxAdapterIdentity* Identity;
     PCWSTR Base;
     HDC Dc;
     NTSTATUS Status;
@@ -610,16 +562,15 @@ DdReadAdapterIdentity(
         wcscpy_s(FileName.UmdFileName, L"D3D9on12.dll");
     FileName.UmdFileName[_countof(FileName.UmdFileName) - 1] = UNICODE_NULL;
 
-    Packet = new (std::nothrow) BYTE[DdIdentityPacketSize];
-    if (Packet != nullptr)
+    Identity = new (std::nothrow) RxAdapterIdentity;
+    if (Identity != nullptr)
     {
-        DdReadIdentityPacket(Open.AdapterLuid, Open.VidPnSourceId, Packet);
-        *VendorId = DdPacketValue(Packet, DdIdentityVendorOffset);
-        *DeviceId = DdPacketValue(Packet, DdIdentityDeviceOffset);
-        *SubSysId = DdPacketValue(Packet, DdIdentitySubSysLowOffset) |
-                    (DdPacketValue(Packet, DdIdentitySubSysHighOffset) << 16);
-        *Revision = DdPacketValue(Packet, DdIdentityRevisionOffset);
-        delete[] Packet;
+        RxReadAdapterIdentity(Open.AdapterLuid, Open.VidPnSourceId, Identity);
+        *VendorId = Identity->VendorId;
+        *DeviceId = Identity->DeviceId;
+        *SubSysId = Identity->SubSysId;
+        *Revision = Identity->Revision;
+        delete Identity;
     }
 
     Close.hAdapter = Open.hAdapter;

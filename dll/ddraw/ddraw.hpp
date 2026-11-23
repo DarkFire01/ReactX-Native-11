@@ -14,6 +14,7 @@
 #include <d3d9types.h>
 #include <d3dumddi.h>
 
+#include "adapteridentity.hpp"
 #include "kmcallbacks.hpp"
 #include "trace.hpp"
 
