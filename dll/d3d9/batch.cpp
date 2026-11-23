@@ -72,7 +72,7 @@ D9Batch::CreateFills(
         if (Placement != D3DDDIPOOL_SYSTEMMEM)
         {
             hr = Device->CreateBufferResource(static_cast<D3DFORMAT>(Fills[Index].Format), Fills[Index].Size,
-                                              Fills[Index].Flags, 0, Placement, nullptr, Targets[Index]);
+                                              Fills[Index].Flags, 0, Placement, nullptr, nullptr, Targets[Index]);
             if (FAILED(hr))
                 return hr;
             continue;

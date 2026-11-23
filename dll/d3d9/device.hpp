@@ -31,6 +31,28 @@ static constexpr UINT D9StagingBufferCount = 4;
 /* Sixteen pixel samplers, the displacement map sampler and four vertex samplers */
 static constexpr UINT D9TextureSlotCount = 21;
 
+/* How a resource takes part in sharing */
+enum class D9ShareMode : UINT
+{
+    None,
+    Create,
+    Open,
+};
+
+/* Usage bits the runtime adds to what a shared resource records: the resource can be locked, it was made by
+   a runtime of the display driver model, and it is an offscreen plain surface */
+static constexpr DWORD D9ShareUsageLockable = 0x04000000;
+static constexpr DWORD D9ShareUsageModern = 0x08000000;
+static constexpr DWORD D9ShareUsagePlain = 0x00400000;
+
+/* What one creation asks of sharing: the mode, the handle to open and the usage the resource records */
+struct D9ShareRequest
+{
+    D9ShareMode Mode;
+    D3DKMT_HANDLE Handle;
+    DWORD Usage;
+};
+
 /* A resource the driver made; its address is the runtime handle the driver passes back */
 struct D9Resource
 {
@@ -39,6 +61,7 @@ struct D9Resource
     D3DDDIFORMAT Format;
     D3DDDI_POOL Pool;
     D3DDDI_RESOURCEFLAGS Flags;
+    D3DDDI_RESOURCEFLAGS2 Flags2;
     UINT Width;
     UINT Height;
     UINT Fvf;
@@ -46,6 +69,17 @@ struct D9Resource
     /* Textures hand the driver every level, and cube maps every face, in one resource */
     UINT SurfaceCount;
     UINT MipLevels;
+
+    /* Sharing: whether the resource is made to share or opened by handle, the kernel's global handle, and
+       the description the kernel keeps for the runtimes that open it */
+    D9ShareMode Share;
+    D3DKMT_HANDLE ShareHandle;
+    D3DRESOURCETYPE Type;
+    DWORD ShareUsage;
+    UINT Depth;
+    UINT LevelCount;
+    D3DDDIMULTISAMPLE_TYPE MultisampleType;
+    UINT MultisampleQuality;
 };
 
 class D9TextureCore;
@@ -347,6 +381,20 @@ public:
         return Discard;
     }
 
+    /* A surface made to share, or opened by handle, says so before Create */
+    VOID
+    Share(
+        _In_ const D9ShareRequest* Request)
+    {
+        Sharing = *Request;
+    }
+
+    D3DKMT_HANDLE
+    ShareHandle() const
+    {
+        return Resource != nullptr ? Resource->ShareHandle : 0;
+    }
+
     /* IUnknown */
     STDMETHOD(QueryInterface)(
         _In_ REFIID Iid,
@@ -432,6 +480,7 @@ private:
 
     BOOLEAN CountedDefault = FALSE;
     D9PrivateData Private;
+    D9ShareRequest Sharing = {};
 
     /* The device context GetDC handed out and the bitmap behind it */
     HDC HeldDc = NULL;
@@ -523,6 +572,10 @@ struct D9TextureRequest
     D3DPOOL ReportedPool;
     BOOLEAN Lockable;
     BOOLEAN DriverAutogen;
+
+    /* Sharing, or the application memory a system memory texture keeps its only level in */
+    D9ShareRequest Share;
+    VOID* UserMemory;
 };
 
 /* Where one level or face of a texture lives */
@@ -717,6 +770,8 @@ protected:
     D3DPOOL ReportedPool;
     BOOLEAN Lockable;
     BOOLEAN DriverAutogen;
+    D9ShareRequest Sharing;
+    BOOLEAN UserMemory;
     D3DTEXTUREFILTERTYPE Filter;
     DWORD ResourcePriority = 0;
     DWORD Lod = 0;
@@ -893,7 +948,14 @@ public:
 
     HRESULT
     Create(
-        _In_ D3DDDI_POOL Placement);
+        _In_ D3DDDI_POOL Placement,
+        _In_opt_ const D9ShareRequest* Share = nullptr);
+
+    D3DKMT_HANDLE
+    ShareHandle() const
+    {
+        return Resource != nullptr ? Resource->ShareHandle : 0;
+    }
 
     /* IUnknown */
     STDMETHOD(QueryInterface)(
@@ -987,6 +1049,20 @@ private:
 
 typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
 typedef D9Buffer<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC> D9IndexBuffer;
+
+/* hardware.cpp */
+VOID
+D9ApplyShare(
+    _Inout_ D9Resource* Resource,
+    _In_opt_ const D9ShareRequest* Share,
+    _In_ D3DRESOURCETYPE Type);
+
+/* device.cpp */
+VOID
+D9StartShare(
+    _In_opt_ const HANDLE* SharedHandle,
+    _In_ DWORD Usage,
+    _Out_ D9ShareRequest* Share);
 
 /* surface.cpp */
 UINT64
@@ -1111,6 +1187,7 @@ public:
         _In_ D3DDDI_POOL DriverPool,
         _In_opt_ VOID* Memory,
         _In_ UINT MemoryPitch,
+        _In_opt_ const D9ShareRequest* Share,
         _Out_ D9Resource* Resource);
 
     HRESULT
@@ -1291,6 +1368,7 @@ public:
         _In_ DWORD Fvf,
         _In_ D3DDDI_POOL Placement,
         _In_opt_ VOID* Memory,
+        _In_opt_ const D9ShareRequest* Share,
         _Out_ D9Resource* Resource);
 
     HRESULT
@@ -2146,6 +2224,10 @@ private:
         _In_ UINT MultisampleQuality);
 
     HRESULT
+    OpenSharedResource(
+        _Inout_ D9Resource* Resource);
+
+    HRESULT
     CheckSurfaceFormat(
         _In_ DWORD Usage,
         _In_ D3DFORMAT Format);
@@ -2181,7 +2263,18 @@ private:
         _In_ const D3DSURFACE_DESC* Desc,
         _In_ BOOLEAN Lockable,
         _In_ BOOLEAN Discard,
+        _In_ const D9ShareRequest* Share,
+        _Inout_opt_ HANDLE* SharedHandle,
         _Out_ IDirect3DSurface9** Surface);
+
+    BOOLEAN
+    CanShare(VOID) const;
+
+    HRESULT
+    CheckDriverRestriction(VOID);
+
+    VOID
+    QueryProtection(VOID);
 
     HRESULT
     LockAsyncBuffer(
@@ -2199,6 +2292,7 @@ private:
         _In_ DWORD Fvf,
         _In_ D3DPOOL Pool,
         _In_ D3DPOOL Placed,
+        _Inout_opt_ HANDLE* SharedHandle,
         _Outptr_ Buffer** Made);
 
     HRESULT
@@ -2288,6 +2382,7 @@ private:
     /* Content protection caps the driver reported, asked for once when a surface first wants them */
     BOOLEAN ProtectionQueried = FALSE;
     BOOLEAN ProtectionSupported = FALSE;
+    BOOLEAN ProtectionSoftware = FALSE;
 
     /* Records driver calls for a worker thread when the driver leaves threading to the runtime */
     D9Batch* Batch = nullptr;

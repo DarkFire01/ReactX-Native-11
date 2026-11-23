@@ -383,11 +383,14 @@ D9TextureCore::D9TextureCore(
       Pool(Request->Pool),
       ReportedPool(Request->ReportedPool),
       Lockable(Request->Lockable),
-      DriverAutogen(Request->DriverAutogen)
+      DriverAutogen(Request->DriverAutogen),
+      Sharing(Request->Share),
+      UserMemory(Request->UserMemory != nullptr)
 {
     DWORD FilterCaps = D9KindFilterCaps(&Owner->DeviceCaps(), Kind);
 
     Filter = (FilterCaps & D3DPTFILTERCAPS_MINFLINEAR) != 0 ? D3DTEXF_LINEAR : D3DTEXF_POINT;
+    Memory = static_cast<BYTE*>(Request->UserMemory);
     for (UINT& Count : DirtyCount)
         Count = D9DirtyWhole;
     if (Pool == D3DPOOL_DEFAULT)
@@ -412,7 +415,7 @@ D9TextureCore::~D9TextureCore()
         delete VideoResource;
     }
     delete[] Subresources;
-    if (Memory != nullptr)
+    if (Memory != nullptr && !UserMemory)
         _aligned_free(Memory);
 }
 
@@ -479,7 +482,7 @@ D9TextureCore::Create(VOID)
         return D3DERR_INVALIDCALL;
     }
 
-    if (InMemory)
+    if (InMemory && !UserMemory)
     {
         Memory = static_cast<BYTE*>(_aligned_malloc(static_cast<SIZE_T>(Total), 32));
         if (Memory == nullptr)
@@ -509,6 +512,11 @@ D9TextureCore::Create(VOID)
     Resource->Flags.AutogenMipmap = DriverAutogen && !InMemory;
     Resource->Flags.NotLockable = !Lockable;
     Resource->Flags.Video = SameSize;
+    Resource->Flags2.UserMemory = UserMemory;
+    D9ApplyShare(Resource, &Sharing, Kind == D9TextureKind::Cube ? D3DRTYPE_CUBETEXTURE :
+                                     Kind == D9TextureKind::Volume ? D3DRTYPE_VOLUMETEXTURE : D3DRTYPE_TEXTURE);
+    Resource->LevelCount = Levels;
+    Resource->Depth = Kind == D9TextureKind::Volume ? Depth : 0;
 
     /* Cube maps list each face's levels before the next face, as the driver expects */
     for (UINT Index = 0; Index < Count; Index++)
@@ -1641,6 +1649,35 @@ D9MakeTexture(
     return S_OK;
 }
 
+/* A handle on a system memory texture names the memory of its only level; on others it shares */
+static
+VOID
+D9StartTextureShare(
+    _Inout_ D9TextureRequest* Request,
+    _In_opt_ const HANDLE* SharedHandle)
+{
+    if (SharedHandle != nullptr && Request->Pool == D3DPOOL_SYSTEMMEM)
+    {
+        Request->UserMemory = *SharedHandle;
+        D9StartShare(nullptr, 0, &Request->Share);
+        return;
+    }
+    D9StartShare(SharedHandle, Request->Usage | D9ShareUsageModern | (Request->Lockable ? D9ShareUsageLockable : 0),
+                 &Request->Share);
+}
+
+/* Hands back the handle a texture made to share got from the kernel */
+static
+VOID
+D9FinishTextureShare(
+    _In_ const D9TextureRequest* Request,
+    _In_ const D9TextureCore* Texture,
+    _Inout_opt_ HANDLE* SharedHandle)
+{
+    if (Request->Share.Mode == D9ShareMode::Create)
+        *SharedHandle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Texture->DriverResource()->ShareHandle));
+}
+
 /* Fills the request every creation call starts from; the extended object's managed pool keeps its spelling */
 static
 VOID
@@ -1692,13 +1729,19 @@ D9Device::CreateTexture(
     Request.Usage = Usage;
     Request.Format = Format;
     hr = CheckTextureRequest(&Request, SharedHandle);
-    if (SUCCEEDED(hr) && SharedHandle != nullptr)
+    if (SUCCEEDED(hr))
     {
-        RX_UNIMPLEMENTED();
-        hr = D3DERR_INVALIDCALL;
+        D9StartTextureShare(&Request, SharedHandle);
+        if (Request.Share.Mode != D9ShareMode::None &&
+            (Request.Usage & D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER) != 0)
+        {
+            hr = CheckDriverRestriction();
+        }
     }
     if (SUCCEEDED(hr))
         hr = D9MakeTexture(this, &Request, &Made);
+    if (SUCCEEDED(hr))
+        D9FinishTextureShare(&Request, Made, SharedHandle);
     *Texture = SUCCEEDED(hr) ? Made : nullptr;
     return hr;
 }
@@ -1738,13 +1781,19 @@ D9Device::CreateCubeTexture(
     Request.Usage = Usage;
     Request.Format = Format;
     hr = CheckTextureRequest(&Request, SharedHandle);
-    if (SUCCEEDED(hr) && SharedHandle != nullptr)
+    if (SUCCEEDED(hr))
     {
-        RX_UNIMPLEMENTED();
-        hr = D3DERR_INVALIDCALL;
+        D9StartTextureShare(&Request, SharedHandle);
+        if (Request.Share.Mode != D9ShareMode::None &&
+            (Request.Usage & D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER) != 0)
+        {
+            hr = CheckDriverRestriction();
+        }
     }
     if (SUCCEEDED(hr))
         hr = D9MakeTexture(this, &Request, &Made);
+    if (SUCCEEDED(hr))
+        D9FinishTextureShare(&Request, Made, SharedHandle);
     *CubeTexture = SUCCEEDED(hr) ? Made : nullptr;
     return hr;
 }
@@ -1786,13 +1835,19 @@ D9Device::CreateVolumeTexture(
     Request.Usage = Usage;
     Request.Format = Format;
     hr = CheckTextureRequest(&Request, SharedHandle);
-    if (SUCCEEDED(hr) && SharedHandle != nullptr)
+    if (SUCCEEDED(hr))
     {
-        RX_UNIMPLEMENTED();
-        hr = D3DERR_INVALIDCALL;
+        D9StartTextureShare(&Request, SharedHandle);
+        if (Request.Share.Mode != D9ShareMode::None &&
+            (Request.Usage & D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER) != 0)
+        {
+            hr = CheckDriverRestriction();
+        }
     }
     if (SUCCEEDED(hr))
         hr = D9MakeTexture(this, &Request, &Made);
+    if (SUCCEEDED(hr))
+        D9FinishTextureShare(&Request, Made, SharedHandle);
     *VolumeTexture = SUCCEEDED(hr) ? Made : nullptr;
     return hr;
 }

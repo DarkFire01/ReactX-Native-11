@@ -7,18 +7,242 @@
 
 #include "device.hpp"
 
-/* Runtime data the kernel keeps with each resource, read back by runtimes that open it */
-struct D9ResourceRecord
+#include <vector>
+
+/* What the kernel keeps with a shared resource for the runtimes that open it */
+struct D9ShareRecord
 {
-    UINT Flags;
-    UINT Format;
-    UINT Pool;
+    UINT Size;
+    UINT Version;
+    UINT Width;
+    UINT Height;
+    UINT DxgiFormat;
+    UINT ArraySize;
+    UINT64 ReadOnly;
     UINT Reserved[2];
-    UINT SurfaceCount;
-    UINT MipLevels;
+    UINT NtShared;
+    UINT Primary;
+    UINT CrossAdapter;
+    UINT Reserved2;
+
+    /* Filled only by Direct3D 9, which marks it with version 1 */
+    UINT Format;
+    UINT Type;
+    DWORD Usage;
+    UINT Reserved3;
+    UINT Shape[4];
 };
 
-static_assert(sizeof(D9ResourceRecord) == 28);
+static_assert(sizeof(D9ShareRecord) == 88);
+
+/* The record version Direct3D 9 writes; others come from the DXGI runtimes */
+static constexpr UINT D9ShareRecordVersion = 1;
+
+/* A record shorter than this cannot describe a resource */
+static constexpr UINT D9ShareRecordMinimum = 0x38;
+
+/* Usage bits a record may carry that an opener need not ask for */
+static constexpr DWORD D9ShareUsageIgnored = D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE |
+                                             D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER;
+
+/* Usage bits that keep a resource of a DXGI runtime from opening as a Direct3D 9 one */
+static constexpr DWORD D9ShareUsageForeign = 0x003F8DEA;
+
+/* The DXGI format a shared resource records for a Direct3D 9 format, zero when there is none */
+static
+UINT
+D9DxgiShareFormat(
+    _In_ D3DDDIFORMAT Format)
+{
+    static const struct
+    {
+        UINT Nine;
+        UINT Dxgi;
+    } Map[] =
+    {
+        { D3DDDIFMT_A8R8G8B8, 87 }, { D3DDDIFMT_X8R8G8B8, 88 }, { D3DDDIFMT_R5G6B5, 85 },
+        { D3DDDIFMT_A1R5G5B5, 86 }, { D3DDDIFMT_A8, 65 }, { D3DDDIFMT_A2B10G10R10, 24 },
+        { D3DDDIFMT_A8B8G8R8, 28 }, { D3DDDIFMT_G16R16, 35 }, { D3DDDIFMT_A16B16G16R16, 11 },
+        { D3DDDIFMT_L8, 61 }, { D3DDDIFMT_V8U8, 49 }, { D3DDDIFMT_D16_LOCKABLE, 55 }, { D3DDDIFMT_D24S8, 45 },
+        { D3DDDIFMT_D16, 55 }, { D3DDDIFMT_L16, 56 }, { D3DDDIFMT_D32F_LOCKABLE, 40 },
+        { D3DDDIFMT_INDEX16, 57 }, { D3DDDIFMT_INDEX32, 42 }, { D3DDDIFMT_Q16W16V16U16, 13 },
+        { D3DDDIFMT_R16F, 54 }, { D3DDDIFMT_G16R16F, 34 }, { D3DDDIFMT_A16B16G16R16F, 10 },
+        { D3DDDIFMT_R32F, 41 }, { D3DDDIFMT_G32R32F, 16 }, { D3DDDIFMT_A32B32G32R32F, 2 }, { 119, 89 },
+        { D3DDDIFMT_DXT1, 71 }, { D3DDDIFMT_DXT3, 74 }, { D3DDDIFMT_DXT5, 77 }, { D3DDDIFMT_R8G8_B8G8, 68 },
+        { D3DDDIFMT_G8R8_G8B8, 69 },
+    };
+
+    for (const auto& Entry : Map)
+    {
+        if (Entry.Nine == static_cast<UINT>(Format))
+            return Entry.Dxgi;
+    }
+    return 0;
+}
+
+/* The Direct3D 9 format a DXGI runtime's shared resource opens as */
+static
+UINT
+D9FormatOfDxgi(
+    _In_ UINT Dxgi)
+{
+    switch (Dxgi)
+    {
+    case 10:
+        return D3DDDIFMT_A16B16G16R16F;
+    case 24:
+        return D3DDDIFMT_A2B10G10R10;
+    case 28:
+    case 29:
+        return D3DDDIFMT_A8B8G8R8;
+    case 87:
+        return D3DDDIFMT_A8R8G8B8;
+    case 88:
+        return D3DDDIFMT_X8R8G8B8;
+    default:
+        return 0;
+    }
+}
+
+/* The record a resource made to share leaves with the kernel */
+static
+VOID
+D9FillShareRecord(
+    _In_ const D9Resource* Resource,
+    _Out_ D9ShareRecord* Record)
+{
+    BOOLEAN Single = (Resource->Type == D3DRTYPE_SURFACE && Resource->MultisampleType == D3DDDIMULTISAMPLE_NONE &&
+                      Resource->MultisampleQuality == 0) ||
+                     (Resource->Type == D3DRTYPE_TEXTURE && Resource->LevelCount == 1);
+
+    ZeroMemory(Record, sizeof(*Record));
+    Record->Size = sizeof(*Record);
+    Record->Version = D9ShareRecordVersion;
+    Record->Width = Resource->Width;
+    Record->Height = Resource->Height;
+    Record->DxgiFormat = Single ? D9DxgiShareFormat(Resource->Format) : 0;
+    Record->ArraySize = 1;
+    Record->Primary = Resource->Flags.Primary;
+    Record->Format = Resource->Format;
+    Record->Type = Resource->Type;
+    Record->Usage = Resource->ShareUsage;
+    switch (Resource->Type)
+    {
+    case D3DRTYPE_SURFACE:
+        Record->Shape[0] = Resource->MultisampleType;
+        Record->Shape[1] = Resource->MultisampleQuality;
+        Record->Shape[2] = Resource->Width;
+        Record->Shape[3] = Resource->Height;
+        break;
+    case D3DRTYPE_VOLUME:
+        Record->Shape[0] = Resource->Width;
+        Record->Shape[1] = Resource->Height;
+        Record->Shape[3] = Resource->Depth;
+        break;
+    case D3DRTYPE_TEXTURE:
+    case D3DRTYPE_CUBETEXTURE:
+        Record->Shape[0] = Resource->Width;
+        Record->Shape[1] = Resource->Height;
+        Record->Shape[2] = Resource->LevelCount;
+        break;
+    case D3DRTYPE_VOLUMETEXTURE:
+        Record->Shape[0] = Resource->Width;
+        Record->Shape[1] = Resource->Height;
+        Record->Shape[2] = Resource->LevelCount;
+        Record->Shape[3] = Resource->Depth;
+        break;
+    case D3DRTYPE_VERTEXBUFFER:
+        Record->Shape[0] = Resource->Width;
+        Record->Shape[1] = Resource->Fvf;
+        break;
+    case D3DRTYPE_INDEXBUFFER:
+        Record->Shape[0] = Resource->Width;
+        break;
+    default:
+        break;
+    }
+}
+
+/* Whether the record of a resource another Direct3D 9 runtime made describes what this one asks for */
+static
+BOOLEAN
+D9ShareRecordMatches(
+    _In_ const D9ShareRecord* Record,
+    _In_ const D9Resource* Wanted)
+{
+    DWORD Usage = Record->Usage & ~D9ShareUsageIgnored;
+    UINT Width = Wanted->Width;
+    UINT Height = Wanted->Height;
+    UINT Depth = Wanted->Depth;
+    UINT Levels = Wanted->LevelCount;
+    UINT Fvf = Wanted->Fvf;
+    UINT Samples = Wanted->MultisampleType;
+    UINT Quality = Wanted->MultisampleQuality;
+
+    if ((Wanted->ShareUsage & D3DUSAGE_NONSECURE) == 0)
+        Usage &= ~D3DUSAGE_NONSECURE;
+
+    /* Each type records its own part of the description; the rest stays as asked */
+    switch (Record->Type)
+    {
+    case D3DRTYPE_SURFACE:
+        Samples = Record->Shape[0];
+        Quality = Record->Shape[1];
+        Width = Record->Shape[2];
+        Height = Record->Shape[3];
+        break;
+    case D3DRTYPE_VOLUME:
+        Width = Record->Shape[0];
+        Height = Record->Shape[1];
+        Depth = Record->Shape[3];
+        break;
+    case D3DRTYPE_TEXTURE:
+    case D3DRTYPE_CUBETEXTURE:
+        Width = Record->Shape[0];
+        Height = Record->Shape[1];
+        Levels = Record->Shape[2];
+        break;
+    case D3DRTYPE_VOLUMETEXTURE:
+        Width = Record->Shape[0];
+        Height = Record->Shape[1];
+        Levels = Record->Shape[2];
+        Depth = Record->Shape[3];
+        break;
+    case D3DRTYPE_VERTEXBUFFER:
+        Width = Record->Shape[0];
+        Fvf = Record->Shape[1];
+        break;
+    case D3DRTYPE_INDEXBUFFER:
+        Width = Record->Shape[0];
+        break;
+    default:
+        break;
+    }
+
+    return Width == Wanted->Width && Height == Wanted->Height && Record->Format == static_cast<UINT>(Wanted->Format) &&
+           Record->Type == static_cast<UINT>(Wanted->Type) && Usage == Wanted->ShareUsage && Depth == Wanted->Depth &&
+           Levels == Wanted->LevelCount && Samples == static_cast<UINT>(Wanted->MultisampleType) &&
+           Quality == Wanted->MultisampleQuality && Fvf == Wanted->Fvf;
+}
+
+/* Whether a resource a DXGI runtime made can open as the single surface or texture level asked for */
+static
+BOOLEAN
+D9DxgiRecordMatches(
+    _In_ const D9ShareRecord* Record,
+    _In_ const D9Resource* Wanted)
+{
+    D3DRESOURCETYPE Shape = Wanted->Type == D3DRTYPE_TEXTURE ? D3DRTYPE_TEXTURE : D3DRTYPE_SURFACE;
+    UINT Format = D9FormatOfDxgi(Record->DxgiFormat);
+
+    if ((Record->ReadOnly >> 32) != 0 || Record->ArraySize > 1 || Format == 0)
+        return FALSE;
+    return Record->Width == Wanted->Width && Record->Height == Wanted->Height &&
+           static_cast<UINT>(Wanted->Format) == Format &&
+           Wanted->Type == Shape && (Shape != D3DRTYPE_TEXTURE || Wanted->MipLevels == 1) && Wanted->Depth == 0 &&
+           (Wanted->ShareUsage & D9ShareUsageForeign) == 0 && Wanted->MultisampleType == D3DDDIMULTISAMPLE_NONE &&
+           Wanted->MultisampleQuality == 0;
+}
 
 /* Direct3D 9 creates its driver device at the DirectX 9 interface */
 static constexpr UINT D9DeviceInterface = 9;
@@ -107,7 +331,7 @@ D9Device::AllocateCallback(
 {
     D9Resource* Resource = static_cast<D9Resource*>(Args->hResource);
     D3DKMT_CREATEALLOCATION Create = {};
-    D9ResourceRecord Record = {};
+    D9ShareRecord Record;
     NTSTATUS Status;
 
     Create.hDevice = DeviceHandle;
@@ -116,18 +340,27 @@ D9Device::AllocateCallback(
     Create.NumAllocations = Args->NumAllocations;
     Create.pAllocationInfo = Args->pAllocationInfo;
 
+    /* Only a resource made to share leaves a record, and only its first allocation makes the share */
     if (Resource != nullptr)
     {
-        Record.Flags = Resource->Flags.Value;
-        Record.Format = Resource->Format;
-        Record.Pool = Resource->Pool;
-        Record.SurfaceCount = Resource->SurfaceCount != 0 ? Resource->SurfaceCount : 1;
-        Record.MipLevels = Resource->MipLevels != 0 ? Resource->MipLevels : 1;
+        BOOLEAN Sharing = Resource->Share == D9ShareMode::Create;
+
         Create.hResource = Resource->KernelResource;
-        Create.pPrivateRuntimeData = &Record;
-        Create.PrivateRuntimeDataSize = sizeof(Record);
+        Create.Flags.NonSecure = (Resource->ShareUsage & D3DUSAGE_NONSECURE) != 0;
+        if (Sharing)
+        {
+            D9FillShareRecord(Resource, &Record);
+            Create.pPrivateRuntimeData = &Record;
+            Create.PrivateRuntimeDataSize = sizeof(Record);
+            Create.Flags.SwapChainBackBuffer = Resource->Flags.Primary;
+        }
         if (Resource->KernelResource == 0)
+        {
             Create.Flags.CreateResource = TRUE;
+            Create.Flags.CreateShared = Sharing;
+            Create.Flags.RestrictSharedAccess = Sharing &&
+                                                (Resource->ShareUsage & D3DUSAGE_RESTRICT_SHARED_RESOURCE) != 0;
+        }
     }
 
     Status = RxGetKmtThunks()->CreateAllocation(&Create);
@@ -140,7 +373,11 @@ D9Device::AllocateCallback(
     if (Resource != nullptr)
     {
         if (Resource->KernelResource == 0)
+        {
             Resource->KernelResource = Create.hResource;
+            if (Resource->Share == D9ShareMode::Create)
+                Resource->ShareHandle = Create.hGlobalShare;
+        }
         Args->hKMResource = Resource->KernelResource;
     }
     return S_OK;
@@ -668,6 +905,11 @@ D9Device::CreateDriverResource(
     D3DDDIARG_CREATERESOURCE Create = {};
     HRESULT hr;
 
+    Resource->MultisampleType = MultisampleType;
+    Resource->MultisampleQuality = MultisampleQuality;
+    if (Resource->Share == D9ShareMode::Open)
+        return OpenSharedResource(Resource);
+
     if (DeviceFunctions.pfnCreateResource2 != nullptr)
     {
         Create2.Format = Resource->Format;
@@ -681,6 +923,7 @@ D9Device::CreateDriverResource(
         Create2.VidPnSourceId = Adapter->SourceId;
         Create2.hResource = Resource;
         Create2.Flags = Resource->Flags;
+        Create2.Flags2 = Resource->Flags2;
         Create2.Rotation = D3DDDI_ROTATION_IDENTITY;
         hr = DeviceFunctions.pfnCreateResource2(DriverDevice, &Create2);
         Resource->DriverResource = Create2.hResource;
@@ -709,6 +952,120 @@ D9Device::CreateDriverResource(
         Resource->DriverResource = NULL;
     }
     return hr;
+}
+
+/* Marks a resource the driver is about to make as shared, or as the one a handle names */
+VOID
+D9ApplyShare(
+    _Inout_ D9Resource* Resource,
+    _In_opt_ const D9ShareRequest* Share,
+    _In_ D3DRESOURCETYPE Type)
+{
+    Resource->Type = Type;
+    Resource->LevelCount = 1;
+    if (Share == nullptr || Share->Mode == D9ShareMode::None)
+        return;
+    Resource->Share = Share->Mode;
+    Resource->ShareHandle = Share->Handle;
+    Resource->ShareUsage = Share->Usage;
+    Resource->Flags.SharedResource = TRUE;
+}
+
+/* Opens a resource another device shared: the kernel's record must describe what was asked for */
+HRESULT
+D9Device::OpenSharedResource(
+    _Inout_ D9Resource* Resource)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_QUERYRESOURCEINFO Query = {};
+    D3DKMT_OPENRESOURCE Open = {};
+    D3DKMT_DESTROYALLOCATION Destroy = {};
+    D3DDDIARG_OPENRESOURCE Args = {};
+    std::vector<BYTE> Runtime;
+    std::vector<BYTE> Driver;
+    std::vector<BYTE> Total;
+    std::vector<D3DDDI_OPENALLOCATIONINFO> Infos;
+    const D9ShareRecord* Record;
+    BOOLEAN Matches;
+    NTSTATUS Status;
+    HRESULT hr;
+
+    Query.hDevice = DeviceHandle;
+    Query.hGlobalShare = Resource->ShareHandle;
+    Status = Kmt->QueryResourceInfo(&Query);
+    if (!NT_SUCCESS(Status))
+    {
+        D9Trace(L"D3DKMTQueryResourceInfo failed 0x%08lX for a shared resource", Status);
+        return D9HresultFromStatus(Status);
+    }
+    if (Query.PrivateRuntimeDataSize < D9ShareRecordMinimum &&
+        (Query.PrivateRuntimeDataSize != 0 || !Resource->Flags.Primary))
+    {
+        D9Trace(L"a shared resource carries %u bytes of runtime data", Query.PrivateRuntimeDataSize);
+        return E_FAIL;
+    }
+
+    Runtime.resize(Query.PrivateRuntimeDataSize);
+    Driver.resize(Query.ResourcePrivateDriverDataSize);
+    Total.resize(Query.TotalPrivateDriverDataSize);
+    Infos.resize(Query.NumAllocations);
+
+    Open.hDevice = DeviceHandle;
+    Open.hGlobalShare = Resource->ShareHandle;
+    Open.NumAllocations = Query.NumAllocations;
+    Open.pOpenAllocationInfo = Infos.data();
+    Open.pPrivateRuntimeData = Runtime.data();
+    Open.PrivateRuntimeDataSize = Query.PrivateRuntimeDataSize;
+    Open.pResourcePrivateDriverData = Driver.data();
+    Open.ResourcePrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
+    Open.pTotalPrivateDriverDataBuffer = Total.data();
+    Open.TotalPrivateDriverDataBufferSize = Query.TotalPrivateDriverDataSize;
+    Status = Kmt->OpenResource(&Open);
+    if (!NT_SUCCESS(Status))
+    {
+        D9Trace(L"D3DKMTOpenResource failed 0x%08lX for a shared resource", Status);
+        return D9HresultFromStatus(Status);
+    }
+
+    Destroy.hDevice = DeviceHandle;
+    Destroy.hResource = Open.hResource;
+    if (Query.PrivateRuntimeDataSize != 0)
+    {
+        Record = reinterpret_cast<const D9ShareRecord*>(Runtime.data());
+        Matches = Record->Width == Resource->Width && Record->Height == Resource->Height &&
+                  Resource->Pool != D3DDDIPOOL_SYSTEMMEM;
+        if (Matches)
+        {
+            Matches = Record->Version == D9ShareRecordVersion ? D9ShareRecordMatches(Record, Resource) :
+                                                                D9DxgiRecordMatches(Record, Resource);
+        }
+        if (!Matches)
+        {
+            D9_TRACE_ONCE(L"a shared resource does not match the description it was opened with");
+            Kmt->DestroyAllocation(&Destroy);
+            return E_INVALIDARG;
+        }
+    }
+
+    Args.NumAllocations = Open.NumAllocations;
+    Args.pOpenAllocationInfo = Infos.data();
+    Args.hKMResource = Open.hResource;
+    Args.pPrivateDriverData = Driver.data();
+    Args.PrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
+    Args.hResource = Resource;
+    Args.Rotation = D3DDDI_ROTATION_IDENTITY;
+    DrainBatch();
+    hr = DeviceFunctions.pfnOpenResource(DriverDevice, &Args);
+    if (FAILED(hr))
+    {
+        D9Trace(L"UMD OpenResource failed 0x%08lX for a shared resource", hr);
+        Kmt->DestroyAllocation(&Destroy);
+        return hr;
+    }
+
+    Resource->DriverResource = Args.hResource;
+    Resource->KernelResource = Open.hResource;
+    return S_OK;
 }
 
 /* A linear vertex or index buffer of the runtime's own */
@@ -742,6 +1099,7 @@ D9Device::CreateBufferResource(
     _In_ DWORD Fvf,
     _In_ D3DDDI_POOL Placement,
     _In_opt_ VOID* Memory,
+    _In_opt_ const D9ShareRequest* Share,
     _Out_ D9Resource* Resource)
 {
     D3DDDI_SURFACEINFO Surface = {};
@@ -753,6 +1111,7 @@ D9Device::CreateBufferResource(
     Resource->Width = Length;
     Resource->Height = 1;
     Resource->Fvf = Fvf;
+    D9ApplyShare(Resource, Share, Format == D3DFMT_VERTEXDATA ? D3DRTYPE_VERTEXBUFFER : D3DRTYPE_INDEXBUFFER);
 
     Surface.Width = Length;
     Surface.Height = 1;
@@ -770,6 +1129,7 @@ D9Device::CreateDriverSurface(
     _In_ D3DDDI_POOL DriverPool,
     _In_opt_ VOID* Memory,
     _In_ UINT MemoryPitch,
+    _In_opt_ const D9ShareRequest* Share,
     _Out_ D9Resource* Resource)
 {
     D3DDDI_SURFACEINFO Surface = {};
@@ -780,6 +1140,7 @@ D9Device::CreateDriverSurface(
     Resource->Width = Desc->Width;
     Resource->Height = Desc->Height;
     D9SurfaceFlags(Desc, Lockable, Discard, &Resource->Flags);
+    D9ApplyShare(Resource, Share, D3DRTYPE_SURFACE);
 
     Surface.Width = Desc->Width;
     Surface.Height = Desc->Height;

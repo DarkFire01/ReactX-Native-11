@@ -1452,24 +1452,32 @@ D9Device::CheckSurfaceFormat(
     return Enum->CheckDeviceFormat(Adapter->Ordinal, DeviceType, Mode.Format, Usage, D3DRTYPE_SURFACE, Format);
 }
 
-/* Restricted content needs a driver that protects content; its caps are asked for once */
-HRESULT
-D9Device::CheckProtectedContent(VOID)
+/* The driver's content protection caps, asked for once when a resource first wants them */
+VOID
+D9Device::QueryProtection(VOID)
 {
     DDICONTENTPROTECTIONCAPS Info = {};
     D3DCONTENTPROTECTIONCAPS Protection = {};
     D3DDDIARG_GETCAPS Args = {};
 
-    if (!ProtectionQueried)
-    {
-        ProtectionQueried = TRUE;
-        Args.Type = D3DDDICAPS_GETCONTENTPROTECTIONCAPS;
-        Args.pInfo = &Info;
-        Args.pData = &Protection;
-        Args.DataSize = sizeof(Protection);
-        if (SUCCEEDED(AdapterFunctions.pfnGetCaps(DriverAdapter, &Args)))
-            ProtectionSupported = (Protection.Caps & (D3DCPCAPS_SOFTWARE | D3DCPCAPS_HARDWARE)) != 0;
-    }
+    if (ProtectionQueried)
+        return;
+    ProtectionQueried = TRUE;
+    Args.Type = D3DDDICAPS_GETCONTENTPROTECTIONCAPS;
+    Args.pInfo = &Info;
+    Args.pData = &Protection;
+    Args.DataSize = sizeof(Protection);
+    if (FAILED(AdapterFunctions.pfnGetCaps(DriverAdapter, &Args)))
+        return;
+    ProtectionSupported = (Protection.Caps & (D3DCPCAPS_SOFTWARE | D3DCPCAPS_HARDWARE)) != 0;
+    ProtectionSoftware = (Protection.Caps & D3DCPCAPS_SOFTWARE) != 0;
+}
+
+/* Restricted content needs a driver that protects content */
+HRESULT
+D9Device::CheckProtectedContent(VOID)
+{
+    QueryProtection();
     if (!ProtectionSupported)
     {
         D9_TRACE_ONCE(L"the driver cannot protect restricted content");
@@ -1478,12 +1486,53 @@ D9Device::CheckProtectedContent(VOID)
     return S_OK;
 }
 
+/* Shared resources whose access only the driver restricts need software content protection */
+HRESULT
+D9Device::CheckDriverRestriction(VOID)
+{
+    QueryProtection();
+    if (!ProtectionSoftware)
+    {
+        D9_TRACE_ONCE(L"the driver cannot restrict access to shared resources");
+        return D3DERR_INVALIDCALL;
+    }
+    return S_OK;
+}
+
+/* Sharing needs a driver that shares and the extended object; the null reference device always may */
+BOOLEAN
+D9Device::CanShare(VOID) const
+{
+    return DeviceType == D3DDEVTYPE_NULLREF ||
+           ((Caps.Caps2 & D3DCAPS2_CANSHARERESOURCE) != 0 && Enum->IsExtended());
+}
+
+/* What a creation's handle asks for: nothing, a new share, or the resource another device shared */
+VOID
+D9StartShare(
+    _In_opt_ const HANDLE* SharedHandle,
+    _In_ DWORD Usage,
+    _Out_ D9ShareRequest* Share)
+{
+    Share->Usage = Usage;
+    Share->Handle = 0;
+    if (SharedHandle == nullptr)
+    {
+        Share->Mode = D9ShareMode::None;
+        return;
+    }
+    Share->Handle = static_cast<D3DKMT_HANDLE>(reinterpret_cast<ULONG_PTR>(*SharedHandle));
+    Share->Mode = *SharedHandle == NULL ? D9ShareMode::Create : D9ShareMode::Open;
+}
+
 /* Wraps a description in a surface object the application owns */
 HRESULT
 D9Device::AddSurface(
     _In_ const D3DSURFACE_DESC* Desc,
     _In_ BOOLEAN Lockable,
     _In_ BOOLEAN Discard,
+    _In_ const D9ShareRequest* Share,
+    _Inout_opt_ HANDLE* SharedHandle,
     _Out_ IDirect3DSurface9** Surface)
 {
     D9Surface* Made = new (std::nothrow) D9Surface(this, nullptr, Desc, Lockable, Discard, TRUE);
@@ -1492,6 +1541,16 @@ D9Device::AddSurface(
     if (Made == nullptr)
         return E_OUTOFMEMORY;
 
+    if (Share->Mode != D9ShareMode::None && (Share->Usage & D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER) != 0)
+    {
+        hr = CheckDriverRestriction();
+        if (FAILED(hr))
+        {
+            delete Made;
+            return hr;
+        }
+    }
+    Made->Share(Share);
     hr = Made->Create();
     if (FAILED(hr))
     {
@@ -1501,6 +1560,8 @@ D9Device::AddSurface(
     }
     if (Desc->Pool == D3DPOOL_DEFAULT)
         Made->CountAsDefault();
+    if (Share->Mode == D9ShareMode::Create)
+        *SharedHandle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Made->ShareHandle()));
     Made->AddRef();
     *Surface = Made;
     return S_OK;
@@ -1521,18 +1582,22 @@ D9Device::CreateTargetSurface(
     _Inout_opt_ HANDLE* SharedHandle)
 {
     D3DSURFACE_DESC Desc = {};
+    D9ShareRequest Share;
     DWORD Levels = 0;
     HRESULT hr;
 
-    if (SharedHandle != nullptr)
+    if (SharedHandle != nullptr && DeviceType != D3DDEVTYPE_NULLREF)
     {
-        if (!IsEx)
+        if (!CanShare())
         {
-            D9_TRACE_ONCE(L"only extended devices share surfaces");
+            D9_TRACE_ONCE(L"this device cannot share surfaces");
             return D3DERR_INVALIDCALL;
         }
-        RX_UNIMPLEMENTED();
-        return D3DERR_INVALIDCALL;
+        if (MultiSample != D3DMULTISAMPLE_NONE)
+        {
+            D9_TRACE_ONCE(L"multisampled surfaces cannot be shared");
+            return D3DERR_INVALIDCALL;
+        }
     }
     if (D9IsDxtFormat(Format) && ((Width % 4) != 0 || (Height % 4) != 0))
         return D3DERR_INVALIDCALL;
@@ -1543,7 +1608,7 @@ D9Device::CreateTargetSurface(
         D9_TRACE_ONCE(L"format %u cannot make this kind of surface", Format);
         return D3DERR_INVALIDCALL;
     }
-    if ((Usage & D9SurfaceUsageShared) != 0)
+    if ((Usage & D9SurfaceUsageShared) != 0 && (SharedHandle == nullptr || *SharedHandle != NULL))
         return D3DERR_INVALIDCALL;
 
     if ((Usage & D3DUSAGE_DEPTHSTENCIL) != 0)
@@ -1573,13 +1638,14 @@ D9Device::CreateTargetSurface(
 
     Desc.Format = Format;
     Desc.Type = D3DRTYPE_SURFACE;
-    Desc.Usage = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
+    Desc.Usage = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL | D9SurfaceUsageShared);
     Desc.Pool = D3DPOOL_DEFAULT;
     Desc.MultiSampleType = MultiSample;
     Desc.MultiSampleQuality = MultisampleQuality;
     Desc.Width = Width;
     Desc.Height = Height;
-    return AddSurface(&Desc, Lockable, Discard, Surface);
+    D9StartShare(SharedHandle, Desc.Usage | D9ShareUsageModern | (Lockable ? D9ShareUsageLockable : 0), &Share);
+    return AddSurface(&Desc, Lockable, Discard, &Share, SharedHandle, Surface);
 }
 
 /* Offscreen plain surfaces; scratch ones only need a format the runtime knows the size of */
@@ -1594,8 +1660,22 @@ D9Device::CreatePlainSurface(
     _Inout_opt_ HANDLE* SharedHandle)
 {
     D3DSURFACE_DESC Desc = {};
+    D9ShareRequest Share;
     UINT64 Pitch;
 
+    if (SharedHandle != nullptr)
+    {
+        if (!CanShare())
+        {
+            D9_TRACE_ONCE(L"this device cannot share surfaces");
+            return D3DERR_INVALIDCALL;
+        }
+        if (Pool != D3DPOOL_DEFAULT && (Pool != D3DPOOL_SYSTEMMEM || *SharedHandle == NULL))
+        {
+            D9_TRACE_ONCE(L"CreateOffscreenPlainSurface: pool %u cannot share", Pool);
+            return D3DERR_INVALIDCALL;
+        }
+    }
     if (Format == D3DFMT_UNKNOWN)
         return D3DERR_INVALIDCALL;
     if (Pool != D3DPOOL_DEFAULT && Pool != D3DPOOL_SYSTEMMEM && Pool != D3DPOOL_SCRATCH)
@@ -1610,14 +1690,8 @@ D9Device::CreatePlainSurface(
     }
     if (Format == D3DFMT_BINARYBUFFER && Height > 1)
         return D3DERR_INVALIDCALL;
-
-    if (SharedHandle != nullptr)
+    if (SharedHandle != nullptr && Pool == D3DPOOL_SYSTEMMEM)
     {
-        if (!IsEx)
-        {
-            D9_TRACE_ONCE(L"only extended devices share surfaces");
-            return D3DERR_INVALIDCALL;
-        }
         RX_UNIMPLEMENTED();
         return D3DERR_INVALIDCALL;
     }
@@ -1627,7 +1701,9 @@ D9Device::CreatePlainSurface(
         return D3DERR_INVALIDCALL;
     if (Width == 0 || Height == 0)
         return D3DERR_INVALIDCALL;
-    if ((Usage & ~D9SurfaceUsageAllowed) != 0 || (Usage & D9SurfaceUsageShared) != 0)
+    if ((Usage & ~D9SurfaceUsageAllowed) != 0)
+        return D3DERR_INVALIDCALL;
+    if ((Usage & D9SurfaceUsageShared) != 0 && (SharedHandle == nullptr || *SharedHandle != NULL))
         return D3DERR_INVALIDCALL;
 
     if (Pool == D3DPOOL_SYSTEMMEM)
@@ -1646,10 +1722,12 @@ D9Device::CreatePlainSurface(
 
     Desc.Format = Format;
     Desc.Type = D3DRTYPE_SURFACE;
+    Desc.Usage = Usage & D9SurfaceUsageShared;
     Desc.Pool = Pool;
     Desc.Width = Width;
     Desc.Height = Height;
-    return AddSurface(&Desc, TRUE, FALSE, Surface);
+    D9StartShare(SharedHandle, Desc.Usage | D9ShareUsageLockable | D9ShareUsagePlain, &Share);
+    return AddSurface(&Desc, TRUE, FALSE, &Share, SharedHandle, Surface);
 }
 
 STDMETHODIMP
@@ -1863,15 +1941,35 @@ D9Device::AddBuffer(
     _In_ DWORD Fvf,
     _In_ D3DPOOL Pool,
     _In_ D3DPOOL Placed,
+    _Inout_opt_ HANDLE* SharedHandle,
     _Outptr_ Buffer** Made)
 {
     D3DDDI_POOL Placement = BufferPlacement(Format == D3DFMT_VERTEXDATA, Usage, Fvf, Placed);
+    D9ShareRequest Share;
     Buffer* Object;
     HRESULT hr;
 
+    /* Only buffers the driver keeps in video memory can be shared */
+    if (SharedHandle != nullptr)
+    {
+        if (Placement != D3DDDIPOOL_VIDEOMEMORY)
+        {
+            D9_TRACE_ONCE(L"the driver cannot share a buffer it keeps in system memory");
+            return D3DERR_NOTAVAILABLE;
+        }
+        if (!CanShare() || Pool != D3DPOOL_DEFAULT)
+            return D3DERR_INVALIDCALL;
+    }
+    D9StartShare(SharedHandle, Usage | D9ShareUsageLockable, &Share);
     if ((Usage & D3DUSAGE_RESTRICTED_CONTENT) != 0)
     {
         hr = CheckProtectedContent();
+        if (FAILED(hr))
+            return hr;
+    }
+    if (Share.Mode != D9ShareMode::None && (Usage & D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER) != 0)
+    {
+        hr = CheckDriverRestriction();
         if (FAILED(hr))
             return hr;
     }
@@ -1880,8 +1978,9 @@ D9Device::AddBuffer(
     if (Object == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Object->Create(Placement);
-    if (FAILED(hr) && Placement != D3DDDIPOOL_SYSTEMMEM && hr != D3DERR_OUTOFVIDEOMEMORY)
+    hr = Object->Create(Placement, &Share);
+    if (FAILED(hr) && Placement != D3DDDIPOOL_SYSTEMMEM && hr != D3DERR_OUTOFVIDEOMEMORY &&
+        Share.Mode == D9ShareMode::None)
     {
         delete Object;
         Object = new (std::nothrow) Buffer(this, Length, Usage, Format, Fvf, Pool);
@@ -1895,6 +1994,8 @@ D9Device::AddBuffer(
         delete Object;
         return hr;
     }
+    if (Share.Mode == D9ShareMode::Create)
+        *SharedHandle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Object->ShareHandle()));
     Object->AddRef();
     *Made = Object;
     return S_OK;
@@ -1940,20 +2041,16 @@ D9Device::CreateVertexBuffer(
     }
     if ((Usage & D3DUSAGE_DYNAMIC) != 0 && Placed == D3DPOOL_MANAGED)
         return D3DERR_INVALIDCALL;
-    if ((Usage & D9SurfaceUsageShared) != 0)
+    if ((Usage & D9SurfaceUsageShared) != 0 && (SharedHandle == nullptr || *SharedHandle != NULL))
         return D3DERR_INVALIDCALL;
     if (FVF != 0 && Length < D9VertexSize(FVF))
     {
         D9_TRACE_ONCE(L"CreateVertexBuffer: %u bytes do not hold one vertex", Length);
         return D3DERR_INVALIDCALL;
     }
-    if (SharedHandle != nullptr)
-    {
-        RX_UNIMPLEMENTED();
-        return D3DERR_NOTAVAILABLE;
-    }
 
-    hr = AddBuffer(Length, Usage, D3DFMT_VERTEXDATA, FVF, Enum->IsExtended() ? Pool : Placed, Placed, &Made);
+    hr = AddBuffer(Length, Usage, D3DFMT_VERTEXDATA, FVF, Enum->IsExtended() ? Pool : Placed, Placed, SharedHandle,
+                   &Made);
     if (SUCCEEDED(hr))
         *VertexBuffer = Made;
     return hr;
@@ -2000,15 +2097,10 @@ D9Device::CreateIndexBuffer(
     }
     if ((Usage & D3DUSAGE_DYNAMIC) != 0 && Placed == D3DPOOL_MANAGED)
         return D3DERR_INVALIDCALL;
-    if ((Usage & D9SurfaceUsageShared) != 0)
+    if ((Usage & D9SurfaceUsageShared) != 0 && (SharedHandle == nullptr || *SharedHandle != NULL))
         return D3DERR_INVALIDCALL;
-    if (SharedHandle != nullptr)
-    {
-        RX_UNIMPLEMENTED();
-        return D3DERR_NOTAVAILABLE;
-    }
 
-    hr = AddBuffer(Length, Usage, Format, 0, Enum->IsExtended() ? Pool : Placed, Placed, &Made);
+    hr = AddBuffer(Length, Usage, Format, 0, Enum->IsExtended() ? Pool : Placed, Placed, SharedHandle, &Made);
     if (SUCCEEDED(hr))
         *IndexBuffer = Made;
     return hr;

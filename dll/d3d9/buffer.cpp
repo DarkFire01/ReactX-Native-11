@@ -71,7 +71,8 @@ D9Buffer<Interface, Description>::~D9Buffer()
 template <class Interface, class Description>
 HRESULT
 D9Buffer<Interface, Description>::Create(
-    _In_ D3DDDI_POOL Placement)
+    _In_ D3DDDI_POOL Placement,
+    _In_opt_ const D9ShareRequest* Share)
 {
     if (Placement == D3DDDIPOOL_SYSTEMMEM)
     {
@@ -87,7 +88,7 @@ D9Buffer<Interface, Description>::Create(
     if (Resource == nullptr)
         return E_OUTOFMEMORY;
     hr = Device->CreateBufferResource(Format, Length, D9BufferFlags(IsVertex(), Usage), Fvf, Placement, Memory,
-                                      Resource);
+                                      Share, Resource);
     if (SUCCEEDED(hr) && IsManaged())
     {
         DirtyEnd = Length;
@@ -230,7 +231,8 @@ D9Buffer<Interface, Description>::Upload(VOID)
         if (VideoResource == nullptr)
             return;
         Flags = Resource->Flags.Value | D9BufferFlags(IsVertex(), D3DUSAGE_WRITEONLY);
-        hr = Device->CreateBufferResource(Format, Length, Flags, Fvf, D3DDDIPOOL_VIDEOMEMORY, nullptr, VideoResource);
+        hr = Device->CreateBufferResource(Format, Length, Flags, Fvf, D3DDDIPOOL_VIDEOMEMORY, nullptr, nullptr,
+                                          VideoResource);
         if (FAILED(hr))
         {
             D9Trace(L"the video copy of a managed buffer could not be made (0x%08lX)", hr);

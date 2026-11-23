@@ -405,7 +405,7 @@ D9Surface::Create(VOID)
 
     /* The driver hears the bytes per pixel row, which block rows spread over four */
     return Device->CreateDriverSurface(&Desc, Lockable, Discard, DriverPool, Memory,
-                                       static_cast<UINT>(Size / Desc.Height), Resource);
+                                       static_cast<UINT>(Size / Desc.Height), &Sharing, Resource);
 }
 
 /* Flip swap chains move the driver surfaces between their buffers; each keeps its runtime handle */
