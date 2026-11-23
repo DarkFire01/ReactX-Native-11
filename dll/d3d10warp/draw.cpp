@@ -1135,6 +1135,21 @@ RxWarpDraw::Rasterize(
     ToScreen(B, &Corner[1]);
     ToScreen(C, &Corner[2]);
     AlphaLine = FALSE;
+
+    /* Wireframe: a triangle that survives culling draws its three edges as lines */
+    if (Raster.FillMode == D3D10_DDI_FILL_WIREFRAME)
+    {
+        INT64 Area = ((INT64)Corner[2].Y - Corner[0].Y) * ((INT64)Corner[1].X - Corner[0].X) -
+                     ((INT64)Corner[0].Y - Corner[1].Y) * ((INT64)Corner[0].X - Corner[2].X);
+        BOOLEAN Front = Raster.FrontCounterClockwise ? !(Area > 0) : (Area > 0);
+
+        if (Area == 0 || (Raster.CullMode == D3D10_DDI_CULL_BACK && !Front) || (Raster.CullMode == D3D10_DDI_CULL_FRONT && Front))
+            return;
+        RasterizeLine(A, B);
+        RasterizeLine(B, C);
+        RasterizeLine(C, A);
+        return;
+    }
     SetupTriangle(FALSE);
 }
 
