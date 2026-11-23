@@ -321,6 +321,19 @@ RxAllocationInfoForDescs(
     D3D12_RESOURCE_ALLOCATION_INFO Total = { 0, 0 };
     UINT Index;
 
+    /* One bad description fails the whole query before anything is written */
+    for (Index = 0; Index < Count; Index++)
+    {
+        D3D12_RESOURCE_DESC1 Desc = Descs[Index];
+
+        if (!RxNormalizeResourceDesc(Desc))
+        {
+            Total.SizeInBytes = UINT64_MAX;
+            Total.Alignment = RxDefaultPlacement;
+            return Total;
+        }
+    }
+
     for (Index = 0; Index < Count; Index++)
     {
         D3D12_RESOURCE_DESC1 Desc = Descs[Index];
@@ -328,18 +341,7 @@ RxAllocationInfoForDescs(
         D3D12_RESOURCE_ALLOCATION_INFO Info;
         UINT64 Offset;
 
-        if (!RxNormalizeResourceDesc(Desc))
-        {
-            Total.SizeInBytes = UINT64_MAX;
-            Total.Alignment = RxDefaultPlacement;
-            if (Each != nullptr)
-            {
-                Each[Index].Offset = UINT64_MAX;
-                Each[Index].Alignment = RxDefaultPlacement;
-                Each[Index].SizeInBytes = UINT64_MAX;
-            }
-            return Total;
-        }
+        RxNormalizeResourceDesc(Desc);
 
         RxToDdiResource(Desc, Ddi);
         Info = RxAllocationInfo(Device, Desc, Ddi);
@@ -813,9 +815,8 @@ RxCopyableFootprints(
         Columns = (Width + BlockWidth - 1) / BlockWidth;
         Rows = (Height + BlockHeight - 1) / BlockHeight;
         RowSize = Columns * BlockBytes;
-        RowPitch = Normal.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER
-                       ? RowSize
-                       : RxAlignUp(RowSize, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        /* Buffers report the copy pitch too, though their one row never steps by it */
+        RowPitch = RxAlignUp(RowSize, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 
         Offset = Normal.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER
                      ? Running
