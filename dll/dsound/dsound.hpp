@@ -687,7 +687,7 @@ private:
     WAVEFORMATEXTENSIBLE OwnFormat;
     const WAVEFORMATEX* StreamFormat;
     BOOLEAN FloatOutput;
-    UINT32 BufferFrames;
+    UINT32 QueueFrames;
     UINT Quantum;
     HANDLE Event;
     HANDLE Thread;

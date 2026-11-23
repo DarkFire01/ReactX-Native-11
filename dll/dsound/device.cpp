@@ -501,7 +501,7 @@ DsDevice::DsDevice()
     MixFormat = nullptr;
     StreamFormat = nullptr;
     FloatOutput = FALSE;
-    BufferFrames = 0;
+    QueueFrames = 0;
     Quantum = 480;
     Event = nullptr;
     Thread = nullptr;
@@ -632,6 +632,7 @@ DsDevice::StartStreaming(VOID)
     REFERENCE_TIME Period = 0;
     REFERENCE_TIME Minimum = 0;
     REFERENCE_TIME Duration;
+    UINT32 PeriodFrames;
     UINT Packets;
     HRESULT hr;
 
@@ -648,7 +649,13 @@ DsDevice::StartStreaming(VOID)
     if (FAILED(hr))
         Period = 100000;
     Packets = Period >= DS_LOCAL_PERIOD_LOW && Period < DS_LOCAL_PERIOD_HIGH ? 2 : 4;
-    Duration = Packets * ((Rate * Period + 5000000) / 10000000) * 10000000 / Rate;
+
+    /* The period and the whole queue go to frames and back, each rounded to the nearest */
+    PeriodFrames = static_cast<UINT32>((Rate * Period + 5000000) / 10000000);
+    Duration = (10000000LL * Packets * PeriodFrames + Rate / 2) / Rate;
+    Period = (10000000LL * PeriodFrames + Rate / 2) / Rate;
+    QueueFrames = static_cast<UINT32>((Rate * Duration + 5000000) / 10000000);
+    PeriodFrames = static_cast<UINT32>((Rate * Period + 5000000) / 10000000);
 
     hr = Client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
                             Duration, 0, StreamFormat, nullptr);
@@ -658,7 +665,6 @@ DsDevice::StartStreaming(VOID)
         Failed = TRUE;
         return DSERR_NODRIVER;
     }
-    Client->GetBufferSize(&BufferFrames);
     hr = Client->GetService(IID_PPV_ARGS(&Render));
     if (SUCCEEDED(hr))
         hr = Client->GetService(IID_PPV_ARGS(&Volume));
@@ -675,13 +681,13 @@ DsDevice::StartStreaming(VOID)
         return E_OUTOFMEMORY;
     Client->SetEventHandle(Event);
 
-    /* The stream opens on silence, leaving one quantum of room for the first mix the thread makes */
-    if (BufferFrames > Quantum)
+    /* The stream opens on silence, one period short of the queue it keeps */
+    if (QueueFrames > PeriodFrames)
     {
         BYTE* Target = nullptr;
 
-        if (SUCCEEDED(Render->GetBuffer(BufferFrames - Quantum, &Target)))
-            Render->ReleaseBuffer(BufferFrames - Quantum, AUDCLNT_BUFFERFLAGS_SILENT);
+        if (SUCCEEDED(Render->GetBuffer(QueueFrames - PeriodFrames, &Target)))
+            Render->ReleaseBuffer(QueueFrames - PeriodFrames, AUDCLNT_BUFFERFLAGS_SILENT);
     }
     SetEvent(Event);
     hr = Client->Start();
@@ -899,16 +905,20 @@ DsDevice::RenderQuantum(
     Unlock();
 }
 
-/* Fills whatever room the stream has, a quantum at a time */
+/* Mixes one quantum, or two when the queue has room for both, never past the queue the stream was opened with */
 VOID
 DsDevice::Pump(VOID)
 {
     UINT32 Padding = 0;
+    UINT Passes;
 
     if (FAILED(Client->GetCurrentPadding(&Padding)))
         return;
+    if (Padding + Quantum > QueueFrames)
+        return;
+    Passes = Padding + 2 * Quantum > QueueFrames ? 1 : 2;
 
-    while (BufferFrames - Padding >= Quantum)
+    for (UINT Done = 0; Done < Passes; Done++)
     {
         BYTE* Target = nullptr;
         HRESULT hr = Render->GetBuffer(Quantum, &Target);
@@ -947,7 +957,6 @@ DsDevice::Pump(VOID)
             }
         }
         Render->ReleaseBuffer(Quantum, 0);
-        Padding += Quantum;
     }
 }
 
