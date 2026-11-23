@@ -10,6 +10,8 @@
 #include <windows.h>
 #include <objbase.h>
 #include <mmreg.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <ks.h>
 #include <ksmedia.h>
 #include <xaudio2.h>
@@ -21,6 +23,8 @@
 #include <cstdio>
 #include <math.h>
 #include <string.h>
+
+#include <new>
 
 /* The XMA2 header layout, which only the Xbox headers declare */
 #pragma pack(push, 1)
@@ -2127,6 +2131,896 @@ XcCheckQueue(VOID)
     printf("release %lu\n", Engine->Release());
 }
 
+/* An XAPO that logs how the host drives it and can record what passes through */
+class XcProbeApo final : public IXAPO, public IXAPOParameters
+{
+public:
+    XcProbeApo(
+        _In_ UINT32 NewFlags,
+        _In_ BOOLEAN NewLogging)
+    {
+        References = 1;
+        Flags = NewFlags;
+        Logging = NewLogging;
+        InitializeCriticalSection(&Lock);
+        memset(Parameters, 0, sizeof(Parameters));
+    }
+
+    ~XcProbeApo()
+    {
+        DeleteCriticalSection(&Lock);
+        delete[] Recorded;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        REFIID Iid,
+        _COM_Outptr_ void** Object) override
+    {
+        if (IsEqualIID(Iid, __uuidof(IXAPO)) || IsEqualIID(Iid, IID_IUnknown))
+            *Object = static_cast<IXAPO*>(this);
+        else if (IsEqualIID(Iid, __uuidof(IXAPOParameters)))
+            *Object = static_cast<IXAPOParameters*>(this);
+        else
+        {
+            *Object = nullptr;
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    AddRef() override
+    {
+        return InterlockedIncrement(&References);
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    Release() override
+    {
+        return InterlockedDecrement(&References);
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetRegistrationProperties(
+        _Outptr_ XAPO_REGISTRATION_PROPERTIES** Properties) override
+    {
+        *Properties = static_cast<XAPO_REGISTRATION_PROPERTIES*>(CoTaskMemAlloc(sizeof(**Properties)));
+        if (*Properties == nullptr)
+            return E_OUTOFMEMORY;
+        memset(*Properties, 0, sizeof(**Properties));
+        (*Properties)->Flags = Flags;
+        (*Properties)->MinInputBufferCount = 1;
+        (*Properties)->MaxInputBufferCount = 1;
+        (*Properties)->MinOutputBufferCount = 1;
+        (*Properties)->MaxOutputBufferCount = 1;
+        Note("registration");
+        return S_OK;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    IsInputFormatSupported(
+        const WAVEFORMATEX* Output,
+        const WAVEFORMATEX* Requested,
+        _Outptr_opt_ WAVEFORMATEX** Supported) override
+    {
+        NoteFormat("isinput out", Output);
+        NoteFormat("isinput requested", Requested);
+        if (Supported != nullptr)
+            *Supported = nullptr;
+        return S_OK;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    IsOutputFormatSupported(
+        const WAVEFORMATEX* Input,
+        const WAVEFORMATEX* Requested,
+        _Outptr_opt_ WAVEFORMATEX** Supported) override
+    {
+        NoteFormat("isoutput in", Input);
+        NoteFormat("isoutput requested", Requested);
+        if (Supported != nullptr)
+            *Supported = nullptr;
+        return S_OK;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    Initialize(
+        _In_reads_bytes_opt_(Size) const void* Data,
+        UINT32 Size) override
+    {
+        Note("initialize");
+        return S_OK;
+    }
+
+    void
+    STDMETHODCALLTYPE
+    Reset() override
+    {
+        Note("reset");
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    LockForProcess(
+        UINT32 InputCount,
+        _In_reads_opt_(InputCount) const XAPO_LOCKFORPROCESS_PARAMETERS* Input,
+        UINT32 OutputCount,
+        _In_reads_opt_(OutputCount) const XAPO_LOCKFORPROCESS_PARAMETERS* Output) override
+    {
+        CHAR Line[96];
+
+        sprintf_s(Line, "lock %u %u max %u %u", InputCount, OutputCount, InputCount != 0 ? Input->MaxFrameCount : 0,
+                  OutputCount != 0 ? Output->MaxFrameCount : 0);
+        Note(Line);
+        if (InputCount != 0)
+        {
+            NoteFormat("lock in", Input->pFormat);
+            InputChannels = Input->pFormat->nChannels;
+        }
+        if (OutputCount != 0)
+        {
+            NoteFormat("lock out", Output->pFormat);
+            OutputChannels = Output->pFormat->nChannels;
+        }
+        return S_OK;
+    }
+
+    void
+    STDMETHODCALLTYPE
+    UnlockForProcess() override
+    {
+        Note("unlock");
+    }
+
+    void
+    STDMETHODCALLTYPE
+    Process(
+        UINT32 InputCount,
+        _In_reads_opt_(InputCount) const XAPO_PROCESS_BUFFER_PARAMETERS* Input,
+        UINT32 OutputCount,
+        _Inout_updates_opt_(OutputCount) XAPO_PROCESS_BUFFER_PARAMETERS* Output,
+        BOOL Enabled) override
+    {
+        Calls += 1;
+        if (Calls <= 4)
+        {
+            CHAR Line[128];
+
+            sprintf_s(Line, "process %u %u in flags %d frames %u out flags %d frames %u inplace %d enabled %d", InputCount,
+                      OutputCount, Input->BufferFlags, Input->ValidFrameCount, Output->BufferFlags,
+                      Output->ValidFrameCount, Input->pBuffer == Output->pBuffer, Enabled);
+            Note(Line);
+        }
+        if (Recorded != nullptr && Recording && Input->BufferFlags == XAPO_BUFFER_VALID)
+        {
+            UINT32 Samples = Input->ValidFrameCount * InputChannels;
+
+            for (UINT32 Index = 0; Index < Samples && RecordedCount < RecordedCapacity; Index++)
+                Recorded[RecordedCount++] = static_cast<const float*>(Input->pBuffer)[Index];
+        }
+        else if (Recorded != nullptr && Recording)
+        {
+            UINT32 Samples = Input->ValidFrameCount * InputChannels;
+
+            for (UINT32 Index = 0; Index < Samples && RecordedCount < RecordedCapacity; Index++)
+                Recorded[RecordedCount++] = 0.0f;
+        }
+        if (Input->pBuffer != Output->pBuffer && InputChannels == OutputChannels)
+            memcpy(Output->pBuffer, Input->pBuffer, sizeof(float) * Input->ValidFrameCount * InputChannels);
+        Output->BufferFlags = Input->BufferFlags;
+        Output->ValidFrameCount = Input->ValidFrameCount;
+    }
+
+    UINT32
+    STDMETHODCALLTYPE
+    CalcInputFrames(
+        UINT32 OutputFrames) override
+    {
+        Note("calcinput");
+        return OutputFrames;
+    }
+
+    UINT32
+    STDMETHODCALLTYPE
+    CalcOutputFrames(
+        UINT32 InputFrames) override
+    {
+        Note("calcoutput");
+        return InputFrames;
+    }
+
+    void
+    STDMETHODCALLTYPE
+    SetParameters(
+        _In_reads_bytes_(Size) const void* NewParameters,
+        UINT32 Size) override
+    {
+        CHAR Line[64];
+
+        sprintf_s(Line, "setparameters %u", Size);
+        Note(Line);
+        memcpy(Parameters, NewParameters, Size < sizeof(Parameters) ? Size : sizeof(Parameters));
+    }
+
+    void
+    STDMETHODCALLTYPE
+    GetParameters(
+        _Out_writes_bytes_(Size) void* Result,
+        UINT32 Size) override
+    {
+        CHAR Line[64];
+
+        sprintf_s(Line, "getparameters %u", Size);
+        Note(Line);
+        memcpy(Result, Parameters, Size < sizeof(Parameters) ? Size : sizeof(Parameters));
+    }
+
+    VOID
+    Note(
+        _In_z_ PCSTR Text)
+    {
+        if (!Logging)
+            return;
+        EnterCriticalSection(&Lock);
+        if (LogLength + strlen(Text) + 2 < sizeof(Log))
+        {
+            strcpy_s(Log + LogLength, sizeof(Log) - LogLength, Text);
+            LogLength += strlen(Text);
+            Log[LogLength++] = '\n';
+            Log[LogLength] = '\0';
+        }
+        LeaveCriticalSection(&Lock);
+    }
+
+    VOID
+    NoteFormat(
+        _In_z_ PCSTR Name,
+        _In_opt_ const WAVEFORMATEX* Format)
+    {
+        CHAR Line[192];
+
+        if (Format == nullptr)
+        {
+            sprintf_s(Line, "%s null", Name);
+        }
+        else if (Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+        {
+            const WAVEFORMATEXTENSIBLE* Extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(Format);
+
+            sprintf_s(Line, "%s ext %u %lu %lu %u %u %u valid %u mask %08lX sub %08lX", Name, Format->nChannels,
+                      Format->nSamplesPerSec, Format->nAvgBytesPerSec, Format->nBlockAlign, Format->wBitsPerSample,
+                      Format->cbSize, Extensible->Samples.wValidBitsPerSample, Extensible->dwChannelMask,
+                      Extensible->SubFormat.Data1);
+        }
+        else
+        {
+            sprintf_s(Line, "%s tag %u %u %lu %lu %u %u %u", Name, Format->wFormatTag, Format->nChannels,
+                      Format->nSamplesPerSec, Format->nAvgBytesPerSec, Format->nBlockAlign, Format->wBitsPerSample,
+                      Format->cbSize);
+        }
+        Note(Line);
+    }
+
+    VOID
+    PrintLog(
+        _In_z_ PCSTR Name)
+    {
+        PCSTR Line = Log;
+
+        EnterCriticalSection(&Lock);
+        while (*Line != '\0')
+        {
+            PCSTR End = strchr(Line, '\n');
+            SIZE_T Length = End != nullptr ? static_cast<SIZE_T>(End - Line) : strlen(Line);
+
+            printf("%s %.*s\n", Name, static_cast<int>(Length), Line);
+            Line += Length + (End != nullptr ? 1 : 0);
+        }
+        LogLength = 0;
+        Log[0] = '\0';
+        LeaveCriticalSection(&Lock);
+    }
+
+    LONG References;
+    UINT32 Flags;
+    BOOLEAN Logging;
+    CRITICAL_SECTION Lock;
+    CHAR Log[8192] = {};
+    SIZE_T LogLength = 0;
+    BYTE Parameters[64];
+    volatile LONG Calls = 0;
+    UINT32 InputChannels = 0;
+    UINT32 OutputChannels = 0;
+    float* Recorded = nullptr;
+    SIZE_T RecordedCount = 0;
+    SIZE_T RecordedCapacity = 0;
+    volatile BOOLEAN Recording = FALSE;
+};
+
+/* How the host drives an application XAPO, and what it accepts */
+static
+VOID
+XcCheckEffects(VOID)
+{
+    static const UINT32 FlagSets[] =
+    {
+        XAPO_FLAG_INPLACE_SUPPORTED | XAPO_FLAG_CHANNELS_MUST_MATCH | XAPO_FLAG_FRAMERATE_MUST_MATCH |
+            XAPO_FLAG_BITSPERSAMPLE_MUST_MATCH | XAPO_FLAG_BUFFERCOUNT_MUST_MATCH,
+        XAPO_FLAG_INPLACE_REQUIRED,
+        XAPO_FLAG_INPLACE_REQUIRED | XAPO_FLAG_INPLACE_SUPPORTED,
+        0,
+        XAPO_FLAG_FRAMERATE_MUST_MATCH | XAPO_FLAG_BITSPERSAMPLE_MUST_MATCH,
+    };
+    static const UINT32 Outputs[] = { 1, 2, 6 };
+    IXAudio2MasteringVoice* Master;
+    IXAudio2* Engine = XcEngineWithMaster(&Master, 2, 48000);
+    static SHORT Data[4800];
+    WAVEFORMATEX Format;
+
+    if (Engine == nullptr)
+        return;
+    XcPcm(&Format, WAVE_FORMAT_PCM, 1, 44100, 16);
+    for (UINT FlagIndex = 0; FlagIndex < ARRAYSIZE(FlagSets); FlagIndex++)
+    {
+        for (UINT OutputIndex = 0; OutputIndex < ARRAYSIZE(Outputs); OutputIndex++)
+        {
+            /* The host may keep references past the voice, so the probes stay alive */
+            XcProbeApo& Probe = *new XcProbeApo(FlagSets[FlagIndex], TRUE);
+            XAUDIO2_EFFECT_DESCRIPTOR Effect = { static_cast<IXAPO*>(&Probe), TRUE, Outputs[OutputIndex] };
+            XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
+            IXAudio2SourceVoice* Source = nullptr;
+            HRESULT hr;
+            CHAR Name[48];
+
+            sprintf_s(Name, "  fx %u/%u", FlagIndex, Outputs[OutputIndex]);
+            hr = Engine->CreateSourceVoice(&Source, &Format, 0, 2.0f, nullptr, nullptr, &Chain);
+            printf("effect flags %08X outputs %u = %08lX refs %ld\n", FlagSets[FlagIndex], Outputs[OutputIndex], hr,
+                   Probe.References);
+            Probe.PrintLog(Name);
+            if (FAILED(hr))
+                continue;
+            {
+                XAUDIO2_VOICE_DETAILS Details;
+                float Volumes[8];
+                float Matrix[16];
+
+                Source->GetVoiceDetails(&Details);
+                printf("  details channels %u\n", Details.InputChannels);
+                memset(Volumes, 0xCC, sizeof(Volumes));
+                Source->GetChannelVolumes(Outputs[OutputIndex], Volumes);
+                XcFloats("  channelvolumes", Volumes, Outputs[OutputIndex]);
+                memset(Matrix, 0xCC, sizeof(Matrix));
+                Source->GetOutputMatrix(Master, Outputs[OutputIndex], 2, Matrix);
+                XcFloats("  matrix", Matrix, Outputs[OutputIndex] * 2);
+            }
+            if (FlagIndex == 0 && OutputIndex == 0)
+            {
+                XAUDIO2_BUFFER Buffer = {};
+                BYTE Parameters[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+                BYTE Read[8];
+                BOOL Enabled = 7;
+
+                Buffer.AudioBytes = sizeof(Data);
+                Buffer.pAudioData = reinterpret_cast<const BYTE*>(Data);
+                Source->SubmitSourceBuffer(&Buffer);
+                Source->Start();
+                Sleep(60);
+                Source->Stop();
+                Sleep(20);
+                Probe.PrintLog("  fx running");
+                printf("  seteffectparams = %08lX\n", Source->SetEffectParameters(0, Parameters, sizeof(Parameters)));
+                printf("  seteffectparams deferred = %08lX\n", Source->SetEffectParameters(0, Parameters, 4, 3));
+                printf("  seteffectparams zero = %08lX\n", Source->SetEffectParameters(0, Parameters, 0));
+                printf("  seteffectparams index = %08lX\n", Source->SetEffectParameters(1, Parameters, 4));
+                memset(Read, 0, sizeof(Read));
+                printf("  geteffectparams = %08lX\n", Source->GetEffectParameters(0, Read, sizeof(Read)));
+                XcBytes("  read", Read, sizeof(Read));
+                printf("  geteffectparams zero = %08lX\n", Source->GetEffectParameters(0, Read, 0));
+                Probe.PrintLog("  fx params");
+                Source->GetEffectState(0, &Enabled);
+                printf("  state %d\n", Enabled);
+                printf("  disable = %08lX\n", Source->DisableEffect(0));
+                Source->GetEffectState(0, &Enabled);
+                printf("  state %d\n", Enabled);
+                printf("  enable deferred = %08lX\n", Source->EnableEffect(0, 5));
+                Source->GetEffectState(0, &Enabled);
+                printf("  state %d\n", Enabled);
+                Engine->CommitChanges(5);
+                Source->GetEffectState(0, &Enabled);
+                printf("  state after commit %d\n", Enabled);
+                printf("  enable index = %08lX\n", Source->EnableEffect(1));
+                printf("  enable opset = %08lX\n", Source->EnableEffect(0, XAUDIO2_INVALID_OPSET));
+                Source->GetEffectState(1, &Enabled);
+                printf("  seteffectchain null = %08lX\n", Source->SetEffectChain(nullptr));
+                Probe.PrintLog("  fx removed");
+            }
+            Source->DestroyVoice();
+            Probe.PrintLog("  fx destroyed");
+            printf("  refs %ld\n", Probe.References);
+        }
+    }
+
+    /* Chains on submix and mastering voices */
+    {
+        XcProbeApo& First = *new XcProbeApo(XAPO_FLAG_INPLACE_SUPPORTED, TRUE);
+        XcProbeApo& Second = *new XcProbeApo(0, TRUE);
+        XAUDIO2_EFFECT_DESCRIPTOR Effects[2] = { { static_cast<IXAPO*>(&First), TRUE, 2 }, { static_cast<IXAPO*>(&Second), FALSE, 2 } };
+        XAUDIO2_EFFECT_CHAIN Chain = { 2, Effects };
+        IXAudio2SubmixVoice* Submix = nullptr;
+
+        printf("submix chain = %08lX\n", Engine->CreateSubmixVoice(&Submix, 2, 32000, 0, 0, nullptr, &Chain));
+        Sleep(40);
+        First.PrintLog("  first");
+        Second.PrintLog("  second");
+        if (Submix != nullptr)
+            Submix->DestroyVoice();
+        First.PrintLog("  first gone");
+        Second.PrintLog("  second gone");
+        printf("master chain = %08lX\n", Master->SetEffectChain(&Chain));
+        Sleep(40);
+        First.PrintLog("  master first");
+        Second.PrintLog("  master second");
+        printf("master chain null = %08lX\n", Master->SetEffectChain(nullptr));
+        Sleep(40);
+        First.PrintLog("  master first gone");
+        Second.PrintLog("  master second gone");
+        printf("refs %ld %ld\n", First.References, Second.References);
+    }
+    printf("release %lu\n", Engine->Release());
+}
+
+/* Records what the default endpoint plays, which carries the engine output */
+class XcLoopback
+{
+public:
+    XcLoopback() : Client(nullptr), Capture(nullptr), Format(nullptr) {}
+
+    ~XcLoopback()
+    {
+        if (Client != nullptr)
+            Client->Stop();
+        if (Capture != nullptr)
+            Capture->Release();
+        if (Client != nullptr)
+            Client->Release();
+        CoTaskMemFree(Format);
+        delete[] Samples;
+    }
+
+    HRESULT
+    Start(VOID)
+    {
+        IMMDeviceEnumerator* Enumerator = nullptr;
+        IMMDevice* Endpoint = nullptr;
+        HRESULT hr;
+
+        Capacity = 48000 * 8;
+        Count = 0;
+        Samples = new (std::nothrow) float[Capacity];
+        if (Samples == nullptr)
+            return E_OUTOFMEMORY;
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&Enumerator));
+        if (SUCCEEDED(hr))
+            hr = Enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &Endpoint);
+        if (SUCCEEDED(hr))
+            hr = Endpoint->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&Client));
+        if (SUCCEEDED(hr))
+            hr = Client->GetMixFormat(&Format);
+        if (SUCCEEDED(hr))
+            hr = Client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 10000000, 0, Format, nullptr);
+        if (SUCCEEDED(hr))
+            hr = Client->GetService(IID_PPV_ARGS(&Capture));
+        if (SUCCEEDED(hr))
+            hr = Client->Start();
+        if (Endpoint != nullptr)
+            Endpoint->Release();
+        if (Enumerator != nullptr)
+            Enumerator->Release();
+        return hr;
+    }
+
+    VOID
+    Collect(
+        _In_ DWORD Milliseconds)
+    {
+        ULONGLONG End = GetTickCount64() + Milliseconds;
+
+        while (GetTickCount64() < End)
+        {
+            UINT32 Packet = 0;
+
+            Sleep(5);
+            while (SUCCEEDED(Capture->GetNextPacketSize(&Packet)) && Packet != 0)
+            {
+                BYTE* Data;
+                UINT32 Frames;
+                DWORD Flags;
+
+                if (FAILED(Capture->GetBuffer(&Data, &Frames, &Flags, nullptr, nullptr)))
+                    break;
+                for (UINT32 Index = 0; Index < Frames * Format->nChannels && Count < Capacity; Index++)
+                    Samples[Count++] = (Flags & AUDCLNT_BUFFERFLAGS_SILENT) ? 0.0f : reinterpret_cast<float*>(Data)[Index];
+                Capture->ReleaseBuffer(Frames);
+            }
+        }
+    }
+
+    IAudioClient* Client;
+    IAudioCaptureClient* Capture;
+    WAVEFORMATEX* Format;
+    float* Samples = nullptr;
+    SIZE_T Count = 0;
+    SIZE_T Capacity = 0;
+};
+
+/* Quiet noise with a marker frame first, so the start lines up between runtimes */
+static
+VOID
+XcFillNoise(
+    _Out_writes_bytes_(Bytes) BYTE* Data,
+    _In_ DWORD Bytes,
+    _In_ const WAVEFORMATEX* Format)
+{
+    UINT Width = Format->wBitsPerSample / 8;
+    DWORD Samples = Bytes / Width;
+    ULONG Seed = 12345;
+
+    for (DWORD Index = 0; Index < Samples; Index++)
+    {
+        float Value;
+
+        Seed = Seed * 1103515245 + 12345;
+        Value = (static_cast<float>((Seed >> 16) & 0x7FFF) / 32767.0f - 0.5f) * 0.008f;
+        if (Index < Format->nChannels)
+            Value = 0.004f;
+        if (Format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+        {
+            reinterpret_cast<float*>(Data)[Index] = Value;
+        }
+        else if (Width == 1)
+        {
+            Data[Index] = static_cast<BYTE>(128 + static_cast<int>(Value * 256.0f));
+        }
+        else if (Width == 2)
+        {
+            reinterpret_cast<SHORT*>(Data)[Index] = static_cast<SHORT>(Value * 32768.0f);
+        }
+        else if (Width == 3)
+        {
+            LONG Sample = static_cast<LONG>(Value * 8388608.0f);
+
+            Data[Index * 3] = static_cast<BYTE>(Sample);
+            Data[Index * 3 + 1] = static_cast<BYTE>(Sample >> 8);
+            Data[Index * 3 + 2] = static_cast<BYTE>(Sample >> 16);
+        }
+        else if (Width == 4)
+        {
+            reinterpret_cast<LONG*>(Data)[Index] = static_cast<LONG>(Value * 2147483648.0f);
+        }
+    }
+}
+
+/* Changes made from inside a pass land on a known pass in both runtimes */
+class XcSceneCallback final : public IXAudio2VoiceCallback
+{
+public:
+    IXAudio2SourceVoice* Voice = nullptr;
+    IXAudio2Voice* Destination = nullptr;
+    UINT Scene = 0;
+    UINT Pass = 0;
+
+    void
+    STDMETHODCALLTYPE
+    OnVoiceProcessingPassStart(
+        _In_ UINT32 BytesRequired) override
+    {
+        Pass += 1;
+        if (Pass != 3)
+            return;
+        switch (Scene)
+        {
+            case 1:
+                Voice->SetVolume(0.25f);
+                break;
+            case 2:
+            {
+                float Matrix[2] = { 0.3f, 1.2f };
+
+                Voice->SetOutputMatrix(Destination, 1, 2, Matrix);
+                break;
+            }
+            case 3:
+                Voice->SetFrequencyRatio(1.25f);
+                break;
+            case 4:
+            {
+                XAUDIO2_FILTER_PARAMETERS Filter = { HighPassFilter, 0.3f, 1.0f };
+
+                Voice->SetFilterParameters(&Filter);
+                break;
+            }
+            case 5:
+                Destination->SetVolume(0.5f);
+                break;
+        }
+    }
+
+    void STDMETHODCALLTYPE OnVoiceProcessingPassEnd() override {}
+    void STDMETHODCALLTYPE OnStreamEnd() override {}
+    void STDMETHODCALLTYPE OnBufferStart(void*) override {}
+    void STDMETHODCALLTYPE OnBufferEnd(void*) override {}
+    void STDMETHODCALLTYPE OnLoopEnd(void*) override {}
+    void STDMETHODCALLTYPE OnVoiceError(void*, HRESULT) override {}
+};
+
+/* Plays short quiet buffers and compares what reaches the endpoint, sample for sample */
+static
+VOID
+XcCheckMix(VOID)
+{
+    enum
+    {
+        XcRoutePlain,
+        XcRouteSubmix,
+        XcRouteSubmixSlow,
+        XcRouteMasterSlow,
+        XcRouteMasterWide,
+    };
+    static const struct
+    {
+        WORD Tag;
+        WORD Channels;
+        DWORD Rate;
+        WORD Bits;
+        UINT Route;
+        float Volume;
+        float Ratio;
+        INT Filter;
+        float Frequency;
+        float OneOverQ;
+        UINT Scene;
+    } Cases[] =
+    {
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 8, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 24, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 32, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 48000, 32, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 44100, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 22050, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 96000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 44100, 32, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.5f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 22050, 8, XcRoutePlain, 1.0f, 0.75f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 0.6f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 2 },
+        { WAVE_FORMAT_PCM, 1, 44100, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 3 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, LowPassFilter, 0.2f, 1.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, HighPassFilter, 0.1f, 1.4f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, BandPassFilter, 0.3f, 0.5f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, NotchFilter, 0.4f, 1.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, LowPassOnePoleFilter, 0.15f, 1.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, HighPassOnePoleFilter, 0.15f, 1.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRoutePlain, 1.0f, 1.0f, LowPassFilter, 1.0f, 1.0f, 4 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteSubmix, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRouteSubmix, 1.0f, 1.0f, -1, 0.0f, 0.0f, 5 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteSubmixSlow, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteMasterSlow, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 6, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteMasterWide, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_ADPCM, 1, 22050, 4, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+    };
+    static BYTE Data[48000 * 6 * 4];
+
+    for (UINT Case = 0; Case < ARRAYSIZE(Cases); Case++)
+    {
+        XcProbeApo& Recorder = *new XcProbeApo(XAPO_FLAG_INPLACE_SUPPORTED | XAPO_FLAG_INPLACE_REQUIRED | XAPO_FLAG_CHANNELS_MUST_MATCH |
+                                XAPO_FLAG_FRAMERATE_MUST_MATCH | XAPO_FLAG_BITSPERSAMPLE_MUST_MATCH |
+                                XAPO_FLAG_BUFFERCOUNT_MUST_MATCH, FALSE);
+        IXAudio2* Engine = nullptr;
+        IXAudio2MasteringVoice* Master = nullptr;
+        IXAudio2SubmixVoice* Submix = nullptr;
+        IXAudio2SourceVoice* Source = nullptr;
+        XcSceneCallback Scene;
+        BYTE FormatStorage[sizeof(ADPCMWAVEFORMAT) + 7 * sizeof(ADPCMCOEFSET)];
+        WAVEFORMATEX* Format = reinterpret_cast<WAVEFORMATEX*>(FormatStorage);
+        XAUDIO2_SEND_DESCRIPTOR Send = {};
+        XAUDIO2_VOICE_SENDS Sends = { 1, &Send };
+        XAUDIO2_BUFFER Buffer = {};
+        UINT32 Bytes;
+        UINT Channels;
+        SIZE_T Onset;
+        SIZE_T Frames;
+        HRESULT hr;
+
+        if (FAILED(XcCreate(&Engine, 0)))
+            return;
+        hr = Engine->CreateMasteringVoice(&Master, Cases[Case].Route == XcRouteMasterWide ? 0 : 2,
+                                          Cases[Case].Route == XcRouteMasterSlow ? 44100 : 48000);
+        if (FAILED(hr))
+        {
+            printf("mix[%u] master = %08lX\n", Case, hr);
+            Engine->Release();
+            continue;
+        }
+        {
+            XAUDIO2_VOICE_DETAILS Details;
+            XAUDIO2_EFFECT_DESCRIPTOR Effect = { static_cast<IXAPO*>(&Recorder), TRUE, 0 };
+            XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
+
+            Master->GetVoiceDetails(&Details);
+            Effect.OutputChannels = Details.InputChannels;
+            Recorder.RecordedCapacity = static_cast<SIZE_T>(Details.InputSampleRate) * Details.InputChannels * 6 / 10;
+            Recorder.Recorded = new (std::nothrow) float[Recorder.RecordedCapacity];
+            hr = Master->SetEffectChain(&Chain);
+            if (FAILED(hr) || Recorder.Recorded == nullptr)
+            {
+                printf("mix[%u] recorder = %08lX\n", Case, hr);
+                Engine->Release();
+                continue;
+            }
+            Channels = Details.InputChannels;
+        }
+        if (Cases[Case].Route == XcRouteSubmix || Cases[Case].Route == XcRouteSubmixSlow)
+        {
+            hr = Engine->CreateSubmixVoice(&Submix, 2, Cases[Case].Route == XcRouteSubmixSlow ? 32000 : 48000);
+            if (FAILED(hr))
+                printf("mix[%u] submix = %08lX\n", Case, hr);
+        }
+
+        memset(FormatStorage, 0, sizeof(FormatStorage));
+        if (Cases[Case].Tag == WAVE_FORMAT_ADPCM)
+        {
+            ADPCMWAVEFORMAT* Adpcm = reinterpret_cast<ADPCMWAVEFORMAT*>(FormatStorage);
+            static const SHORT Coef1[7] = { 256, 512, 0, 192, 240, 460, 392 };
+            static const SHORT Coef2[7] = { 0, -256, 0, 64, 0, -208, -232 };
+            ULONG Seed = 777;
+
+            Adpcm->wfx.wFormatTag = WAVE_FORMAT_ADPCM;
+            Adpcm->wfx.nChannels = 1;
+            Adpcm->wfx.nSamplesPerSec = Cases[Case].Rate;
+            Adpcm->wfx.wBitsPerSample = 4;
+            Adpcm->wSamplesPerBlock = 128;
+            Adpcm->wfx.nBlockAlign = 7 + 63;
+            Adpcm->wfx.nAvgBytesPerSec = Cases[Case].Rate / 128 * 70;
+            Adpcm->wfx.cbSize = 32;
+            Adpcm->wNumCoef = 7;
+            for (UINT Coef = 0; Coef < 7; Coef++)
+            {
+                Adpcm->aCoef[Coef].iCoef1 = Coef1[Coef];
+                Adpcm->aCoef[Coef].iCoef2 = Coef2[Coef];
+            }
+
+            /* Blocks with small deltas and pseudo random nibbles stay quiet */
+            Bytes = Cases[Case].Rate / 4 / 128 * 70;
+            for (UINT32 Block = 0; Block < Bytes / 70; Block++)
+            {
+                BYTE* Header = Data + Block * 70;
+
+                static const BYTE Steps[3] = { 0x0, 0x1, 0xF };
+
+                Header[0] = static_cast<BYTE>(Block % 2 == 0 ? 0 : 4);
+                Header[1] = 16;
+                Header[2] = 0;
+                Header[3] = 40;
+                Header[4] = 0;
+                Header[5] = 20;
+                Header[6] = 0;
+                for (UINT32 Byte = 7; Byte < 70; Byte++)
+                {
+                    Seed = Seed * 1103515245 + 12345;
+                    Header[Byte] = static_cast<BYTE>((Steps[(Seed >> 16) % 3] << 4) | Steps[(Seed >> 20) % 3]);
+                }
+            }
+        }
+        else
+        {
+            XcPcm(Format, Cases[Case].Tag, Cases[Case].Channels, Cases[Case].Rate, Cases[Case].Bits);
+            Bytes = Format->nAvgBytesPerSec / 4 / Format->nBlockAlign * Format->nBlockAlign;
+            XcFillNoise(Data, Bytes, Format);
+        }
+
+        Send.pOutputVoice = Submix != nullptr ? static_cast<IXAudio2Voice*>(Submix) : Master;
+        Send.Flags = 0;
+        hr = Engine->CreateSourceVoice(&Source, Format, Cases[Case].Filter >= 0 ? XAUDIO2_VOICE_USEFILTER : 0, 2.0f, &Scene,
+                                       &Sends);
+        if (FAILED(hr))
+        {
+            printf("mix[%u] source = %08lX\n", Case, hr);
+            Engine->Release();
+            continue;
+        }
+        Scene.Voice = Source;
+        Scene.Destination = Send.pOutputVoice;
+        Scene.Scene = Cases[Case].Scene;
+        Source->SetVolume(Cases[Case].Volume);
+        if (Cases[Case].Ratio != 1.0f)
+            Source->SetFrequencyRatio(Cases[Case].Ratio);
+        if (Cases[Case].Filter >= 0)
+        {
+            XAUDIO2_FILTER_PARAMETERS Filter = { static_cast<XAUDIO2_FILTER_TYPE>(Cases[Case].Filter), Cases[Case].Frequency,
+                                                 Cases[Case].OneOverQ };
+
+            Source->SetFilterParameters(&Filter);
+        }
+        Buffer.AudioBytes = Bytes;
+        Buffer.pAudioData = Data;
+        Buffer.Flags = XAUDIO2_END_OF_STREAM;
+        Source->SubmitSourceBuffer(&Buffer);
+
+        /* The recorder on the mastering voice hears the mix before the endpoint does */
+        Sleep(50);
+        Recorder.Recording = TRUE;
+        Source->Start();
+        Sleep(400);
+        Recorder.Recording = FALSE;
+        {
+            float Peak = 0.0f;
+
+            for (SIZE_T Index = 0; Index < Recorder.RecordedCount; Index++)
+                Peak = fabsf(Recorder.Recorded[Index]) > Peak ? fabsf(Recorder.Recorded[Index]) : Peak;
+            fprintf(stderr, "mix[%u] peak %g\n", Case, Peak);
+        }
+        Source->DestroyVoice();
+        if (Submix != nullptr)
+            Submix->DestroyVoice();
+        Engine->Release();
+
+        for (Onset = 0; Onset < Recorder.RecordedCount; Onset++)
+        {
+            if (fabsf(Recorder.Recorded[Onset]) > 1e-4f)
+                break;
+        }
+        Onset -= Onset % Channels;
+        Frames = (Recorder.RecordedCount - Onset) / Channels;
+        printf("mix[%u] format %u/%u/%lu/%u route %u volume %08lX ratio %08lX filter %d scene %u\n", Case, Cases[Case].Tag,
+               Cases[Case].Channels, Cases[Case].Rate, Cases[Case].Bits, Cases[Case].Route, XcBits(Cases[Case].Volume),
+               XcBits(Cases[Case].Ratio), Cases[Case].Filter, Cases[Case].Scene);
+        if (Onset >= Recorder.RecordedCount)
+        {
+            printf("  silent\n");
+            continue;
+        }
+        {
+            const float* Start = &Recorder.Recorded[Onset];
+            SIZE_T Count = Frames < 12000 ? Frames : 12000;
+            double Sum[8] = {};
+            double Power[8] = {};
+
+            for (SIZE_T Frame = 0; Frame < Count; Frame++)
+            {
+                for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
+                {
+                    Sum[Channel] += Start[Frame * Channels + Channel];
+                    Power[Channel] += static_cast<double>(Start[Frame * Channels + Channel]) * Start[Frame * Channels + Channel];
+                }
+            }
+            for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
+                printf("  channel %u sum %.9g power %.9g\n", Channel, Sum[Channel], Power[Channel]);
+            for (SIZE_T Frame = 0; Frame < 1200 && Frame < Frames; Frame++)
+            {
+                if (Frame >= 40 && !(Frame >= 940 && Frame < 1000) && Frame < 1160)
+                    continue;
+                printf("  frame %4zu", Frame);
+                for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
+                    printf(" %08lX", XcBits(Start[Frame * Channels + Channel]));
+                printf("\n");
+            }
+        }
+    }
+}
+
 /* XAudio2 2.8 forwards everything to 2.9 */
 static
 VOID
@@ -2239,6 +3133,12 @@ wmain(
         XcCheckQueue();
     if (XcWant(L"legacy"))
         XcCheckLegacy(Runtime);
+    if (XcWant(L"effects"))
+        XcCheckEffects();
+
+    /* Audible, so only on request */
+    if (XcSection != nullptr && _wcsicmp(XcSection, L"mix") == 0)
+        XcCheckMix();
 
     FreeLibrary(XcModule);
     CoUninitialize();
