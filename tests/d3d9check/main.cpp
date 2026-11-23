@@ -2292,6 +2292,198 @@ NcCheckTextures(
     Plain->Release();
 }
 
+/* Private data on one resource: flags, sizes, replacing, interface pointers and freeing */
+static
+VOID
+NcCheckPrivateData(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DResource9* Resource,
+    _In_ IUnknown* Object)
+{
+    static const GUID First = { 0x1A2B3C4D, 0x1111, 0x2222, { 1, 2, 3, 4, 5, 6, 7, 8 } };
+    static const GUID Second = { 0x1A2B3C4D, 0x1111, 0x2222, { 8, 7, 6, 5, 4, 3, 2, 1 } };
+    BYTE Bytes[12] = { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0 };
+    BYTE Read[16] = {};
+    IUnknown* Back = nullptr;
+    DWORD Size = 16;
+    ULONG Count;
+    HRESULT hr;
+
+    printf("%s_private_get_none = %08lX\n", Name, Resource->GetPrivateData(First, Read, &Size));
+    printf("%s_private_free_none = %08lX\n", Name, Resource->FreePrivateData(First));
+    printf("%s_private_bad_flags = %08lX\n", Name, Resource->SetPrivateData(First, Bytes, 4, 2));
+    printf("%s_private_unknown_size = %08lX\n", Name, Resource->SetPrivateData(First, Object, 4, D3DSPD_IUNKNOWN));
+    printf("%s_private_set = %08lX\n", Name, Resource->SetPrivateData(First, Bytes, sizeof(Bytes), 0));
+    Size = 4;
+    hr = Resource->GetPrivateData(First, Read, &Size);
+    printf("%s_private_get_small = %08lX size %lu byte %02X\n", Name, hr, Size, Read[0]);
+    Size = 0;
+    hr = Resource->GetPrivateData(First, nullptr, &Size);
+    printf("%s_private_get_size = %08lX size %lu\n", Name, hr, Size);
+    Size = 16;
+    hr = Resource->GetPrivateData(First, Read, &Size);
+    printf("%s_private_get = %08lX size %lu bytes %02X %02X %02X\n", Name, hr, Size, Read[0], Read[11], Read[12]);
+    printf("%s_private_replace = %08lX\n", Name, Resource->SetPrivateData(First, Bytes + 4, 2, 0));
+    Size = 16;
+    hr = Resource->GetPrivateData(First, Read, &Size);
+    printf("%s_private_get_again = %08lX size %lu byte %02X %02X\n", Name, hr, Size, Read[0], Read[2]);
+    printf("%s_private_zero = %08lX\n", Name, Resource->SetPrivateData(Second, Bytes, 0, 0));
+    Size = 16;
+    hr = Resource->GetPrivateData(Second, Read, &Size);
+    printf("%s_private_get_zero = %08lX size %lu\n", Name, hr, Size);
+
+    Object->AddRef();
+    Count = Object->Release();
+    hr = Resource->SetPrivateData(Second, Object, sizeof(IUnknown*), D3DSPD_IUNKNOWN);
+    printf("%s_private_unknown = %08lX refs %lu", Name, hr, Count);
+    Object->AddRef();
+    printf(" %lu", Object->Release());
+    Size = sizeof(Back);
+    hr = Resource->GetPrivateData(Second, &Back, &Size);
+    printf(" get %08lX size %lu same %d", hr, Size, Back == Object);
+    if (Back != nullptr)
+        Back->Release();
+    printf(" free %08lX", Resource->FreePrivateData(Second));
+    Object->AddRef();
+    printf(" refs %lu\n", Object->Release());
+    hr = Resource->FreePrivateData(First);
+    printf("%s_private_free = %08lX %08lX\n", Name, hr, Resource->FreePrivateData(First));
+    printf("%s_priority = %lu", Name, Resource->SetPriority(4));
+    printf(" %lu", Resource->SetPriority(6));
+    printf(" %lu type %u\n", Resource->GetPriority(), Resource->GetType());
+    Resource->PreLoad();
+}
+
+/* Private data and priority across every kind of resource */
+static
+VOID
+NcCheckResourcesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DTexture9* Other = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DSurface9* Level = nullptr;
+    IDirect3DVolume9* Slice = nullptr;
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    char Name[96];
+
+    Device->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Other, nullptr);
+    if (Other == nullptr)
+        return;
+    for (D3DPOOL Pool : { D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH })
+    {
+        Texture = nullptr;
+        if (SUCCEEDED(Device->CreateTexture(8, 8, 2, 0, D3DFMT_A8R8G8B8, Pool, &Texture, nullptr)))
+        {
+            sprintf_s(Name, "%s_texture[%u]", Prefix, Pool);
+            NcCheckPrivateData(Name, Texture, Other);
+            if (SUCCEEDED(Texture->GetSurfaceLevel(1, &Level)))
+            {
+                sprintf_s(Name, "%s_texture_level[%u]", Prefix, Pool);
+                NcCheckPrivateData(Name, Level, Other);
+                Level->Release();
+            }
+            Texture->Release();
+        }
+        Surface = nullptr;
+        if (SUCCEEDED(Device->CreateOffscreenPlainSurface(8, 8, D3DFMT_A8R8G8B8, Pool, &Surface, nullptr)))
+        {
+            sprintf_s(Name, "%s_surface[%u]", Prefix, Pool);
+            NcCheckPrivateData(Name, Surface, Other);
+            Surface->Release();
+        }
+        Vertices = nullptr;
+        if (SUCCEEDED(Device->CreateVertexBuffer(64, 0, 0, Pool, &Vertices, nullptr)))
+        {
+            sprintf_s(Name, "%s_vertices[%u]", Prefix, Pool);
+            NcCheckPrivateData(Name, Vertices, Other);
+            Vertices->Release();
+        }
+        Indices = nullptr;
+        if (SUCCEEDED(Device->CreateIndexBuffer(64, 0, D3DFMT_INDEX16, Pool, &Indices, nullptr)))
+        {
+            sprintf_s(Name, "%s_indices[%u]", Prefix, Pool);
+            NcCheckPrivateData(Name, Indices, Other);
+            Indices->Release();
+        }
+        Volume = nullptr;
+        if (SUCCEEDED(Device->CreateVolumeTexture(4, 4, 2, 1, 0, D3DFMT_A8R8G8B8, Pool, &Volume, nullptr)))
+        {
+            sprintf_s(Name, "%s_volume[%u]", Prefix, Pool);
+            NcCheckPrivateData(Name, Volume, Other);
+            if (SUCCEEDED(Volume->GetVolumeLevel(0, &Slice)))
+            {
+                static const GUID Tag = { 0x5E5E5E5E, 0x3333, 0x4444, { 9, 9, 9, 9, 9, 9, 9, 9 } };
+                DWORD Value = 0x1234;
+                DWORD Size = sizeof(Value);
+
+                HRESULT hr;
+
+                printf("%s_slice = %08lX", Name, Slice->SetPrivateData(Tag, &Value, sizeof(Value), 0));
+                Value = 0;
+                hr = Slice->GetPrivateData(Tag, &Value, &Size);
+                printf(" %08lX %08lX", hr, Value);
+                hr = Slice->FreePrivateData(Tag);
+                printf(" %08lX %08lX\n", hr, Slice->FreePrivateData(Tag));
+                Slice->Release();
+            }
+            Volume->Release();
+        }
+    }
+    if (SUCCEEDED(Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Surface)))
+    {
+        sprintf_s(Name, "%s_backbuffer", Prefix);
+        NcCheckPrivateData(Name, Surface, Other);
+        Surface->Release();
+    }
+    if (SUCCEEDED(Device->CreateRenderTarget(8, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr)))
+    {
+        sprintf_s(Name, "%s_target", Prefix);
+        NcCheckPrivateData(Name, Surface, Other);
+        Surface->Release();
+    }
+    printf("%s_other_release = %lu\n", Prefix, Other->Release());
+}
+
+/* Resources on a windowed extended device and on a device of the plain object */
+static
+VOID
+NcCheckResources(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                   nullptr, &DeviceEx);
+    printf("resources_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckResourcesOn("resources_ex", DeviceEx);
+        printf("resources_ex_release = %lu\n", DeviceEx->Release());
+    }
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    printf("resources_create_plain = %08lX\n", hr);
+    if (Device != nullptr)
+    {
+        NcCheckResourcesOn("resources_plain", Device);
+        printf("resources_plain_release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* Makes one resource of a kind the reset checks hold across a reset */
 static
 IUnknown*
@@ -2450,6 +2642,7 @@ static const NineCheckInfo NcChecks[] =
     { "buffers", NcCheckBuffers },
     { "textures", NcCheckTextures },
     { "reset", NcCheckReset },
+    { "resources", NcCheckResources },
 };
 
 static
