@@ -1243,6 +1243,10 @@ private:
 
 #define D9_DEVICE_LOCK() D9DeviceLock Scope(&Lock, (BehaviorFlags & D3DCREATE_MULTITHREADED) != 0)
 
+BOOLEAN
+D9IsRetiredState(
+    _In_ DWORD State);
+
 /* The IDirect3DDevice9Ex object CreateDevice and CreateDeviceEx hand out */
 class D9Device final : public IDirect3DDevice9Ex, public RxKernelDevice
 {
@@ -2271,6 +2275,14 @@ private:
     SendClipPlanes(
         _In_ BOOLEAN Twice);
 
+    BOOLEAN
+    KeepsNoState(VOID) const;
+
+    VOID
+    SendStateValue(
+        _In_ UINT State,
+        _In_ DWORD Value);
+
     VOID
     SendInitialState(VOID);
 
@@ -2500,6 +2512,9 @@ private:
     D9Surface* DepthStencil = nullptr;
     D9Surface* AutoDepthStencil = nullptr;
     DWORD RenderStates[D9RenderStateCount];
+
+    /* Vertices go through the runtime's software pipeline; a mixed device switches this */
+    BOOLEAN SoftwareVertices;
     INT GpuPriority = 0;
     UINT FrameLatency = 3;
 

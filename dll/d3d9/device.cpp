@@ -63,14 +63,16 @@ static const struct
     { D3DRS_DESTBLENDALPHA, D3DBLEND_ZERO }, { D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD },
 };
 
-/* Retired render states the runtime still hands the driver once, with the values it gives them */
+/* Retired render states the runtime still hands the driver once, with the values it gives them and
+   whether its own copy of the state starts out holding that value */
 static const struct
 {
     BYTE State;
     DWORD Value;
+    BOOLEAN Kept;
 } D9RetiredInitialValues[] =
 {
-    { 10, 0 }, { 30, 0 }, { 164, 0 }, { 196, 0xFFFFFFFF }, { 197, 0xFFFFFFFF },
+    { 10, 0, TRUE }, { 30, 0, TRUE }, { 164, 0, FALSE }, { 196, 0xFFFFFFFF, TRUE }, { 197, 0xFFFFFFFF, TRUE },
 };
 
 /* The order a new device first hands its render states to the driver: pixel states before the
@@ -158,7 +160,6 @@ D9HasStencil(
            Format == D3DFMT_D24FS8 || Format == D3DFMT_S8_LOCKABLE;
 }
 
-static
 BOOLEAN
 D9IsRetiredState(
     _In_ DWORD State)
@@ -185,7 +186,8 @@ D9Device::D9Device(
       FocusWindow(FocusWindow),
       BehaviorFlags(BehaviorFlags),
       IsEx(IsEx),
-      SwapEffectUpgrade(SwapEffectUpgrade)
+      SwapEffectUpgrade(SwapEffectUpgrade),
+      SoftwareVertices((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0)
 {
     InitializeCriticalSection(&Lock);
     for (DWORD& Value : RenderStates)
@@ -356,6 +358,11 @@ D9Device::SetDefaultState(
         else if (Default.State == D3DRS_POINTSIZE_MAX)
             CopyMemory(&Value, &PointSizeMax, sizeof(Value));
         RenderStates[Default.State] = Value;
+    }
+    for (const auto& Retired : D9RetiredInitialValues)
+    {
+        if (Retired.Kept)
+            RenderStates[Retired.State] = Retired.Value;
     }
 }
 
@@ -891,48 +898,6 @@ D9Device::Clear(
     if (FAILED(hr))
         D9Trace(L"UMD Clear failed 0x%08lX", hr);
     return hr;
-}
-
-STDMETHODIMP
-D9Device::SetRenderState(
-    _In_ D3DRENDERSTATETYPE State,
-    _In_ DWORD Value)
-{
-    D9_DEVICE_LOCK();
-    D3DDDIARG_RENDERSTATE Args = {};
-
-    if (static_cast<DWORD>(State) >= D9RenderStateCount)
-    {
-        D9_TRACE_ONCE(L"SetRenderState: state %u is not valid", State);
-        return D3DERR_INVALIDCALL;
-    }
-
-    /* Retired states are accepted and dropped */
-    if (D9IsRetiredState(State))
-        return S_OK;
-
-    RenderStates[State] = Value;
-    Args.State = static_cast<D3DDDIRENDERSTATETYPE>(State);
-    Args.Value = Value;
-    DdiRenderState(&Args);
-    return S_OK;
-}
-
-STDMETHODIMP
-D9Device::GetRenderState(
-    _In_ D3DRENDERSTATETYPE State,
-    _Out_ DWORD* Value)
-{
-    D9_DEVICE_LOCK();
-
-    if ((BehaviorFlags & D3DCREATE_PUREDEVICE) != 0 || static_cast<DWORD>(State) >= D9RenderStateCount ||
-        D9IsRetiredState(State))
-    {
-        return D3DERR_INVALIDCALL;
-    }
-
-    *Value = RenderStates[State];
-    return S_OK;
 }
 
 STDMETHODIMP
