@@ -3854,12 +3854,207 @@ DcCheckLayoutLock(VOID)
     printf("release %lu\n", Sound->Release());
 }
 
+static PCWSTR DcRuntimeName = L"system";
+
+/* A child of the check: holds levels on a window of its own until told to quit */
+static
+int
+DcRunChild(
+    _In_z_ PCWSTR ReadyName,
+    _In_z_ PCWSTR QuitName)
+{
+    HANDLE Ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, ReadyName);
+    HANDLE Quit = OpenEventW(SYNCHRONIZE, FALSE, QuitName);
+    IDirectSound8* Sounds[2] = {};
+    HWND Window;
+    HRESULT hr = E_FAIL;
+
+    if (Ready == nullptr || Quit == nullptr)
+        return 2;
+    Window = CreateWindowExW(0, L"STATIC", L"dsoundcheck child", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, nullptr, nullptr);
+    if (Window != nullptr && SUCCEEDED(DcCreate8(&Sounds[0])) && SUCCEEDED(DcCreate8(&Sounds[1])))
+    {
+        hr = Sounds[0]->SetCooperativeLevel(Window, DSSCL_PRIORITY);
+        if (SUCCEEDED(hr))
+            hr = Sounds[1]->SetCooperativeLevel(Window, DSSCL_WRITEPRIMARY);
+    }
+    SetEvent(Ready);
+    WaitForSingleObject(Quit, 30000);
+    for (UINT Index = 0; Index < ARRAYSIZE(Sounds); Index++)
+    {
+        if (Sounds[Index] != nullptr)
+            Sounds[Index]->Release();
+    }
+    if (Window != nullptr)
+        DestroyWindow(Window);
+    CloseHandle(Ready);
+    CloseHandle(Quit);
+    return static_cast<int>(hr);
+}
+
+struct DC_CHILD
+{
+    PROCESS_INFORMATION Process;
+    HANDLE Quit;
+};
+
+/* Starts this check again as a child holding levels */
+static
+BOOLEAN
+DcStartChild(
+    _Out_ DC_CHILD* Child)
+{
+    static UINT Serial;
+    WCHAR Module[MAX_PATH];
+    WCHAR ReadyName[64];
+    WCHAR QuitName[64];
+    std::wstring Command;
+    STARTUPINFOW Startup = {};
+    HANDLE Ready;
+    BOOLEAN Started;
+
+    ZeroMemory(Child, sizeof(*Child));
+    Serial += 1;
+    swprintf_s(ReadyName, L"dsoundcheck ready %lu %u", GetCurrentProcessId(), Serial);
+    swprintf_s(QuitName, L"dsoundcheck quit %lu %u", GetCurrentProcessId(), Serial);
+    Ready = CreateEventW(nullptr, TRUE, FALSE, ReadyName);
+    Child->Quit = CreateEventW(nullptr, TRUE, FALSE, QuitName);
+    GetModuleFileNameW(nullptr, Module, _countof(Module));
+    Command = std::wstring(L"\"") + Module + L"\" -runtime \"" + DcRuntimeName + L"\" -child \"" + ReadyName + L"\" \"" + QuitName + L"\"";
+    Startup.cb = sizeof(Startup);
+    Started = CreateProcessW(Module, &Command[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &Startup, &Child->Process) &&
+              WaitForSingleObject(Ready, 10000) == WAIT_OBJECT_0;
+    CloseHandle(Ready);
+    return Started;
+}
+
+static
+VOID
+DcStopChild(
+    _Inout_ DC_CHILD* Child)
+{
+    if (Child->Quit != nullptr)
+        SetEvent(Child->Quit);
+    if (Child->Process.hProcess != nullptr)
+    {
+        DWORD Code = 0;
+
+        WaitForSingleObject(Child->Process.hProcess, 10000);
+        GetExitCodeProcess(Child->Process.hProcess, &Code);
+        printf("  child levels = %08lX\n", Code);
+        CloseHandle(Child->Process.hProcess);
+        CloseHandle(Child->Process.hThread);
+    }
+    if (Child->Quit != nullptr)
+        CloseHandle(Child->Quit);
+    ZeroMemory(Child, sizeof(*Child));
+}
+
+/* Prints the entries this process and its child have in the list every DirectSound process shares */
+static
+VOID
+DcShowShared(
+    _In_z_ PCSTR Name,
+    _In_ DWORD ChildProcess)
+{
+    HANDLE Mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"DirectSound Administrator shared thread array");
+    const DWORD* View;
+    DWORD Window = GetWindowThreadProcessId(DcWindow, nullptr);
+    DWORD Self = GetCurrentProcessId();
+    DWORD Bytes;
+
+    /* With no DirectSound object left anywhere the list is gone, which reads the same as an empty one */
+    printf("shared %s", Name);
+    if (Mapping == nullptr)
+    {
+        printf(" whole 1:\n");
+        return;
+    }
+    View = static_cast<const DWORD*>(MapViewOfFile(Mapping, FILE_MAP_READ, 0, 0, 0));
+    if (View == nullptr)
+    {
+        printf(" unmapped\n");
+        CloseHandle(Mapping);
+        return;
+    }
+    Bytes = View[0];
+    printf(" whole %d:", Bytes % 12 == 0 && Bytes <= 12 * 1024);
+    for (DWORD Entry = 0; Entry < Bytes / 12 && Entry < 1024; Entry++)
+    {
+        const DWORD* Item = &View[1 + Entry * 3];
+
+        if (Item[0] == Self)
+            printf(" self/%s/%lu", Item[1] == 0 ? "none" : Item[1] == Window ? "window" : "other", Item[2]);
+        else if (Item[0] == ChildProcess && ChildProcess != 0)
+            printf(" child/%s/%lu", Item[1] == 0 ? "none" : "thread", Item[2]);
+    }
+    printf("\n");
+    UnmapViewOfFile(View);
+    CloseHandle(Mapping);
+}
+
+/* Each DirectSound object of every process publishes the thread and level it holds, which focus reads across processes */
+static
+VOID
+DcCheckSharedLevels(VOID)
+{
+    PDC_GET_CLASS_OBJECT GetClassObject = reinterpret_cast<PDC_GET_CLASS_OBJECT>(GetProcAddress(DcModule, "DllGetClassObject"));
+    IDirectSound8* First = nullptr;
+    IDirectSound8* Second = nullptr;
+    IDirectSound8* Bare = nullptr;
+    DC_CHILD Child = {};
+    DWORD ChildProcess;
+
+    DcShowShared("start", 0);
+    if (FAILED(DcCreate8(&First)))
+        return;
+    DcShowShared("created", 0);
+    First->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+    DcShowShared("priority", 0);
+    First->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+    DcShowShared("same", 0);
+    if (SUCCEEDED(DcCreate8(&Second)))
+        Second->SetCooperativeLevel(DcWindow, DSSCL_WRITEPRIMARY);
+    DcShowShared("second", 0);
+    {
+        IClassFactory* Factory = nullptr;
+
+        if (SUCCEEDED(GetClassObject(CLSID_DirectSound8, IID_IClassFactory, reinterpret_cast<void**>(&Factory))))
+        {
+            Factory->CreateInstance(nullptr, IID_IDirectSound8, reinterpret_cast<void**>(&Bare));
+            Factory->Release();
+        }
+    }
+    DcShowShared("bare", 0);
+    if (Bare != nullptr)
+    {
+        printf("shared bare coop = %08lX\n", Bare->SetCooperativeLevel(DcWindow, DSSCL_NORMAL));
+        DcShowShared("bare coop", 0);
+    }
+    First->SetCooperativeLevel(DcWindow, DSSCL_NORMAL);
+    DcShowShared("normal", 0);
+
+    printf("shared child = %d\n", DcStartChild(&Child));
+    ChildProcess = Child.Process.dwProcessId;
+    DcShowShared("with child", ChildProcess);
+    if (Second != nullptr)
+        printf("shared release second %lu\n", Second->Release());
+    DcShowShared("second gone", ChildProcess);
+    DcStopChild(&Child);
+    DcShowShared("child gone", ChildProcess);
+    if (Bare != nullptr)
+        printf("shared release bare %lu\n", Bare->Release());
+    printf("shared release first %lu\n", First->Release());
+    DcShowShared("end", ChildProcess);
+}
+
 int
 wmain(
     _In_ int argc,
     _In_reads_(argc) wchar_t** argv)
 {
     PCWSTR Runtime = L"system";
+    PCWSTR Child[2] = {};
 
     for (int Index = 1; Index < argc; Index++)
     {
@@ -3869,6 +4064,25 @@ wmain(
             DcSection = argv[++Index];
         else if (_wcsicmp(argv[Index], L"-from") == 0 && Index + 1 < argc)
             DcFirstMixCase = static_cast<UINT>(_wtoi(argv[++Index]));
+        else if (_wcsicmp(argv[Index], L"-child") == 0 && Index + 2 < argc)
+        {
+            Child[0] = argv[++Index];
+            Child[1] = argv[++Index];
+        }
+    }
+    DcRuntimeName = Runtime;
+    if (Child[0] != nullptr)
+    {
+        int Result;
+
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        DcModule = LoadLibraryW(DcRuntimePath(Runtime).c_str());
+        if (DcModule == NULL)
+            return 1;
+        Result = DcRunChild(Child[0], Child[1]);
+        FreeLibrary(DcModule);
+        CoUninitialize();
+        return Result;
     }
 
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -3915,6 +4129,8 @@ wmain(
         DcCheckProperties();
     if (DcWant(L"config"))
         DcCheckBufferConfig();
+    if (DcWant(L"shared"))
+        DcCheckSharedLevels();
 
     /* Audible, so only on request */
     if (DcSection != nullptr && _wcsicmp(DcSection, L"mix") == 0)
@@ -3923,6 +4139,7 @@ wmain(
         DcCheckMixLayouts();
         DcCheckLayoutLock();
     }
+
 
     DestroyWindow(DcWindow);
     FreeLibrary(DcModule);
