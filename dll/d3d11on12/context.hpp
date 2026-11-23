@@ -77,7 +77,7 @@ public:
     ID3D12Device*
     GetDevice() const
     {
-        return Device;
+        return Device.Get();
     }
 
     O12DescriptorPool&
@@ -109,7 +109,7 @@ private:
     VOID
     PrimeList();
 
-    ID3D12Device* Device;
+    RxComPtr<ID3D12Device> Device;
     UINT NodeIndex;
     O12ContextArgs Args = {};
     D3D_FEATURE_LEVEL FeatureLevel;

@@ -41,7 +41,7 @@ O12Context::O12Context(
     _In_ UINT NodeIndex)
     : Device(Device),
       NodeIndex(NodeIndex),
-      FeatureLevel(O12QueryHardwareLevel(Device)),
+  FeatureLevel(O12QueryHardwareLevel(Device)),
       SrvPool(Device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, O12ViewPoolHeap, 1u << NodeIndex),
       UavPool(Device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, O12ViewPoolHeap, 1u << NodeIndex),
       RtvPool(Device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, O12TargetPoolHeap, 1u << NodeIndex),
