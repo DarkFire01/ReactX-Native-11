@@ -978,6 +978,12 @@ TrDeviceOutputs(
 {
     VOID* Args = reinterpret_cast<VOID*>(A[1]);
 
+    /* These return nothing, so there is no result to print */
+    if (Slot == TR_DEVICE_SLOT(pfnAcquireResource) || Slot == TR_DEVICE_SLOT(pfnReleaseResource))
+    {
+        Text->append("void");
+        return;
+    }
     TrAppend(Text, "%08lX", Result);
     switch (Slot)
     {
@@ -3887,6 +3893,103 @@ TrScenarioPresentFlipEx(
             TrRelease(DeviceEx);
         }
     }
+    DestroyWindow(Window);
+}
+
+/* FlipEx presents with each present flag, dirty regions, a window override, a shorter present limit, an immediate
+   interval and a lockable chain the compositor cannot take directly */
+static
+VOID
+TrScenarioPresentFlipExFlags(
+    _In_ TrContext* Context)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Interval;
+        DWORD Flags;
+    } Chains[] =
+    {
+        { "flipex flags default interval", D3DPRESENT_INTERVAL_DEFAULT, 0 },
+        { "flipex flags immediate interval", D3DPRESENT_INTERVAL_IMMEDIATE, 0 },
+        { "flipex flags lockable", D3DPRESENT_INTERVAL_DEFAULT, D3DPRESENTFLAG_LOCKABLE_BACKBUFFER },
+    };
+    static const DWORD PresentFlags[] = { 0, D3DPRESENT_DONOTWAIT, D3DPRESENT_DONOTFLIP, D3DPRESENT_FORCEIMMEDIATE,
+                                          D3DPRESENT_LINEAR_CONTENT, 0 };
+    struct
+    {
+        RGNDATAHEADER Header;
+        RECT Rects[2];
+    } Region = {};
+    HWND Window = TrCreateWindow();
+    HWND Other = TrCreateWindow();
+    char Name[64];
+
+    Region.Header.dwSize = sizeof(Region.Header);
+    Region.Header.iType = RDH_RECTANGLES;
+    Region.Header.nCount = 2;
+    Region.Header.nRgnSize = sizeof(Region.Rects);
+    SetRect(&Region.Header.rcBound, 0, 0, 64, 32);
+    SetRect(&Region.Rects[0], 0, 0, 16, 16);
+    SetRect(&Region.Rects[1], 32, 8, 64, 32);
+    for (const auto& Chain : Chains)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DSwapChain9* Swap = nullptr;
+        IDirect3DSwapChain9Ex* SwapEx = nullptr;
+        D3DPRESENTSTATS Stats = {};
+        UINT Count = 0;
+
+        TrPhase(Chain.Name);
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_FLIPEX;
+        Parameters.BackBufferCount = 3;
+        Parameters.PresentationInterval = Chain.Interval;
+        Parameters.Flags = Chain.Flags;
+        Parameters.hDeviceWindow = Window;
+        TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window,
+                                                            D3DCREATE_HARDWARE_VERTEXPROCESSING |
+                                                            D3DCREATE_ENABLE_PRESENTSTATS, &Parameters, nullptr,
+                                                            &DeviceEx));
+        if (DeviceEx == nullptr)
+            continue;
+        DeviceEx->GetSwapChain(0, &Swap);
+        if (Swap != nullptr)
+        {
+            Swap->QueryInterface(__uuidof(IDirect3DSwapChain9Ex), reinterpret_cast<VOID**>(&SwapEx));
+            Swap->Release();
+        }
+        for (DWORD Flags : PresentFlags)
+        {
+            TrApi("Clear", DeviceEx->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF204060, 1.0f, 0));
+            sprintf_s(Name, "PresentEx %08lX", Flags);
+            TrApi(Name, DeviceEx->PresentEx(nullptr, nullptr, nullptr, nullptr, Flags));
+        }
+        TrApi("PresentEx region", DeviceEx->PresentEx(nullptr, nullptr, nullptr,
+                                                       reinterpret_cast<const RGNDATA*>(&Region), 0));
+        Region.Rects[0].right = 80;
+        TrApi("PresentEx region outside", DeviceEx->PresentEx(nullptr, nullptr, nullptr,
+                                                               reinterpret_cast<const RGNDATA*>(&Region), 0));
+        Region.Rects[0].right = 16;
+        TrApi("PresentEx window override", DeviceEx->PresentEx(nullptr, nullptr, Other, nullptr, 0));
+        TrApi("SetMaximumFrameLatency 1", DeviceEx->SetMaximumFrameLatency(1));
+        TrApi("PresentEx latency 1", DeviceEx->PresentEx(nullptr, nullptr, nullptr, nullptr, 0));
+        TrApi("SetMaximumFrameLatency 5", DeviceEx->SetMaximumFrameLatency(5));
+        TrApi("PresentEx latency 5", DeviceEx->PresentEx(nullptr, nullptr, nullptr, nullptr, 0));
+        if (SwapEx != nullptr)
+        {
+            TrApi("swap chain PresentEx", SwapEx->Present(nullptr, nullptr, nullptr, nullptr, 0));
+            TrApi("GetLastPresentCount", SwapEx->GetLastPresentCount(&Count));
+            TrCloseLine();
+            printf("last present count %u\n", Count);
+            TrApi("GetPresentStats", SwapEx->GetPresentStats(&Stats));
+            TrApi("GetPresentStats again", SwapEx->GetPresentStats(&Stats));
+        }
+        TrRelease(SwapEx);
+        TrRelease(DeviceEx);
+    }
+    DestroyWindow(Other);
     DestroyWindow(Window);
 }
 
@@ -7450,6 +7553,7 @@ static const TrScenario TrScenarios[] =
     { "cursor", TrScenarioCursor },
     { "presentstats", TrScenarioPresentStats },
     { "present_flipex", TrScenarioPresentFlipEx },
+    { "present_flipex_flags", TrScenarioPresentFlipExFlags },
     { "states", TrScenarioStates },
     { "states_plain", TrScenarioStatesPlain },
     { "states_software", TrScenarioStatesSoftware },
