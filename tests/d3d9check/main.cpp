@@ -5178,6 +5178,340 @@ NcCheckConstants(
     Plain->Release();
 }
 
+/* Prints every pixel of a target, read through a system memory copy or by locking it */
+static
+VOID
+NcPrintPixels(
+    _In_z_ PCSTR Prefix,
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Target,
+    _In_ BOOLEAN Lock)
+{
+    IDirect3DSurface9* Copy = nullptr;
+    IDirect3DSurface9* Read = Target;
+    D3DSURFACE_DESC Desc;
+    D3DLOCKED_RECT Locked = {};
+    HRESULT hr = S_OK;
+
+    Target->GetDesc(&Desc);
+    if (!Lock)
+    {
+        hr = Device->CreateOffscreenPlainSurface(Desc.Width, Desc.Height, Desc.Format, D3DPOOL_SYSTEMMEM, &Copy,
+                                                 nullptr);
+        if (SUCCEEDED(hr))
+            hr = Device->GetRenderTargetData(Target, Copy);
+        Read = Copy;
+    }
+    if (SUCCEEDED(hr))
+        hr = Read->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    printf("%s_%s_read = %08lX\n", Prefix, Name, hr);
+    if (SUCCEEDED(hr))
+    {
+        for (UINT Row = 0; Row < Desc.Height; Row++)
+        {
+            const DWORD* Pixels = reinterpret_cast<const DWORD*>(static_cast<BYTE*>(Locked.pBits) + Row * Locked.Pitch);
+
+            printf("%s_%s[%u] =", Prefix, Name, Row);
+            for (UINT Column = 0; Column < Desc.Width; Column++)
+                printf(" %06lX", Pixels[Column] & 0xFFFFFF);
+            printf("\n");
+        }
+        Read->UnlockRect();
+    }
+    if (Copy != nullptr)
+        Copy->Release();
+}
+
+/* Shaders, vertices and indices the draw checks draw with */
+static const DWORD NcDrawVertexCode[] = { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x0000001F, 0x80000005,
+                                          0x900F0001, 0x00000001, 0xC00F0000, 0x90E40000, 0x00000001, 0xE00F0000,
+                                          0x90E40001, 0x0000FFFF };
+static const DWORD NcDrawColorCode[] = { 0xFFFF0200, 0x02000001, 0x800F0800, 0xA0E40000, 0x0000FFFF };
+static const DWORD NcDrawSampleCode[] = { 0xFFFF0200, 0x0200001F, 0x80000000, 0xB0030000, 0x0200001F, 0x90000000,
+                                          0xA00F0800, 0x03000042, 0x800F0000, 0xB0E40000, 0xA0E40800, 0x02000001,
+                                          0x800F0800, 0x80E40000, 0x0000FFFF };
+static const D3DVERTEXELEMENT9 NcDrawElements[] = { { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITION, 0 },
+                                                    { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                                                    D3DDECL_END() };
+static const FLOAT NcDrawQuad[] = { -1.0f, -1.0f, 0.5f, 1.0f, 0.0f, 1.0f, -1.0f, 1.0f, 0.5f, 1.0f, 0.0f, 0.0f,
+                                    1.0f, -1.0f, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 1.0f, 1.0f, 0.0f,
+                                    -1.0f, -1.0f, 0.5f, 1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.0f,
+                                    0.0f, -1.0f, 0.5f, 1.0f, 1.0f, 1.0f };
+static const WORD NcDrawIndices16[] = { 0, 1, 2, 2, 1, 3, 4, 5, 6 };
+static const DWORD NcDrawIndices32[] = { 0, 1, 2, 2, 1, 3, 4, 5, 6 };
+
+/* The objects one device's draw checks make */
+struct NcDrawObjects
+{
+    IDirect3DVertexShader9* Vertex;
+    IDirect3DPixelShader9* Color;
+    IDirect3DPixelShader9* Sample;
+    IDirect3DVertexDeclaration9* Declaration;
+    IDirect3DVertexBuffer9* Buffer;
+    IDirect3DIndexBuffer9* Index16;
+    IDirect3DIndexBuffer9* Index32;
+    IDirect3DTexture9* Texture;
+    IDirect3DSurface9* Target;
+    IDirect3DSurface9* Lockable;
+    IDirect3DSurface9* Original;
+};
+
+static
+BOOLEAN
+NcMakeDrawObjects(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ BOOLEAN Managed,
+    _Out_ NcDrawObjects* Made)
+{
+    static const DWORD Texels[] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00 };
+    D3DPOOL Pool = Managed ? D3DPOOL_MANAGED : D3DPOOL_DEFAULT;
+    DWORD Usage = Managed ? 0 : D3DUSAGE_DYNAMIC;
+    D3DLOCKED_RECT Locked = {};
+    VOID* Data;
+
+    ZeroMemory(Made, sizeof(*Made));
+    printf("%s_vs = %08lX\n", Prefix, Device->CreateVertexShader(NcDrawVertexCode, &Made->Vertex));
+    printf("%s_ps = %08lX\n", Prefix, Device->CreatePixelShader(NcDrawColorCode, &Made->Color));
+    printf("%s_ps_sample = %08lX\n", Prefix, Device->CreatePixelShader(NcDrawSampleCode, &Made->Sample));
+    printf("%s_decl = %08lX\n", Prefix, Device->CreateVertexDeclaration(NcDrawElements, &Made->Declaration));
+    printf("%s_vb = %08lX\n", Prefix, Device->CreateVertexBuffer(sizeof(NcDrawQuad), Usage, 0, Pool, &Made->Buffer,
+                                                                 nullptr));
+    printf("%s_ib16 = %08lX\n", Prefix, Device->CreateIndexBuffer(sizeof(NcDrawIndices16), Usage, D3DFMT_INDEX16,
+                                                                  Pool, &Made->Index16, nullptr));
+    printf("%s_ib32 = %08lX\n", Prefix, Device->CreateIndexBuffer(sizeof(NcDrawIndices32), Usage, D3DFMT_INDEX32,
+                                                                  Pool, &Made->Index32, nullptr));
+    printf("%s_texture = %08lX\n", Prefix, Device->CreateTexture(2, 2, 1, Usage, D3DFMT_A8R8G8B8, Pool,
+                                                                 &Made->Texture, nullptr));
+    printf("%s_target = %08lX\n", Prefix, Device->CreateRenderTarget(8, 4, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                     FALSE, &Made->Target, nullptr));
+    printf("%s_lockable = %08lX\n", Prefix, Device->CreateRenderTarget(8, 4, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE,
+                                                                       0, TRUE, &Made->Lockable, nullptr));
+    printf("%s_original = %08lX\n", Prefix, Device->GetRenderTarget(0, &Made->Original));
+    if (Made->Vertex == nullptr || Made->Color == nullptr || Made->Sample == nullptr ||
+        Made->Declaration == nullptr || Made->Buffer == nullptr || Made->Index16 == nullptr ||
+        Made->Index32 == nullptr || Made->Texture == nullptr || Made->Target == nullptr ||
+        Made->Lockable == nullptr || Made->Original == nullptr)
+    {
+        return FALSE;
+    }
+    if (SUCCEEDED(Made->Buffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, NcDrawQuad, sizeof(NcDrawQuad));
+        Made->Buffer->Unlock();
+    }
+    if (SUCCEEDED(Made->Index16->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, NcDrawIndices16, sizeof(NcDrawIndices16));
+        Made->Index16->Unlock();
+    }
+    if (SUCCEEDED(Made->Index32->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, NcDrawIndices32, sizeof(NcDrawIndices32));
+        Made->Index32->Unlock();
+    }
+    if (SUCCEEDED(Made->Texture->LockRect(0, &Locked, nullptr, 0)))
+    {
+        CopyMemory(Locked.pBits, Texels, 8);
+        CopyMemory(static_cast<BYTE*>(Locked.pBits) + Locked.Pitch, Texels + 2, 8);
+        Made->Texture->UnlockRect(0);
+    }
+    return TRUE;
+}
+
+static
+VOID
+NcReleaseDrawObjects(
+    _In_ IDirect3DDevice9* Device,
+    _Inout_ NcDrawObjects* Made)
+{
+    IUnknown* Objects[] = { Made->Vertex, Made->Color, Made->Sample, Made->Declaration, Made->Buffer,
+                            Made->Index16, Made->Index32, Made->Texture, Made->Target, Made->Lockable,
+                            Made->Original };
+
+    if (Made->Original != nullptr)
+        Device->SetRenderTarget(0, Made->Original);
+    Device->SetTexture(0, nullptr);
+    Device->SetStreamSource(0, nullptr, 0, 0);
+    Device->SetIndices(nullptr);
+    Device->SetVertexShader(nullptr);
+    Device->SetPixelShader(nullptr);
+    Device->SetVertexDeclaration(nullptr);
+    for (IUnknown* Object : Objects)
+    {
+        if (Object != nullptr)
+            Object->Release();
+    }
+}
+
+/* Draws through application shaders: the checks before the first draw, buffers, application memory, managed
+   resources, textures and what stream 0 and the index binding hold afterwards */
+static
+VOID
+NcCheckDrawsOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ BOOLEAN Managed)
+{
+    static const FLOAT Red[] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    static const FLOAT Green[] = { 0.0f, 1.0f, 0.0f, 1.0f };
+    static const FLOAT Blue[] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    NcDrawObjects Made;
+    IDirect3DVertexBuffer9* Stream = nullptr;
+    IDirect3DIndexBuffer9* Bound = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    VOID* Data;
+    UINT Offset;
+    UINT Stride;
+    HRESULT hr;
+
+    if (!NcMakeDrawObjects(Prefix, Device, Managed, &Made))
+    {
+        NcReleaseDrawObjects(Device, &Made);
+        return;
+    }
+
+    printf("%s_set_target_null = %08lX\n", Prefix, Device->SetRenderTarget(0, nullptr));
+    printf("%s_set_target_index = %08lX\n", Prefix, Device->SetRenderTarget(4, Made.Target));
+    printf("%s_set_target = %08lX\n", Prefix, Device->SetRenderTarget(0, Made.Target));
+    printf("%s_set_target_twice = %08lX\n", Prefix, Device->SetRenderTarget(1, Made.Target));
+    printf("%s_set_depth_target = %08lX\n", Prefix, Device->SetDepthStencilSurface(Made.Target));
+    printf("%s_set_depth_null = %08lX\n", Prefix, Device->SetDepthStencilSurface(nullptr));
+    printf("%s_clear = %08lX\n", Prefix, Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF204060, 1.0f, 0));
+    Device->SetVertexShader(Made.Vertex);
+    Device->SetPixelShader(Made.Color);
+    Device->SetPixelShaderConstantF(0, Red, 1);
+
+    printf("%s_draw_outside = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    Device->BeginScene();
+    printf("%s_draw_no_decl = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    printf("%s_draw_up_no_decl = %08lX\n", Prefix, Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, NcDrawQuad, 24));
+    Device->SetFVF(D3DFVF_XYZ);
+    printf("%s_draw_fvf_no_stream = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    Device->SetVertexDeclaration(Made.Declaration);
+    printf("%s_draw_indexed_none = %08lX\n", Prefix, Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 1));
+    printf("%s_draw_up_stride = %08lX\n", Prefix, Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, NcDrawQuad, 0));
+    printf("%s_draw_indexed_up_stride = %08lX\n", Prefix,
+           Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 4, 1, NcDrawIndices16, D3DFMT_INDEX16, NcDrawQuad, 0));
+    Device->SetStreamSource(0, Made.Buffer, 0, 24);
+    Device->SetIndices(Made.Index16);
+    printf("%s_draw_strip = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    Device->EndScene();
+    NcPrintPixels(Prefix, "pixels_strip", Device, Made.Target, FALSE);
+
+    printf("%s_draw_after_scene = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+    Device->BeginScene();
+    Device->SetPixelShaderConstantF(0, Green, 1);
+    printf("%s_draw_indexed = %08lX\n", Prefix, Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 7, 6, 1));
+    Device->SetIndices(Made.Index32);
+    Device->SetPixelShaderConstantF(0, Blue, 1);
+    printf("%s_draw_indexed32 = %08lX\n", Prefix, Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, -4, 4, 3, 0, 1));
+    Device->EndScene();
+    NcPrintPixels(Prefix, "pixels_indexed", Device, Made.Target, FALSE);
+
+    Device->SetRenderTarget(0, Made.Lockable);
+    Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0);
+    Device->BeginScene();
+    printf("%s_draw_up = %08lX\n", Prefix, Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, NcDrawQuad + 24, 24));
+    hr = Device->GetStreamSource(0, &Stream, &Offset, &Stride);
+    printf("%s_stream_after_up = %08lX %d %u %u\n", Prefix, hr, Stream == nullptr, Offset, Stride);
+    if (Stream != nullptr)
+        Stream->Release();
+    Device->SetStreamSource(0, Made.Buffer, 24, 24);
+    Device->SetPixelShaderConstantF(0, Green, 1);
+    printf("%s_draw_indexed_up = %08lX\n", Prefix,
+           Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 4, 1, NcDrawIndices16 + 3, D3DFMT_INDEX16,
+                                          NcDrawQuad, 24));
+    hr = Device->GetIndices(&Bound);
+    printf("%s_indices_after_up = %08lX %d\n", Prefix, hr, Bound == nullptr);
+    if (Bound != nullptr)
+        Bound->Release();
+    hr = Device->GetStreamSource(0, &Stream, &Offset, &Stride);
+    printf("%s_stream_after_indexed_up = %08lX %d %u %u\n", Prefix, hr, Stream == nullptr, Offset, Stride);
+    if (Stream != nullptr)
+        Stream->Release();
+    Device->EndScene();
+    NcPrintPixels(Prefix, "pixels_up", Device, Made.Lockable, TRUE);
+
+    Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+    Device->SetStreamSource(0, Made.Buffer, 0, 24);
+    Device->SetPixelShader(Made.Sample);
+    Device->SetTexture(0, Made.Texture);
+    Device->BeginScene();
+    printf("%s_draw_textured = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    Device->EndScene();
+    NcPrintPixels(Prefix, "pixels_textured", Device, Made.Lockable, TRUE);
+    if (Managed && SUCCEEDED(Made.Texture->LockRect(0, &Locked, nullptr, 0)))
+    {
+        static_cast<DWORD*>(Locked.pBits)[0] = 0xFF808080;
+        Made.Texture->UnlockRect(0);
+    }
+    if (Managed && SUCCEEDED(Made.Buffer->Lock(24, 24, &Data, 0)))
+    {
+        static_cast<FLOAT*>(Data)[1] = 0.0f;
+        Made.Buffer->Unlock();
+    }
+    Device->BeginScene();
+    printf("%s_draw_updated = %08lX\n", Prefix, Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    Device->EndScene();
+    NcPrintPixels(Prefix, "pixels_updated", Device, Made.Lockable, TRUE);
+    NcReleaseDrawObjects(Device, &Made);
+}
+
+/* Draws on extended, hardware and pure devices */
+static
+VOID
+NcCheckDraws(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "draws_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "draws_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "draws_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, nullptr,
+                                           &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckDrawsOn(Case.Name, Device, Case.Plain);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -5209,6 +5543,7 @@ static const NineCheckInfo NcChecks[] =
     { "constants", NcCheckConstants },
     { "blocks", NcCheckBlocks },
     { "shaders", NcCheckShaders },
+    { "draws", NcCheckDraws },
 };
 
 static
