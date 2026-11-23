@@ -284,6 +284,33 @@ NcCheckCaps(
     }
 }
 
+/* The plain object masks a few caps the extended one shows; bad types and adapters zero the structure */
+static
+VOID
+NcCheckCapsPlain(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    UINT Count = Plain->GetAdapterCount();
+
+    for (UINT Adapter = 0; Adapter <= Count; Adapter++)
+    {
+        for (UINT Type : { 0U, 1U, 5U, 0x7FFFFFFFU })
+        {
+            D3DCAPS9 Caps;
+            HRESULT hr;
+
+            memset(&Caps, 0xCC, sizeof(Caps));
+            hr = Plain->GetDeviceCaps(Adapter, static_cast<D3DDEVTYPE>(Type), &Caps);
+            printf("plain_caps[%u][%u] = %08lX", Adapter, Type, hr);
+            for (UINT Index = 0; Index < sizeof(Caps) / sizeof(DWORD); Index++)
+                printf(" %08lX", reinterpret_cast<const DWORD*>(&Caps)[Index]);
+            printf("\n");
+        }
+    }
+    Plain->Release();
+}
+
 static
 VOID
 NcCheckDeviceType(
@@ -519,6 +546,7 @@ static const NineCheckInfo NcChecks[] =
     { "modes_plain", NcCheckModesPlain },
     { "modes_ex", NcCheckModesEx },
     { "caps", NcCheckCaps },
+    { "caps_plain", NcCheckCapsPlain },
     { "devtype", NcCheckDeviceType },
     { "formats", NcCheckFormats },
     { "multisample", NcCheckMultisample },
