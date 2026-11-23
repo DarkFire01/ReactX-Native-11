@@ -700,6 +700,48 @@ ScTranslateLerp(
     ScResult(Context, Instr, D3D10_SB_OPCODE_MAD, Dst, &Weight, &Result, &From);
 }
 
+/* Pixel shader samplers the raster state marks as depth textures compare instead of sampling */
+static
+BOOL
+ScUsesShadowCompare(
+    _In_ const ScContext* Context,
+    _In_ UINT Sampler)
+{
+    if ((Context->Version & 0xFFFF0000) != 0xFFFF0000)
+        return FALSE;
+    return ((1u << Sampler) & (Context->Raster->Words[2] >> 11) & 0xFFFF) != 0;
+}
+
+/* texldl: sample_l with the level of detail from the coordinate's w */
+static
+HRESULT
+ScTranslateTexLdl(
+    _In_ ScContext* Context,
+    _In_ ScInstr& Instr)
+{
+    SB::COperandBase Dst;
+    SB::COperandBase Coordinate;
+    SB::COperandBase Level;
+    UINT Sampler = Instr.Src[1].Token & 0x7FF;
+    UINT Swizzle = ScTokenSwizzle(Instr.Src[1].Token, 4);
+
+    Instr.Destination(&Dst);
+    Context->SourceOperand(&Coordinate, Instr, 0, 0, 4);
+
+    /* The comparison path is only taken by pixel shaders, which are not converted yet */
+    if (ScUsesShadowCompare(Context, Sampler))
+        return E_NOTIMPL;
+
+    SB::COperandBase Resource = SB::COperand4(D3D10_SB_OPERAND_TYPE_RESOURCE, Sampler);
+    SB::COperand State(D3D10_SB_OPERAND_TYPE_SAMPLER, Sampler);
+    const SB::COperandBase* Sources[4] = { &Coordinate, &Resource, &State, &Level };
+
+    Level = ScComponent(Coordinate, 3);
+    ScSetSwizzle(&Resource, Swizzle);
+    Context->EmitResult(Instr.Flags, D3D10_SB_OPCODE_SAMPLE_L, Sampler, Dst, 4, Sources);
+    return S_OK;
+}
+
 /* Emits the Direct3D 10 comparison for a Direct3D 9 one; gt and le swap their operands */
 static
 VOID
@@ -1078,6 +1120,8 @@ ScContext::Translate(
             ScCompare(this, (Instr.OpcodeToken >> 16) & 7, Dst, Left, Right);
             break;
         }
+        case 95:
+            return ScTranslateTexLdl(this, Instr);
         case 78:
             ScTranslateExpPartial(this, Instr);
             break;
