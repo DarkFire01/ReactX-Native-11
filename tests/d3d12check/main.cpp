@@ -92,6 +92,76 @@ TcCheckCreate(
     Check.Report("as_unknown", "0x%08lX", hr);
 }
 
+/* lifetime: reference counts and what of a device outlives its last reference */
+static
+VOID
+TcCheckLifetime(
+    _In_ TwelveCheck& Check)
+{
+    static const GUID Tag = { 0x6b1f0c3a, 0x55d1, 0x4c0e, { 0x9a, 0x1b, 0x2d, 0x7c, 0x44, 0x10, 0x8e, 0x21 } };
+    ID3D12Device* Device = nullptr;
+    ID3D12Device* Again = nullptr;
+    ID3D12Device* Parent = nullptr;
+    ID3D12Fence* Fence = nullptr;
+    UINT Value = 0x1234;
+    UINT Size;
+    HRESULT hr;
+
+    hr = Check.MakeDevice(&Device);
+    Check.Report("create", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+
+    Check.Report("addref", "%lu", Device->AddRef());
+    Check.Report("release", "%lu", Device->Release());
+
+    hr = Check.MakeDevice(&Again);
+    Check.Report("second", "0x%08lX same %d", hr, Again == Device);
+    if (SUCCEEDED(hr))
+        Check.Report("second_release", "%lu", Again->Release());
+
+    hr = Device->SetPrivateData(Tag, sizeof(Value), &Value);
+    Check.Report("set_tag", "0x%08lX", hr);
+    Check.Report("last_release", "%lu", Device->Release());
+
+    /* A new device shows whether the old one survived its last reference */
+    hr = Check.MakeDevice(&Device);
+    Check.Report("recreate", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+    Value = 0;
+    Size = sizeof(Value);
+    hr = Device->GetPrivateData(Tag, &Size, &Value);
+    Check.Report("recreate_tag", "0x%08lX %u 0x%x", hr, Size, Value);
+
+    /* A child holds the device */
+    hr = Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
+    Check.Report("fence", "0x%08lX", hr);
+    if (FAILED(hr))
+    {
+        Device->Release();
+        return;
+    }
+    Check.Report("release_with_child", "%lu", Device->Release());
+
+    hr = Fence->GetDevice(IID_PPV_ARGS(&Parent));
+    Check.Report("child_device", "0x%08lX", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = Check.MakeDevice(&Again);
+        Check.Report("create_with_child", "0x%08lX same %d", hr, Again == Parent);
+        if (SUCCEEDED(hr))
+            Check.Report("create_with_child_release", "%lu", Again->Release());
+        Check.Report("child_device_release", "%lu", Parent->Release());
+    }
+    Check.Report("fence_release", "%lu", Fence->Release());
+
+    hr = Check.MakeDevice(&Device);
+    Check.Report("after_child", "0x%08lX", hr);
+    if (SUCCEEDED(hr))
+        Check.Report("after_child_release", "%lu", Device->Release());
+}
+
 /* device: fixed answers every application reads right after creation */
 static
 VOID
@@ -2087,6 +2157,7 @@ struct CheckInfo
 static const CheckInfo Checks[] =
 {
     { "create", TcCheckCreate },
+    { "lifetime", TcCheckLifetime },
     { "device", TcCheckDevice },
     { "features", TcCheckFeatures },
     { "fence", TcCheckFence },
