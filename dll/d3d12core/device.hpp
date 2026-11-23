@@ -356,6 +356,18 @@ public:
         return MemoryArchitecture.UMA && MemoryArchitecture.CacheCoherent;
     }
 
+    /* The most descriptors a shader visible heap of a type may hold, 0 for no limit */
+    UINT
+    GetShaderVisibleHeapLimit(
+        _In_ D3D12_DESCRIPTOR_HEAP_TYPE Type) const
+    {
+        if (Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+            return HeapLimits.MaxSamplerDescriptorHeapSize;
+        if (HasHeapLimits)
+            return HeapLimits.MaxViewDescriptorHeapSize;
+        return Options.ResourceBindingTier < D3D12DDI_RESOURCE_BINDING_TIER_3 ? D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2 : 0;
+    }
+
     /* The checks before any child object is made */
     HRESULT
     CheckUsable() const
@@ -395,6 +407,8 @@ private:
     D3D12DDI_D3D12_OPTIONS_DATA_0089 Options = {};
     D3D12DDI_MEMORY_ARCHITECTURE_CAPS_0041 MemoryArchitecture = {};
     D3D12DDI_SHADER_CAPS_0084 ShaderCaps = {};
+    D3D12DDI_OPTIONS_DATA_0102 HeapLimits = {};
+    BOOLEAN HasHeapLimits = FALSE;
     D3D_SHADER_MODEL HighestShaderModel = D3D_SHADER_MODEL_5_1;
     BOOLEAN TileBased = FALSE;
     UINT VaBitsPerResource = 0;

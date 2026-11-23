@@ -18,17 +18,20 @@ RxDescriptorHeap::Create(
 
     *Heap = nullptr;
 
-    if ((UINT)Desc.Type >= D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES || Desc.NumDescriptors == 0 || Desc.NodeMask > 1 ||
-        (Desc.Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) != 0)
-    {
+    if (Desc.NodeMask > 1 || (Desc.Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) != 0)
         return E_INVALIDARG;
-    }
 
-    /* Only the heaps shaders index can be visible to them */
-    if ((Desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) != 0 &&
-        (Desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || Desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
+    /* Only view and sampler heaps can be shader visible, and only up to the device's limit */
+    if ((Desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) != 0)
     {
-        return E_INVALIDARG;
+        UINT Limit;
+
+        if (Desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV && Desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+            return E_INVALIDARG;
+
+        Limit = Device.GetShaderVisibleHeapLimit(Desc.Type);
+        if (Limit != 0 && Desc.NumDescriptors > Limit)
+            return E_INVALIDARG;
     }
 
     hr = Device.CheckUsable();
