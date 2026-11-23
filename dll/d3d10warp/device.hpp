@@ -240,6 +240,64 @@ public:
     BOOL PredicateValue = FALSE;
 };
 
+/* What the Basic Render kernel driver needs to place an allocation: the resource shape and its byte size */
+typedef struct _RX_WARP_ALLOCATION_DATA
+{
+    UINT Dimension;
+    UINT Width;
+    UINT Height;
+    UINT Depth;
+    UINT Format;
+    UINT RowPitch;
+    UINT Size;
+    UINT ArraySize;
+    UINT MipLevels;
+    UINT Usage;
+    UINT BindFlags;
+    UINT SampleCount;
+    UINT SampleQuality;
+    UINT RefreshNumerator;
+    UINT RefreshDenominator;
+    UINT Rotation;
+    UINT VidPnSourceId;
+    UINT Reserved[5];
+    UINT Flags;
+    UINT Reserved2;
+} RX_WARP_ALLOCATION_DATA;
+
+static_assert(sizeof(RX_WARP_ALLOCATION_DATA) == 96, "the kernel driver reads 96 bytes");
+
+#define RX_WARP_ALLOCATION_PRIMARY          0x00000010
+#define RX_WARP_ALLOCATION_ROTATED          0x00000100
+#define RX_WARP_ALLOCATION_CROSS_ADAPTER    0x00000200
+#define RX_WARP_ALLOCATION_TILE_POOL        0x00000400
+#define RX_WARP_ALLOCATION_LINEAR           0x00000080
+#define RX_WARP_ALLOCATION_SYSTEM           0x00200000
+#define RX_WARP_ALLOCATION_SHARED           0x00080000
+#define RX_WARP_ALLOCATION_STEREO           0x10000000
+
+/* Writes one element over a view or rectangles of it; Mask picks the bits that change */
+VOID
+RxWarpFillView(
+    _In_ RxWarpView *View,
+    _In_reads_bytes_(16) const BYTE *Element,
+    _In_reads_bytes_(16) const BYTE *Mask,
+    _In_reads_opt_(RectCount) const D3D10_DDI_RECT *Rects,
+    _In_ UINT RectCount);
+
+VOID
+RxWarpClearDepthStencil(
+    _In_ RxWarpView *View,
+    _In_ UINT Flags,
+    _In_ FLOAT Depth,
+    _In_ UINT8 Stencil,
+    _In_reads_opt_(RectCount) const D3D10_DDI_RECT *Rects,
+    _In_ UINT RectCount);
+
+/* Sixteen bytes of all ones, the mask of a full clear */
+const BYTE *
+RxWarpAllBitsMask(VOID);
+
 /* What a stage's shader sees, gathered from its bound state */
 HRESULT
 RxWarpAllocateForPresent(

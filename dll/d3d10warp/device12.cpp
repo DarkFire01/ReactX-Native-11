@@ -161,22 +161,6 @@ RxWarp12CheckMultisampleQualityLevels(
     *Levels = RxWarpMultisampleQuality(Format, SampleCount, (UINT)Flags);
 }
 
-/* Shader visible heaps hold full views; samplers and the CPU only heaps hold a pointer */
-static
-UINT
-APIENTRY
-RxWarp12GetDescriptorSizeInBytes(
-    _In_ D3D12DDI_HDEVICE Device,
-    _In_ D3D12DDI_DESCRIPTOR_HEAP_TYPE Type)
-{
-    RxWarpLock Lock;
-
-    UNREFERENCED_PARAMETER(Device);
-    if (Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER)
-        return 64;
-    return 8;
-}
-
 static
 HRESULT
 APIENTRY
@@ -224,41 +208,6 @@ RxWarp12ResetCommandPool(
 
     UNREFERENCED_PARAMETER(Device);
     UNREFERENCED_PARAMETER(Pool);
-}
-
-/* Heaps are the only objects with memory the kernel pages; none of ours are kernel allocations yet */
-static
-HRESULT
-APIENTRY
-RxWarp12MakeResident(
-    _In_ D3D12DDI_HDEVICE Device,
-    _Inout_ D3D12DDIARG_MAKERESIDENT_0001 *Args)
-{
-    RxWarpLock Lock;
-
-    UNREFERENCED_PARAMETER(Device);
-    if (Args->NumObjects == 0 || Args->NumAdapters == 0)
-    {
-        Args->WaitMask = 0;
-        return S_OK;
-    }
-    *Args->pPagingFenceValue = 0;
-    Args->WaitMask = 1;
-    return S_OK;
-}
-
-static
-HRESULT
-APIENTRY
-RxWarp12Evict(
-    _In_ D3D12DDI_HDEVICE Device,
-    _In_ const D3D12DDIARG_EVICT *Args)
-{
-    RxWarpLock Lock;
-
-    UNREFERENCED_PARAMETER(Device);
-    UNREFERENCED_PARAMETER(Args);
-    return S_OK;
 }
 
 static
@@ -597,7 +546,6 @@ RxWarp12BuildDeviceTable(VOID)
 
     Device.pfnCheckFormatSupport = RxWarp12CheckFormatSupport;
     Device.pfnCheckMultisampleQualityLevels = RxWarp12CheckMultisampleQualityLevels;
-    Device.pfnGetDescriptorSizeInBytes = RxWarp12GetDescriptorSizeInBytes;
     Device.pfnCreateCommandPool = RxWarp12CreateCommandPool;
     Device.pfnDestroyCommandPool = RxWarp12DestroyCommandPool;
     Device.pfnResetCommandPool = RxWarp12ResetCommandPool;
@@ -607,8 +555,10 @@ RxWarp12BuildDeviceTable(VOID)
     Device.pfnCalcPrivateRootSignatureSize = RxWarp12CalcPrivateRootSignatureSize;
     Device.pfnCreateRootSignature = RxWarp12CreateRootSignature;
     Device.pfnDestroyRootSignature = RxWarp12DestroyRootSignature;
-    Device.pfnMakeResident = RxWarp12MakeResident;
-    Device.pfnEvict = RxWarp12Evict;
+    RxWarp12FillResourceTable(&Device);
+    RxWarp12FillDescriptorTable(&Device);
+    RxWarp12FillListTable(&Device, nullptr);
+    RxWarp12FillQueueTables(&Device, nullptr, nullptr);
     return Device;
 }
 
@@ -695,6 +645,8 @@ RxWarp12BuildCommandListTable(VOID)
     RxWarp12Nothing(&List.pfnDiscardResource);
     RxWarp12Nothing(&List.pfnSetProtectedResourceSession);
     RxWarp12Nothing(&List.pfnInitializeMetaCommand);
+    RxWarp12FillListTable(nullptr, &List);
+    RxWarp12FillQueueTables(nullptr, nullptr, &List);
     return List;
 }
 
@@ -709,6 +661,7 @@ RxWarp12BuildCommandQueueTable(VOID)
     RxWarp12Stub(&Queue.pfnCopyTileMappings);
     RxWarp12Stub(&Queue.pfnSignalFence);
     RxWarp12Stub(&Queue.pfnWaitForFence);
+    RxWarp12FillQueueTables(nullptr, &Queue, nullptr);
     return Queue;
 }
 

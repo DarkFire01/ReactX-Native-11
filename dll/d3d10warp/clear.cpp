@@ -12,7 +12,6 @@
  * Writes one element value over a view, or over the given rectangles of it. Mask selects the
  * bits that change, so depth only and stencil only clears keep the other part.
  */
-static
 VOID
 RxWarpFillView(
     _In_ RxWarpView *View,
@@ -134,19 +133,33 @@ RxWarpDdi::ClearDepthStencilView(
 {
     RxWarpLock Lock;
     RxWarpView *Object = RxWarpObject<RxWarpView>(View);
-    const RX_WARP_FORMAT_INFO *Info;
+
+    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
+        return;
+    if (Object != nullptr)
+        RxWarpClearDepthStencil(Object, Flags, Depth, Stencil, nullptr, 0);
+}
+
+VOID
+RxWarpClearDepthStencil(
+    _In_ RxWarpView *View,
+    _In_ UINT Flags,
+    _In_ FLOAT Depth,
+    _In_ UINT8 Stencil,
+    _In_reads_opt_(RectCount) const D3D10_DDI_RECT *Rects,
+    _In_ UINT RectCount)
+{
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(View->Format);
     const FLOAT Values[4] = { Depth, (FLOAT)Stencil, 0.0f, 0.0f };
     BYTE Element[16];
     BYTE Mask[16] = {};
     UINT Offset = 0;
 
-    if (RxWarpObject<RxWarpDevice>(Device)->Predicated())
-        return;
-    if (Object == nullptr || (Info = RxWarpFormatInfo(Object->Format)) == nullptr)
+    if (Info == nullptr)
         return;
 
     /* Build the value with depth in channel 4 and stencil in channel 5, then mask per flag */
-    RxWarpEncodeColor(Object->Format, Values, Element);
+    RxWarpEncodeColor(View->Format, Values, Element);
     for (UINT Index = 0; Index < Info->ChannelCount; Index++)
     {
         const RX_WARP_CHANNEL &Channel = Info->Channels[Index];
@@ -157,7 +170,13 @@ RxWarpDdi::ClearDepthStencilView(
             Mask[(Offset + Bit) / 8] |= (BYTE)(1u << ((Offset + Bit) % 8));
         Offset += Channel.Bits;
     }
-    RxWarpFillView(Object, Element, Mask, nullptr, 0);
+    RxWarpFillView(View, Element, Mask, Rects, RectCount);
+}
+
+const BYTE *
+RxWarpAllBitsMask(VOID)
+{
+    return RxWarpAllBits;
 }
 
 VOID

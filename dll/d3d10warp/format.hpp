@@ -100,6 +100,13 @@ RxWarpEncodeColor(
     _In_reads_(4) const FLOAT *Color,
     _Out_writes_bytes_(16) BYTE *Element);
 
+/* The same for Direct3D 12 clears, which round halves and snorm their own way */
+BOOLEAN
+RxWarpEncodeClearColor(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_(4) const FLOAT *Color,
+    _Out_writes_bytes_(16) BYTE *Element);
+
 BOOLEAN
 RxWarpEncodeUint(
     _In_ DXGI_FORMAT Format,

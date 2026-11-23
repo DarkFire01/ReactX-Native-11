@@ -487,11 +487,62 @@ RxWarpComponent(
     return Color[Source - 4];
 }
 
+/* Direct3D 12 clears: halves truncate their mantissa, snorm rounds half up */
+static
+UINT
+RxWarpToHalfTruncated(
+    _In_ FLOAT Value)
+{
+    UINT Bits;
+    UINT Sign;
+    INT Exponent;
+    UINT Mantissa;
+
+    memcpy(&Bits, &Value, sizeof(Bits));
+    Sign = (Bits >> 16) & 0x8000;
+    Exponent = (INT)((Bits >> 23) & 0xFF) - 127 + 15;
+    Mantissa = Bits & 0x7FFFFF;
+
+    if (((Bits >> 23) & 0xFF) == 0xFF)
+        return Sign | 0x7C00 | (Mantissa ? 0x200 : 0);
+    if (Exponent >= 31)
+        return Sign | 0x7C00;
+    if (Exponent <= 0)
+    {
+        if (Exponent < -10)
+            return Sign;
+        return Sign | ((Mantissa | 0x800000) >> (UINT)(14 - Exponent));
+    }
+    return Sign | ((UINT)Exponent << 10) | (Mantissa >> 13);
+}
+
+static
+UINT
+RxWarpToSnormRoundUp(
+    _In_ FLOAT Value,
+    _In_ UINT Bits)
+{
+    FLOAT Max = (FLOAT)((1ull << (Bits - 1)) - 1);
+    INT Result;
+
+    if (Value != Value)
+        return 0;
+    if (Value >= 1.0f)
+        Result = (INT)Max;
+    else if (Value <= -1.0f)
+        Result = -(INT)Max;
+    else
+        Result = (INT)floorf(Value * Max + 0.5f);
+    return (UINT)Result & (UINT)((1ull << Bits) - 1);
+}
+
+static
 BOOLEAN
-RxWarpEncodeColor(
+RxWarpEncodeColorAs(
     _In_ DXGI_FORMAT Format,
     _In_reads_(4) const FLOAT *Color,
-    _Out_writes_bytes_(16) BYTE *Element)
+    _Out_writes_bytes_(16) BYTE *Element,
+    _In_ BOOLEAN Clear)
 {
     const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Format);
     UINT Offset = 0;
@@ -533,7 +584,7 @@ RxWarpEncodeColor(
                     Bits = RxWarpToUnorm(RxWarpLinearToSrgb(Value), Channel.Bits);
                 break;
             case RxChannelSnorm:
-                Bits = RxWarpToSnorm(Value, Channel.Bits);
+                Bits = Clear ? RxWarpToSnormRoundUp(Value, Channel.Bits) : RxWarpToSnorm(Value, Channel.Bits);
                 break;
             case RxChannelFloat:
                 if (Channel.Bits == 32)
@@ -543,7 +594,7 @@ RxWarpEncodeColor(
                 }
                 else
                 {
-                    Bits = RxWarpToHalf(Value);
+                    Bits = Clear ? RxWarpToHalfTruncated(Value) : RxWarpToHalf(Value);
                 }
                 break;
             case RxChannelUint:
@@ -562,6 +613,24 @@ RxWarpEncodeColor(
         Offset += Channel.Bits;
     }
     return TRUE;
+}
+
+BOOLEAN
+RxWarpEncodeColor(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_(4) const FLOAT *Color,
+    _Out_writes_bytes_(16) BYTE *Element)
+{
+    return RxWarpEncodeColorAs(Format, Color, Element, FALSE);
+}
+
+BOOLEAN
+RxWarpEncodeClearColor(
+    _In_ DXGI_FORMAT Format,
+    _In_reads_(4) const FLOAT *Color,
+    _Out_writes_bytes_(16) BYTE *Element)
+{
+    return RxWarpEncodeColorAs(Format, Color, Element, TRUE);
 }
 
 BOOLEAN
