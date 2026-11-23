@@ -2263,13 +2263,17 @@ RxWarpDraw::Blend(
             for (UINT Component = 0; Component < 4; Component++)
             {
                 BOOLEAN Alpha = (Component == 3);
-                FLOAT SourceFactor;
-                FLOAT DestFactor;
+                D3D10_DDI_BLEND_OP Operation = Alpha ? Desc->BlendOpAlpha : Desc->BlendOp;
+                FLOAT SourceFactor = 1.0f;
+                FLOAT DestFactor = 1.0f;
 
-                RxWarpBlendFactor(Alpha ? Desc->SrcBlendAlpha : Desc->SrcBlend, Source, Source1, Dest, Constant, Component, &SourceFactor);
-                RxWarpBlendFactor(Alpha ? Desc->DestBlendAlpha : Desc->DestBlend, Source, Source1, Dest, Constant, Component, &DestFactor);
-                Result[Component] = RxWarpBlendOp(Alpha ? Desc->BlendOpAlpha : Desc->BlendOp,
-                                                  Source[Component] * SourceFactor, Dest[Component] * DestFactor);
+                /* Minimum and maximum compare the colors themselves and ignore the factors */
+                if (Operation != D3D10_DDI_BLEND_OP_MIN && Operation != D3D10_DDI_BLEND_OP_MAX)
+                {
+                    RxWarpBlendFactor(Alpha ? Desc->SrcBlendAlpha : Desc->SrcBlend, Source, Source1, Dest, Constant, Component, &SourceFactor);
+                    RxWarpBlendFactor(Alpha ? Desc->DestBlendAlpha : Desc->DestBlend, Source, Source1, Dest, Constant, Component, &DestFactor);
+                }
+                Result[Component] = RxWarpBlendOp(Operation, Source[Component] * SourceFactor, Dest[Component] * DestFactor);
             }
             RxWarpClampToFormat(View->Format, Result);
         }
