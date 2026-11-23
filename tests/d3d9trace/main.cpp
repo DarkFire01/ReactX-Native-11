@@ -3671,6 +3671,91 @@ TrScenarioShared(
     DestroyWindow(Window);
 }
 
+/* The device cursor: properties from surfaces of each pool, shown, moved and hidden */
+static
+VOID
+TrCursorWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DPOOL Pools[] = { D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH, D3DPOOL_DEFAULT };
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    char Name[64];
+
+    TrCloseLine();
+    printf("api ShowCursor early = %d\n", Device->ShowCursor(TRUE));
+    for (D3DPOOL Pool : Pools)
+    {
+        Surface = nullptr;
+        Device->CreateOffscreenPlainSurface(32, 32, D3DFMT_A8R8G8B8, Pool, &Surface, nullptr);
+        sprintf_s(Name, "SetCursorProperties pool %u", Pool);
+        TrApi(Name, Surface != nullptr ? Device->SetCursorProperties(1, 2, Surface) : E_FAIL);
+        TrRelease(Surface);
+    }
+    Device->CreateTexture(32, 32, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    if (Texture != nullptr)
+    {
+        Texture->GetSurfaceLevel(0, &Surface);
+        TrApi("SetCursorProperties dynamic level", Device->SetCursorProperties(0, 0, Surface));
+        Surface->Release();
+        TrRelease(Texture);
+    }
+    Surface = nullptr;
+    Device->CreateRenderTarget(32, 32, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    TrApi("SetCursorProperties target", Surface != nullptr ? Device->SetCursorProperties(0, 0, Surface) : E_FAIL);
+    TrRelease(Surface);
+    TrCloseLine();
+    printf("api ShowCursor = %d\n", Device->ShowCursor(TRUE));
+    Device->SetCursorPosition(60, 70, 0);
+    Device->SetCursorPosition(61, 71, D3DCURSOR_IMMEDIATE_UPDATE);
+    TrCloseLine();
+    printf("api ShowCursor hide = %d\n", Device->ShowCursor(FALSE));
+}
+
+/* The cursor on a windowed extended device and on a device of the plain object; the real cursor goes back */
+static
+VOID
+TrScenarioCursor(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HCURSOR Before = GetCursor();
+    POINT Saved = {};
+
+    GetCursorPos(&Saved);
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("cursor extended");
+    Made = Parameters;
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Made, nullptr, &DeviceEx));
+    if (DeviceEx != nullptr)
+    {
+        TrCursorWork(DeviceEx);
+        TrRelease(DeviceEx);
+    }
+    TrPhase("cursor plain");
+    Made = Parameters;
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made,
+                                              &Device));
+    if (Device != nullptr)
+    {
+        TrCursorWork(Device);
+        TrRelease(Device);
+    }
+    SetCursor(Before);
+    SetCursorPos(Saved.x, Saved.y);
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -3694,6 +3779,7 @@ static const TrScenario TrScenarios[] =
     { "copies", TrScenarioCopies },
     { "copies_plain", TrScenarioCopiesPlain },
     { "shared", TrScenarioShared },
+    { "cursor", TrScenarioCursor },
 };
 
 static
