@@ -5568,6 +5568,358 @@ TrScenarioConstantsPlain(
     Plain->Release();
 }
 
+/* Reads a render target back through a system memory surface and prints a hash of its pixels */
+static
+VOID
+TrReadTarget(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Target,
+    _In_z_ PCSTR Name)
+{
+    IDirect3DSurface9* Copy = nullptr;
+    D3DSURFACE_DESC Desc;
+    D3DLOCKED_RECT Locked;
+    UINT Hash = 0;
+
+    Target->GetDesc(&Desc);
+    TrApi("CreateOffscreenPlainSurface readback",
+          Device->CreateOffscreenPlainSurface(Desc.Width, Desc.Height, Desc.Format, D3DPOOL_SYSTEMMEM, &Copy, nullptr));
+    if (Copy == nullptr)
+        return;
+    TrApi("GetRenderTargetData", Device->GetRenderTargetData(Target, Copy));
+    if (SUCCEEDED(Copy->LockRect(&Locked, nullptr, D3DLOCK_READONLY)))
+    {
+        for (UINT Row = 0; Row < Desc.Height; Row++)
+            Hash = Hash * 31 + TrHash(static_cast<BYTE*>(Locked.pBits) + Row * Locked.Pitch, Desc.Width * 4);
+        Copy->UnlockRect();
+    }
+    TrCloseLine();
+    printf("api pixels %s = %08X\n", Name, Hash);
+    TrRelease(Copy);
+}
+
+/* Shaders, declarations and vertices the draw scenarios draw with */
+static const DWORD TrDrawVertexCode[] = { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x0000001F, 0x80000005,
+                                          0x900F0001, 0x00000001, 0xC00F0000, 0x90E40000, 0x00000001, 0xE00F0000,
+                                          0x90E40001, 0x0000FFFF };
+static const DWORD TrDrawColorCode[] = { 0xFFFF0200, 0x05000051, 0xA00F0001, 0x3F800000, 0x3F000000, 0x00000000,
+                                         0x3F800000, 0x02000001, 0x800F0800, 0xA0E40001, 0x0000FFFF };
+static const DWORD TrDrawSampleCode[] = { 0xFFFF0200, 0x0200001F, 0x80000000, 0xB0030000, 0x0200001F, 0x90000000,
+                                          0xA00F0800, 0x03000042, 0x800F0000, 0xB0E40000, 0xA0E40800, 0x02000001,
+                                          0x800F0800, 0x80E40000, 0x0000FFFF };
+static const D3DVERTEXELEMENT9 TrDrawElements[] = { { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITION, 0 },
+                                                    { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                                                    D3DDECL_END() };
+static const FLOAT TrDrawVertices[] = { -1.0f, -1.0f, 0.5f, 1.0f, 0.0f, 1.0f, -1.0f, 1.0f, 0.5f, 1.0f, 0.0f, 0.0f,
+                                        1.0f, -1.0f, 0.5f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 1.0f, 1.0f, 0.0f,
+                                        -0.5f, -0.5f, 0.5f, 1.0f, 0.0f, 1.0f, -0.5f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f,
+                                        0.5f, -0.5f, 0.5f, 1.0f, 1.0f, 1.0f };
+static const WORD TrDrawIndices16[] = { 0, 1, 2, 2, 1, 3, 4, 5, 6 };
+static const DWORD TrDrawIndices32[] = { 0, 1, 2, 2, 1, 3, 4, 5, 6 };
+static constexpr UINT TrDrawStride = 24;
+
+/* Prints what a stream and the index binding hold after a draw */
+static
+VOID
+TrPrintStreams(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DVertexBuffer9* Buffer,
+    _In_ IDirect3DIndexBuffer9* IndexBuffer)
+{
+    IDirect3DVertexBuffer9* Stream = nullptr;
+    IDirect3DIndexBuffer9* Bound = nullptr;
+    UINT Offset = 0xDEAD;
+    UINT Stride = 0xDEAD;
+    HRESULT hr;
+
+    hr = Device->GetStreamSource(0, &Stream, &Offset, &Stride);
+    TrCloseLine();
+    printf("api GetStreamSource = %08lX %d %d %u %u\n", hr, Stream == nullptr, Stream == Buffer, Offset, Stride);
+    TrRelease(Stream);
+    hr = Device->GetIndices(&Bound);
+    TrCloseLine();
+    printf("api GetIndices = %08lX %d %d\n", hr, Bound == nullptr, Bound == IndexBuffer);
+    TrRelease(Bound);
+}
+
+/* Draws that fail the checks the first draw goes through, then the same checks once a draw got through */
+static
+VOID
+TrDrawChecks(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DVertexDeclaration9* Declaration,
+    _In_ IDirect3DVertexBuffer9* Buffer,
+    _In_ IDirect3DIndexBuffer9* IndexBuffer)
+{
+    TrApi("DrawPrimitive outside scene", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive no declaration", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("DrawPrimitiveUP no declaration", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, TrDrawVertices,
+                                                                     TrDrawStride));
+    TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZ | D3DFVF_TEX1));
+    TrApi("DrawPrimitive format no stream", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    TrApi("DrawIndexedPrimitive no indices", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 1));
+    TrApi("DrawPrimitiveUP stride zero", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, TrDrawVertices, 0));
+    TrApi("DrawIndexedPrimitiveUP stride zero",
+          Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 4, 1, TrDrawIndices16, D3DFMT_INDEX16,
+                                         TrDrawVertices, 0));
+    TrPrintStreams(Device, Buffer, IndexBuffer);
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("SetIndices", Device->SetIndices(IndexBuffer));
+    TrApi("DrawPrimitive count zero", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 0));
+    TrApi("DrawPrimitive first", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrApi("DrawPrimitive after scene", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetIndices null", Device->SetIndices(nullptr));
+    TrApi("DrawIndexedPrimitive null indices", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 1));
+    TrApi("DrawPrimitiveUP stride zero again", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, TrDrawVertices, 0));
+    TrApi("SetIndices", Device->SetIndices(IndexBuffer));
+    TrSettle(Device);
+}
+
+/* Draws from buffers and from application memory through shaders the application made, with textures, and
+   the target read back after each group */
+static
+VOID
+TrDrawWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DPixelShader9* Color = nullptr;
+    IDirect3DPixelShader9* Sample = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DVertexBuffer9* Managed = nullptr;
+    IDirect3DIndexBuffer9* IndexBuffer = nullptr;
+    IDirect3DIndexBuffer9* Index32 = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DTexture9* Second = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    D3DLOCKED_RECT Locked;
+    VOID* Data = nullptr;
+
+    TrPhase("draws create");
+    TrApi("CreateVertexShader", Device->CreateVertexShader(TrDrawVertexCode, &Vertex));
+    TrApi("CreatePixelShader color", Device->CreatePixelShader(TrDrawColorCode, &Color));
+    TrApi("CreatePixelShader sample", Device->CreatePixelShader(TrDrawSampleCode, &Sample));
+    TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrDrawElements, &Declaration));
+    TrApi("CreateVertexBuffer", Device->CreateVertexBuffer(sizeof(TrDrawVertices), 0, 0, D3DPOOL_DEFAULT, &Buffer,
+                                                           nullptr));
+    TrApi("CreateVertexBuffer managed", Device->CreateVertexBuffer(sizeof(TrDrawVertices), 0, 0, D3DPOOL_MANAGED,
+                                                                   &Managed, nullptr));
+    TrApi("CreateIndexBuffer", Device->CreateIndexBuffer(sizeof(TrDrawIndices16), 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT,
+                                                         &IndexBuffer, nullptr));
+    TrApi("CreateIndexBuffer 32", Device->CreateIndexBuffer(sizeof(TrDrawIndices32), 0, D3DFMT_INDEX32,
+                                                            D3DPOOL_MANAGED, &Index32, nullptr));
+    TrApi("CreateTexture managed", Device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture,
+                                                         nullptr));
+    TrApi("CreateTexture default", Device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Second,
+                                                         nullptr));
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    if (Buffer != nullptr && SUCCEEDED(Buffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        Buffer->Unlock();
+    }
+    if (Managed != nullptr && SUCCEEDED(Managed->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        Managed->Unlock();
+    }
+    if (IndexBuffer != nullptr && SUCCEEDED(IndexBuffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawIndices16, sizeof(TrDrawIndices16));
+        IndexBuffer->Unlock();
+    }
+    if (Index32 != nullptr && SUCCEEDED(Index32->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawIndices32, sizeof(TrDrawIndices32));
+        Index32->Unlock();
+    }
+    if (Texture != nullptr && SUCCEEDED(Texture->LockRect(0, &Locked, nullptr, 0)))
+    {
+        static const DWORD Texels[] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFFFF };
+
+        CopyMemory(Locked.pBits, Texels, 8);
+        CopyMemory(static_cast<BYTE*>(Locked.pBits) + Locked.Pitch, Texels + 2, 8);
+        Texture->UnlockRect(0);
+    }
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("SetPixelShader", Device->SetPixelShader(Color));
+    TrSettle(Device);
+
+    TrPhase("draws checks");
+    TrDrawChecks(Device, Declaration, Buffer, IndexBuffer);
+    TrReadTarget(Device, Target, "checks");
+    TrSettle(Device);
+
+    TrPhase("draws buffers");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive strip", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("DrawIndexedPrimitive", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2));
+    TrApi("DrawIndexedPrimitive based", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 1, 3, 4, 6, 1));
+    TrApi("SetStreamSource offset", Device->SetStreamSource(0, Buffer, TrDrawStride * 4, TrDrawStride));
+    TrApi("DrawPrimitive offset", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetStreamSource managed", Device->SetStreamSource(0, Managed, 0, TrDrawStride));
+    TrApi("SetIndices 32", Device->SetIndices(Index32));
+    TrApi("DrawIndexedPrimitive managed", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 7, 0, 3));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "buffers");
+    TrSettle(Device);
+
+    TrPhase("draws managed update");
+    if (Managed != nullptr && SUCCEEDED(Managed->Lock(TrDrawStride, TrDrawStride, &Data, 0)))
+    {
+        static_cast<FLOAT*>(Data)[0] = -0.75f;
+        Managed->Unlock();
+    }
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive managed", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "managed");
+    TrSettle(Device);
+
+    TrPhase("draws memory");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF203010, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, TrDrawVertices, TrDrawStride));
+    TrPrintStreams(Device, Managed, Index32);
+    TrApi("DrawPrimitive after memory", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("DrawIndexedPrimitiveUP", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 4, 2, TrDrawIndices16,
+                                                                   D3DFMT_INDEX16, TrDrawVertices, TrDrawStride));
+    TrPrintStreams(Device, Buffer, Index32);
+    TrApi("DrawIndexedPrimitiveUP 32", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 4, 3, 1,
+                                                                      TrDrawIndices32 + 6, D3DFMT_INDEX32,
+                                                                      TrDrawVertices, TrDrawStride));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("SetIndices", Device->SetIndices(IndexBuffer));
+    TrApi("DrawIndexedPrimitive after memory", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "memory");
+    TrSettle(Device);
+
+    TrPhase("draws textures");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0));
+    TrApi("SetPixelShader sample", Device->SetPixelShader(Sample));
+    TrApi("SetTexture", Device->SetTexture(0, Texture));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive textured", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("SetTexture 3", Device->SetTexture(3, Second));
+    TrApi("SetTexture vertex", Device->SetTexture(D3DVERTEXTEXTURESAMPLER1, Second));
+    TrApi("DrawPrimitive more textures", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetTexture 3 null", Device->SetTexture(3, nullptr));
+    TrApi("SetPixelShader color", Device->SetPixelShader(Color));
+    TrApi("DrawPrimitive color", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetPixelShader sample", Device->SetPixelShader(Sample));
+    TrApi("DrawPrimitive sample", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "textures");
+    TrSettle(Device);
+
+    TrPhase("draws release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    TrApi("SetTexture null", Device->SetTexture(0, nullptr));
+    TrApi("SetTexture vertex null", Device->SetTexture(D3DVERTEXTEXTURESAMPLER1, nullptr));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetPixelShader null", Device->SetPixelShader(nullptr));
+    TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetIndices null", Device->SetIndices(nullptr));
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrRelease(Vertex);
+    TrRelease(Color);
+    TrRelease(Sample);
+    TrRelease(Declaration);
+    TrRelease(Buffer);
+    TrRelease(Managed);
+    TrRelease(IndexBuffer);
+    TrRelease(Index32);
+    TrRelease(Texture);
+    TrRelease(Second);
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
+/* Draws on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioDraws(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("draws device");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrDrawWork(Device);
+        TrPhase("draws device release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
+/* Draws on pure and hardware vertex processing devices of the plain object */
+static
+VOID
+TrScenarioDrawsPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "draws plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrDrawWork(Device);
+            TrPhase("draws plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -5604,6 +5956,8 @@ static const TrScenario TrScenarios[] =
     { "shaders_plain", TrScenarioShadersPlain },
     { "declarations", TrScenarioDeclarations },
     { "declarations_plain", TrScenarioDeclarationsPlain },
+    { "draws", TrScenarioDraws },
+    { "draws_plain", TrScenarioDrawsPlain },
 };
 
 static
