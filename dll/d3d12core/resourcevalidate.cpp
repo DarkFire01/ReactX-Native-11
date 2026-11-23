@@ -7,6 +7,7 @@
 
 #include "objects.hpp"
 #include "formatlayout12.hpp"
+#include "formatsupport12.hpp"
 
 #include <d3d12video.h>
 
@@ -134,25 +135,92 @@ RxQueryFormat(
     return Device.CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, Support, sizeof(*Support));
 }
 
-/* Whether the format, or any format of its cast family, has a FORMAT_SUPPORT1 bit */
+/* Typeless heads whose family passes the typed UAV check outright, unless the resource is a BGRA one */
 static
 BOOLEAN
-RxFamilySupports(
+RxTypelessPassesUav(
+    _In_ DXGI_FORMAT Member,
+    _In_ DXGI_FORMAT Format)
+{
+    switch (Member)
+    {
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R16G16_TYPELESS:
+        case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+            break;
+        default:
+            return FALSE;
+    }
+
+    return Format != DXGI_FORMAT_B8G8R8A8_UNORM && Format != DXGI_FORMAT_B8G8R8X8_UNORM &&
+           Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB && Format != DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+}
+
+/*
+ * Whether some format of the cast family can be viewed for the capability: the level's rules promise it,
+ * or leave it to the driver and the driver offers the FORMAT_SUPPORT1 bit. A zero bit means a rule that
+ * leaves it to the driver is enough.
+ */
+static
+BOOLEAN
+RxCastFamilyAllows(
     _In_ RxDevice12& Device,
     _In_ DXGI_FORMAT Format,
+    _In_ RxFormatCap12 Cap,
     _In_ UINT Support1)
 {
     DXGI_FORMAT Family = RxFormatFamily(Format);
+    DXGI_FORMAT Members[DXGI_FORMAT_A4B4G4R4_UNORM];
     D3D12_FEATURE_DATA_FORMAT_SUPPORT Support;
+    UINT Count = 0;
+    UINT Promised = 0;
+    UINT Optional = 0;
 
     if (Family == DXGI_FORMAT_UNKNOWN)
-        return SUCCEEDED(RxQueryFormat(Device, Format, &Support)) && (Support.Support1 & Support1) != 0;
-
-    for (UINT Index = 1; Index <= DXGI_FORMAT_A4B4G4R4_UNORM; Index++)
     {
-        if (RxFormatFamily((DXGI_FORMAT)Index) != Family)
+        Members[Count] = Format;
+        Count += 1;
+    }
+    else
+    {
+        for (UINT Index = 1; Index <= DXGI_FORMAT_A4B4G4R4_UNORM; Index++)
+        {
+            if (RxFormatFamily((DXGI_FORMAT)Index) != Family)
+                continue;
+            Members[Count] = (DXGI_FORMAT)Index;
+            Count += 1;
+        }
+    }
+
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        RxFormatRule12 Rule;
+
+        if (Cap == RxCapTypedUav && RxTypelessPassesUav(Members[Index], Format))
+            return TRUE;
+
+        Rule = RxFormatCapRule12(Device.GetFeatureLevel(), Members[Index], Cap);
+        if (Rule == RxRuleRequired)
+            Promised += 1;
+        else if (Rule == RxRuleDriver)
+            Optional += 1;
+    }
+
+    if (Promised != 0)
+        return TRUE;
+    if (Optional == 0)
+        return FALSE;
+    if (Support1 == 0)
+        return TRUE;
+
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        if (RxFormatCapRule12(Device.GetFeatureLevel(), Members[Index], Cap) != RxRuleDriver)
             continue;
-        if (SUCCEEDED(RxQueryFormat(Device, (DXGI_FORMAT)Index, &Support)) && (Support.Support1 & Support1) != 0)
+        if (SUCCEEDED(RxQueryFormat(Device, Members[Index], &Support)) && (Support.Support1 & Support1) != 0)
             return TRUE;
     }
 
@@ -432,14 +500,14 @@ RxCheckAccessFlags(
         if (Device.GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0)
             return E_INVALIDARG;
         if (!RxIsFeedbackFormat(Desc.Format) &&
-            !RxFamilySupports(Device, Desc.Format, D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW))
+            !RxCastFamilyAllows(Device, Desc.Format, RxCapTypedUav, D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW))
         {
             return E_INVALIDARG;
         }
     }
 
     if ((Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
-        !RxFamilySupports(Device, Desc.Format, D3D12_FORMAT_SUPPORT1_RENDER_TARGET))
+        !RxCastFamilyAllows(Device, Desc.Format, RxCapRenderTarget, D3D12_FORMAT_SUPPORT1_RENDER_TARGET))
     {
         return E_INVALIDARG;
     }
@@ -451,7 +519,7 @@ RxCheckAccessFlags(
 
         if ((Flags & NotWithDepth) != 0)
             return E_INVALIDARG;
-        if (!RxFamilySupports(Device, Desc.Format, D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL))
+        if (!RxCastFamilyAllows(Device, Desc.Format, RxCapDepthStencil, 0))
             return E_INVALIDARG;
     }
     else if ((Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 && (Flags & RxVideoReference) == 0)

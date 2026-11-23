@@ -100,6 +100,13 @@ RxFormatTileable12(
     _In_ DXGI_FORMAT Format,
     _In_ UINT SampleCount);
 
+/* What the level's rule row says about one capability of a format */
+RxFormatRule12
+RxFormatCapRule12(
+    _In_ D3D_FEATURE_LEVEL Level,
+    _In_ DXGI_FORMAT Format,
+    _In_ RxFormatCap12 Cap);
+
 /* Typed UAV loads the format promises (1), leaves to the driver (2) or lacks (0) */
 RxFormatRule12
 RxTypedLoadRule12(

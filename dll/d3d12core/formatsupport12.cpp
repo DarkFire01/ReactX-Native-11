@@ -96,6 +96,15 @@ RxFormatIn(
 }
 
 RxFormatRule12
+RxFormatCapRule12(
+    _In_ D3D_FEATURE_LEVEL Level,
+    _In_ DXGI_FORMAT Format,
+    _In_ RxFormatCap12 Cap)
+{
+    return RxRuleIn(RxRowOf(Level, Format), Cap);
+}
+
+RxFormatRule12
 RxTypedLoadRule12(
     _In_ D3D_FEATURE_LEVEL Level,
     _In_ DXGI_FORMAT Format)
