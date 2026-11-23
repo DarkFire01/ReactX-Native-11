@@ -202,6 +202,8 @@ D9Device::~D9Device()
     if (DriverDevice != NULL)
         DestroyStagingBuffers();
     DestroyHardware();
+    delete[] SyncPackets;
+    delete[] SyncFreeSlots;
     DeleteCriticalSection(&Lock);
     Enum->Release();
 }

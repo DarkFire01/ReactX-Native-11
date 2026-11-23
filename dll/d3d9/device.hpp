@@ -45,6 +45,22 @@ static constexpr DWORD D9ShareUsageLockable = 0x04000000;
 static constexpr DWORD D9ShareUsageModern = 0x08000000;
 static constexpr DWORD D9ShareUsagePlain = 0x00400000;
 
+/* What a sync token the driver hands back stands for: a wait for a fence value, or a signal of one, on the
+   driver's contexts */
+enum class D9SyncKind : UINT
+{
+    None,
+    Wait,
+    Signal,
+};
+
+struct D9SyncPacket
+{
+    D9SyncKind Kind;
+    D3DKMT_HANDLE Fence;
+    UINT64 Value;
+};
+
 /* What one creation asks of sharing: the mode, the handle to open and the usage the resource records */
 struct D9ShareRequest
 {
@@ -1434,6 +1450,22 @@ public:
     AllocateCallback(
         _Inout_ D3DDDICB_ALLOCATE* Args);
 
+    /* Sync tokens: packets the runtime hands the driver by number, which the driver passes back to run */
+    HRESULT
+    AcquireSyncToken(
+        _In_ const D9SyncPacket* Packet,
+        _Out_ UINT64* Token);
+
+    HRESULT
+    TakeSyncPacket(
+        _In_ UINT64 Token,
+        _Out_ D9SyncPacket* Packet);
+
+    HRESULT
+    RunSyncToken(
+        _In_ const D3DDDICB_SYNCTOKEN* Args,
+        _In_ D9SyncKind Expected);
+
     HRESULT
     DeallocateCallback(
         _In_ const D3DDDICB_DEALLOCATE* Args);
@@ -2403,4 +2435,13 @@ private:
 
     /* Between BeginScene and EndScene */
     BOOLEAN InScene = FALSE;
+
+    /* Sync token packets, with the slots tokens the driver ran left free */
+    SRWLOCK SyncLock = SRWLOCK_INIT;
+    D9SyncPacket* SyncPackets = nullptr;
+    UINT SyncPacketCount = 0;
+    UINT SyncPacketCapacity = 0;
+    UINT* SyncFreeSlots = nullptr;
+    UINT SyncFreeCount = 0;
+    UINT SyncFreeCapacity = 0;
 };

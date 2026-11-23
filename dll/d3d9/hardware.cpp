@@ -463,6 +463,164 @@ D9SetDisplayModeCb(
 }
 
 /* The runtime hands out no synchronization tokens yet, so every token a driver names is unknown */
+/* Grows one of the sync token arrays to hold one more entry; it starts at eight and doubles */
+template <class Entry>
+static
+BOOLEAN
+D9GrowSyncArray(
+    _Inout_ Entry** Items,
+    _In_ UINT Count,
+    _Inout_ UINT* Capacity)
+{
+    UINT Wanted = *Capacity * 2 > 8 ? *Capacity * 2 : 8;
+    Entry* Grown;
+
+    if (Count < *Capacity)
+        return TRUE;
+    Grown = new (std::nothrow) Entry[Wanted];
+    if (Grown == nullptr)
+        return FALSE;
+    if (Count != 0)
+        CopyMemory(Grown, *Items, sizeof(**Items) * Count);
+    delete[] *Items;
+    *Items = Grown;
+    *Capacity = Wanted;
+    return TRUE;
+}
+
+/* Stores a packet and names it by its slot plus one; slots freed by earlier tokens are used first */
+HRESULT
+D9Device::AcquireSyncToken(
+    _In_ const D9SyncPacket* Packet,
+    _Out_ UINT64* Token)
+{
+    UINT Slot;
+
+    AcquireSRWLockExclusive(&SyncLock);
+    if (SyncFreeCount != 0)
+    {
+        SyncFreeCount -= 1;
+        Slot = SyncFreeSlots[SyncFreeCount];
+    }
+    else
+    {
+        if (!D9GrowSyncArray(&SyncPackets, SyncPacketCount, &SyncPacketCapacity))
+        {
+            ReleaseSRWLockExclusive(&SyncLock);
+            return E_OUTOFMEMORY;
+        }
+        Slot = SyncPacketCount;
+        SyncPacketCount += 1;
+    }
+    SyncPackets[Slot] = *Packet;
+    *Token = static_cast<UINT64>(Slot) + 1;
+    ReleaseSRWLockExclusive(&SyncLock);
+    return S_OK;
+}
+
+/* Reads the packet a token names and frees its slot; a token the runtime never gave out is refused */
+HRESULT
+D9Device::TakeSyncPacket(
+    _In_ UINT64 Token,
+    _Out_ D9SyncPacket* Packet)
+{
+    UINT64 Slot = Token - 1;
+    HRESULT hr = S_OK;
+
+    ZeroMemory(Packet, sizeof(*Packet));
+    AcquireSRWLockExclusive(&SyncLock);
+    if (Slot >= SyncPacketCount)
+    {
+        hr = E_INVALIDARG;
+    }
+    else if (!D9GrowSyncArray(&SyncFreeSlots, SyncFreeCount, &SyncFreeCapacity))
+    {
+        *Packet = SyncPackets[Slot];
+        hr = E_OUTOFMEMORY;
+    }
+    else
+    {
+        *Packet = SyncPackets[Slot];
+        SyncFreeSlots[SyncFreeCount] = static_cast<UINT>(Slot);
+        SyncFreeCount += 1;
+        SyncPackets[Slot].Kind = D9SyncKind::None;
+    }
+    ReleaseSRWLockExclusive(&SyncLock);
+    return hr;
+}
+
+/* Runs the packet behind a token on the contexts the driver names, or on every context the device has */
+HRESULT
+D9Device::RunSyncToken(
+    _In_ const D3DDDICB_SYNCTOKEN* Args,
+    _In_ D9SyncKind Expected)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_HANDLE Contexts[D9MaxKernelContexts];
+    UINT Count = 0;
+    D9SyncPacket Packet;
+    HRESULT hr;
+
+    hr = TakeSyncPacket(reinterpret_cast<UINT64>(Args->hSyncToken), &Packet);
+    if (FAILED(hr) && hr != E_OUTOFMEMORY)
+        return hr;
+    if (Packet.Kind != Expected)
+        return E_INVALIDARG;
+
+    if (Args->BroadcastContextArray != nullptr)
+    {
+        for (UINT Index = 0; Index < Args->BroadcastContextCount && Count < D9MaxKernelContexts; Index++)
+        {
+            Contexts[Count] = static_cast<D3DKMT_HANDLE>(reinterpret_cast<ULONG_PTR>(
+                Args->BroadcastContextArray[Index]));
+            Count += 1;
+        }
+    }
+    else
+    {
+        for (UINT Remaining = KernelContextCount; Remaining > 0; Remaining -= 1)
+        {
+            Contexts[Count] = KernelContexts[Remaining - 1];
+            Count += 1;
+        }
+    }
+
+    if (Expected == D9SyncKind::Wait)
+    {
+        for (UINT Index = 0; Index < Count; Index++)
+        {
+            D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU Wait = {};
+            NTSTATUS Status;
+
+            Wait.hContext = Contexts[Index];
+            Wait.ObjectCount = 1;
+            Wait.ObjectHandleArray = &Packet.Fence;
+            Wait.MonitoredFenceValueArray = &Packet.Value;
+            Status = Kmt->WaitForSynchronizationObjectFromGpu(&Wait);
+            if (!NT_SUCCESS(Status))
+            {
+                D9Trace(L"waiting for a sync token's fence failed 0x%08lX", Status);
+                break;
+            }
+        }
+    }
+    else
+    {
+        D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 Signal = {};
+        NTSTATUS Status;
+
+        Signal.ObjectCount = 1;
+        Signal.ObjectHandleArray = &Packet.Fence;
+        Signal.BroadcastContextCount = Count;
+        Signal.BroadcastContextArray = Contexts;
+        Signal.MonitoredFenceValueArray = &Packet.Value;
+        Status = Kmt->SignalSynchronizationObjectFromGpu2(&Signal);
+        if (!NT_SUCCESS(Status))
+            D9Trace(L"signaling a sync token's fence failed 0x%08lX", Status);
+    }
+    return S_OK;
+}
+
 static
 HRESULT
 APIENTRY
@@ -470,9 +628,7 @@ D9AcquireResourceCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_SYNCTOKEN* Args)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(Args);
-    return E_INVALIDARG;
+    return static_cast<D9Device*>(hDevice)->RunSyncToken(Args, D9SyncKind::Wait);
 }
 
 static
@@ -482,9 +638,7 @@ D9ReleaseResourceCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_SYNCTOKEN* Args)
 {
-    UNREFERENCED_PARAMETER(hDevice);
-    UNREFERENCED_PARAMETER(Args);
-    return E_INVALIDARG;
+    return static_cast<D9Device*>(hDevice)->RunSyncToken(Args, D9SyncKind::Signal);
 }
 
 static
