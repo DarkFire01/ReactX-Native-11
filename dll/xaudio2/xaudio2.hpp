@@ -888,7 +888,9 @@ public:
 HRESULT
 XaWmaInitialize(
     _Inout_ XaSourceVoice* Voice,
-    _In_ const WAVEFORMATEX* Format);
+    _In_ const WAVEFORMATEX* Format,
+    _In_ float MaxRatio,
+    _In_ BOOLEAN Pitch);
 
 VOID
 XaWmaRelease(

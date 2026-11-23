@@ -72,8 +72,12 @@ struct XaWmaSource
     UINT32 PcmStart;
     UINT32 PcmCount;
 
-    /* Decoded bytes handed to the mixer since the last stream end */
+    /* Decoded bytes passed on since the last stream end; output joins it a batch at a time */
     UINT64 DeliveredBytes;
+
+    /* The ring decoded output goes through: where the next batch lands, and where it wraps */
+    UINT32 RingOffset;
+    UINT32 RingLimit;
 };
 
 static
@@ -316,6 +320,30 @@ XaWmaTrim(
     return Length;
 }
 
+/* Counts output toward SamplesPlayed once the batch reaches the end of the ring, or when Flush is set */
+static
+VOID
+XaWmaPassOn(
+    _Inout_ XaWmaSource* Wma,
+    _Inout_ UINT32* Batch,
+    _In_ BOOLEAN Flush)
+{
+    if (*Batch == 0)
+        return;
+    if (Flush)
+    {
+        Wma->DeliveredBytes += *Batch;
+        Wma->RingOffset += *Batch;
+        *Batch = 0;
+    }
+    else if (Wma->RingOffset + *Batch >= Wma->RingLimit)
+    {
+        Wma->DeliveredBytes += *Batch;
+        Wma->RingOffset = 0;
+        *Batch = 0;
+    }
+}
+
 /* Decodes until Bytes more output is queued or the stream runs dry */
 static
 HRESULT
@@ -324,9 +352,10 @@ XaWmaFill(
     _In_ INT32 Bytes)
 {
     XaWmaSource* Wma = Voice->Wma;
+    UINT32 Batch = 0;
     HRESULT hr = S_OK;
 
-    while (Bytes > 0)
+    while (Bytes > 0 && SUCCEEDED(hr))
     {
         if (Wma->Input == nullptr && Wma->Pending != nullptr)
             XaWmaLoadHead(Voice);
@@ -351,13 +380,11 @@ XaWmaFill(
         }
         else if (Wma->State == XaWmaFailed)
         {
-            return E_FAIL;
+            hr = E_FAIL;
         }
         else if (Wma->State == XaWmaWantsDecode)
         {
             hr = XaWmaDecode(Wma->Decoder, &Wma->ReadyFrames, &Wma->State);
-            if (FAILED(hr))
-                return hr;
         }
         else
         {
@@ -368,31 +395,45 @@ XaWmaFill(
             UINT32 Kept;
 
             if (Out == nullptr)
-                return E_OUTOFMEMORY;
+            {
+                hr = E_OUTOFMEMORY;
+                break;
+            }
             hr = XaWmaReadPcm(Wma->Decoder, Frames, Out, &Produced, &Wma->State);
             if (FAILED(hr))
-                return hr;
+                break;
             Kept = XaWmaTrim(Wma, Out, Wma->FrameBytes * Produced);
             Wma->PcmCount += Kept / Wma->FrameBytes;
-            Wma->DeliveredBytes += Kept;
             Bytes -= static_cast<INT32>(Kept);
+            Batch += Kept;
+            XaWmaPassOn(Wma, &Batch, FALSE);
         }
     }
+    XaWmaPassOn(Wma, &Batch, TRUE);
     return hr;
 }
 
 HRESULT
 XaWmaInitialize(
     _Inout_ XaSourceVoice* Voice,
-    _In_ const WAVEFORMATEX* Format)
+    _In_ const WAVEFORMATEX* Format,
+    _In_ float MaxRatio,
+    _In_ BOOLEAN Pitch)
 {
     XaWmaSource* Wma = new (std::nothrow) XaWmaSource;
+    float Stretch = (static_cast<float>(Format->nSamplesPerSec) / static_cast<float>(Voice->OutputRate)) * MaxRatio;
+    double Reach = static_cast<double>(XaQuantumFrames(Voice->OutputRate, Voice->Engine)) * Stretch;
+    UINT32 PassBytes;
     HRESULT hr;
 
     if (Wma == nullptr)
         return E_OUTOFMEMORY;
     memset(Wma, 0, sizeof(*Wma));
     Wma->FrameBytes = sizeof(SHORT) * Format->nChannels;
+
+    /* The ring holds at least two of the largest passes the converter can ask for */
+    PassBytes = Wma->FrameBytes * (Pitch ? static_cast<UINT32>(Reach + 1.0) + 1 : static_cast<UINT32>(Reach + 0.5));
+    Wma->RingLimit = PassBytes * 2 * (2048 / XaMax(PassBytes, 1u) + 1);
     Voice->Wma = Wma;
     hr = XaWmaCreate(Format, XaWmaPullInput, Voice, &Wma->Decoder);
     if (FAILED(hr))

@@ -77,6 +77,7 @@ XaSourceVoice::Initialize(
     float InitialRatio;
     WORD SourceTag = XaFormatTag(NewFormat);
     const WAVEFORMATEX* Compressed = nullptr;
+    BOOLEAN Pitch = (Flags & XAUDIO2_VOICE_NOPITCH) == 0;
     HRESULT hr;
 
     if (NewFormat->nChannels == 0 || NewFormat->nChannels > XA_MAX_CHANNELS)
@@ -167,7 +168,7 @@ XaSourceVoice::Initialize(
         return E_OUTOFMEMORY;
     hr = InitializeCommon(Flags, SendList, Chain);
     if (SUCCEEDED(hr) && Compressed != nullptr)
-        hr = XaWmaInitialize(this, Compressed);
+        hr = XaWmaInitialize(this, Compressed, MaxRatio, Pitch);
     return hr;
 }
 
