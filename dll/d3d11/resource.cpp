@@ -194,6 +194,17 @@ DdiResource::Create(
         return hr;
     }
 
+    if (Args.Usage == D3D10_DDI_USAGE_STAGING)
+        Route = MapRoute::Staging;
+    else if (Args.Usage != D3D10_DDI_USAGE_DYNAMIC)
+        Route = MapRoute::Default;
+    else if (Args.BindFlags & (D3D10_DDI_BIND_VERTEX_BUFFER | D3D10_DDI_BIND_INDEX_BUFFER))
+        Route = MapRoute::DynamicInputAssembler;
+    else if (Args.BindFlags & D3D10_DDI_BIND_CONSTANT_BUFFER)
+        Route = MapRoute::DynamicConstant;
+    else
+        Route = MapRoute::DynamicOther;
+
     IsCreated = TRUE;
     return S_OK;
 }
@@ -622,12 +633,38 @@ DdiResource::Map(
     _In_ UINT MapFlags,
     _Out_ D3D11_MAPPED_SUBRESOURCE* Mapped)
 {
+    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
     D3D10DDI_MAPPED_SUBRESOURCE Result = {};
+    BOOLEAN IsDiscard = (MapType == D3D11_MAP_WRITE_DISCARD);
+    decltype(Funcs.pfnResourceMap) Entry = Funcs.pfnResourceMap;
     HRESULT hr;
 
+    switch (Route)
+    {
+        case MapRoute::Staging:
+            Entry = Funcs.pfnStagingResourceMap;
+            break;
+
+        case MapRoute::DynamicInputAssembler:
+            Entry = IsDiscard ? Funcs.pfnDynamicIABufferMapDiscard : Funcs.pfnDynamicIABufferMapNoOverwrite;
+            break;
+
+        case MapRoute::DynamicConstant:
+            Entry = IsDiscard ? Funcs.pfnDynamicConstantBufferMapDiscard : Funcs.pfnDynamicConstantBufferMapNoOverwrite;
+            break;
+
+        case MapRoute::DynamicOther:
+            if (IsDiscard)
+                Entry = Funcs.pfnDynamicResourceMapDiscard;
+            break;
+
+        default:
+            break;
+    }
+
     /* D3D11_MAP and the DO_NOT_WAIT flag share their values with the DDI */
-    Device.GetDeviceFuncs().pfnResourceMap(Device.GetDriverDevice(), Handle, Subresource, (D3D10_DDI_MAP)MapType,
-                                           MapFlags, &Result);
+    Entry(Device.GetDriverDevice(), Handle, Subresource, (D3D10_DDI_MAP)MapType, MapFlags, &Result);
+    IsDefaultMapped = (Route == MapRoute::DynamicOther && !IsDiscard);
     hr = RxApiResult(Device.TakeDriverError());
     if (FAILED(hr))
     {
@@ -645,7 +682,35 @@ VOID
 DdiResource::Unmap(
     _In_ UINT Subresource)
 {
-    Device.GetDeviceFuncs().pfnResourceUnmap(Device.GetDriverDevice(), Handle, Subresource);
+    const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
+    decltype(Funcs.pfnResourceUnmap) Entry = Funcs.pfnResourceUnmap;
+
+    if (!IsDefaultMapped)
+    {
+        switch (Route)
+        {
+            case MapRoute::Staging:
+                Entry = Funcs.pfnStagingResourceUnmap;
+                break;
+
+            case MapRoute::DynamicInputAssembler:
+                Entry = Funcs.pfnDynamicIABufferUnmap;
+                break;
+
+            case MapRoute::DynamicConstant:
+                Entry = Funcs.pfnDynamicConstantBufferUnmap;
+                break;
+
+            case MapRoute::DynamicOther:
+                Entry = Funcs.pfnDynamicResourceUnmap;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    Entry(Device.GetDriverDevice(), Handle, Subresource);
 }
 
 HRESULT

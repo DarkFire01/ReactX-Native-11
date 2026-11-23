@@ -265,6 +265,21 @@ private:
     /* This device holds the keyed mutex; the fence value is what the GPU waited for or signals next */
     BOOLEAN IsSyncAcquired = FALSE;
     UINT64 SyncFenceValue = 0;
+
+    /* The DDI map entries the usage and binding of the resource call for */
+    enum class MapRoute : UCHAR
+    {
+        Default,
+        Staging,
+        DynamicInputAssembler,
+        DynamicConstant,
+        DynamicOther,
+    };
+
+    MapRoute Route = MapRoute::Default;
+
+    /* A dynamic map that went through the default entry is undone through it too */
+    BOOLEAN IsDefaultMapped = FALSE;
 };
 
 /* Creates the keyed mutex and fence of a texture whose record asks for one, before its allocations */
