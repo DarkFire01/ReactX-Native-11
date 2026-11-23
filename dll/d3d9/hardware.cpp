@@ -666,6 +666,7 @@ D9Device::CreateDriverResource(
     D3DDDIARG_CREATERESOURCE Create = {};
     HRESULT hr;
 
+    DrainBatch();
     if (DeviceFunctions.pfnCreateResource2 != nullptr)
     {
         Create2.Format = Resource->Format;
@@ -757,6 +758,7 @@ D9Device::DestroyDriverSurface(
     if (Resource->DriverResource == NULL)
         return;
 
+    DrainBatch();
     DeviceFunctions.pfnDestroyResource(DriverDevice, Resource->DriverResource);
     Resource->DriverResource = NULL;
 }
@@ -782,6 +784,7 @@ D9Device::LockDriverSurface(
         Args.Area = *Rect;
     }
 
+    DrainBatch();
     hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
     if (FAILED(hr))
     {
@@ -802,5 +805,267 @@ D9Device::UnlockDriverSurface(
     D3DDDIARG_UNLOCK Unlock = {};
 
     Unlock.hResource = Resource->DriverResource;
+    DrainBatch();
     return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
+}
+
+/* A runtime owned system memory buffer the driver reads from */
+HRESULT
+D9Device::CreateSystemBuffer(
+    _In_ D3DDDIFORMAT Format,
+    _In_ UINT Size,
+    _In_ UINT Flags,
+    _In_ VOID* Memory,
+    _Out_ D9Resource* Resource)
+{
+    D3DDDI_SURFACEINFO Surface = {};
+
+    ZeroMemory(Resource, sizeof(*Resource));
+    Resource->Format = Format;
+    Resource->Pool = D3DDDIPOOL_SYSTEMMEM;
+    Resource->Flags.Value = Flags;
+    Resource->Width = Size;
+    Resource->Height = 1;
+
+    Surface.Width = Size;
+    Surface.Height = 1;
+    Surface.pSysMem = Memory;
+    Surface.SysMemPitch = Size;
+    return CreateDriverResource(Resource, &Surface, D3DDDIMULTISAMPLE_NONE, 0);
+}
+
+/* Whether the machine has more than one processor core */
+static
+BOOLEAN
+D9HasSeveralCores(VOID)
+{
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* Entries;
+    DWORD Size = 0;
+    UINT Cores = 0;
+
+    if (GetLogicalProcessorInformation(nullptr, &Size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        return FALSE;
+
+    Entries = static_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION*>(HeapAlloc(GetProcessHeap(), 0, Size));
+    if (Entries == nullptr)
+        return FALSE;
+    if (GetLogicalProcessorInformation(Entries, &Size))
+    {
+        for (DWORD Index = 0; Index < Size / sizeof(*Entries) && Cores < 2; Index++)
+        {
+            if (Entries[Index].Relationship == RelationProcessorCore)
+                Cores += 1;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, Entries);
+    return Cores > 1;
+}
+
+/* Drivers that offer asynchronous locks on a hardware device leave threading to the runtime */
+BOOLEAN
+D9Device::WantsBatch(VOID) const
+{
+    static LONG SeveralCores = -1;
+
+    if (DeviceType != D3DDEVTYPE_HAL || (BehaviorFlags & D3DCREATE_DISABLE_PSGP_THREADING) != 0)
+        return FALSE;
+    if (DeviceFunctions.pfnLockAsync == nullptr || DeviceFunctions.pfnUnlockAsync == nullptr ||
+        DeviceFunctions.pfnRename == nullptr)
+    {
+        return FALSE;
+    }
+    if (SeveralCores < 0)
+        InterlockedExchange(&SeveralCores, D9HasSeveralCores() ? 1 : 0);
+    return SeveralCores == 1;
+}
+
+VOID
+D9Device::StartBatch(VOID)
+{
+    HRESULT hr;
+
+    if (Batch != nullptr || !WantsBatch())
+        return;
+
+    Batch = new (std::nothrow) D9Batch(this, &DeviceFunctions, DriverDevice);
+    if (Batch == nullptr)
+        return;
+    hr = Batch->Start();
+    if (FAILED(hr))
+    {
+        D9Trace(L"driver calls run on the calling thread; the batch could not start (0x%08lX)", hr);
+        StopBatch();
+    }
+}
+
+VOID
+D9Device::StopBatch(VOID)
+{
+    D9Batch* Stopping = Batch;
+
+    if (Stopping == nullptr)
+        return;
+    Batch = nullptr;
+    Stopping->Stop();
+    delete Stopping;
+}
+
+VOID
+D9Device::DrainBatch(VOID)
+{
+    if (Batch != nullptr)
+        Batch->Drain();
+}
+
+/* Copies a call into the batch; FALSE leaves it to the caller to make */
+static
+BOOLEAN
+D9RecordCall(
+    _In_opt_ D9Batch* Batch,
+    _In_ D9BatchCall Call,
+    _In_reads_bytes_(Size) const VOID* Args,
+    _In_ UINT Size)
+{
+    VOID* Slot;
+
+    if (Batch == nullptr)
+        return FALSE;
+    Slot = Batch->Record(Call, Size);
+    if (Slot == nullptr)
+        return FALSE;
+    CopyMemory(Slot, Args, Size);
+    return TRUE;
+}
+
+VOID
+D9Device::DdiRenderState(
+    _In_ const D3DDDIARG_RENDERSTATE* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::RenderState, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetRenderState(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiTextureStageState(
+    _In_ const D3DDDIARG_TEXTURESTAGESTATE* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::TextureStageState, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetTextureStageState(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiPixelShaderConst(
+    _In_ const D3DDDIARG_SETPIXELSHADERCONST* Args,
+    _In_reads_(Args->Count * 4) const FLOAT* Data)
+{
+    UINT DataSize = Args->Count * 4 * sizeof(*Data);
+    BYTE* Slot = Batch != nullptr ? static_cast<BYTE*>(Batch->Record(D9BatchCall::PixelShaderConst,
+                                                                      sizeof(*Args) + DataSize))
+                                  : nullptr;
+
+    if (Slot == nullptr)
+    {
+        DeviceFunctions.pfnSetPixelShaderConst(DriverDevice, Args, Data);
+        return;
+    }
+    CopyMemory(Slot, Args, sizeof(*Args));
+    CopyMemory(Slot + sizeof(*Args), Data, DataSize);
+}
+
+VOID
+D9Device::DdiViewport(
+    _In_ const D3DDDIARG_VIEWPORTINFO* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::Viewport, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetViewport(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiZRange(
+    _In_ const D3DDDIARG_ZRANGE* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::ZRange, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetZRange(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiScissorRect(
+    _In_ const RECT* Rect)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::ScissorRect, Rect, sizeof(*Rect)))
+        DeviceFunctions.pfnSetScissorRect(DriverDevice, Rect);
+}
+
+VOID
+D9Device::DdiClipPlane(
+    _In_ const D3DDDIARG_SETCLIPPLANE* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::ClipPlane, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetClipPlane(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiWInfo(
+    _In_ const D3DDDIARG_WINFO* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::WInfo, Args, sizeof(*Args)))
+        DeviceFunctions.pfnUpdateWInfo(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiRenderTarget(
+    _In_ const D3DDDIARG_SETRENDERTARGET* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::RenderTarget, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetRenderTarget(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiDepthStencil(
+    _In_ const D3DDDIARG_SETDEPTHSTENCIL* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::DepthStencil, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetDepthStencil(DriverDevice, Args);
+}
+
+/* A recorded clear keeps its rectangle count and then the rectangles after the arguments */
+HRESULT
+D9Device::DdiClear(
+    _In_ const D3DDDIARG_CLEAR* Args,
+    _In_ UINT Count,
+    _In_reads_(Count) const RECT* Rects)
+{
+    UINT Size = sizeof(*Args) + 2 * sizeof(UINT) + Count * sizeof(*Rects);
+    BYTE* Slot = Batch != nullptr ? static_cast<BYTE*>(Batch->Record(D9BatchCall::Clear, Size)) : nullptr;
+    UINT* Kept;
+
+    if (Slot == nullptr)
+        return DeviceFunctions.pfnClear(DriverDevice, Args, Count, Rects);
+
+    CopyMemory(Slot, Args, sizeof(*Args));
+    Kept = reinterpret_cast<UINT*>(Slot + sizeof(*Args));
+    Kept[0] = Count;
+    Kept[1] = 0;
+    CopyMemory(Kept + 2, Rects, Count * sizeof(*Rects));
+    return S_OK;
+}
+
+/* Hands a single source present to the worker; FALSE leaves it to the caller */
+BOOLEAN
+D9Device::DdiPresent1(
+    _In_ const D3DDDIARG_PRESENT1* Args)
+{
+    BYTE* Slot;
+
+    if (Batch == nullptr || Args->SrcResources != 1)
+        return FALSE;
+
+    Slot = static_cast<BYTE*>(Batch->Record(D9BatchCall::Present1,
+                                            sizeof(*Args) + sizeof(D3DDDIARG_PRESENTSURFACE)));
+    if (Slot == nullptr)
+        return FALSE;
+    CopyMemory(Slot, Args, sizeof(*Args));
+    CopyMemory(Slot + sizeof(*Args), Args->phSrcResources, sizeof(D3DDDIARG_PRESENTSURFACE));
+    Batch->Submit();
+    return TRUE;
 }

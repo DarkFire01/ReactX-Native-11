@@ -40,6 +40,107 @@ struct D9Resource
     UINT Height;
 };
 
+/* Driver calls a batch records instead of making them */
+enum class D9BatchCall : UINT
+{
+    RenderState,
+    TextureStageState,
+    PixelShaderConst,
+    Viewport,
+    ZRange,
+    ScissorRect,
+    ClipPlane,
+    WInfo,
+    RenderTarget,
+    DepthStencil,
+    Clear,
+    Present1,
+};
+
+/* One recording buffer, with the system memory vertex and index buffers drawing from application memory fills */
+struct D9BatchBuffer
+{
+    BYTE* Data;
+    UINT Used;
+    UINT Calls;
+    D9Resource Vertices;
+    D9Resource Indices16;
+    D9Resource Indices32;
+    VOID* Memory[3];
+};
+
+/* Records state calls and runs them on a worker thread for drivers that lock asynchronously, as the system does
+   when the driver leaves threading to the runtime */
+class D9Batch
+{
+public:
+    D9Batch(
+        _In_ D9Device* Owner,
+        _In_ const D3DDDI_DEVICEFUNCS* Functions,
+        _In_ HANDLE DriverDevice);
+
+    ~D9Batch();
+
+    D9Batch(const D9Batch&) = delete;
+    D9Batch& operator=(const D9Batch&) = delete;
+
+    HRESULT
+    Start(VOID);
+
+    VOID
+    Stop(VOID);
+
+    _Ret_maybenull_
+    VOID*
+    Record(
+        _In_ D9BatchCall Call,
+        _In_ UINT Size);
+
+    VOID
+    Submit(VOID);
+
+    VOID
+    Drain(VOID);
+
+private:
+    static
+    DWORD
+    WINAPI
+    WorkerMain(
+        _In_ VOID* Context);
+
+    VOID
+    WaitForWorker(VOID);
+
+    VOID
+    Run(
+        _Inout_ D9BatchBuffer* Buffer);
+
+    HRESULT
+    CreateFills(
+        _Inout_ D9BatchBuffer* Buffer);
+
+    VOID
+    LockFills(
+        _Inout_ D9BatchBuffer* Buffer);
+
+    VOID
+    DestroyFills(
+        _Inout_ D9BatchBuffer* Buffer);
+
+    D9Device* Device;
+    const D3DDDI_DEVICEFUNCS* Funcs;
+    HANDLE Driver;
+    D9BatchBuffer Buffers[2] = {};
+    UINT Current = 0;
+    HANDLE Thread = NULL;
+    HANDLE Wake = NULL;
+    HANDLE Done = NULL;
+    volatile LONG Busy = 0;
+    BOOLEAN Pending = FALSE;
+    BOOLEAN Exiting = FALSE;
+};
+
 /* Objects a device owns hold the device while the application holds them */
 class D9Child
 {
@@ -342,6 +443,18 @@ public:
         _In_ UINT Size,
         _In_ UINT Flags,
         _Out_ D9Resource* Resource);
+
+    HRESULT
+    CreateSystemBuffer(
+        _In_ D3DDDIFORMAT Format,
+        _In_ UINT Size,
+        _In_ UINT Flags,
+        _In_ VOID* Memory,
+        _Out_ D9Resource* Resource);
+
+    /* Driver calls that a batch may record; the rest wait for it to empty first */
+    VOID
+    DrainBatch(VOID);
 
     VOID
     DestroyDriverSurface(
@@ -1108,7 +1221,8 @@ private:
         _In_ FLOAT W);
 
     VOID
-    SendClipPlanes(VOID);
+    SendClipPlanes(
+        _In_ BOOLEAN Twice);
 
     VOID
     SendInitialState(VOID);
@@ -1124,8 +1238,70 @@ private:
     SendTargets(VOID);
 
     VOID
-    SendViewport(
-        _In_ BOOLEAN Twice);
+    SendViewport(VOID);
+
+    VOID
+    SendViewportRange(VOID);
+
+    BOOLEAN
+    WantsBatch(VOID) const;
+
+    VOID
+    StartBatch(VOID);
+
+    VOID
+    StopBatch(VOID);
+
+    VOID
+    DdiRenderState(
+        _In_ const D3DDDIARG_RENDERSTATE* Args);
+
+    VOID
+    DdiTextureStageState(
+        _In_ const D3DDDIARG_TEXTURESTAGESTATE* Args);
+
+    VOID
+    DdiPixelShaderConst(
+        _In_ const D3DDDIARG_SETPIXELSHADERCONST* Args,
+        _In_reads_(Args->Count * 4) const FLOAT* Data);
+
+    VOID
+    DdiViewport(
+        _In_ const D3DDDIARG_VIEWPORTINFO* Args);
+
+    VOID
+    DdiZRange(
+        _In_ const D3DDDIARG_ZRANGE* Args);
+
+    VOID
+    DdiScissorRect(
+        _In_ const RECT* Rect);
+
+    VOID
+    DdiClipPlane(
+        _In_ const D3DDDIARG_SETCLIPPLANE* Args);
+
+    VOID
+    DdiWInfo(
+        _In_ const D3DDDIARG_WINFO* Args);
+
+    VOID
+    DdiRenderTarget(
+        _In_ const D3DDDIARG_SETRENDERTARGET* Args);
+
+    VOID
+    DdiDepthStencil(
+        _In_ const D3DDDIARG_SETDEPTHSTENCIL* Args);
+
+    HRESULT
+    DdiClear(
+        _In_ const D3DDDIARG_CLEAR* Args,
+        _In_ UINT Count,
+        _In_reads_(Count) const RECT* Rects);
+
+    BOOLEAN
+    DdiPresent1(
+        _In_ const D3DDDIARG_PRESENT1* Args);
 
     HRESULT
     CreateDriverResource(
@@ -1209,6 +1385,9 @@ private:
     /* The bound targets reach the driver before the first operation that writes them */
     BOOLEAN TargetsDirty = FALSE;
     D9Resource StagingBuffers[D9StagingBufferCount] = {};
+
+    /* Records driver calls for a worker thread when the driver leaves threading to the runtime */
+    D9Batch* Batch = nullptr;
 
     /* The driver's contexts in creation order; the kernel is told about them newest first */
     D3DKMT_HANDLE KernelContexts[D9MaxKernelContexts] = {};

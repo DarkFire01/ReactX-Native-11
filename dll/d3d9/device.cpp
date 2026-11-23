@@ -88,6 +88,18 @@ static const BYTE D9InitialLaterStates[] =
     181, 182, 183, 184, 190, 191, 192,
 };
 
+/* With software vertex processing the driver also sees the vertex pipeline states */
+static const BYTE D9InitialVertexStates[] =
+{
+    137, 139, 140, 141, 142, 143, 145, 146, 147, 148, 151,
+};
+
+static const BYTE D9InitialSoftwareLaterStates[] =
+{
+    166, 154, 155, 156, 157, 158, 159, 160, 162, 161, 163, 164, 167, 168, 170, 171, 172, 173, 174, 195, 175,
+    176, 196, 197, 178, 179, 180, 181, 182, 183, 184, 190, 191, 192,
+};
+
 /* Sampler states in the order the driver first sees them, with their defaults */
 static const struct
 {
@@ -212,6 +224,7 @@ D9Device::D9Device(
 
 D9Device::~D9Device()
 {
+    StopBatch();
     delete AutoDepthStencil;
     delete ImplicitChain;
     if (DriverDevice != NULL)
@@ -316,36 +329,37 @@ D9Device::SendTargets(VOID)
 
     Target.RenderTargetIndex = 0;
     Target.hRenderTarget = RenderTargets[0]->DriverResource()->DriverResource;
-    DeviceFunctions.pfnSetRenderTarget(DriverDevice, &Target);
+    DdiRenderTarget(&Target);
     Depth.hZBuffer = DepthStencil != nullptr ? DepthStencil->DriverResource()->DriverResource : NULL;
-    DeviceFunctions.pfnSetDepthStencil(DriverDevice, &Depth);
+    DdiDepthStencil(&Depth);
     TargetsDirty = FALSE;
 }
 
-/* The viewport covering the back buffer and its scissor rectangle; a new device sends the viewport twice */
+/* The viewport covering the back buffer, its depth range and its scissor rectangle */
 VOID
-D9Device::SendViewport(
-    _In_ BOOLEAN Twice)
+D9Device::SendViewport(VOID)
+{
+    const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
+    RECT Scissor;
+
+    SendViewportRange();
+    SetRect(&Scissor, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
+    DdiScissorRect(&Scissor);
+}
+
+VOID
+D9Device::SendViewportRange(VOID)
 {
     const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
     D3DDDIARG_VIEWPORTINFO Viewport = {};
     D3DDDIARG_ZRANGE Range = {};
-    RECT Scissor;
 
     Viewport.Width = Parameters.BackBufferWidth;
     Viewport.Height = Parameters.BackBufferHeight;
     Range.MinZ = 0.0f;
     Range.MaxZ = 1.0f;
-    SetRect(&Scissor, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
-
-    DeviceFunctions.pfnSetViewport(DriverDevice, &Viewport);
-    DeviceFunctions.pfnSetZRange(DriverDevice, &Range);
-    DeviceFunctions.pfnSetScissorRect(DriverDevice, &Scissor);
-    if (Twice)
-    {
-        DeviceFunctions.pfnSetViewport(DriverDevice, &Viewport);
-        DeviceFunctions.pfnSetZRange(DriverDevice, &Range);
-    }
+    DdiViewport(&Viewport);
+    DdiZRange(&Range);
 }
 
 /* Fills the render state table with its defaults; the driver keeps what it was last sent */
@@ -390,7 +404,7 @@ D9Device::SendRenderState(
 
     Args.State = static_cast<D3DDDIRENDERSTATETYPE>(State);
     Args.Value = InitialStateValue(State);
-    DeviceFunctions.pfnSetRenderState(DriverDevice, &Args);
+    DdiRenderState(&Args);
 }
 
 VOID
@@ -404,7 +418,7 @@ D9Device::SendTextureStageState(
     Args.Stage = Stage;
     Args.State = static_cast<D3DDDITEXTURESTAGESTATETYPE>(State);
     Args.Value = Value;
-    DeviceFunctions.pfnSetTextureStageState(DriverDevice, &Args);
+    DdiTextureStageState(&Args);
 }
 
 VOID
@@ -420,20 +434,22 @@ D9Device::SendPixelConstant(
 
     Args.Register = Register;
     Args.Count = 1;
-    DeviceFunctions.pfnSetPixelShaderConst(DriverDevice, &Args, Values);
+    DdiPixelShaderConst(&Args, Values);
 }
 
-/* Every user clip plane cleared, each sent twice */
+/* Every user clip plane cleared; hardware vertex processing sends each twice */
 VOID
-D9Device::SendClipPlanes(VOID)
+D9Device::SendClipPlanes(
+    _In_ BOOLEAN Twice)
 {
     for (UINT Plane = 0; Plane < Caps.MaxUserClipPlanes; Plane++)
     {
         D3DDDIARG_SETCLIPPLANE Args = {};
 
         Args.Index = Plane;
-        DeviceFunctions.pfnSetClipPlane(DriverDevice, &Args);
-        DeviceFunctions.pfnSetClipPlane(DriverDevice, &Args);
+        DdiClipPlane(&Args);
+        if (Twice)
+            DdiClipPlane(&Args);
     }
 }
 
@@ -451,8 +467,12 @@ D9Device::SendInitialState(VOID)
 
     Scale.Register = 0;
     Scale.Count = 2;
-    DeviceFunctions.pfnSetPixelShaderConst(DriverDevice, &Scale, Scales);
-    SendViewport(TRUE);
+    DdiPixelShaderConst(&Scale, Scales);
+
+    /* Drivers that leave threading to the runtime get their batch once the first viewport is in place */
+    SendViewport();
+    StartBatch();
+    SendViewportRange();
 
     for (BYTE State : D9InitialPixelStates)
         SendRenderState(State);
@@ -503,18 +523,30 @@ D9Device::SendInitialState(VOID)
             SendTextureStageState(Samplers[Index], State.State, State.Value);
     }
 
-    SendRenderState(D3DRS_CLIPPING);
-    SendRenderState(D3DRS_CLIPPLANEENABLE);
-    SendClipPlanes();
-    for (BYTE State : D9InitialLaterStates)
-        SendRenderState(State);
-
     WInfo.WNear = 1.0f;
     WInfo.WFar = 1.0f;
-    DeviceFunctions.pfnUpdateWInfo(DriverDevice, &WInfo);
+    SendRenderState(D3DRS_CLIPPING);
+    if ((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0)
+    {
+        for (BYTE State : D9InitialVertexStates)
+            SendRenderState(State);
+        SendRenderState(D3DRS_CLIPPLANEENABLE);
+        SendClipPlanes(FALSE);
+        for (BYTE State : D9InitialSoftwareLaterStates)
+            SendRenderState(State);
+        DdiWInfo(&WInfo);
+        return;
+    }
+
+    /* The runtime's vertex shaders see the range fog and clip plane states again */
+    SendRenderState(D3DRS_CLIPPLANEENABLE);
+    SendClipPlanes(TRUE);
+    for (BYTE State : D9InitialLaterStates)
+        SendRenderState(State);
+    DdiWInfo(&WInfo);
     SendRenderState(D3DRS_RANGEFOGENABLE);
     SendRenderState(D3DRS_CLIPPLANEENABLE);
-    SendClipPlanes();
+    SendClipPlanes(TRUE);
 }
 
 /* The runtime's buffers for drawing from application memory: a vertex buffer that may be read back, two
@@ -874,7 +906,7 @@ D9Device::Clear(
     Args.FillDepth = Z;
     Args.FillStencil = Stencil;
     SendTargets();
-    hr = DeviceFunctions.pfnClear(DriverDevice, &Args, Kept, Clipped);
+    hr = DdiClear(&Args, Kept, Clipped);
     delete[] Clipped;
     if (FAILED(hr))
         D9Trace(L"UMD Clear failed 0x%08lX", hr);
@@ -902,7 +934,8 @@ D9Device::SetRenderState(
     RenderStates[State] = Value;
     Args.State = static_cast<D3DDDIRENDERSTATETYPE>(State);
     Args.Value = Value;
-    return DeviceFunctions.pfnSetRenderState(DriverDevice, &Args);
+    DdiRenderState(&Args);
+    return S_OK;
 }
 
 STDMETHODIMP
@@ -988,18 +1021,25 @@ D9Device::ResetCommon(
         return D3DERR_NOTAVAILABLE;
     }
 
-    /* The depth buffer goes before the back buffers, then the device gives up any display it owned */
+    /* The depth buffer goes before the back buffers, then the device gives up any display it owned; the plain
+       object's device also starts over with its batch and drawing buffers */
+    if (!IsEx)
+        StopBatch();
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     DepthStencil = nullptr;
     delete AutoDepthStencil;
     AutoDepthStencil = nullptr;
     ImplicitChain->ReleaseBuffers();
+    if (!IsEx)
+        DestroyStagingBuffers();
     ReleaseVidPnOwnership();
 
     hr = ImplicitChain->Reset(Parameters);
     if (SUCCEEDED(hr))
         hr = CreateAutoDepthStencil(Parameters);
+    if (SUCCEEDED(hr) && !IsEx)
+        hr = CreateStagingBuffers();
     if (FAILED(hr))
     {
         Lost = TRUE;
@@ -1007,8 +1047,15 @@ D9Device::ResetCommon(
     }
 
     BindRenderTargets();
-    SendViewport(FALSE);
+    if (IsEx)
+    {
+        SendViewport();
+        SetDefaultState(Parameters);
+        return S_OK;
+    }
+
     SetDefaultState(Parameters);
+    SendInitialState();
     return S_OK;
 }
 

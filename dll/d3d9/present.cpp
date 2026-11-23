@@ -130,6 +130,7 @@ D9Device::ReleaseWindowSurface(VOID)
         return;
 
     if (WindowSurface->DriverResource != NULL)
+        DrainBatch();
         DeviceFunctions.pfnDestroyResource(DriverDevice, WindowSurface->DriverResource);
     delete WindowSurface;
     WindowSurface = nullptr;
@@ -216,6 +217,7 @@ D9Device::OpenWindowSurface(
     Args.pPrivateDriverData = Driver.data();
     Args.PrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
     Args.hResource = Resource;
+    DrainBatch();
     hr = DeviceFunctions.pfnOpenResource(DriverDevice, &Args);
     if (FAILED(hr))
     {
@@ -236,6 +238,7 @@ D9Device::OpenWindowSurface(
 VOID
 D9Device::FlushDriver(VOID)
 {
+    DrainBatch();
     if (UsesFlush1)
         DeviceFunctions.pfnFlush1(DriverDevice, 0);
     else
@@ -311,7 +314,7 @@ D9Device::DriverPresent(
         Present1.Flags.Value = PendingPresent.Flags.Value & 7;
         Present1.FlipInterval = static_cast<D3DDDI_FLIPINTERVAL_TYPE>(Interval);
         Present1.BackBufferMultiplicity = 1;
-        hr = DeviceFunctions.pfnPresent1(DriverDevice, &Present1);
+        hr = DdiPresent1(&Present1) ? S_OK : DeviceFunctions.pfnPresent1(DriverDevice, &Present1);
     }
     else
     {
