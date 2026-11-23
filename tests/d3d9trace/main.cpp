@@ -6666,7 +6666,74 @@ struct TrVertexCase
     DWORD Fvf;
     BOOLEAN Points;
     TrFixedSet Sets[12];
+    const D3DVERTEXELEMENT9* Elements;
 };
+
+/* Declarations the vertex cases draw with: two positions and normals for tweening, and one of scattered
+   colors, a point size and a coordinate set of usage two */
+static const D3DVERTEXELEMENT9 TrVertexTweened[] =
+{
+    { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+    { 0, 12, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 1 },
+    { 0, 24, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_NORMAL, 0 },
+    { 0, 36, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_NORMAL, 1 },
+    { 0, 48, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+    { 0, 52, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+    D3DDECL_END()
+};
+static const D3DVERTEXELEMENT9 TrVertexScattered[] =
+{
+    { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+    { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 1 },
+    { 0, 16, D3DDECLTYPE_FLOAT1, 0, D3DDECLUSAGE_PSIZE, 0 },
+    { 0, 20, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_TEXCOORD, 2 },
+    { 0, 32, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+    D3DDECL_END()
+};
+
+/* Fills a quad for a declaration's elements, all in stream zero; returns the stride */
+static
+UINT
+TrVertexFillElements(
+    _In_ const D3DVERTEXELEMENT9* Elements,
+    _Out_writes_(512) FLOAT* Vertices)
+{
+    static const FLOAT Corners[4][2] = { { -0.75f, -0.5f }, { 0.75f, -0.5f }, { -0.75f, 0.5f }, { 0.75f, 0.5f } };
+    UINT Stride = 0;
+
+    for (UINT Index = 0; Elements[Index].Stream != 0xFF; Index++)
+    {
+        static const UINT Sizes[] = { 4, 8, 12, 16, 4, 4 };
+        UINT End = Elements[Index].Offset + Sizes[Elements[Index].Type];
+
+        if (End > Stride)
+            Stride = End;
+    }
+    for (UINT Corner = 0; Corner < 4; Corner++)
+    {
+        BYTE* Vertex = reinterpret_cast<BYTE*>(Vertices) + Corner * Stride;
+
+        for (UINT Index = 0; Elements[Index].Stream != 0xFF; Index++)
+        {
+            const D3DVERTEXELEMENT9& Element = Elements[Index];
+            FLOAT* Floats = reinterpret_cast<FLOAT*>(Vertex + Element.Offset);
+
+            if (Element.Type == D3DDECLTYPE_D3DCOLOR)
+            {
+                CopyMemory(Floats, &TrFixedColors[Corner][Element.UsageIndex & 1], sizeof(DWORD));
+                continue;
+            }
+            for (UINT Part = 0; Part <= Element.Type && Part < 4; Part++)
+            {
+                if (Element.Usage == D3DDECLUSAGE_POSITION && Part < 2)
+                    Floats[Part] = Corners[Corner][Part] * (Element.UsageIndex == 0 ? 1.0f : 0.5f);
+                else
+                    Floats[Part] = 0.125f * (Part + 1) + 0.25f * ((Corner + Element.UsageIndex) & 3);
+            }
+        }
+    }
+    return Stride;
+}
 
 /* States each case starts from: no lighting, identity matrices and the stages the device starts with */
 static const TrFixedSet TrVertexBaseline[] =
@@ -7013,6 +7080,22 @@ static const TrVertexCase TrVertexCases[] =
       { { TrFixedRender, D3DRS_VERTEXBLEND, D3DVBF_DISABLE },
         { TrFixedRender, D3DRS_INDEXEDVERTEXBLENDENABLE, FALSE },
         { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_WORLD1, 4 }, { TrVertexTransform, D3DTS_WORLD2, 2 }, { TrVertexTransform, D3DTS_WORLD3, 3 } } },
+    { "tweened", 0, FALSE,
+      { { TrFixedRender, D3DRS_VERTEXBLEND, D3DVBF_TWEENING }, { TrFixedRender, D3DRS_TWEENFACTOR, 0x3EC00000 } },
+      TrVertexTweened },
+    { "tweened lit", 0, FALSE,
+      { { TrFixedRender, D3DRS_VERTEXBLEND, D3DVBF_TWEENING }, { TrFixedRender, D3DRS_TWEENFACTOR, 0x3F200000 },
+        { TrFixedRender, D3DRS_LIGHTING, TRUE }, { TrVertexLight, 1, 0 }, { TrVertexEnable, 1, TRUE },
+        { TrFixedRender, D3DRS_NORMALIZENORMALS, TRUE } },
+      TrVertexTweened },
+    { "declared untweened", 0, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE }, { TrVertexLight, 1, 0 }, { TrVertexEnable, 1, TRUE } },
+      TrVertexTweened },
+    { "declared scattered", 0, FALSE,
+      { { 0, D3DTSS_TEXCOORDINDEX, 2 }, { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 0 } },
+      TrVertexScattered },
+    { "declared scattered points", 0, TRUE,
+      { { TrFixedRender, D3DRS_POINTSCALEENABLE, TRUE } }, TrVertexScattered },
     { "default again", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE, {} },
 };
 
@@ -7059,15 +7142,25 @@ TrVertexRun(
     _In_ const TrVertexCase& Case,
     _In_ IDirect3DSurface9* Target)
 {
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
     FLOAT Vertices[512];
-    UINT Stride = TrVertexFill(Case.Fvf, Vertices);
+    UINT Stride = Case.Elements != nullptr ? TrVertexFillElements(Case.Elements, Vertices)
+                                           : TrVertexFill(Case.Fvf, Vertices);
     char Phase[96];
 
     sprintf_s(Phase, "fixed vertex %s", Case.Name);
     TrPhase(Phase);
     TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
     TrVertexApply(Device, TrVertexBaseline, _countof(TrVertexBaseline));
-    TrApi("SetFVF", Device->SetFVF(Case.Fvf));
+    if (Case.Elements != nullptr)
+    {
+        TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(Case.Elements, &Declaration));
+        TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    }
+    else
+    {
+        TrApi("SetFVF", Device->SetFVF(Case.Fvf));
+    }
     TrVertexApply(Device, Case.Sets, _countof(Case.Sets));
     TrApi("BeginScene", Device->BeginScene());
     if (Case.Points)
@@ -7077,6 +7170,7 @@ TrVertexRun(
     TrApi("EndScene", Device->EndScene());
     TrSettle(Device);
     TrReadTarget(Device, Target, Case.Name);
+    TrRelease(Declaration);
     TrSettle(Device);
 }
 
