@@ -126,7 +126,7 @@ TcOpsCompile(
  */
 struct TcOpsKit
 {
-    static constexpr UINT OutputSize = 4096;
+    static constexpr UINT OutputSize = 16384;
     static constexpr UINT TableSize = 12;
 
     HRESULT
@@ -328,13 +328,13 @@ struct TcOpsKit
 
         if (SUCCEEDED(Staging->Map(0, NULL, reinterpret_cast<VOID **>(&Data))))
         {
-            memcpy(Data + 2 * 65536 + 8192, &Five, sizeof(Five));
+            memcpy(Data + 2 * 65536 + 32768, &Five, sizeof(Five));
             Staging->Unmap(0, NULL);
         }
         Queue->List->CopyBufferRegion(Output, 0, Staging, 2 * 65536, OutputSize);
         Queue->List->CopyBufferRegion(Counted, 0, Staging, 3 * 65536, 256);
         Queue->List->CopyBufferRegion(Typed, 0, Staging, 3 * 65536 + 4, 252);
-        Queue->List->CopyBufferRegion(Counter, 0, Staging, 2 * 65536 + 8192, 4);
+        Queue->List->CopyBufferRegion(Counter, 0, Staging, 2 * 65536 + 32768, 4);
         CopyImage(Queue, Grid, 0, 8, 8, DXGI_FORMAT_R32_UINT, 3 * 65536);
         for (ID3D12Resource *Buffer : { Output, Counted, Typed, Counter, Grid })
             TcBarrier(Queue->List, Buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -408,8 +408,7 @@ static const char TcOpsCommon[] =
     "Texture2D<float> Floats : register(t1);\n"
     "Texture2DArray Layers : register(t2);\n"
     "ByteAddressBuffer Raw : register(t3);\n"
-    "Texture2D<float> SpaceFloats : register(t0, space1);\n"
-    "Texture2D SpaceImage : register(t1, space1);\n"
+    "Texture2D SpacePair[2] : register(t0, space1);\n"
     "SamplerState Point : register(s0);\n"
     "SamplerState Smooth : register(s1);\n"
     "SamplerComparisonState Compare : register(s2);\n"
@@ -518,4 +517,49 @@ SceneOpsFlow(
     _Inout_ TcResult *Result)
 {
     return TcOpsRun(Device, Result, TcOpsFlowSource, "flow", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 2);
+}
+
+/* Loads, sizes, level and gradient samples, comparisons and gathers, through fixed and computed resource indices */
+static const char TcOpsReadSource[] =
+    "[numthreads(64, 1, 1)] void reads(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 256;\n"
+    "    float2 Uv = float2((t % 8) * 0.137 - 0.2, (t / 8) * 0.161 - 0.3);\n"
+    "    uint w, h, m, e;\n"
+    "    Image.GetDimensions(t & 1, w, h, m);\n"
+    "    Layers.GetDimensions(w, h, e);\n"
+    "    uint4 Sizes = uint4(w, h, m, e);\n"
+    "    Floats.GetDimensions(w, h);\n"
+    "    Raw.GetDimensions(e);\n"
+    "    Sizes += uint4(w * 100, h * 100, e * 1000, 0);\n"
+    "    Out.Store4(Base, Sizes);\n"
+    "    Out.Store4(Base + 16, asuint(Image.Load(int3(t % 8, t / 8, 0))));\n"
+    "    Out.Store4(Base + 32, asuint(Image.SampleLevel(Smooth, Uv, (t % 5) * 0.3)));\n"
+    "    Out.Store4(Base + 48, asuint(Image.SampleGrad(Smooth, Uv, float2(0.05 * (t % 3), 0.01), float2(0.02, 0.3 * (t % 4)))));\n"
+    "    Out.Store4(Base + 64, asuint(Image.SampleLevel(Mirror, Uv * 2.5, 0.4, int2(1, -2))));\n"
+    "    Out.Store(Base + 80, asuint(Floats.SampleCmpLevelZero(Compare, Uv, (t % 7) * 1.5 - 4.0)));\n"
+    "    Out.Store(Base + 84, asuint(Floats.SampleLevel(Smooth, Uv, 0)));\n"
+    "    Out.Store(Base + 88, asuint(Floats.SampleLevel(Point, Uv, 0, int2(-1, 1))));\n"
+    "    Out.Store(Base + 92, asuint(Layers.SampleLevel(Smooth, float3(Uv, t % 4), 0).y));\n"
+    "    Out.Store4(Base + 96, asuint(Image.GatherRed(Point, Uv)));\n"
+    "    Out.Store4(Base + 112, asuint(Image.GatherAlpha(Smooth, Uv, int2(1, 0))));\n"
+    "    Out.Store4(Base + 128, asuint(Floats.Gather(Point, Uv * 1.3)));\n"
+    "    Out.Store4(Base + 144, asuint(Floats.GatherCmp(Compare, Uv, 1.0)));\n"
+    "    Out.Store4(Base + 160, asuint(SpacePair[t & 1].SampleLevel(Smooth, Uv, 0)));\n"
+    "    Out.Store4(Base + 176, asuint(SpacePair[(t >> 1) & 1].Load(int3(t % 4, t / 16, 0))));\n"
+    "    Out.Store4(Base + 192, Raw.Load4((t * 4) % 240));\n"
+    "    Out.Store2(Base + 208, Raw.Load2((t * 12) % 248));\n"
+    "    Out.Store4(Base + 216, asuint(Layers.Load(int4(t % 4, (t / 4) % 4, t % 3, 0))));\n"
+    "    Out.Store2(Base + 232, asuint(Image.Load(int3(t % 4, t % 3, 1), int2(1, 0)).xw));\n"
+    "    Out.Store2(Base + 240, asuint(Image.SampleLevel(Point, Uv, 1).yz));\n"
+    "    Out.Store2(Base + 248, asuint(SpacePair[1].Gather(Point, Uv).xy));\n"
+    "}\n";
+
+static
+HRESULT
+SceneOpsRead(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsReadSource, "reads", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
 }

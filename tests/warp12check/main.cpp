@@ -2781,6 +2781,7 @@ static const TcScene Scenes[] =
     { "texture", SceneTexture },
     { "compute", SceneCompute },
     { "opsflow", SceneOpsFlow },
+    { "opsread", SceneOpsRead },
 };
 
 static
