@@ -585,6 +585,15 @@ D9Enum::CheckDeviceFormat(
     return MissingOnlyAutoGen ? D3DOK_NOAUTOGEN : D3DERR_NOTAVAILABLE;
 }
 
+const D9Adapter*
+D9Enum::QualityDriver(
+    _In_ UINT Adapter)
+{
+    if (QualityDrivers[Adapter] == nullptr)
+        QualityDrivers[Adapter] = D9OpenSecondDriver(&Adapters[Adapter], IsEx);
+    return QualityDrivers[Adapter];
+}
+
 STDMETHODIMP
 D9Enum::CheckDeviceMultiSampleType(
     _In_ UINT Adapter,
@@ -665,12 +674,14 @@ D9Enum::CheckDeviceMultiSampleType(
 
         if (QualityLevels != nullptr && DeviceType == D3DDEVTYPE_HAL && Table->HasDriver)
         {
+            const D9Adapter* Quality = QualityDriver(Adapter);
             DDIMULTISAMPLEQUALITYLEVELSDATA Levels = {};
 
             Levels.Format = static_cast<D3DDDIFORMAT>(Format);
             Levels.Flip = !Windowed;
             Levels.MsType = static_cast<D3DDDIMULTISAMPLE_TYPE>(MultiSampleType);
-            if (SUCCEEDED(D9DriverGetCaps(Table, D3DDDICAPS_GETMULTISAMPLEQUALITYLEVELS, &Levels, &Levels,
+            if (Quality != nullptr &&
+                SUCCEEDED(D9DriverGetCaps(Quality, D3DDDICAPS_GETMULTISAMPLEQUALITYLEVELS, nullptr, &Levels,
                                           sizeof(Levels))))
             {
                 *QualityLevels = Levels.QualityLevels;

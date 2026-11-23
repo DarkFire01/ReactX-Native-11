@@ -25,6 +25,7 @@ D9Enum::~D9Enum()
     for (UINT Index = 0; Index < AdapterCount; Index++)
     {
         D9CloseDriver(&Adapters[Index]);
+        D9CloseSecondDriver(QualityDrivers[Index]);
         D9CloseAdapter(&Adapters[Index]);
     }
 

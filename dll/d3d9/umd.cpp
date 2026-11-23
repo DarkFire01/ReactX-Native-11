@@ -795,6 +795,41 @@ D9OpenDriver(
     return TRUE;
 }
 
+/* Another driver adapter beside the object's own, with everything read through it again */
+_Ret_maybenull_
+D9Adapter*
+D9OpenSecondDriver(
+    _In_ const D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx)
+{
+    D9Adapter* Second;
+
+    if (D9DriverUpdating(Adapter->KernelAdapter))
+        return nullptr;
+
+    Second = D9CopyAdapter(Adapter);
+    if (Second == nullptr)
+        return nullptr;
+
+    if (!D9LoadDriverModule(Second) || !D9OpenDriverAdapter(Second) || !D9ReadDriverAnswers(Second, IsEx))
+    {
+        D9CloseSecondDriver(Second);
+        return nullptr;
+    }
+    Second->HasDriver = TRUE;
+    return Second;
+}
+
+VOID
+D9CloseSecondDriver(
+    _In_opt_ D9Adapter* Second)
+{
+    if (Second == nullptr)
+        return;
+    D9CloseDriver(Second);
+    delete Second;
+}
+
 /* Opens a second driver adapter to check a device creation against, as the system does, and closes it again */
 HRESULT
 D9ProbeDriver(
@@ -802,23 +837,15 @@ D9ProbeDriver(
     _In_ BOOLEAN IsEx,
     _Out_ D3DCAPS9* Caps)
 {
-    D9Adapter* Probe;
-    BOOLEAN Opened;
+    D9Adapter* Probe = D9OpenSecondDriver(Adapter, IsEx);
 
     ZeroMemory(Caps, sizeof(*Caps));
-    if (D9DriverUpdating(Adapter->KernelAdapter))
+    if (Probe == nullptr)
         return D3DERR_NOTAVAILABLE;
 
-    Probe = D9CopyAdapter(Adapter);
-    if (Probe == nullptr)
-        return E_OUTOFMEMORY;
-
-    Opened = D9LoadDriverModule(Probe) && D9OpenDriverAdapter(Probe) && D9ReadDriverAnswers(Probe, IsEx);
-    if (Opened)
-        *Caps = Probe->DriverCaps;
-    D9CloseDriver(Probe);
-    delete Probe;
-    return Opened ? S_OK : D3DERR_NOTAVAILABLE;
+    *Caps = Probe->DriverCaps;
+    D9CloseSecondDriver(Probe);
+    return S_OK;
 }
 
 VOID

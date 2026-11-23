@@ -297,6 +297,11 @@ private:
         _In_ D3DDEVTYPE DeviceType,
         _Outptr_ const D9Adapter** Table);
 
+    _Ret_maybenull_
+    const D9Adapter*
+    QualityDriver(
+        _In_ UINT Adapter);
+
     UINT
     HeadCount(
         _In_ UINT Adapter,
@@ -370,6 +375,9 @@ private:
 
     D9Adapter Adapters[D9MaxAdapters] = {};
     UINT AdapterCount = 0;
+
+    /* Multisample quality levels come from a driver adapter of their own, opened the first time one is asked for */
+    D9Adapter* QualityDrivers[D9MaxAdapters] = {};
 
     BOOLEAN SoftwareOnly = FALSE;
     BOOLEAN CanCalibrateGamma = FALSE;
@@ -457,6 +465,16 @@ _Ret_maybenull_
 D9Adapter*
 D9CopyAdapter(
     _In_ const D9Adapter* Adapter);
+
+_Ret_maybenull_
+D9Adapter*
+D9OpenSecondDriver(
+    _In_ const D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx);
+
+VOID
+D9CloseSecondDriver(
+    _In_opt_ D9Adapter* Second);
 
 HRESULT
 D9ProbeDriver(
