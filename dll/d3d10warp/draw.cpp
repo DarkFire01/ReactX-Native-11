@@ -801,26 +801,86 @@ RxWarpFirstCorner(
     return First;
 }
 
-/* Interpolates every register from Inner toward Outer, stopping on the plane */
+/* A polygon corner during clipping with its distance to every plane */
+typedef struct _RX_WARP_CLIP_VERTEX
+{
+    RX_WARP_VERTEX Vertex;
+    FLOAT Distance[RxWarpClipPlanes];
+} RX_WARP_CLIP_VERTEX;
+
+/* Moves from Inner toward Outer by the inner distance over the span, in double precision */
+static
+FLOAT
+RxWarpClipLerp(
+    _In_ FLOAT Inner,
+    _In_ FLOAT Outer,
+    _In_ FLOAT InnerDistance,
+    _In_ FLOAT Span)
+{
+    FLOAT Difference = Outer - Inner;
+
+    return (FLOAT)((double)Difference * (double)InnerDistance / (double)Span + (double)Inner);
+}
+
+/*
+ * The point where the edge from Inner to Outer meets Plane. Registers follow the pixel
+ * shader's interpolation: flat ones come from the first vertex, screen linear ones move
+ * by the factor w gives, the rest in clip space. Later planes carry their distances along.
+ */
 static
 VOID
 RxWarpClipPoint(
-    _In_ const RX_WARP_VERTEX &Inner,
-    _In_ const RX_WARP_VERTEX &Outer,
-    _In_ FLOAT InnerDistance,
-    _In_ FLOAT OuterDistance,
-    _Out_ RX_WARP_VERTEX *Point)
+    _In_ const RX_WARP_CLIP_VERTEX &Inner,
+    _In_ const RX_WARP_CLIP_VERTEX &Outer,
+    _In_ UINT Plane,
+    _In_ UINT Planes,
+    _In_ UINT PositionRegister,
+    _In_reads_opt_(RxWarpMaxRegisters) const UINT8 *Modes,
+    _In_ const RX_WARP_VERTEX &First,
+    _Out_ RX_WARP_CLIP_VERTEX *Point)
 {
-    FLOAT Span = InnerDistance - OuterDistance;
+    FLOAT InnerDistance = Inner.Distance[Plane];
+    FLOAT Span = InnerDistance - Outer.Distance[Plane];
+    FLOAT InnerW = RxWarpBitsAsFloat(Inner.Vertex.Registers[PositionRegister][3]);
+    FLOAT OuterW = RxWarpBitsAsFloat(Outer.Vertex.Registers[PositionRegister][3]);
+    volatile FLOAT Scaled = OuterW * InnerDistance;
+    volatile FLOAT Lower = (OuterW - InnerW) * InnerDistance;
+    volatile FLOAT Upper = Span * InnerW;
+    FLOAT Screen = Scaled / (Lower + Upper);
+
+    for (UINT Index = Plane + 1; Index < 6; Index++)
+    {
+        if (Planes & (1u << Index))
+            Point->Distance[Index] = RxWarpClipLerp(Inner.Distance[Index], Outer.Distance[Index], InnerDistance, Span);
+    }
 
     for (UINT Register = 0; Register < RxWarpMaxRegisters; Register++)
     {
+        UINT Mode = (Modes != nullptr && Register != PositionRegister) ? Modes[Register] : D3D10_SB_INTERPOLATION_LINEAR;
+
+        if (Mode == D3D10_SB_INTERPOLATION_CONSTANT)
+        {
+            memcpy(Point->Vertex.Registers[Register], First.Registers[Register], sizeof(First.Registers[Register]));
+            continue;
+        }
         for (UINT Component = 0; Component < 4; Component++)
         {
-            FLOAT P = RxWarpBitsAsFloat(Inner.Registers[Register][Component]);
-            FLOAT Q = RxWarpBitsAsFloat(Outer.Registers[Register][Component]);
+            FLOAT P = RxWarpBitsAsFloat(Inner.Vertex.Registers[Register][Component]);
+            FLOAT Q = RxWarpBitsAsFloat(Outer.Vertex.Registers[Register][Component]);
+            FLOAT Value;
 
-            Point->Registers[Register][Component] = RxWarpFloatAsBits((Q - P) * InnerDistance / Span + P);
+            if (Mode == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE || Mode == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_CENTROID ||
+                Mode == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_SAMPLE)
+            {
+                volatile FLOAT Step = (Q - P) * Screen;
+
+                Value = Step + P;
+            }
+            else
+            {
+                Value = RxWarpClipLerp(P, Q, InnerDistance, Span);
+            }
+            Point->Vertex.Registers[Register][Component] = RxWarpFloatAsBits(Value);
         }
     }
 }
@@ -834,8 +894,8 @@ RxWarpDraw::ClipPrimitive(
     UINT PlaneCount = 6 + ClipCount;
     UINT Outside[3] = {};
     UINT Any;
-    std::vector<RX_WARP_VERTEX> Polygon;
-    std::vector<RX_WARP_VERTEX> Next;
+    std::vector<RX_WARP_CLIP_VERTEX> Polygon;
+    std::vector<RX_WARP_CLIP_VERTEX> Next;
 
     Device->Counters[RxWarpCountClipInvocations]++;
 
@@ -897,8 +957,12 @@ RxWarpDraw::ClipPrimitive(
     {
         UINT First = (Count == 3) ? RxWarpFirstCorner(Corners, PositionRegister) : 0;
 
+        Polygon.resize(Count);
         for (UINT Index = 0; Index < Count; Index++)
-            Polygon.push_back(*Corners[(First + Index) % Count]);
+        {
+            Polygon[Index].Vertex = *Corners[(First + Index) % Count];
+            ClipDistances(&Polygon[Index].Vertex, Polygon[Index].Distance);
+        }
     }
 
     for (UINT Plane = 0; Plane < PlaneCount && Polygon.size() >= Count; Plane++)
@@ -911,28 +975,29 @@ RxWarpDraw::ClipPrimitive(
         Next.clear();
         for (SIZE_T Index = 0; Index < Edges; Index++)
         {
-            const RX_WARP_VERTEX &From = Polygon[Index];
-            const RX_WARP_VERTEX &To = Polygon[(Index + 1) % Polygon.size()];
-            FLOAT FromDistance[RxWarpClipPlanes];
-            FLOAT ToDistance[RxWarpClipPlanes];
-            BOOLEAN FromIn;
-            BOOLEAN ToIn;
-            RX_WARP_VERTEX Point;
-
-            ClipDistances(&From, FromDistance);
-            ClipDistances(&To, ToDistance);
-            FromIn = !(FromDistance[Plane] < 0.0f);
-            ToIn = !(ToDistance[Plane] < 0.0f);
+            const RX_WARP_CLIP_VERTEX &From = Polygon[Index];
+            const RX_WARP_CLIP_VERTEX &To = Polygon[(Index + 1) % Polygon.size()];
+            BOOLEAN FromIn = !(From.Distance[Plane] < 0.0f);
+            BOOLEAN ToIn = !(To.Distance[Plane] < 0.0f);
+            RX_WARP_CLIP_VERTEX Point = {};
 
             if (FromIn)
                 Next.push_back(From);
             if (FromIn != ToIn)
             {
+                const UINT8 *Modes = (PixelShader != nullptr) ? PixelShader->InputMode : nullptr;
+
                 /* The new point always interpolates from the inside vertex */
-                if (FromIn)
-                    RxWarpClipPoint(From, To, FromDistance[Plane], ToDistance[Plane], &Point);
-                else
-                    RxWarpClipPoint(To, From, ToDistance[Plane], FromDistance[Plane], &Point);
+                RxWarpClipPoint(FromIn ? From : To, FromIn ? To : From, Plane, Any, PositionRegister, Modes, *Corners[0], &Point);
+
+                /* Shader clip distances are read back from the new point's registers */
+                if (ClipCount != 0)
+                {
+                    FLOAT Fresh[RxWarpClipPlanes];
+
+                    ClipDistances(&Point.Vertex, Fresh);
+                    memcpy(&Point.Distance[6], &Fresh[6], sizeof(FLOAT) * ClipCount);
+                }
                 Next.push_back(Point);
             }
             if (Count == 2 && ToIn)
@@ -946,7 +1011,7 @@ RxWarpDraw::ClipPrimitive(
         if (Polygon.size() == 2)
         {
             Device->Counters[RxWarpCountClipPrimitives]++;
-            RasterizeLine(&Polygon[0], &Polygon[1]);
+            RasterizeLine(&Polygon[0].Vertex, &Polygon[1].Vertex);
         }
         return;
     }
@@ -955,7 +1020,7 @@ RxWarpDraw::ClipPrimitive(
     for (SIZE_T Index = 1; Index + 1 < Polygon.size(); Index++)
     {
         Device->Counters[RxWarpCountClipPrimitives]++;
-        Rasterize(&Polygon[0], &Polygon[Index], &Polygon[Index + 1]);
+        Rasterize(&Polygon[0].Vertex, &Polygon[Index].Vertex, &Polygon[Index + 1].Vertex);
     }
 }
 
