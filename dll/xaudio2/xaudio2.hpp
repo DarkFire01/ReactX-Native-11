@@ -905,6 +905,14 @@ XaWmaFlush(
     _Inout_ XaSourceVoice* Voice);
 
 VOID
+XaWmaFlushStopped(
+    _Inout_ XaSourceVoice* Voice);
+
+VOID
+XaWmaReportDropped(
+    _Inout_ XaSourceVoice* Voice);
+
+VOID
 XaWmaDiscontinuity(
     _Inout_ XaSourceVoice* Voice);
 

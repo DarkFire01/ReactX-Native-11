@@ -50,6 +50,9 @@ struct XaWmaSource
     XaWmaBuffer* Taken;
     XaWmaBuffer* TakenTail;
 
+    /* Buffers a flush of the stopped voice dropped, waiting for their callbacks */
+    XaWmaBuffer* Dropped;
+
     /* What is left of the buffer being handed to the decoder */
     const BYTE* Input;
     UINT32 InputLeft;
@@ -405,12 +408,13 @@ XaWmaRelease(
     _Inout_ XaSourceVoice* Voice)
 {
     XaWmaSource* Wma = Voice->Wma;
-    XaWmaBuffer* Lists[2];
+    XaWmaBuffer* Lists[3];
 
     if (Wma == nullptr)
         return;
     Lists[0] = Wma->Pending;
     Lists[1] = Wma->Taken;
+    Lists[2] = Wma->Dropped;
     for (UINT32 Index = 0; Index < ARRAYSIZE(Lists); Index++)
     {
         while (Lists[Index] != nullptr)
@@ -517,6 +521,51 @@ XaWmaFlush(
         delete Buffer;
     }
     Wma->TakenTail = nullptr;
+}
+
+/* Drops every buffer of a stopped voice now, leaving OnBufferEnd for the next engine pass */
+VOID
+XaWmaFlushStopped(
+    _Inout_ XaSourceVoice* Voice)
+{
+    XaWmaSource* Wma = Voice->Wma;
+    XaWmaBuffer** Tail = &Wma->Dropped;
+    XaWmaBuffer* Lists[2] = { Wma->Taken, Wma->Pending };
+
+    while (*Tail != nullptr)
+        Tail = &(*Tail)->Next;
+    for (UINT32 Index = 0; Index < ARRAYSIZE(Lists); Index++)
+    {
+        for (XaWmaBuffer* Buffer = Lists[Index]; Buffer != nullptr; Buffer = Buffer->Next)
+            Voice->QueuedCount -= 1;
+        *Tail = Lists[Index];
+        while (*Tail != nullptr)
+            Tail = &(*Tail)->Next;
+    }
+    Wma->Taken = nullptr;
+    Wma->TakenTail = nullptr;
+    Wma->Pending = nullptr;
+    Wma->PendingTail = nullptr;
+    Wma->Input = nullptr;
+    Wma->InputLeft = 0;
+    Wma->InputLast = FALSE;
+}
+
+VOID
+XaWmaReportDropped(
+    _Inout_ XaSourceVoice* Voice)
+{
+    XaWmaSource* Wma = Voice->Wma;
+
+    while (Wma->Dropped != nullptr)
+    {
+        XaWmaBuffer* Buffer = Wma->Dropped;
+
+        Wma->Dropped = Buffer->Next;
+        if (Voice->Callback != nullptr)
+            Voice->Callback->OnBufferEnd(Buffer->Context);
+        delete Buffer;
+    }
 }
 
 VOID

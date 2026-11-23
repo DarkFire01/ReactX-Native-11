@@ -468,6 +468,8 @@ XaProcessSource(
     float* Input;
     float* Output;
 
+    if (Voice->Wma != nullptr)
+        XaWmaReportDropped(Voice);
     if (Voice->FlushPending)
     {
         if (Voice->Wma != nullptr)

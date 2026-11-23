@@ -470,7 +470,12 @@ STDMETHODCALLTYPE
 XaSourceVoice::FlushSourceBuffers()
 {
     Engine->Lock();
-    FlushPending = TRUE;
+
+    /* A stopped xWMA voice drops its buffers at once; only the callbacks wait for the engine */
+    if (Wma != nullptr && PlayState != XaPlayRunning)
+        XaWmaFlushStopped(this);
+    else
+        FlushPending = TRUE;
     Engine->Unlock();
     return S_OK;
 }
