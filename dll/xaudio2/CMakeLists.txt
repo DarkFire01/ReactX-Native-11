@@ -21,6 +21,7 @@ nt_add_usermode_dll(xaudio2_9
         reverb.cpp
         source.cpp
         voice.cpp
+        wmabits.cpp
         wmadec.cpp
         wmaformat.cpp
         wmasource.cpp
