@@ -107,3 +107,19 @@ OcCheckDeferred(
 VOID
 OcCheckPresent(
     _In_ OnCheck& Check);
+
+VOID
+OcCheckGenMips(
+    _In_ OnCheck& Check);
+
+VOID
+OcCheckResolve(
+    _In_ OnCheck& Check);
+
+VOID
+OcCheckTiled(
+    _In_ OnCheck& Check);
+
+VOID
+OcCheckVideo(
+    _In_ OnCheck& Check);

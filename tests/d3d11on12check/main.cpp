@@ -523,6 +523,10 @@ static const CheckInfo Checks[] =
     { "queries", OcCheckQueries },
     { "deferred", OcCheckDeferred },
     { "present", OcCheckPresent },
+    { "genmips", OcCheckGenMips },
+    { "resolve", OcCheckResolve },
+    { "video", OcCheckVideo },
+    { "tiled", OcCheckTiled },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
