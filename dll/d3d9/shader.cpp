@@ -134,7 +134,51 @@ D9Device::SendVertexConstants(
             return;
         Count = Registers - Start;
     }
-    DdiShaderConstants(Call, Start, Count, Data, Count * Stride);
+    if (VertexShader == nullptr)
+    {
+        DdiShaderConstants(Call, Start, Count, Data, Count * Stride);
+        return;
+    }
+    if (Call == D9BatchCall::VertexShaderConst)
+        SendAroundDefs(Call, Start, Count, Data, Stride, VertexShader->Shape()->FloatDefs,
+                       VertexShader->Shape()->FloatDefCount);
+    else if (Call == D9BatchCall::VertexShaderConstI)
+        SendAroundDefs(Call, Start, Count, Data, Stride, VertexShader->Shape()->IntDefs,
+                       VertexShader->Shape()->IntDefCount);
+    else
+        SendAroundDefs(Call, Start, Count, Data, Stride, VertexShader->Shape()->BoolDefs,
+                       VertexShader->Shape()->BoolDefCount);
+}
+
+/* The registers a bound shader defines keep its own values; the rest of a range goes out in pieces */
+VOID
+D9Device::SendAroundDefs(
+    _In_ D9BatchCall Call,
+    _In_ UINT Start,
+    _In_ UINT Count,
+    _In_reads_bytes_opt_(Count * Stride) const VOID* Data,
+    _In_ UINT Stride,
+    _In_reads_(DefCount) const USHORT* Defs,
+    _In_ UINT DefCount)
+{
+    const BYTE* Bytes = static_cast<const BYTE*>(Data);
+    UINT End = Start + Count;
+    UINT Piece = Start;
+
+    for (UINT Index = 0; Index < DefCount && Piece < End; Index++)
+    {
+        UINT Defined = Defs[Index];
+
+        if (Defined < Piece)
+            continue;
+        if (Defined >= End)
+            break;
+        if (Defined > Piece)
+            DdiShaderConstants(Call, Piece, Defined - Piece, Bytes + (Piece - Start) * Stride, (Defined - Piece) * Stride);
+        Piece = Defined + 1;
+    }
+    if (Piece < End)
+        DdiShaderConstants(Call, Piece, End - Piece, Bytes + (Piece - Start) * Stride, (End - Piece) * Stride);
 }
 
 /* Float pixel constants share the driver's registers with the runtime's fixed function pixel shaders, so
@@ -149,7 +193,14 @@ D9Device::SendPixelConstants(
 {
     if (Call == D9BatchCall::PixelShaderConst)
         return;
-    DdiShaderConstants(Call, Start, Count, Data, Count * Stride);
+    if (PixelShader == nullptr)
+        DdiShaderConstants(Call, Start, Count, Data, Count * Stride);
+    else if (Call == D9BatchCall::PixelShaderConstI)
+        SendAroundDefs(Call, Start, Count, Data, Stride, PixelShader->Shape()->IntDefs,
+                       PixelShader->Shape()->IntDefCount);
+    else
+        SendAroundDefs(Call, Start, Count, Data, Stride, PixelShader->Shape()->BoolDefs,
+                       PixelShader->Shape()->BoolDefCount);
 }
 
 STDMETHODIMP
@@ -353,5 +404,318 @@ D9Device::GetPixelShaderConstantB(
     if (D9OutsideRegisters(StartRegister, BoolCount, Limits.PixelBools))
         return D3DERR_INVALIDCALL;
     CopyMemory(ConstantData, &PixelBools[StartRegister], BoolCount * sizeof(*PixelBools));
+    return S_OK;
+}
+
+/* Only a device that processes every vertex in hardware gives its driver vertex shaders as they are made */
+BOOLEAN
+D9Device::DriverHasVertexShaders(VOID) const
+{
+    return (BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)) == 0;
+}
+
+template <class Interface>
+D9Shader<Interface>::~D9Shader()
+{
+    BOOLEAN Pixel = __uuidof(Interface) == __uuidof(IDirect3DPixelShader9);
+
+    if (DriverHandle != NULL)
+        Device->DestroyDriverShader(Pixel, DriverHandle);
+    delete[] Function;
+    delete[] Code;
+}
+
+/* Keeps the application's function and the copy the driver gets, which leaves out comments and names the
+   extended version 2 pixel machine as version 2 */
+template <class Interface>
+HRESULT
+D9Shader<Interface>::Initialize(
+    _In_ const DWORD* Source,
+    _In_ const D9ShaderLayout* Shape)
+{
+    const DWORD* Token = Source + 1;
+    DWORD* Out;
+
+    Layout = *Shape;
+    Function = new (std::nothrow) DWORD[Layout.Size / sizeof(DWORD)];
+    Code = new (std::nothrow) DWORD[Layout.StrippedSize / sizeof(DWORD)];
+    if (Function == nullptr || Code == nullptr)
+    {
+        D9Trace(L"CreateShader: no memory for %u bytes of code", Layout.Size);
+        return E_OUTOFMEMORY;
+    }
+    CopyMemory(Function, Source, Layout.Size);
+
+    Out = Code;
+    *Out++ = Source[0] == D3DPS_VERSION(2, 1) ? D3DPS_VERSION(2, 0) : Source[0];
+    while (Token < Source + Layout.Size / sizeof(DWORD))
+    {
+        if ((*Token & 0xFFFF) == 0xFFFE)
+        {
+            Token += ((*Token >> 16) & 0x7FFF) + 1;
+            continue;
+        }
+        *Out++ = *Token++;
+    }
+    return S_OK;
+}
+
+template <class Interface>
+STDMETHODIMP
+D9Shader<Interface>::QueryInterface(
+    _In_ REFIID Iid,
+    _COM_Outptr_ VOID** Object)
+{
+    if (Object == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    *Object = nullptr;
+    if (IsEqualGUID(Iid, __uuidof(IUnknown)) || IsEqualGUID(Iid, __uuidof(Interface)))
+    {
+        *Object = static_cast<Interface*>(this);
+        AddRef();
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+template <class Interface>
+STDMETHODIMP_(ULONG)
+D9Shader<Interface>::AddRef()
+{
+    return AddRefChild();
+}
+
+template <class Interface>
+STDMETHODIMP_(ULONG)
+D9Shader<Interface>::Release()
+{
+    D9Device* Owner = Device;
+    LONG Count = InterlockedDecrement(&RefCount);
+
+    if (Count == 0)
+    {
+        if (BindCount > 0)
+            Orphaned = TRUE;
+        else
+            delete this;
+        Owner->Release();
+    }
+    return static_cast<ULONG>(Count);
+}
+
+template <class Interface>
+VOID
+D9Shader<Interface>::Unbind(VOID)
+{
+    BindCount -= 1;
+    if (BindCount == 0 && Orphaned)
+        delete this;
+}
+
+template <class Interface>
+STDMETHODIMP
+D9Shader<Interface>::GetDevice(
+    _Out_ IDirect3DDevice9** Result)
+{
+    if (Result == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    *Result = Device;
+    Device->AddRef();
+    return S_OK;
+}
+
+/* The whole function is copied whatever size the caller says it has room for */
+template <class Interface>
+STDMETHODIMP
+D9Shader<Interface>::GetFunction(
+    _Out_writes_bytes_opt_(*SizeOfData) VOID* Data,
+    _Inout_ UINT* SizeOfData)
+{
+    if (Data != nullptr)
+        CopyMemory(Data, Function, Layout.Size);
+    *SizeOfData = Layout.Size;
+    return S_OK;
+}
+
+template class D9Shader<IDirect3DVertexShader9>;
+template class D9Shader<IDirect3DPixelShader9>;
+
+/* Checks the tokens against the version the device reports, then makes the shader and, where the device
+   hands shaders to its driver, the driver's copy */
+template <class Shader>
+static
+HRESULT
+D9MakeShader(
+    _In_ D9Device* Device,
+    _In_ const DWORD* Function,
+    _In_ BOOLEAN Pixel,
+    _In_ DWORD Supported,
+    _In_ BOOLEAN ToDriver,
+    _Out_ Shader** Made)
+{
+    D9ShaderLayout* Shape = new (std::nothrow) D9ShaderLayout;
+    Shader* Object;
+    HRESULT hr;
+
+    *Made = nullptr;
+    if (Shape == nullptr)
+        return E_OUTOFMEMORY;
+    if (!D9CheckShaderTokens(Function, Pixel, Supported, Shape))
+    {
+        delete Shape;
+        return D3DERR_INVALIDCALL;
+    }
+
+    Object = new (std::nothrow) Shader(Device);
+    if (Object == nullptr)
+    {
+        delete Shape;
+        return E_OUTOFMEMORY;
+    }
+    hr = Object->Initialize(Function, Shape);
+    if (SUCCEEDED(hr) && ToDriver)
+        hr = Device->CreateDriverShader(Pixel, Object->DriverCode(), Shape->StrippedSize, &Object->DriverHandle);
+    delete Shape;
+    if (FAILED(hr))
+    {
+        delete Object;
+        return hr;
+    }
+    Object->AddRef();
+    *Made = Object;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::CreateVertexShader(
+    _In_opt_ const DWORD* Function,
+    _Out_ IDirect3DVertexShader9** Shader)
+{
+    D9_DEVICE_LOCK();
+    D9VertexShader* Made;
+    HRESULT hr;
+
+    hr = D9MakeShader(this, Function, FALSE, Caps.VertexShaderVersion, DriverHasVertexShaders(), &Made);
+    *Shader = Made;
+    return hr;
+}
+
+STDMETHODIMP
+D9Device::CreatePixelShader(
+    _In_opt_ const DWORD* Function,
+    _Out_ IDirect3DPixelShader9** Shader)
+{
+    D9_DEVICE_LOCK();
+    D9PixelShader* Made;
+    HRESULT hr;
+
+    hr = D9MakeShader(this, Function, TRUE, Caps.PixelShaderVersion, TRUE, &Made);
+    *Shader = Made;
+    return hr;
+}
+
+/* The constants the old shader defined go back to the application's values before the driver switches; a null
+   shader reaches the driver only when something draws with the fixed function pipeline */
+STDMETHODIMP
+D9Device::SetVertexShader(
+    _In_opt_ IDirect3DVertexShader9* Shader)
+{
+    D9_DEVICE_LOCK();
+    D9VertexShader* Next = static_cast<D9VertexShader*>(Shader);
+    D9VertexShader* Previous = VertexShader;
+
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::VertexShader, 0, 0, &Shader, sizeof(Shader));
+    if (Next == Previous)
+        return S_OK;
+
+    if (Next != nullptr)
+        Next->Bind();
+    VertexShader = nullptr;
+    if (Previous != nullptr)
+    {
+        const D9ShaderLayout* Shape = Previous->Shape();
+
+        for (UINT Index = 0; Index < Shape->FloatDefCount; Index++)
+        {
+            UINT Defined = Shape->FloatDefs[Index];
+
+            if (Defined < Limits.VertexFloats)
+                SendVertexConstants(D9BatchCall::VertexShaderConst, Defined, 1, VertexFloats[Defined],
+                                    sizeof(*VertexFloats));
+        }
+        for (UINT Index = 0; Index < Shape->IntDefCount; Index++)
+        {
+            UINT Defined = Shape->IntDefs[Index];
+
+            if (Defined < Limits.VertexInts)
+                SendVertexConstants(D9BatchCall::VertexShaderConstI, Defined, 1, VertexInts[Defined],
+                                    sizeof(*VertexInts));
+        }
+        for (UINT Index = 0; Index < Shape->BoolDefCount; Index++)
+        {
+            UINT Defined = Shape->BoolDefs[Index];
+
+            if (Defined < Limits.VertexBools)
+                SendVertexConstants(D9BatchCall::VertexShaderConstB, Defined, 1, &VertexBools[Defined],
+                                    sizeof(*VertexBools));
+        }
+    }
+    VertexShader = Next;
+    if (Next != nullptr && Next->DriverHandle != NULL)
+        DdiShaderConstants(D9BatchCall::VertexShaderFunc, 0, 0, &Next->DriverHandle, sizeof(Next->DriverHandle));
+    if (Previous != nullptr)
+        Previous->Unbind();
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetVertexShader(
+    _Out_ IDirect3DVertexShader9** Shader)
+{
+    D9_DEVICE_LOCK();
+
+    if (Shader == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Shader = VertexShader;
+    if (VertexShader != nullptr)
+        VertexShader->AddRef();
+    return S_OK;
+}
+
+/* The pixel shader reaches the driver when something draws with it */
+STDMETHODIMP
+D9Device::SetPixelShader(
+    _In_opt_ IDirect3DPixelShader9* Shader)
+{
+    D9_DEVICE_LOCK();
+    D9PixelShader* Next = static_cast<D9PixelShader*>(Shader);
+    D9PixelShader* Previous = PixelShader;
+
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::PixelShader, 0, 0, &Shader, sizeof(Shader));
+    if (Next == Previous)
+        return S_OK;
+    if (Next != nullptr)
+        Next->Bind();
+    PixelShader = Next;
+    if (Previous != nullptr)
+        Previous->Unbind();
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetPixelShader(
+    _Out_ IDirect3DPixelShader9** Shader)
+{
+    D9_DEVICE_LOCK();
+
+    if (Shader == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Shader = PixelShader;
+    if (PixelShader != nullptr)
+        PixelShader->AddRef();
     return S_OK;
 }

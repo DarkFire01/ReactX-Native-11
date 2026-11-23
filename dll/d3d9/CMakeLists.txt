@@ -19,6 +19,7 @@ nt_add_usermode_dll(d3d9
         present.cpp
         psgp.cpp
         shader.cpp
+        shadercheck.cpp
         state.cpp
         surface.cpp
         swapchain.cpp

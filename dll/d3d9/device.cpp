@@ -212,6 +212,10 @@ D9Device::D9Device(
 D9Device::~D9Device()
 {
     delete Recording;
+    if (VertexShader != nullptr)
+        VertexShader->Unbind();
+    if (PixelShader != nullptr)
+        PixelShader->Unbind();
     UnbindTextures();
     UnbindStreams();
     delete[] Lights;
@@ -2410,56 +2414,6 @@ D9Device::SetVertexDeclaration(
 STDMETHODIMP
 D9Device::GetVertexDeclaration(
     _Out_ IDirect3DVertexDeclaration9** Decl)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateVertexShader(
-    _In_opt_ const DWORD* Function,
-    _Out_ IDirect3DVertexShader9** Shader)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetVertexShader(
-    _In_opt_ IDirect3DVertexShader9* Shader)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetVertexShader(
-    _Out_ IDirect3DVertexShader9** Shader)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreatePixelShader(
-    _In_opt_ const DWORD* Function,
-    _Out_ IDirect3DPixelShader9** Shader)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetPixelShader(
-    _In_opt_ IDirect3DPixelShader9* Shader)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetPixelShader(
-    _Out_ IDirect3DPixelShader9** Shader)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

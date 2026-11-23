@@ -54,6 +54,9 @@ D9RunShaderConstants(
     Range.Count = Record->Count;
     switch (Call)
     {
+    case D9BatchCall::VertexShaderFunc:
+        Funcs->pfnSetVertexShaderFunc(Driver, *static_cast<HANDLE*>(Data));
+        break;
     case D9BatchCall::VertexShaderConst:
         Funcs->pfnSetVertexShaderConst(Driver, &Range, Data);
         break;
@@ -446,6 +449,7 @@ D9Batch::Run(
         case D9BatchCall::ColorFill:
             Funcs->pfnColorFill(Driver, reinterpret_cast<D3DDDIARG_COLORFILL*>(Args));
             break;
+        case D9BatchCall::VertexShaderFunc:
         case D9BatchCall::VertexShaderConst:
         case D9BatchCall::VertexShaderConstI:
         case D9BatchCall::VertexShaderConstB:

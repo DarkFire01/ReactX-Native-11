@@ -160,6 +160,7 @@ enum class D9BatchCall : UINT
     Rename,
     Blt,
     ColorFill,
+    VertexShaderFunc,
     VertexShaderConst,
     VertexShaderConstI,
     VertexShaderConstB,
@@ -1224,6 +1225,103 @@ private:
 typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
 typedef D9Buffer<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC> D9IndexBuffer;
 
+/* Registers one shader's DEF instructions may fix, of each kind */
+static constexpr UINT D9MaxShaderDefs = 256;
+
+/* What the token check learns of a shader: its sizes with and without comments and the registers it defines */
+struct D9ShaderLayout
+{
+    UINT Size;
+    UINT StrippedSize;
+    UINT Instructions;
+    UINT FloatDefCount;
+    UINT IntDefCount;
+    UINT BoolDefCount;
+    USHORT FloatDefs[D9MaxShaderDefs];
+    USHORT IntDefs[D9MaxShaderDefs];
+    USHORT BoolDefs[D9MaxShaderDefs];
+};
+
+BOOLEAN
+D9CheckShaderTokens(
+    _In_ const DWORD* Tokens,
+    _In_ BOOLEAN Pixel,
+    _In_ DWORD Supported,
+    _Out_ D9ShaderLayout* Layout);
+
+/* A vertex or pixel shader: the function the application gave, what the driver made of it and the constants
+   its DEF instructions fix */
+template <class Interface>
+class D9Shader final : public Interface, public D9Child
+{
+public:
+    explicit
+    D9Shader(
+        _In_ D9Device* Owner)
+        : D9Child(Owner)
+    {
+    }
+
+    ~D9Shader();
+
+    D9Shader(const D9Shader&) = delete;
+    D9Shader& operator=(const D9Shader&) = delete;
+
+    HRESULT
+    Initialize(
+        _In_ const DWORD* Function,
+        _In_ const D9ShaderLayout* Shape);
+
+    STDMETHOD(QueryInterface)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Object) override;
+
+    STDMETHOD_(ULONG, AddRef)() override;
+
+    STDMETHOD_(ULONG, Release)() override;
+
+    STDMETHOD(GetDevice)(
+        _Out_ IDirect3DDevice9** Result) override;
+
+    STDMETHOD(GetFunction)(
+        _Out_writes_bytes_opt_(*SizeOfData) VOID* Data,
+        _Inout_ UINT* SizeOfData) override;
+
+    /* The device and state blocks keep a shader past its last release */
+    VOID
+    Bind(VOID)
+    {
+        BindCount += 1;
+    }
+
+    VOID
+    Unbind(VOID);
+
+    const D9ShaderLayout*
+    Shape() const
+    {
+        return &Layout;
+    }
+
+    const DWORD*
+    DriverCode() const
+    {
+        return Code;
+    }
+
+    HANDLE DriverHandle = NULL;
+
+private:
+    DWORD* Function = nullptr;
+    DWORD* Code = nullptr;
+    D9ShaderLayout Layout = {};
+    LONG BindCount = 0;
+    BOOLEAN Orphaned = FALSE;
+};
+
+typedef D9Shader<IDirect3DVertexShader9> D9VertexShader;
+typedef D9Shader<IDirect3DPixelShader9> D9PixelShader;
+
 /* hardware.cpp */
 VOID
 D9ApplyShare(
@@ -1340,6 +1438,8 @@ enum class D9BlockOp : UINT
     PixelFloats,
     PixelInts,
     PixelBools,
+    VertexShader,
+    PixelShader,
 };
 
 /* An entry's header; the values it sets follow, padded to eight bytes */
@@ -1452,6 +1552,19 @@ public:
     HRESULT
     Initialize(
         _Inout_ D3DPRESENT_PARAMETERS* Parameters);
+
+    /* Shader objects make and free their driver shaders through the device */
+    HRESULT
+    CreateDriverShader(
+        _In_ BOOLEAN Pixel,
+        _In_reads_bytes_(Size) const DWORD* Code,
+        _In_ UINT Size,
+        _Out_ HANDLE* Handle);
+
+    VOID
+    DestroyDriverShader(
+        _In_ BOOLEAN Pixel,
+        _In_ HANDLE Handle);
 
     /* State blocks replay and gather through the device's own calls */
     HRESULT
@@ -2580,6 +2693,19 @@ private:
     ClearConstants(VOID);
 
     VOID
+    SendAroundDefs(
+        _In_ D9BatchCall Call,
+        _In_ UINT Start,
+        _In_ UINT Count,
+        _In_reads_bytes_opt_(Count * Stride) const VOID* Data,
+        _In_ UINT Stride,
+        _In_reads_(DefCount) const USHORT* Defs,
+        _In_ UINT DefCount);
+
+    BOOLEAN
+    DriverHasVertexShaders(VOID) const;
+
+    VOID
     SendVertexConstants(
         _In_ D9BatchCall Call,
         _In_ UINT Start,
@@ -2865,6 +2991,10 @@ private:
 
     /* The block BeginStateBlock started; while it is set, state calls go into it and leave the device alone */
     D9StateBlock* Recording = nullptr;
+
+    /* The shaders the application bound */
+    D9VertexShader* VertexShader = nullptr;
+    D9PixelShader* PixelShader = nullptr;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;

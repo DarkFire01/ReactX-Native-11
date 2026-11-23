@@ -1927,8 +1927,8 @@ D9Device::DdiPixelShaderConst(
     CopyMemory(Slot + sizeof(*Args), Data, DataSize);
 }
 
-/* Vertex constants of every kind and integer and boolean pixel constants; a recorded call hands the driver
-   the batch's copy of the data */
+/* Vertex constants of every kind, integer and boolean pixel constants and the vertex shader; a recorded call
+   hands the driver the batch's copy of the data */
 VOID
 D9Device::DdiShaderConstants(
     _In_ D9BatchCall Call,
@@ -1955,6 +1955,9 @@ D9Device::DdiShaderConstants(
 
     switch (Call)
     {
+    case D9BatchCall::VertexShaderFunc:
+        DeviceFunctions.pfnSetVertexShaderFunc(DriverDevice, *static_cast<const HANDLE*>(Data));
+        break;
     case D9BatchCall::VertexShaderConst:
         DeviceFunctions.pfnSetVertexShaderConst(DriverDevice, &Range, Data);
         break;
@@ -2137,4 +2140,46 @@ D9Device::DdiPresent1(
     CopyMemory(Slot + sizeof(*Args), Args->phSrcResources, sizeof(D3DDDIARG_PRESENTSURFACE));
     Batch->Submit();
     return TRUE;
+}
+
+HRESULT
+D9Device::CreateDriverShader(
+    _In_ BOOLEAN Pixel,
+    _In_reads_bytes_(Size) const DWORD* Code,
+    _In_ UINT Size,
+    _Out_ HANDLE* Handle)
+{
+    HRESULT hr;
+
+    *Handle = NULL;
+    if (Pixel)
+    {
+        D3DDDIARG_CREATEPIXELSHADER Args = {};
+
+        Args.CodeSize = Size;
+        hr = DeviceFunctions.pfnCreatePixelShader(DriverDevice, &Args, reinterpret_cast<const UINT*>(Code));
+        *Handle = Args.ShaderHandle;
+    }
+    else
+    {
+        D3DDDIARG_CREATEVERTEXSHADERFUNC Args = {};
+
+        Args.Size = Size;
+        hr = DeviceFunctions.pfnCreateVertexShaderFunc(DriverDevice, &Args, reinterpret_cast<const UINT*>(Code));
+        *Handle = Args.ShaderHandle;
+    }
+    if (FAILED(hr))
+        D9Trace(L"CreateDriverShader: the driver failed with %08lX", hr);
+    return hr;
+}
+
+VOID
+D9Device::DestroyDriverShader(
+    _In_ BOOLEAN Pixel,
+    _In_ HANDLE Handle)
+{
+    if (Pixel)
+        DeviceFunctions.pfnDeletePixelShader(DriverDevice, Handle);
+    else
+        DeviceFunctions.pfnDeleteVertexShaderFunc(DriverDevice, Handle);
 }

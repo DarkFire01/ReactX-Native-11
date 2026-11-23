@@ -101,6 +101,30 @@ D9StateBlock::Hold(
             static_cast<D9IndexBuffer*>(Buffer)->Unbind();
         break;
     }
+    case D9BlockOp::VertexShader:
+    {
+        D9VertexShader* Shader = *static_cast<D9VertexShader* const*>(Values);
+
+        if (Shader == nullptr)
+            break;
+        if (Take)
+            Shader->Bind();
+        else
+            Shader->Unbind();
+        break;
+    }
+    case D9BlockOp::PixelShader:
+    {
+        D9PixelShader* Shader = *static_cast<D9PixelShader* const*>(Values);
+
+        if (Shader == nullptr)
+            break;
+        if (Take)
+            Shader->Bind();
+        else
+            Shader->Unbind();
+        break;
+    }
     default:
         break;
     }
@@ -310,6 +334,12 @@ D9Device::ApplyBlock(
         case D9BlockOp::PixelBools:
             SetPixelShaderConstantB(Entry->Index, static_cast<BOOL*>(Values), Entry->Type);
             break;
+        case D9BlockOp::VertexShader:
+            SetVertexShader(*static_cast<IDirect3DVertexShader9**>(Values));
+            break;
+        case D9BlockOp::PixelShader:
+            SetPixelShader(*static_cast<IDirect3DPixelShader9**>(Values));
+            break;
         }
     }
     return S_OK;
@@ -429,6 +459,16 @@ D9Device::CaptureBlock(
             break;
         case D9BlockOp::PixelBools:
             CopyMemory(Values, &PixelBools[Entry->Index], Entry->Type * sizeof(*PixelBools));
+            break;
+        case D9BlockOp::VertexShader:
+            D9StateBlock::Hold(Entry, FALSE);
+            *static_cast<D9VertexShader**>(Values) = VertexShader;
+            D9StateBlock::Hold(Entry, TRUE);
+            break;
+        case D9BlockOp::PixelShader:
+            D9StateBlock::Hold(Entry, FALSE);
+            *static_cast<D9PixelShader**>(Values) = PixelShader;
+            D9StateBlock::Hold(Entry, TRUE);
             break;
         }
     }
@@ -550,6 +590,8 @@ D9Device::FillBlock(
         if (SUCCEEDED(hr))
             hr = D9AddConstants(Block, D9BlockOp::VertexBools, reinterpret_cast<BYTE*>(VertexBools),
                                 Limits.VertexBools, sizeof(*VertexBools));
+        if (SUCCEEDED(hr))
+            hr = Block->Add(D9BlockOp::VertexShader, 0, 0, &VertexShader, sizeof(VertexShader));
         for (UINT Stream = 0; Stream < StreamCount && SUCCEEDED(hr); Stream++)
             hr = Block->Add(D9BlockOp::StreamFrequency, Stream, 0, &Streams[Stream].Frequency, sizeof(UINT));
         return hr;
@@ -577,6 +619,8 @@ D9Device::FillBlock(
         if (SUCCEEDED(hr))
             hr = D9AddConstants(Block, D9BlockOp::PixelBools, reinterpret_cast<BYTE*>(PixelBools), Limits.PixelBools,
                                 sizeof(*PixelBools));
+        if (SUCCEEDED(hr))
+            hr = Block->Add(D9BlockOp::PixelShader, 0, 0, &PixelShader, sizeof(PixelShader));
         return hr;
     }
 
@@ -637,6 +681,10 @@ D9Device::FillBlock(
             hr = Block->Add(D9BlockOp::LightEnable, Index, 0, &Enabled, sizeof(Enabled));
     }
 
+    if (SUCCEEDED(hr))
+        hr = Block->Add(D9BlockOp::VertexShader, 0, 0, &VertexShader, sizeof(VertexShader));
+    if (SUCCEEDED(hr))
+        hr = Block->Add(D9BlockOp::PixelShader, 0, 0, &PixelShader, sizeof(PixelShader));
     if (SUCCEEDED(hr))
         hr = D9AddConstants(Block, D9BlockOp::VertexFloats, reinterpret_cast<BYTE*>(VertexFloats),
                             Limits.VertexFloats, sizeof(*VertexFloats));
