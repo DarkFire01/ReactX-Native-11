@@ -1579,6 +1579,8 @@ public:
         WasEnabled = FALSE;
         InputChannels = 0;
         OutputChannels = 0;
+        LockedRate = 0;
+        LockedFrames = 0;
         Network = nullptr;
         Scratch = nullptr;
         Matrix = nullptr;
@@ -1689,6 +1691,8 @@ private:
     BOOL WasEnabled;
     UINT32 InputChannels;
     UINT32 OutputChannels;
+    UINT32 LockedRate;
+    UINT32 LockedFrames;
     XaRvbNetwork* Network;
     float* Scratch;
     float* Matrix;
@@ -1811,6 +1815,12 @@ XaRvb::LockForProcess(
         UnlockForProcess();
         return hr;
     }
+    /* A lock on top of a lock keeps the running network and its settings */
+    if (Network != nullptr && InputChannels == Input->pFormat->nChannels && OutputChannels == Output->pFormat->nChannels &&
+        LockedRate == Input->pFormat->nSamplesPerSec && LockedFrames == Input->MaxFrameCount)
+    {
+        return S_OK;
+    }
     InputChannels = Input->pFormat->nChannels;
     OutputChannels = Output->pFormat->nChannels;
     Rate = Input->pFormat->nSamplesPerSec;
@@ -1820,6 +1830,8 @@ XaRvb::LockForProcess(
         return XAPO_E_FORMAT_UNSUPPORTED;
     }
     Discard();
+    LockedRate = Rate;
+    LockedFrames = Input->MaxFrameCount;
     hr = Build(Input->MaxFrameCount, Rate);
     if (FAILED(hr))
     {
