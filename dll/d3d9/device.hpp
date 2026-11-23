@@ -1310,6 +1310,122 @@ BOOLEAN
 D9IsRetiredState(
     _In_ DWORD State);
 
+VOID
+D9HoldTexture(
+    _In_ IDirect3DBaseTexture9* Texture,
+    _In_ BOOLEAN Hold);
+
+/* What one state block entry sets */
+enum class D9BlockOp : UINT
+{
+    RenderState,
+    StageState,
+    SamplerState,
+    Texture,
+    StreamSource,
+    StreamFrequency,
+    Indices,
+    NPatchMode,
+    Viewport,
+    Scissor,
+    Transform,
+    ClipPlane,
+    Material,
+    Light,
+    LightEnable,
+    Fvf,
+    VertexFloats,
+    VertexInts,
+    VertexBools,
+    PixelFloats,
+    PixelInts,
+    PixelBools,
+};
+
+/* An entry's header; the values it sets follow, padded to eight bytes */
+struct D9BlockEntry
+{
+    D9BlockOp Op;
+    UINT Index;
+    UINT Type;
+    UINT Size;
+};
+
+/* A stream binding as a block keeps it */
+struct D9BlockStream
+{
+    IDirect3DVertexBuffer9* Buffer;
+    UINT Offset;
+    UINT Stride;
+};
+
+/* The settings a block replays in the order they were recorded or gathered; it holds the textures and
+   buffers it names as a binding would */
+class D9StateBlock final : public IDirect3DStateBlock9, public D9Child
+{
+public:
+    explicit
+    D9StateBlock(
+        _In_ D9Device* Owner)
+        : D9Child(Owner)
+    {
+    }
+
+    ~D9StateBlock();
+
+    D9StateBlock(const D9StateBlock&) = delete;
+    D9StateBlock& operator=(const D9StateBlock&) = delete;
+
+    HRESULT
+    Add(
+        _In_ D9BlockOp Op,
+        _In_ UINT Index,
+        _In_ UINT Type,
+        _In_reads_bytes_(Size) const VOID* Values,
+        _In_ UINT Size);
+
+    /* Walks the entries; Next gives the first with null and stops with null */
+    _Ret_maybenull_
+    D9BlockEntry*
+    Next(
+        _In_opt_ D9BlockEntry* Entry) const;
+
+    static
+    VOID
+    Hold(
+        _In_ const D9BlockEntry* Entry,
+        _In_ BOOLEAN Take);
+
+    STDMETHOD(QueryInterface)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Object) override;
+
+    STDMETHOD_(ULONG, AddRef)() override;
+
+    STDMETHOD_(ULONG, Release)() override;
+
+    STDMETHOD(GetDevice)(
+        _Out_ IDirect3DDevice9** Result) override;
+
+    STDMETHOD(Capture)() override;
+
+    STDMETHOD(Apply)() override;
+
+private:
+    BYTE* Entries = nullptr;
+    UINT Used = 0;
+    UINT Capacity = 0;
+};
+
+/* The values that follow an entry's header */
+inline
+VOID*
+D9BlockValues(
+    _In_ D9BlockEntry* Entry)
+{
+    return Entry + 1;
+}
+
 DWORD
 D9DriverStageValue(
     _In_ UINT Type,
@@ -1336,6 +1452,15 @@ public:
     HRESULT
     Initialize(
         _Inout_ D3DPRESENT_PARAMETERS* Parameters);
+
+    /* State blocks replay and gather through the device's own calls */
+    HRESULT
+    ApplyBlock(
+        _In_ D9StateBlock* Block);
+
+    HRESULT
+    CaptureBlock(
+        _In_ D9StateBlock* Block);
 
     /* What the swap chain and surfaces need from their device */
     const D9Adapter*
@@ -2438,6 +2563,19 @@ private:
     HRESULT
     CreateConstants(VOID);
 
+    HRESULT
+    FillBlock(
+        _Inout_ D9StateBlock* Block,
+        _In_ D3DSTATEBLOCKTYPE Type);
+
+    HRESULT
+    RecordConstants(
+        _In_ D9BlockOp Op,
+        _In_ UINT Start,
+        _In_ UINT Count,
+        _In_reads_bytes_opt_(Count * Stride) const VOID* Data,
+        _In_ UINT Stride);
+
     VOID
     ClearConstants(VOID);
 
@@ -2724,6 +2862,9 @@ private:
     INT (*PixelInts)[4] = nullptr;
     BOOL* PixelBools = nullptr;
     BOOLEAN VertexConstantsPending = FALSE;
+
+    /* The block BeginStateBlock started; while it is set, state calls go into it and leave the device alone */
+    D9StateBlock* Recording = nullptr;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;

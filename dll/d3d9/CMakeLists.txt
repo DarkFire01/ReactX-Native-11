@@ -3,6 +3,7 @@ nt_add_usermode_dll(d3d9
     SOURCES
         adapter.cpp
         batch.cpp
+        block.cpp
         buffer.cpp
         caps.cpp
         copy.cpp

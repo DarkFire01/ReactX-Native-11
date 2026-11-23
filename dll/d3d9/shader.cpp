@@ -162,6 +162,8 @@ D9Device::SetVertexShaderConstantF(
 
     if (D9OutsideRegisters(StartRegister, Vector4fCount, Limits.VertexFloats))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return RecordConstants(D9BlockOp::VertexFloats, StartRegister, Vector4fCount, ConstantData, sizeof(*VertexFloats));
     CopyMemory(VertexFloats[StartRegister], ConstantData, Vector4fCount * sizeof(*VertexFloats));
     SendVertexConstants(D9BatchCall::VertexShaderConst, StartRegister, Vector4fCount, ConstantData,
                         sizeof(*VertexFloats));
@@ -194,6 +196,8 @@ D9Device::SetVertexShaderConstantI(
 
     if (D9OutsideRegisters(StartRegister, Vector4iCount, Limits.VertexInts))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return RecordConstants(D9BlockOp::VertexInts, StartRegister, Vector4iCount, ConstantData, sizeof(*VertexInts));
     CopyMemory(VertexInts[StartRegister], ConstantData, Vector4iCount * sizeof(*VertexInts));
     SendVertexConstants(D9BatchCall::VertexShaderConstI, StartRegister, Vector4iCount, ConstantData,
                         sizeof(*VertexInts));
@@ -226,6 +230,8 @@ D9Device::SetVertexShaderConstantB(
 
     if (D9OutsideRegisters(StartRegister, BoolCount, Limits.VertexBools))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return RecordConstants(D9BlockOp::VertexBools, StartRegister, BoolCount, ConstantData, sizeof(*VertexBools));
     CopyMemory(&VertexBools[StartRegister], ConstantData, BoolCount * sizeof(*VertexBools));
     SendVertexConstants(D9BatchCall::VertexShaderConstB, StartRegister, BoolCount, ConstantData,
                         sizeof(*VertexBools));
@@ -258,6 +264,8 @@ D9Device::SetPixelShaderConstantF(
 
     if (D9OutsideRegisters(StartRegister, Vector4fCount, Limits.PixelFloats))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return RecordConstants(D9BlockOp::PixelFloats, StartRegister, Vector4fCount, ConstantData, sizeof(*PixelFloats));
     CopyMemory(PixelFloats[StartRegister], ConstantData, Vector4fCount * sizeof(*PixelFloats));
     SendPixelConstants(D9BatchCall::PixelShaderConst, StartRegister, Vector4fCount, ConstantData,
                        sizeof(*PixelFloats));
@@ -290,6 +298,8 @@ D9Device::SetPixelShaderConstantI(
 
     if (D9OutsideRegisters(StartRegister, Vector4iCount, Limits.PixelInts))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return RecordConstants(D9BlockOp::PixelInts, StartRegister, Vector4iCount, ConstantData, sizeof(*PixelInts));
     CopyMemory(PixelInts[StartRegister], ConstantData, Vector4iCount * sizeof(*PixelInts));
     SendPixelConstants(D9BatchCall::PixelShaderConstI, StartRegister, Vector4iCount, ConstantData,
                        sizeof(*PixelInts));
@@ -322,6 +332,8 @@ D9Device::SetPixelShaderConstantB(
 
     if (D9OutsideRegisters(StartRegister, BoolCount, Limits.PixelBools))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return RecordConstants(D9BlockOp::PixelBools, StartRegister, BoolCount, ConstantData, sizeof(*PixelBools));
     CopyMemory(&PixelBools[StartRegister], ConstantData, BoolCount * sizeof(*PixelBools));
     SendPixelConstants(D9BatchCall::PixelShaderConstB, StartRegister, BoolCount, ConstantData,
                        sizeof(*PixelBools));

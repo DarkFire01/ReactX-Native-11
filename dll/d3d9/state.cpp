@@ -128,6 +128,14 @@ D9Device::SetRenderState(
     D9_DEVICE_LOCK();
     UINT Slot = D9Clamp(State, D9LastRenderState);
 
+    /* A block takes neither retired states nor the device's own copy */
+    if (Recording != nullptr)
+    {
+        if (D9IsRetiredState(Slot))
+            return D3DERR_INVALIDCALL;
+        return Recording->Add(D9BlockOp::RenderState, Slot, 0, &Value, sizeof(Value));
+    }
+
     /* Undefined and retired states reach the driver like any other */
     if (!KeepsNoState())
     {
@@ -266,6 +274,8 @@ D9Device::SetTextureStageState(
     UINT Kept = D9Clamp(Stage, D9StageCount - 1);
     UINT Slot = D9Clamp(Type, D9StageStateCount - 1);
 
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::StageState, Kept, Slot, &Value, sizeof(Value));
     if (!KeepsNoState())
     {
         if (StageStates[Kept][Slot] == Value)
@@ -322,6 +332,8 @@ D9Device::SetSamplerState(
 
     if (static_cast<UINT>(Type) >= D9SamplerStateCount)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::SamplerState, Accepted, Type, &Value, sizeof(Value));
     if (!KeepsNoState())
     {
         if (SamplerStates[Slot][Type] == Value)
@@ -400,6 +412,8 @@ D9Device::SetTransform(
 
     if (Matrix == nullptr)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Transform, Type, 0, Matrix, sizeof(*Matrix));
 
     /* Types the runtime does not keep are accepted and dropped */
     if (Slot >= 0)
@@ -454,6 +468,8 @@ D9Device::SetViewport(
 
     if (Viewport == nullptr)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Viewport, 0, 0, Viewport, sizeof(*Viewport));
 
     /* A depth range thinner than a thousandth is widened away from the nearer end of the unit range */
     *Kept = *Viewport;
@@ -496,6 +512,8 @@ D9Device::SetScissorRect(
 
     if (Rect == nullptr)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Scissor, 0, 0, Rect, sizeof(*Rect));
     ScissorRect = *Rect;
     DdiScissorRect(&ScissorRect);
     return S_OK;
@@ -522,6 +540,8 @@ D9Device::SetMaterial(
 
     if (Material == nullptr)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Material, 0, 0, Material, sizeof(*Material));
     CurrentMaterial = *Material;
     return S_OK;
 }
@@ -560,6 +580,8 @@ D9Device::SetLight(
 
     if (Light == nullptr)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Light, Index, 0, Light, sizeof(*Light));
 
     /* The table grows past the index so that nearby lights fit without growing it again */
     if (Index >= LightCapacity)
@@ -609,10 +631,13 @@ D9Device::LightEnable(
 {
     D9_DEVICE_LOCK();
     D9Light* Found = D9FindLight(Lights, LightCapacity, Index);
+    BOOL Enabled = Enable != FALSE;
 
-    /* Turning on a light never set gives it a white directional light pointing along Z first */
+    /* Turning on a light never set gives the device a white directional light pointing along Z first, even
+       while a block records */
     if (Found == nullptr)
     {
+        D9StateBlock* Block = Recording;
         D3DLIGHT9 White = {};
         HRESULT hr;
 
@@ -621,11 +646,15 @@ D9Device::LightEnable(
         White.Diffuse.g = 1.0f;
         White.Diffuse.b = 1.0f;
         White.Direction.z = 1.0f;
+        Recording = nullptr;
         hr = SetLight(Index, &White);
+        Recording = Block;
         if (FAILED(hr))
             return hr;
         Found = &Lights[Index];
     }
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::LightEnable, Index, 0, &Enabled, sizeof(Enabled));
     Found->Enabled = Enable != FALSE;
     return S_OK;
 }
@@ -683,6 +712,8 @@ D9Device::SetClipPlane(
 
     if (Plane == nullptr)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::ClipPlane, Slot, 0, Plane, sizeof(ClipPlanes[Slot]));
     /* A mixed device's driver sees the plane from both of the runtime's vertex pipelines */
     CopyMemory(ClipPlanes[Slot], Plane, sizeof(ClipPlanes[Slot]));
     SendClipPlane(Slot, (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0 ? 4 : 2);
@@ -735,6 +766,8 @@ D9Device::SetNPatchMode(
     D9_DEVICE_LOCK();
     D3DDDIARG_RENDERSTATE Args = {};
 
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::NPatchMode, 0, 0, &NSegments, sizeof(NSegments));
     PatchSegments = NSegments;
     Args.State = static_cast<D3DDDIRENDERSTATETYPE>(D9PatchSegmentsState);
     CopyMemory(&Args.Value, &NSegments, sizeof(Args.Value));
@@ -801,6 +834,8 @@ D9Device::SetFVF(
 {
     D9_DEVICE_LOCK();
 
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Fvf, 0, 0, &FVF, sizeof(FVF));
     CurrentFvf = FVF;
     return S_OK;
 }
@@ -830,6 +865,12 @@ D9Device::SetStreamSource(
 
     if (StreamNumber >= D9StreamCount)
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+    {
+        D9BlockStream Bound = { StreamData, OffsetInBytes, Stride };
+
+        return Recording->Add(D9BlockOp::StreamSource, StreamNumber, 0, &Bound, sizeof(Bound));
+    }
 
     Stream = &Streams[StreamNumber];
     if (Stream->Buffer == StreamData && Stream->Offset == OffsetInBytes && Stream->Stride == Stride)
@@ -893,6 +934,8 @@ D9Device::SetStreamSourceFreq(
 
     if (Setting == 0 || Kind == (Indexed | Instanced) || (Kind == Instanced && Stream == 0))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::StreamFrequency, Stream, 0, &Setting, sizeof(Setting));
 
     Streams[Stream].Frequency = Setting;
     if (SoftwareVertices)
@@ -923,6 +966,8 @@ D9Device::SetIndices(
 {
     D9_DEVICE_LOCK();
 
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Indices, 0, 0, &IndexData, sizeof(IndexData));
     if (Indices == IndexData)
         return S_OK;
     if (IndexData != nullptr)

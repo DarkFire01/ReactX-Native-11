@@ -211,6 +211,7 @@ D9Device::D9Device(
 
 D9Device::~D9Device()
 {
+    delete Recording;
     UnbindTextures();
     UnbindStreams();
     delete[] Lights;
@@ -2283,30 +2284,6 @@ D9Device::EndScene()
     Capture.Value = FALSE;
     DdiRenderState(&Capture);
     return S_OK;
-}
-
-STDMETHODIMP
-D9Device::CreateStateBlock(
-    _In_ D3DSTATEBLOCKTYPE Type,
-    _Out_ IDirect3DStateBlock9** SB)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::BeginStateBlock()
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::EndStateBlock(
-    _In_ IDirect3DStateBlock9** SB)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
 }
 
 STDMETHODIMP

@@ -1893,6 +1893,8 @@ D9Device::SetTexture(
 
     if (!D9TextureSlot(Stage, &Slot))
         return D3DERR_INVALIDCALL;
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::Texture, Stage, 0, &Texture, sizeof(Texture));
 
     Previous = Textures[Slot];
     if (Previous == Texture)
@@ -1925,6 +1927,18 @@ D9Device::GetTexture(
     if (*Texture != nullptr)
         (*Texture)->AddRef();
     return S_OK;
+}
+
+/* A state block holds a texture as a binding would */
+VOID
+D9HoldTexture(
+    _In_ IDirect3DBaseTexture9* Texture,
+    _In_ BOOLEAN Hold)
+{
+    if (Hold)
+        D9CoreOf(Texture)->Bind();
+    else
+        D9CoreOf(Texture)->Unbind();
 }
 
 /* Lets go of every bound texture, destroying those the application already released */
