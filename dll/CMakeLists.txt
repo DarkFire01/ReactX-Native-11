@@ -10,6 +10,7 @@ add_subdirectory(xinput)
 add_subdirectory(xinput9)
 add_subdirectory(dinput)
 add_subdirectory(ddraw)
+add_subdirectory(d3d9)
 add_subdirectory(dinput8)
 add_subdirectory(dsound)
 
