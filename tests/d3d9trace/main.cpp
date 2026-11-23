@@ -5752,6 +5752,9 @@ TrDrawWork(
     TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
     TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
     TrApi("SetPixelShader", Device->SetPixelShader(Color));
+    TrApi("SetPixelShaderConstantF early", Device->SetPixelShaderConstantF(0, TrDrawVertices, 2));
+    TrApi("SetPixelShaderConstantF def", Device->SetPixelShaderConstantF(1, TrDrawVertices + 8, 1));
+    TrApi("SetPixelShaderConstantF high", Device->SetPixelShaderConstantF(5, TrDrawVertices + 4, 1));
     TrSettle(Device);
 
     TrPhase("draws checks");
@@ -5823,6 +5826,14 @@ TrDrawWork(
     TrApi("DrawPrimitive color", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
     TrApi("SetPixelShader sample", Device->SetPixelShader(Sample));
     TrApi("DrawPrimitive sample", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetPixelShaderConstantF bound", Device->SetPixelShaderConstantF(2, TrDrawVertices, 2));
+    TrApi("SetRenderState factor", Device->SetRenderState(D3DRS_TEXTUREFACTOR, 0x80402010));
+    TrApi("SetTextureStageState constant", Device->SetTextureStageState(1, D3DTSS_CONSTANT, 0x10204080));
+    TrApi("SetTextureStageState bump", Device->SetTextureStageState(0, D3DTSS_BUMPENVMAT01, 0x3F000000));
+    TrApi("SetTextureStageState color", Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_ADD));
+    TrApi("DrawPrimitive constants", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("SetPixelShader color again", Device->SetPixelShader(Color));
+    TrApi("DrawPrimitive color again", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
     TrApi("EndScene", Device->EndScene());
     TrSettle(Device);
     TrReadTarget(Device, Target, "textures");
