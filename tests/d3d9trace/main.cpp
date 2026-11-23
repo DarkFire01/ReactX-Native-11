@@ -7220,6 +7220,38 @@ TrFixedVertexWork(
     for (const TrVertexCase& Case : TrVertexCases)
         TrVertexRun(Device, Case, Target);
 
+    /* Application vertex shaders feed the fixed function pixel shader with the outputs they write */
+    {
+        static const DWORD Outputs[] = { 0xFFFE0200, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000005,
+                                         0x900F0001, 0x02000001, 0xC00F0000, 0x90E40000, 0x02000001, 0xD00F0000,
+                                         0x90E40001, 0x02000001, 0xE0030000, 0x90E40001, 0x02000001, 0xE0070001,
+                                         0x90E40001, 0x0000FFFF };
+        static const TrVertexCase Shaded[] =
+        {
+            { "application shader one set", D3DFVF_XYZ | D3DFVF_TEX1, FALSE, {} },
+            { "application shader two stages", D3DFVF_XYZ | D3DFVF_TEX1, FALSE,
+              { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+            { "application shader colors", D3DFVF_XYZ | D3DFVF_TEX1, FALSE,
+              { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE } } },
+        };
+        static const TrVertexCase Back = { "fixed function again", D3DFVF_XYZ | D3DFVF_TEX1, FALSE,
+                                           { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } };
+        IDirect3DVertexShader9* One = nullptr;
+        IDirect3DVertexShader9* Many = nullptr;
+
+        TrApi("CreateVertexShader", Device->CreateVertexShader(TrDrawVertexCode, &One));
+        TrApi("CreateVertexShader outputs", Device->CreateVertexShader(Outputs, &Many));
+        TrApi("SetVertexShader", Device->SetVertexShader(One));
+        TrVertexRun(Device, Shaded[0], Target);
+        TrApi("SetVertexShader outputs", Device->SetVertexShader(Many));
+        TrVertexRun(Device, Shaded[1], Target);
+        TrVertexRun(Device, Shaded[2], Target);
+        TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+        TrVertexRun(Device, Back, Target);
+        TrRelease(One);
+        TrRelease(Many);
+    }
+
     TrPhase("fixed vertex release");
     TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
     TrRelease(Target);
