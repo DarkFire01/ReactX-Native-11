@@ -6616,6 +6616,210 @@ NcCheckValidator(
     NcCheckValidatorDevices(Check);
 }
 
+/* vs_1_1 for ProcessVertices: transform by c0-c3, color and coordinates through, specular from c4, fog from z */
+static const DWORD NcPvVertexCode[] = { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x0000001F, 0x8000000A,
+                                        0x900F0001, 0x0000001F, 0x80000005, 0x900F0002, 0x00000014, 0xC00F0000,
+                                        0x90E40000, 0xA0E40000, 0x00000001, 0xD00F0000, 0x90E40001, 0x00000001,
+                                        0xD00F0001, 0xA0E40004, 0x00000001, 0xE0030000, 0x90E40002, 0x00000001,
+                                        0xC00F0001, 0x90AA0000, 0x0000FFFF };
+
+/* The same in vs_3_0 with declared outputs, which a declaration destination needs */
+static const DWORD NcPvVertex30Code[] = { 0xFFFE0300, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x8000000A,
+                                          0x900F0001, 0x0200001F, 0x80000005, 0x900F0002, 0x0200001F, 0x80000000,
+                                          0xE00F0000, 0x0200001F, 0x8000000A, 0xE00F0001, 0x0200001F, 0x8001000A,
+                                          0xE00F0002, 0x0200001F, 0x80000005, 0xE0030003, 0x03000014, 0xE00F0000,
+                                          0x90E40000, 0xA0E40000, 0x02000001, 0xE00F0001, 0x90E40001, 0x02000001,
+                                          0xE00F0002, 0xA0E40004, 0x02000001, 0xE0030003, 0x90E40002, 0x0000FFFF };
+static const D3DVERTEXELEMENT9 NcPvElements[] = { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                                                  { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+                                                  { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                                                  D3DDECL_END() };
+
+/* The destination as a declaration: position, specular before diffuse, one coordinate pair */
+static const D3DVERTEXELEMENT9 NcPvOutElements[] = { { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITIONT, 0 },
+                                                     { 0, 16, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 1 },
+                                                     { 0, 20, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+                                                     { 0, 24, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                                                     D3DDECL_END() };
+
+/* Inside, on the edges of and outside the clip volume */
+static const FLOAT NcPvSource[] = { -1.0f, -1.0f, 0.5f, 0.0f, 0.0f, 0.25f, 1.0f, -1.0f, 0.25f, 0.0f, 1.0f, 0.5f,
+                                    0.0f, 1.0f, 0.75f, 0.0f, 0.5f, 0.75f, 2.0f, 0.0f, 0.5f, 0.0f, -1.0f, 2.0f,
+                                    0.0f, 0.0f, -0.5f, 0.0f, 3.0f, -3.0f, 0.5f, 0.5f, 1.5f, 0.0f, 0.125f, 8.0f };
+static const DWORD NcPvColors[] = { 0xFF102030, 0x80FF0000, 0x4000FF00, 0x200000FF, 0xC0808080, 0x01020304 };
+static constexpr UINT NcPvCount = 6;
+static constexpr DWORD NcPvFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX1;
+static constexpr UINT NcPvStride = 32;
+
+/* Fills the destination with a pattern, processes and prints every vertex slot of it */
+static
+VOID
+NcPvRun(
+    _In_z_ PCSTR Prefix,
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DVertexBuffer9* Dest,
+    _In_ UINT Stride,
+    _In_ UINT Start,
+    _In_ UINT DestIndex,
+    _In_ UINT Count,
+    _In_opt_ IDirect3DVertexDeclaration9* Declaration,
+    _In_ DWORD Flags)
+{
+    UINT Bytes = NcPvCount * Stride;
+    VOID* Data;
+    HRESULT hr;
+
+    if (SUCCEEDED(Dest->Lock(0, 0, &Data, 0)))
+    {
+        FillMemory(Data, Bytes, 0xCD);
+        Dest->Unlock();
+    }
+    fflush(stdout);
+    hr = Device->ProcessVertices(Start, DestIndex, Count, Dest, Declaration, Flags);
+    printf("%s_%s = %08lX\n", Prefix, Name, hr);
+    if (FAILED(Dest->Lock(0, 0, &Data, D3DLOCK_READONLY)))
+        return;
+    for (UINT Slot = 0; Slot < NcPvCount; Slot++)
+    {
+        const DWORD* Words = reinterpret_cast<const DWORD*>(static_cast<BYTE*>(Data) + Slot * Stride);
+
+        printf("%s_%s[%u] =", Prefix, Name, Slot);
+        for (UINT Word = 0; Word < Stride / 4; Word++)
+            printf(" %08lX", Words[Word]);
+        printf("\n");
+    }
+    Dest->Unlock();
+}
+
+/* ProcessVertices through a vertex shader into a format and a declaration destination */
+static
+VOID
+NcCheckProcessVerticesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ DWORD Usage)
+{
+    static const FLOAT Constants[] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                       0.0f, 0.0f, 0.0f, 1.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    D3DVIEWPORT9 Viewport = { 4, 2, 32, 16, 0.25f, 0.75f };
+    IDirect3DVertexShader9* Shader = nullptr;
+    IDirect3DVertexShader9* Shader30 = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexDeclaration9* OutDeclaration = nullptr;
+    IDirect3DVertexBuffer9* Source = nullptr;
+    IDirect3DVertexBuffer9* Dest = nullptr;
+    IDirect3DVertexBuffer9* OutDest = nullptr;
+    VOID* Data;
+
+    printf("%s_vs = %08lX\n", Prefix, Device->CreateVertexShader(NcPvVertexCode, &Shader));
+    printf("%s_vs30 = %08lX\n", Prefix, Device->CreateVertexShader(NcPvVertex30Code, &Shader30));
+    printf("%s_decl = %08lX\n", Prefix, Device->CreateVertexDeclaration(NcPvElements, &Declaration));
+    printf("%s_outdecl = %08lX\n", Prefix, Device->CreateVertexDeclaration(NcPvOutElements, &OutDeclaration));
+    printf("%s_src = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * 24, Usage, 0, D3DPOOL_SYSTEMMEM,
+                                                                  &Source, nullptr));
+    printf("%s_dst = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * NcPvStride, Usage, NcPvFvf,
+                                                                  D3DPOOL_SYSTEMMEM, &Dest, nullptr));
+    printf("%s_outdst = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * 32, Usage, 0, D3DPOOL_SYSTEMMEM,
+                                                                     &OutDest, nullptr));
+    if (Shader != nullptr && Shader30 != nullptr && Declaration != nullptr && OutDeclaration != nullptr && Source != nullptr &&
+        Dest != nullptr && OutDest != nullptr)
+    {
+        if (SUCCEEDED(Source->Lock(0, 0, &Data, 0)))
+        {
+            for (UINT Index = 0; Index < NcPvCount; Index++)
+            {
+                BYTE* Vertex = static_cast<BYTE*>(Data) + Index * 24;
+
+                CopyMemory(Vertex, &NcPvSource[Index * 6], 12);
+                CopyMemory(Vertex + 12, &NcPvColors[Index], 4);
+                CopyMemory(Vertex + 16, &NcPvSource[Index * 6 + 4], 8);
+            }
+            Source->Unlock();
+        }
+        printf("%s_viewport = %08lX\n", Prefix, Device->SetViewport(&Viewport));
+        Device->SetVertexShaderConstantF(0, Constants, 5);
+        Device->SetVertexDeclaration(Declaration);
+        Device->SetVertexShader(Shader);
+        Device->SetStreamSource(0, Source, 0, 24);
+
+        NcPvRun(Prefix, "fvf", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        NcPvRun(Prefix, "nocopy", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, D3DPV_DONOTCOPYDATA);
+        NcPvRun(Prefix, "offset", Device, Dest, NcPvStride, 1, 2, 3, nullptr, 0);
+        NcPvRun(Prefix, "overflow", Device, Dest, NcPvStride, 0, 1, NcPvCount, nullptr, 0);
+        Device->SetRenderState(D3DRS_CLIPPING, FALSE);
+        NcPvRun(Prefix, "noclip", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        Device->SetRenderState(D3DRS_CLIPPING, TRUE);
+
+        /* A declaration destination maps declared shader outputs; the system crashes on one from vs_1_1 */
+        Device->SetVertexShader(Shader30);
+        NcPvRun(Prefix, "fvf30", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        NcPvRun(Prefix, "decl", Device, OutDest, 32, 0, 0, NcPvCount, OutDeclaration, 0);
+        NcPvRun(Prefix, "decl_overflow", Device, OutDest, 32, 0, 2, NcPvCount, OutDeclaration, 0);
+        Device->SetStreamSource(0, nullptr, 0, 0);
+        Device->SetVertexShader(nullptr);
+        Device->SetVertexDeclaration(nullptr);
+    }
+    if (Shader != nullptr)
+        Shader->Release();
+    if (Shader30 != nullptr)
+        Shader30->Release();
+    if (Declaration != nullptr)
+        Declaration->Release();
+    if (OutDeclaration != nullptr)
+        OutDeclaration->Release();
+    if (Source != nullptr)
+        Source->Release();
+    if (Dest != nullptr)
+        Dest->Release();
+    if (OutDest != nullptr)
+        OutDest->Release();
+}
+
+static
+VOID
+NcCheckProcessVertices(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        DWORD Usage;
+    } Cases[] =
+    {
+        { "pv_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, 0 },
+        { "pv_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, 0 },
+        { "pv_sw", D3DCREATE_SOFTWARE_VERTEXPROCESSING, 0 },
+        { "pv_mixed", D3DCREATE_MIXED_VERTEXPROCESSING, D3DUSAGE_SOFTWAREPROCESSING },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, &Device);
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        if ((Case.Behavior & D3DCREATE_MIXED_VERTEXPROCESSING) != 0)
+            printf("%s_software = %08lX\n", Case.Name, Device->SetSoftwareVertexProcessing(TRUE));
+        NcCheckProcessVerticesOn(Case.Name, Device, Case.Usage);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -6651,6 +6855,7 @@ static const NineCheckInfo NcChecks[] =
     { "ffpixel", NcCheckFixedPixel },
     { "ffvertex", NcCheckFixedVertex },
     { "validator", NcCheckValidator },
+    { "processvertices", NcCheckProcessVertices },
 };
 
 static

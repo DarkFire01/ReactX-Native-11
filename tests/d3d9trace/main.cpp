@@ -7946,6 +7946,129 @@ TrScenarioFixedVertex(
     DestroyWindow(Window);
 }
 
+/* vs_1_1 for ProcessVertices: transform by c0-c3, color and coordinates through, specular from c4 */
+static const DWORD TrProcessCode[] = { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x0000001F, 0x8000000A,
+                                       0x900F0001, 0x0000001F, 0x80000005, 0x900F0002, 0x00000014, 0xC00F0000,
+                                       0x90E40000, 0xA0E40000, 0x00000001, 0xD00F0000, 0x90E40001, 0x00000001,
+                                       0xD00F0001, 0xA0E40004, 0x00000001, 0xE0030000, 0x90E40002, 0x00000001,
+                                       0xC00F0001, 0x90AA0000, 0x0000FFFF };
+static const D3DVERTEXELEMENT9 TrProcessElements[] = { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                                                       { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+                                                       { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                                                       D3DDECL_END() };
+static const FLOAT TrProcessSource[] = { -1.0f, -1.0f, 0.5f, 0.0f, 0.0f, 0.0f, 1.0f, -1.0f, 0.25f, 0.0f, 1.0f, 0.5f,
+                                         0.0f, 1.0f, 0.75f, 0.0f, 0.5f, 0.75f };
+static const DWORD TrProcessColors[] = { 0xFF102030, 0x80FF0000, 0x4000FF00 };
+static constexpr DWORD TrProcessFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX1;
+
+/* ProcessVertices into a system memory buffer: the whole source, a part without copying and one that does not fit */
+static
+VOID
+TrProcessWork(
+    _In_ IDirect3DDevice9* Device,
+    _In_ DWORD Usage)
+{
+    static const FLOAT Constants[] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                       0.0f, 0.0f, 0.0f, 1.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    IDirect3DVertexShader9* Shader = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexBuffer9* Source = nullptr;
+    IDirect3DVertexBuffer9* Dest = nullptr;
+    VOID* Data = nullptr;
+
+    TrPhase("process create");
+    TrApi("CreateVertexShader", Device->CreateVertexShader(TrProcessCode, &Shader));
+    TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrProcessElements, &Declaration));
+    TrApi("CreateVertexBuffer source", Device->CreateVertexBuffer(3 * 24, Usage, 0, D3DPOOL_SYSTEMMEM, &Source,
+                                                                  nullptr));
+    TrApi("CreateVertexBuffer dest", Device->CreateVertexBuffer(3 * 32, Usage, TrProcessFvf, D3DPOOL_SYSTEMMEM,
+                                                                &Dest, nullptr));
+    if (Shader == nullptr || Declaration == nullptr || Source == nullptr || Dest == nullptr)
+    {
+        TrRelease(Shader);
+        TrRelease(Declaration);
+        TrRelease(Source);
+        TrRelease(Dest);
+        return;
+    }
+    if (SUCCEEDED(Source->Lock(0, 0, &Data, 0)))
+    {
+        for (UINT Index = 0; Index < 3; Index++)
+        {
+            BYTE* Vertex = static_cast<BYTE*>(Data) + Index * 24;
+
+            CopyMemory(Vertex, &TrProcessSource[Index * 6], 12);
+            CopyMemory(Vertex + 12, &TrProcessColors[Index], 4);
+            CopyMemory(Vertex + 16, &TrProcessSource[Index * 6 + 4], 8);
+        }
+        Source->Unlock();
+    }
+    TrApi("SetVertexShaderConstantF", Device->SetVertexShaderConstantF(0, Constants, 5));
+    TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    TrApi("SetVertexShader", Device->SetVertexShader(Shader));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Source, 0, 24));
+    TrSettle(Device);
+
+    TrPhase("process run");
+    TrApi("ProcessVertices", Device->ProcessVertices(0, 0, 3, Dest, nullptr, 0));
+    TrApi("ProcessVertices nocopy", Device->ProcessVertices(1, 1, 2, Dest, nullptr, D3DPV_DONOTCOPYDATA));
+    TrApi("ProcessVertices overflow", Device->ProcessVertices(0, 1, 3, Dest, nullptr, 0));
+    TrSettle(Device);
+
+    TrPhase("process release");
+    TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrRelease(Shader);
+    TrRelease(Declaration);
+    TrRelease(Source);
+    TrRelease(Dest);
+    TrSettle(Device);
+}
+
+/* ProcessVertices on hardware, software and mixed vertex processing devices of the plain object */
+static
+VOID
+TrScenarioProcess(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING,
+        D3DCREATE_MIXED_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        D3DPRESENT_PARAMETERS Made = Parameters;
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "process create %08lX", Behavior);
+        TrPhase(Name);
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device == nullptr)
+            continue;
+        TrSettle(Device);
+        if (Behavior == D3DCREATE_MIXED_VERTEXPROCESSING)
+            TrApi("SetSoftwareVertexProcessing", Device->SetSoftwareVertexProcessing(TRUE));
+        TrProcessWork(Device, Behavior == D3DCREATE_HARDWARE_VERTEXPROCESSING ? 0 : D3DUSAGE_SOFTWAREPROCESSING);
+        TrPhase("process device release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* The fixed function vertex pipeline on pure and hardware vertex processing devices of the plain object, with
    a reset between two runs on the second */
 static
@@ -8046,6 +8169,7 @@ static const TrScenario TrScenarios[] =
     { "fixed_reset", TrScenarioFixedReset },
     { "fixed_vertex", TrScenarioFixedVertex },
     { "fixed_vertex_plain", TrScenarioFixedVertexPlain },
+    { "process", TrScenarioProcess },
 };
 
 static
