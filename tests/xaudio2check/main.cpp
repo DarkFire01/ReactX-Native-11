@@ -5080,6 +5080,192 @@ XcCheckWma(VOID)
     }
 }
 
+/* How one xWMA control case queues its buffers */
+enum XcWmaQueue
+{
+    XcWmaOne,
+    XcWmaTwo,
+    XcWmaFlushFirst,
+    XcWmaDiscontinuity,
+};
+
+struct XcWmaCase
+{
+    PCSTR Name;
+    UINT32 PlayBegin;
+    UINT32 PlayLength;
+    UINT32 LoopBegin;
+    UINT32 LoopLength;
+    UINT32 LoopCount;
+    XcWmaQueue Queue;
+};
+
+/* Plays one xWMA stream through a control case and prints what the recorder heard and the voice reported */
+static
+VOID
+XcPlayWmaCase(
+    _In_ const XcWmaStream* Stream,
+    _In_ const XcWmaCase* Case)
+{
+    XcProbeApo& Recorder = *new XcProbeApo(XAPO_FLAG_INPLACE_SUPPORTED | XAPO_FLAG_INPLACE_REQUIRED | XAPO_FLAG_CHANNELS_MUST_MATCH |
+                            XAPO_FLAG_FRAMERATE_MUST_MATCH | XAPO_FLAG_BITSPERSAMPLE_MUST_MATCH |
+                            XAPO_FLAG_BUFFERCOUNT_MUST_MATCH, FALSE);
+    XAUDIO2_EFFECT_DESCRIPTOR Effect = { static_cast<IXAPO*>(&Recorder), TRUE, 2 };
+    XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
+    IXAudio2* Engine = nullptr;
+    IXAudio2MasteringVoice* Master = nullptr;
+    IXAudio2SourceVoice* Source = nullptr;
+    XcVoiceCallback Callback;
+    XAUDIO2_BUFFER Buffer = {};
+    XAUDIO2_BUFFER_WMA Table = {};
+    XAUDIO2_VOICE_STATE State;
+    BOOLEAN Queued = FALSE;
+    HRESULT hr;
+
+    hr = XcCreate(&Engine, 0);
+    if (SUCCEEDED(hr))
+    {
+        Engine->StopEngine();
+        hr = Engine->CreateMasteringVoice(&Master, 2, 44100, 0, nullptr, &Chain);
+    }
+    if (SUCCEEDED(hr))
+    {
+        Recorder.RecordedCapacity = 44100 * 2 * 4;
+        Recorder.Recorded = new (std::nothrow) float[Recorder.RecordedCapacity];
+        Recorder.Recording = TRUE;
+        hr = Engine->CreateSourceVoice(&Source, &Stream->Format, 0, 2.0f, &Callback);
+    }
+    if (FAILED(hr) || Recorder.Recorded == nullptr)
+    {
+        printf("  %s setup = %08lX\n", Case->Name, hr);
+        if (Engine != nullptr)
+            Engine->Release();
+        return;
+    }
+
+    Buffer.AudioBytes = Stream->PacketCount * Stream->Format.nBlockAlign;
+    Buffer.pAudioData = Stream->Packets;
+    Buffer.PlayBegin = Case->PlayBegin;
+    Buffer.PlayLength = Case->PlayLength;
+    Buffer.LoopBegin = Case->LoopBegin;
+    Buffer.LoopLength = Case->LoopLength;
+    Buffer.LoopCount = Case->LoopCount;
+    Buffer.pContext = reinterpret_cast<void*>(1);
+    Buffer.Flags = Case->Queue == XcWmaOne ? XAUDIO2_END_OF_STREAM : 0;
+    Table.pDecodedPacketCumulativeBytes = Stream->Cumulative;
+    Table.PacketCount = Stream->PacketCount;
+    XcResetEvents();
+    hr = Source->SubmitSourceBuffer(&Buffer, &Table);
+    printf("  %s submit = %08lX", Case->Name, hr);
+    Queued = SUCCEEDED(hr);
+    if (Case->Queue == XcWmaTwo || Case->Queue == XcWmaFlushFirst)
+    {
+        if (Case->Queue == XcWmaFlushFirst)
+        {
+            printf(" flush = %08lX", Source->FlushSourceBuffers());
+            Source->GetState(&State, 0);
+            printf(" queued %u", State.BuffersQueued);
+        }
+        Buffer.PlayBegin = 0;
+        Buffer.PlayLength = 0;
+        Buffer.LoopBegin = 0;
+        Buffer.LoopLength = 0;
+        Buffer.LoopCount = 0;
+        Buffer.pContext = reinterpret_cast<void*>(2);
+        Buffer.Flags = XAUDIO2_END_OF_STREAM;
+        hr = Source->SubmitSourceBuffer(&Buffer, &Table);
+        printf(" second = %08lX", hr);
+        Queued = Queued || SUCCEEDED(hr);
+    }
+    else if (Case->Queue == XcWmaDiscontinuity)
+    {
+        printf(" discontinuity = %08lX", Source->Discontinuity());
+    }
+    Source->GetState(&State, 0);
+    printf(" queued %u played %llu\n", State.BuffersQueued, State.SamplesPlayed);
+
+    if (Queued)
+    {
+        XcStreamEnded = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        Source->Start();
+        Engine->StartEngine();
+        if (WaitForSingleObject(XcStreamEnded, 5000) != WAIT_OBJECT_0)
+            printf("    no stream end\n");
+        Source->GetState(&State, 0);
+        Engine->StopEngine();
+        CloseHandle(XcStreamEnded);
+        XcStreamEnded = nullptr;
+        printf("    played %llu queued %u\n", State.SamplesPlayed, State.BuffersQueued);
+        Recorder.Recording = FALSE;
+        {
+            SIZE_T Onset = 0;
+            SIZE_T End = Recorder.RecordedCount;
+
+            /* Only the span between the first and last sound, which does not depend on when the engine stopped */
+            while (Onset < End && Recorder.Recorded[Onset] == 0.0f)
+                Onset += 1;
+            while (End > Onset && Recorder.Recorded[End - 1] == 0.0f)
+                End -= 1;
+            Onset -= Onset % 2;
+            End += End % 2;
+            printf("    onset %zu frames %zu hash %08X\n", Onset / 2, (End - Onset) / 2, XcHash(Recorder.Recorded + Onset, End - Onset));
+        }
+        XcPrintEvents("    ");
+    }
+    Source->DestroyVoice();
+    Engine->Release();
+}
+
+/* Play ranges, loops, queues, flushes and discontinuities on xWMA voices */
+static
+VOID
+XcCheckWmaControls(VOID)
+{
+    static const struct
+    {
+        WORD Tag;
+        DWORD Average;
+        WORD Align;
+    } Rates[] =
+    {
+        { 0x0161, 12000, 4459 }, { 0x0162, 6000, 2230 },
+    };
+    static const XcWmaCase Cases[] =
+    {
+        { "begin", 2048, 0, 0, 0, 0, XcWmaOne },
+        { "range", 1000, 5000, 0, 0, 0, XcWmaOne },
+        { "length", 0, 4096, 0, 0, 0, XcWmaOne },
+        { "loop1", 0, 0, 0, 0, 1, XcWmaOne },
+        { "loop2", 0, 0, 0, 0, 2, XcWmaOne },
+        { "loopregion", 0, 0, 2048, 4096, 1, XcWmaOne },
+        { "looprange", 1024, 0, 0, 0, 1, XcWmaOne },
+        { "two", 0, 0, 0, 0, 0, XcWmaTwo },
+        { "rangetwo", 3000, 2000, 0, 0, 0, XcWmaTwo },
+        { "flush", 0, 0, 0, 0, 0, XcWmaFlushFirst },
+        { "discontinuity", 0, 0, 0, 0, 0, XcWmaDiscontinuity },
+    };
+    static BYTE Pcm[44100 * 4 / 2];
+    WAVEFORMATEX PcmFormat;
+
+    XcPcm(&PcmFormat, WAVE_FORMAT_PCM, 2, 44100, 16);
+    XcFillNoise(Pcm, sizeof(Pcm), &PcmFormat);
+    for (UINT Index = 0; Index < ARRAYSIZE(Rates); Index++)
+    {
+        XcWmaStream Stream;
+        HRESULT hr;
+
+        hr = XcEncodeWma(Pcm, sizeof(Pcm), &PcmFormat, Rates[Index].Tag, Rates[Index].Average, Rates[Index].Align, &Stream);
+        printf("wma controls %04X %lu = %08lX packets %u\n", Rates[Index].Tag, Rates[Index].Average, hr, Stream.PacketCount);
+        if (SUCCEEDED(hr))
+        {
+            for (UINT CaseIndex = 0; CaseIndex < ARRAYSIZE(Cases); CaseIndex++)
+                XcPlayWmaCase(&Stream, &Cases[CaseIndex]);
+        }
+        delete[] Stream.Packets;
+        delete[] Stream.Cumulative;
+    }
+}
+
 /* Whether passes run over a window, which only needs the windows to sit well clear of the idle delay */
 static
 VOID
@@ -5792,7 +5978,10 @@ wmain(
 
     /* Encodes with the system WMA encoder and plays the result */
     if (XcSection != nullptr && _wcsicmp(XcSection, L"wma") == 0)
+    {
         XcCheckWma();
+        XcCheckWmaControls();
+    }
 
     /* Waits out the idle delay several times, so also only on request */
     if (XcSection != nullptr && _wcsicmp(XcSection, L"idle") == 0)
