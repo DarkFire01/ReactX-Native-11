@@ -3856,6 +3856,40 @@ TrScenarioPresentStats(
     Plain->Release();
 }
 
+/* Windowed FlipEx presents with and without present statistics */
+static
+VOID
+TrScenarioPresentFlipEx(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] = { D3DCREATE_ENABLE_PRESENTSTATS, 0 };
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_FLIPEX;
+    Parameters.BackBufferCount = 2;
+    Parameters.hDeviceWindow = Window;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+
+        TrPhase(Behavior != 0 ? "flipex presentstats enabled" : "flipex presentstats disabled");
+        Made = Parameters;
+        TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window,
+                                                            D3DCREATE_HARDWARE_VERTEXPROCESSING | Behavior, &Made,
+                                                            nullptr, &DeviceEx));
+        if (DeviceEx != nullptr)
+        {
+            TrApi("Clear", DeviceEx->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+            TrPresentStatsWork(DeviceEx);
+            TrRelease(DeviceEx);
+        }
+    }
+    DestroyWindow(Window);
+}
+
 /* Prints a Get call that returns one DWORD; the value is read only once the call has run */
 static
 VOID
@@ -7415,6 +7449,7 @@ static const TrScenario TrScenarios[] =
     { "shared", TrScenarioShared },
     { "cursor", TrScenarioCursor },
     { "presentstats", TrScenarioPresentStats },
+    { "present_flipex", TrScenarioPresentFlipEx },
     { "states", TrScenarioStates },
     { "states_plain", TrScenarioStatesPlain },
     { "states_software", TrScenarioStatesSoftware },
