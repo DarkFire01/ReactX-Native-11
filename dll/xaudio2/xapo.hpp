@@ -199,6 +199,10 @@ XaCreateEqObject(
     _Outptr_ IUnknown** Apo);
 
 HRESULT
+XaCreateLimiterObject(
+    _Outptr_ IUnknown** Apo);
+
+HRESULT
 XaCreateEchoObject(
     _Outptr_ IUnknown** Apo,
     _In_opt_ const VOID* InitData,

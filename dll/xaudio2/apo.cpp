@@ -36,6 +36,8 @@ XaCreateFx(
     /* Only the echo takes its creation data, the others start from their defaults */
     if (IsEqualCLSID(Clsid, __uuidof(FXEQ)))
         return XaCreateEqObject(Effect);
+    if (IsEqualCLSID(Clsid, __uuidof(FXMasteringLimiter)))
+        return XaCreateLimiterObject(Effect);
     if (IsEqualCLSID(Clsid, __uuidof(FXEcho)))
         return XaCreateEchoObject(Effect, InitData, InitDataByteSize);
 

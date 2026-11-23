@@ -9,6 +9,7 @@ nt_add_usermode_dll(xaudio2_9
         format.cpp
         fxecho.cpp
         fxeq.cpp
+        fxlimit.cpp
         main.cpp
         matrix.cpp
         meter.cpp
