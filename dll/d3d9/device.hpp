@@ -1299,7 +1299,6 @@ BOOLEAN
 D9CheckShaderTokens(
     _In_ const DWORD* Tokens,
     _In_ BOOLEAN Pixel,
-    _In_ DWORD Supported,
     _In_ const D9_SHADER_CHECK_DEVICE* Device,
     _Out_ D9ShaderLayout* Layout);
 

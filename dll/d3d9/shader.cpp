@@ -549,7 +549,7 @@ D9Shader<Interface>::GetFunction(
 template class D9Shader<IDirect3DVertexShader9>;
 template class D9Shader<IDirect3DPixelShader9>;
 
-/* Checks the tokens against the version the device reports, then makes the shader and, where the device
+/* Validates the tokens against the device, then makes the shader and, where the device
    hands shaders to its driver, the driver's copy */
 template <class Shader>
 static
@@ -558,7 +558,6 @@ D9MakeShader(
     _In_ D9Device* Device,
     _In_ const DWORD* Function,
     _In_ BOOLEAN Pixel,
-    _In_ DWORD Supported,
     _In_ BOOLEAN ToDriver,
     _In_ const D9_SHADER_CHECK_DEVICE* Checked,
     _Out_ Shader** Made)
@@ -570,7 +569,7 @@ D9MakeShader(
     *Made = nullptr;
     if (Shape == nullptr)
         return E_OUTOFMEMORY;
-    if (!D9CheckShaderTokens(Function, Pixel, Supported, Checked, Shape))
+    if (!D9CheckShaderTokens(Function, Pixel, Checked, Shape))
     {
         delete Shape;
         return D3DERR_INVALIDCALL;
@@ -606,7 +605,7 @@ D9Device::CreateVertexShader(
     D9VertexShader* Made;
     HRESULT hr;
 
-    hr = D9MakeShader(this, Function, FALSE, Caps.VertexShaderVersion, DriverHasVertexShaders(), &Checked, &Made);
+    hr = D9MakeShader(this, Function, FALSE, DriverHasVertexShaders(), &Checked, &Made);
     *Shader = Made;
     return hr;
 }
@@ -621,7 +620,7 @@ D9Device::CreatePixelShader(
     D9PixelShader* Made;
     HRESULT hr;
 
-    hr = D9MakeShader(this, Function, TRUE, Caps.PixelShaderVersion, TRUE, &Checked, &Made);
+    hr = D9MakeShader(this, Function, TRUE, TRUE, &Checked, &Made);
     *Shader = Made;
     return hr;
 }
