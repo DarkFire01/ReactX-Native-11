@@ -2621,6 +2621,677 @@ NcCheckReset(
     Plain->Release();
 }
 
+/* The surfaces the copy checks move pixels between */
+struct NcCopyKind
+{
+    PCSTR Name;
+    UINT Make;
+    D3DFORMAT Format;
+    D3DPOOL Pool;
+    DWORD Usage;
+    UINT Width;
+    UINT Height;
+    D3DMULTISAMPLE_TYPE Samples;
+};
+
+enum
+{
+    NcMakePlain,
+    NcMakeTarget,
+    NcMakeLockableTarget,
+    NcMakeDepth,
+    NcMakeTexture,
+    NcMakeBackBuffer,
+};
+
+static const NcCopyKind NcCopyKinds[] =
+{
+    { "sysmem", NcMakePlain, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "default", NcMakePlain, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "scratch", NcMakePlain, D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "target", NcMakeTarget, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "target_lock", NcMakeLockableTarget, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "target_ms", NcMakeTarget, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_4_SAMPLES },
+    { "depth", NcMakeDepth, D3DFMT_D24S8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "depth_lock", NcMakeDepth, D3DFMT_D16_LOCKABLE, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "depth_ms", NcMakeDepth, D3DFMT_D24S8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_4_SAMPLES },
+    { "depth_big", NcMakeDepth, D3DFMT_D24S8, D3DPOOL_DEFAULT, 0, 32, 16, D3DMULTISAMPLE_NONE },
+    { "tex_default", NcMakeTexture, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "tex_target", NcMakeTexture, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, D3DUSAGE_RENDERTARGET, 16, 8,
+      D3DMULTISAMPLE_NONE },
+    { "tex_sysmem", NcMakeTexture, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "tex_managed", NcMakeTexture, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "tex_dynamic", NcMakeTexture, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, D3DUSAGE_DYNAMIC, 16, 8, D3DMULTISAMPLE_NONE },
+    { "tex_depth", NcMakeTexture, D3DFMT_D24S8, D3DPOOL_DEFAULT, D3DUSAGE_DEPTHSTENCIL, 16, 8, D3DMULTISAMPLE_NONE },
+    { "sysmem_x8", NcMakePlain, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "target_x8", NcMakeTarget, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "sysmem_r5", NcMakePlain, D3DFMT_R5G6B5, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "target_r5", NcMakeTarget, D3DFMT_R5G6B5, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "sysmem_big", NcMakePlain, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 32, 16, D3DMULTISAMPLE_NONE },
+    { "target_big", NcMakeLockableTarget, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0, 32, 16, D3DMULTISAMPLE_NONE },
+    { "backbuffer", NcMakeBackBuffer, D3DFMT_UNKNOWN, D3DPOOL_DEFAULT, 0, 0, 0, D3DMULTISAMPLE_NONE },
+    { "sysmem_dxt1", NcMakePlain, D3DFMT_DXT1, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "default_dxt1", NcMakePlain, D3DFMT_DXT1, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "sysmem_d16", NcMakePlain, D3DFMT_D16_LOCKABLE, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "sysmem_yuy2", NcMakePlain, D3DFMT_YUY2, D3DPOOL_SYSTEMMEM, 0, 16, 8, D3DMULTISAMPLE_NONE },
+    { "default_yuy2", NcMakePlain, D3DFMT_YUY2, D3DPOOL_DEFAULT, 0, 16, 8, D3DMULTISAMPLE_NONE },
+};
+
+/* Makes one surface of a copy kind; texture levels keep their texture alive */
+static
+IDirect3DSurface9*
+NcMakeCopySurface(
+    _In_ IDirect3DDevice9* Device,
+    _In_ const NcCopyKind* Kind)
+{
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+
+    switch (Kind->Make)
+    {
+    case NcMakePlain:
+        Device->CreateOffscreenPlainSurface(Kind->Width, Kind->Height, Kind->Format, Kind->Pool, &Surface, nullptr);
+        break;
+    case NcMakeTarget:
+    case NcMakeLockableTarget:
+        Device->CreateRenderTarget(Kind->Width, Kind->Height, Kind->Format, Kind->Samples, 0,
+                                   Kind->Make == NcMakeLockableTarget, &Surface, nullptr);
+        break;
+    case NcMakeDepth:
+        Device->CreateDepthStencilSurface(Kind->Width, Kind->Height, Kind->Format, Kind->Samples, 0, FALSE, &Surface,
+                                          nullptr);
+        break;
+    case NcMakeTexture:
+        Device->CreateTexture(Kind->Width, Kind->Height, 1, Kind->Usage, Kind->Format, Kind->Pool, &Texture, nullptr);
+        if (Texture != nullptr)
+        {
+            Texture->GetSurfaceLevel(0, &Surface);
+            Texture->Release();
+        }
+        break;
+    case NcMakeBackBuffer:
+        Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Surface);
+        break;
+    }
+    return Surface;
+}
+
+/* A hash of a surface's rows, or why it could not be read */
+static
+VOID
+NcPrintSurfaceHash(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DSurface9* Surface)
+{
+    D3DSURFACE_DESC Desc = {};
+    D3DLOCKED_RECT Locked = {};
+    UINT Bytes;
+    UINT Rows;
+    DWORD Hash = 2166136261UL;
+    HRESULT hr;
+
+    Surface->GetDesc(&Desc);
+    hr = Surface->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    if (FAILED(hr))
+    {
+        printf("%s = lock %08lX\n", Name, hr);
+        return;
+    }
+    Bytes = Desc.Width * (Desc.Format == D3DFMT_R5G6B5 || Desc.Format == D3DFMT_D16_LOCKABLE ||
+                          Desc.Format == D3DFMT_X1R5G5B5 || Desc.Format == D3DFMT_A1R5G5B5 ? 2 : 4);
+    if (Desc.Format == D3DFMT_R8G8B8)
+        Bytes = Desc.Width * 3;
+    Rows = Desc.Height;
+    if (Desc.Format == D3DFMT_DXT1)
+    {
+        Bytes = (Desc.Width + 3) / 4 * 8;
+        Rows = (Desc.Height + 3) / 4;
+    }
+    for (UINT Row = 0; Row < Rows; Row++)
+    {
+        const BYTE* Line = static_cast<const BYTE*>(Locked.pBits) + static_cast<SIZE_T>(Row) * Locked.Pitch;
+
+        for (UINT Index = 0; Index < Bytes; Index++)
+            Hash = (Hash ^ Line[Index]) * 16777619UL;
+    }
+    printf("%s = %08lX first %08lX hash %08lX\n", Name, hr, *static_cast<const DWORD*>(Locked.pBits), Hash);
+    Surface->UnlockRect();
+}
+
+/* Writes a pattern that numbers every byte of a lockable 32 bit surface */
+static
+VOID
+NcFillPattern(
+    _In_ IDirect3DSurface9* Surface,
+    _In_ BYTE Seed)
+{
+    D3DSURFACE_DESC Desc = {};
+    D3DLOCKED_RECT Locked = {};
+
+    Surface->GetDesc(&Desc);
+    if (FAILED(Surface->LockRect(&Locked, nullptr, 0)))
+        return;
+    for (UINT Row = 0; Row < Desc.Height; Row++)
+    {
+        BYTE* Line = static_cast<BYTE*>(Locked.pBits) + static_cast<SIZE_T>(Row) * Locked.Pitch;
+
+        for (UINT Index = 0; Index < Desc.Width * 4; Index++)
+            Line[Index] = static_cast<BYTE>(Seed + Row * 31 + Index);
+    }
+    Surface->UnlockRect();
+}
+
+/* Every pairing of copy kinds through UpdateSurface, StretchRect and GetRenderTargetData */
+static
+VOID
+NcCheckCopyPairs(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSurface9* Surfaces[_countof(NcCopyKinds)] = {};
+    char Name[128];
+
+    for (UINT Index = 0; Index < _countof(NcCopyKinds); Index++)
+    {
+        Surfaces[Index] = NcMakeCopySurface(Device, &NcCopyKinds[Index]);
+        printf("%s_kind[%s] = %s\n", Prefix, NcCopyKinds[Index].Name, Surfaces[Index] != nullptr ? "made" : "none");
+    }
+    for (UINT Source = 0; Source < _countof(NcCopyKinds); Source++)
+    {
+        for (UINT Target = 0; Target < _countof(NcCopyKinds); Target++)
+        {
+            HRESULT Update;
+            HRESULT Stretch;
+            HRESULT Linear;
+            HRESULT Readback;
+
+            if (Surfaces[Source] == nullptr || Surfaces[Target] == nullptr)
+                continue;
+            Update = Device->UpdateSurface(Surfaces[Source], nullptr, Surfaces[Target], nullptr);
+            Stretch = Device->StretchRect(Surfaces[Source], nullptr, Surfaces[Target], nullptr, D3DTEXF_NONE);
+            Linear = Device->StretchRect(Surfaces[Source], nullptr, Surfaces[Target], nullptr, D3DTEXF_LINEAR);
+            Readback = Device->GetRenderTargetData(Surfaces[Source], Surfaces[Target]);
+            sprintf_s(Name, "%s[%s,%s]", Prefix, NcCopyKinds[Source].Name, NcCopyKinds[Target].Name);
+            printf("%s update %08lX stretch %08lX linear %08lX readback %08lX\n", Name, Update, Stretch, Linear,
+                   Readback);
+        }
+    }
+    for (UINT Index = 0; Index < _countof(NcCopyKinds); Index++)
+    {
+        HDC Dc = NULL;
+        HRESULT Fill;
+        HRESULT hr;
+        HRESULT Release = 0;
+
+        if (Surfaces[Index] == nullptr)
+            continue;
+        Fill = Device->ColorFill(Surfaces[Index], nullptr, 0xFF102030);
+        hr = Surfaces[Index]->GetDC(&Dc);
+        if (Dc != NULL)
+            Release = Surfaces[Index]->ReleaseDC(Dc);
+        printf("%s_fill[%s] = %08lX dc %08lX %s release %08lX\n", Prefix, NcCopyKinds[Index].Name, Fill, hr,
+               Dc != NULL ? "set" : "null", Release);
+        printf("%s_front[%s] = %08lX\n", Prefix, NcCopyKinds[Index].Name,
+               Device->GetFrontBufferData(0, Surfaces[Index]));
+        Surfaces[Index]->Release();
+    }
+    /* UpdateSurface and UpdateTexture are left out: the system reads through the missing objects and crashes */
+    printf("%s_null = %08lX %08lX %08lX\n", Prefix, Device->StretchRect(nullptr, nullptr, nullptr, nullptr, D3DTEXF_NONE),
+           Device->GetRenderTargetData(nullptr, nullptr), Device->ColorFill(nullptr, nullptr, 0));
+}
+
+/* Rectangles, points and filters the copies accept, and the bytes they leave */
+static
+VOID
+NcCheckCopyRects(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const RECT Rects[] =
+    {
+        { 2, 1, 10, 5 }, { 0, 0, 16, 8 }, { 0, 0, 17, 8 }, { -1, 0, 4, 4 }, { 4, 4, 4, 6 }, { 6, 2, 2, 6 },
+        { 12, 4, 16, 8 }, { 1, 1, 5, 5 }, { 4, 4, 8, 8 },
+    };
+    static const POINT Points[] = { { 0, 0 }, { 4, 2 }, { 12, 4 }, { 13, 0 }, { -1, 0 }, { 0, 7 } };
+    static const DWORD Filters[] = { 0, 1, 2, 3, 4, 5, 6, 7, 0x100 };
+    IDirect3DSurface9* Sysmem = NcMakeCopySurface(Device, &NcCopyKinds[0]);
+    IDirect3DSurface9* Target = NcMakeCopySurface(Device, &NcCopyKinds[4]);
+    IDirect3DSurface9* Big = NcMakeCopySurface(Device, &NcCopyKinds[21]);
+    IDirect3DSurface9* BigMemory = NcMakeCopySurface(Device, &NcCopyKinds[20]);
+    IDirect3DSurface9* Multi = NcMakeCopySurface(Device, &NcCopyKinds[5]);
+    IDirect3DSurface9* DxtMemory = NcMakeCopySurface(Device, &NcCopyKinds[23]);
+    IDirect3DSurface9* Dxt = NcMakeCopySurface(Device, &NcCopyKinds[24]);
+    IDirect3DSurface9* Depth = NcMakeCopySurface(Device, &NcCopyKinds[6]);
+    IDirect3DSurface9* DepthOther = NcMakeCopySurface(Device, &NcCopyKinds[6]);
+    char Name[128];
+    HRESULT hr;
+
+    if (Sysmem == nullptr || Target == nullptr || Big == nullptr || BigMemory == nullptr)
+    {
+        printf("%s_rects = missing surfaces\n", Prefix);
+        return;
+    }
+
+    for (UINT RectIndex = 0; RectIndex < _countof(Rects); RectIndex++)
+    {
+        for (UINT PointIndex = 0; PointIndex < _countof(Points); PointIndex++)
+        {
+            NcFillPattern(Sysmem, static_cast<BYTE>(RectIndex * 7 + PointIndex));
+            Device->ColorFill(Target, nullptr, 0xFF405060);
+            hr = Device->UpdateSurface(Sysmem, &Rects[RectIndex], Target, &Points[PointIndex]);
+            sprintf_s(Name, "%s_update[%u,%u] %08lX", Prefix, RectIndex, PointIndex, hr);
+            NcPrintSurfaceHash(Name, Target);
+        }
+        hr = Device->UpdateSurface(Sysmem, &Rects[RectIndex], Target, nullptr);
+        printf("%s_update_nopoint[%u] = %08lX\n", Prefix, RectIndex, hr);
+        hr = Device->UpdateSurface(Sysmem, nullptr, Target, &Points[RectIndex % _countof(Points)]);
+        printf("%s_update_norect[%u] = %08lX\n", Prefix, RectIndex, hr);
+
+        Device->ColorFill(Big, nullptr, 0xFF000000);
+        hr = Device->ColorFill(Big, &Rects[RectIndex], 0x80FF8040);
+        sprintf_s(Name, "%s_fill_rect[%u] %08lX", Prefix, RectIndex, hr);
+        NcPrintSurfaceHash(Name, Big);
+        hr = Device->GetRenderTargetData(Big, BigMemory);
+        sprintf_s(Name, "%s_readback[%u] %08lX", Prefix, RectIndex, hr);
+        NcPrintSurfaceHash(Name, BigMemory);
+
+        for (UINT DestIndex = 0; DestIndex < _countof(Rects); DestIndex += 2)
+        {
+            NcFillPattern(Target, static_cast<BYTE>(RectIndex));
+            Device->ColorFill(Big, nullptr, 0xFF000000);
+            hr = Device->StretchRect(Target, &Rects[RectIndex], Big, &Rects[DestIndex], D3DTEXF_POINT);
+            sprintf_s(Name, "%s_stretch[%u,%u] %08lX", Prefix, RectIndex, DestIndex, hr);
+            NcPrintSurfaceHash(Name, Big);
+        }
+        printf("%s_stretch_nodest[%u] = %08lX\n", Prefix, RectIndex,
+               Device->StretchRect(Target, &Rects[RectIndex], Big, nullptr, D3DTEXF_NONE));
+        printf("%s_stretch_nosrc[%u] = %08lX\n", Prefix, RectIndex,
+               Device->StretchRect(Big, nullptr, Target, &Rects[RectIndex], D3DTEXF_NONE));
+        if (Dxt != nullptr && DxtMemory != nullptr)
+        {
+            HRESULT Update = Device->UpdateSurface(DxtMemory, &Rects[RectIndex], Dxt,
+                                                   &Points[RectIndex % _countof(Points)]);
+            HRESULT Fill = Device->ColorFill(Dxt, &Rects[RectIndex], 0);
+            HRESULT Stretch = Device->StretchRect(Dxt, &Rects[RectIndex], Dxt, &Rects[RectIndex], D3DTEXF_NONE);
+
+            printf("%s_dxt[%u] = update %08lX fill %08lX stretch %08lX\n", Prefix, RectIndex, Update, Fill, Stretch);
+        }
+    }
+
+    for (DWORD Filter : Filters)
+    {
+        NcFillPattern(Target, 9);
+        hr = Device->StretchRect(Target, nullptr, Big, nullptr, static_cast<D3DTEXTUREFILTERTYPE>(Filter));
+        sprintf_s(Name, "%s_filter[%lu] %08lX", Prefix, Filter, hr);
+        NcPrintSurfaceHash(Name, Big);
+        printf("%s_filter_shrink[%lu] = %08lX\n", Prefix, Filter,
+               Device->StretchRect(Big, nullptr, Target, nullptr, static_cast<D3DTEXTUREFILTERTYPE>(Filter)));
+        printf("%s_filter_same[%lu] = %08lX\n", Prefix, Filter,
+               Device->StretchRect(Target, nullptr, Target, nullptr, static_cast<D3DTEXTUREFILTERTYPE>(Filter)));
+    }
+
+    if (Multi != nullptr)
+    {
+        printf("%s_ms_fill = %08lX\n", Prefix, Device->ColorFill(Multi, nullptr, 0xFF203040));
+        hr = Device->StretchRect(Multi, nullptr, Target, nullptr, D3DTEXF_NONE);
+        sprintf_s(Name, "%s_ms_resolve %08lX", Prefix, hr);
+        NcPrintSurfaceHash(Name, Target);
+        hr = Device->StretchRect(Multi, &Rects[0], Target, &Rects[0], D3DTEXF_NONE);
+        printf("%s_ms_resolve_rect = %08lX\n", Prefix, hr);
+        hr = Device->StretchRect(Multi, &Rects[0], Big, &Rects[1], D3DTEXF_NONE);
+        printf("%s_ms_resolve_stretch = %08lX\n", Prefix, hr);
+        hr = Device->StretchRect(Target, nullptr, Multi, nullptr, D3DTEXF_NONE);
+        printf("%s_ms_into = %08lX\n", Prefix, hr);
+        printf("%s_ms_readback = %08lX\n", Prefix, Device->GetRenderTargetData(Multi, Sysmem));
+    }
+
+    if (Depth != nullptr && DepthOther != nullptr)
+    {
+        printf("%s_depth_copy = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, DepthOther, nullptr, D3DTEXF_NONE));
+        printf("%s_depth_rect = %08lX\n", Prefix,
+               Device->StretchRect(Depth, &Rects[0], DepthOther, &Rects[0], D3DTEXF_NONE));
+        printf("%s_depth_filter = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, DepthOther, nullptr, D3DTEXF_LINEAR));
+        Device->BeginScene();
+        printf("%s_depth_scene = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, DepthOther, nullptr, D3DTEXF_NONE));
+        printf("%s_scene_color = %08lX\n", Prefix, Device->StretchRect(Target, nullptr, Big, nullptr, D3DTEXF_NONE));
+        printf("%s_scene_fill = %08lX\n", Prefix, Device->ColorFill(Target, nullptr, 0));
+        printf("%s_scene_update = %08lX\n", Prefix, Device->UpdateSurface(Sysmem, nullptr, Target, nullptr));
+        printf("%s_scene_readback = %08lX\n", Prefix, Device->GetRenderTargetData(Target, Sysmem));
+        Device->EndScene();
+    }
+
+    {
+        D3DLOCKED_RECT Locked = {};
+
+        Sysmem->LockRect(&Locked, nullptr, 0);
+        printf("%s_locked_src = %08lX\n", Prefix, Device->UpdateSurface(Sysmem, nullptr, Target, nullptr));
+        printf("%s_locked_readback = %08lX\n", Prefix, Device->GetRenderTargetData(Target, Sysmem));
+        Sysmem->UnlockRect();
+        Target->LockRect(&Locked, nullptr, 0);
+        printf("%s_locked_dst = %08lX\n", Prefix, Device->UpdateSurface(Sysmem, nullptr, Target, nullptr));
+        printf("%s_locked_fill = %08lX\n", Prefix, Device->ColorFill(Target, nullptr, 0));
+        printf("%s_locked_stretch = %08lX\n", Prefix,
+               Device->StretchRect(Big, nullptr, Target, nullptr, D3DTEXF_NONE));
+        Target->UnlockRect();
+    }
+
+    for (IDirect3DSurface9* Surface : { Sysmem, Target, Big, BigMemory, Multi, DxtMemory, Dxt, Depth, DepthOther })
+    {
+        if (Surface != nullptr)
+            Surface->Release();
+    }
+}
+
+/* Device contexts on surfaces of every format and pool, and what GDI drawing leaves in them */
+static
+VOID
+NcCheckSurfaceDcs(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DPOOL Pools[] = { D3DPOOL_SYSTEMMEM, D3DPOOL_DEFAULT, D3DPOOL_SCRATCH };
+    IDirect3DSurface9* Surface;
+    IDirect3DTexture9* Texture;
+    char Name[128];
+    HDC Dc;
+    HDC Second;
+    HRESULT hr;
+
+    for (D3DFORMAT Format : NcFormats)
+    {
+        for (D3DPOOL Pool : Pools)
+        {
+            Surface = nullptr;
+            Device->CreateOffscreenPlainSurface(16, 8, Format, Pool, &Surface, nullptr);
+            if (Surface == nullptr)
+                continue;
+            Dc = NULL;
+            hr = Surface->GetDC(&Dc);
+            printf("%s_dc[%u,%u] = %08lX %s\n", Prefix, Format, Pool, hr, Dc != NULL ? "set" : "null");
+            if (Dc != NULL)
+            {
+                RECT Area = { 2, 1, 6, 4 };
+                HBRUSH Brush = CreateSolidBrush(RGB(0x10, 0x80, 0xF0));
+                D3DLOCKED_RECT Locked = {};
+                HDC Screen = GetDC(nullptr);
+                HRESULT First;
+
+                FillRect(Dc, &Area, Brush);
+                DeleteObject(Brush);
+                SetPixel(Dc, 0, 0, RGB(0xFF, 0x00, 0x7F));
+                printf("%s_dc_pixel[%u,%u] = %06lX %06lX\n", Prefix, Format, Pool, GetPixel(Dc, 0, 0),
+                       GetPixel(Dc, 3, 2));
+                Second = NULL;
+                printf("%s_dc_again[%u,%u] = %08lX\n", Prefix, Format, Pool, Surface->GetDC(&Second));
+                printf("%s_dc_lock[%u,%u] = %08lX\n", Prefix, Format, Pool, Surface->LockRect(&Locked, nullptr, 0));
+                printf("%s_dc_wrong[%u,%u] = %08lX\n", Prefix, Format, Pool, Surface->ReleaseDC(Screen));
+                ReleaseDC(nullptr, Screen);
+                First = Surface->ReleaseDC(Dc);
+                printf("%s_dc_release[%u,%u] = %08lX again %08lX\n", Prefix, Format, Pool, First,
+                       Surface->ReleaseDC(Dc));
+                if (Pool != D3DPOOL_DEFAULT)
+                {
+                    sprintf_s(Name, "%s_dc_bytes[%u,%u]", Prefix, Format, Pool);
+                    NcPrintSurfaceHash(Name, Surface);
+                }
+            }
+            Surface->Release();
+        }
+    }
+
+    for (UINT Index = 0; Index < _countof(NcCopyKinds); Index++)
+    {
+        Surface = NcMakeCopySurface(Device, &NcCopyKinds[Index]);
+        if (Surface == nullptr)
+            continue;
+        Dc = NULL;
+        hr = Surface->GetDC(&Dc);
+        printf("%s_dc_kind[%s] = %08lX %s\n", Prefix, NcCopyKinds[Index].Name, hr, Dc != NULL ? "set" : "null");
+        if (Dc != NULL)
+        {
+            SetPixel(Dc, 1, 1, RGB(0x20, 0x40, 0x60));
+            printf("%s_dc_kind_release[%s] = %08lX\n", Prefix, NcCopyKinds[Index].Name, Surface->ReleaseDC(Dc));
+        }
+        printf("%s_dc_kind_unheld[%s] = %08lX\n", Prefix, NcCopyKinds[Index].Name, Surface->ReleaseDC(NULL));
+        Surface->Release();
+    }
+
+    Texture = nullptr;
+    Device->CreateTexture(16, 8, 2, 0, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, &Texture, nullptr);
+    if (Texture != nullptr)
+    {
+        IDirect3DSurface9* Level = nullptr;
+        D3DLOCKED_RECT Locked = {};
+
+        Texture->GetSurfaceLevel(1, &Level);
+        Dc = NULL;
+        printf("%s_dc_level = %08lX\n", Prefix, Level->GetDC(&Dc));
+        printf("%s_dc_level_lock = %08lX\n", Prefix, Texture->LockRect(1, &Locked, nullptr, 0));
+        printf("%s_dc_level_lock0 = %08lX\n", Prefix, Texture->LockRect(0, &Locked, nullptr, 0));
+        if (Dc != NULL)
+            printf("%s_dc_level_release = %08lX\n", Prefix, Level->ReleaseDC(Dc));
+        Texture->UnlockRect(0);
+        Texture->LockRect(0, &Locked, nullptr, 0);
+        Dc = NULL;
+        printf("%s_dc_level_locked = %08lX\n", Prefix, Level->GetDC(&Dc));
+        if (Dc != NULL)
+            Level->ReleaseDC(Dc);
+        Texture->UnlockRect(0);
+        Level->Release();
+        Texture->Release();
+    }
+}
+
+/* Texture uploads: matching rules, managed and dirty regions, and the bytes that arrive */
+static
+VOID
+NcCheckUpdateTextures(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Width;
+        UINT Height;
+        UINT Levels;
+        DWORD Usage;
+        D3DFORMAT Format;
+        D3DPOOL Pool;
+    } Textures[] =
+    {
+        { "sys3", 16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "sys1", 16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "sysbig", 32, 16, 4, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "sysx8", 16, 8, 3, 0, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "dyn3", 16, 8, 3, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "def3", 16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "def1", 16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "def5", 16, 8, 5, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "defbig", 32, 16, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "defsmall", 8, 4, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "defx8", 16, 8, 3, 0, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT },
+        { "target", 16, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "autogen", 16, 8, 0, D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "managed", 16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED },
+        { "scratch", 16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH },
+        { "sysdxt", 16, 8, 3, 0, D3DFMT_DXT1, D3DPOOL_SYSTEMMEM },
+        { "defdxt", 16, 8, 3, 0, D3DFMT_DXT1, D3DPOOL_DEFAULT },
+    };
+    IDirect3DBaseTexture9* Made[_countof(Textures) + 4] = {};
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DTexture9* Texture;
+    IDirect3DTexture9* Memory = nullptr;
+    IDirect3DTexture9* Dynamic = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    RECT Dirty = { 4, 2, 8, 6 };
+    char Name[128];
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < _countof(Textures); Index++)
+    {
+        Texture = nullptr;
+        hr = Device->CreateTexture(Textures[Index].Width, Textures[Index].Height, Textures[Index].Levels,
+                                   Textures[Index].Usage, Textures[Index].Format, Textures[Index].Pool, &Texture,
+                                   nullptr);
+        printf("%s_tex[%s] = %08lX\n", Prefix, Textures[Index].Name, hr);
+        Made[Index] = Texture;
+    }
+    Device->CreateCubeTexture(8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Cube, nullptr);
+    Made[_countof(Textures)] = Cube;
+    Cube = nullptr;
+    Device->CreateCubeTexture(8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube, nullptr);
+    Made[_countof(Textures) + 1] = Cube;
+    Device->CreateVolumeTexture(8, 4, 2, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Volume, nullptr);
+    Made[_countof(Textures) + 2] = Volume;
+    Volume = nullptr;
+    Device->CreateVolumeTexture(8, 4, 2, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Volume, nullptr);
+    Made[_countof(Textures) + 3] = Volume;
+
+    for (UINT Source = 0; Source < _countof(Made); Source++)
+    {
+        if (Made[Source] == nullptr)
+            continue;
+        for (UINT Target = 0; Target < _countof(Made); Target++)
+        {
+            /* Textures of different types are left out: the system copies without checking and crashes */
+            if (Made[Target] == nullptr || Made[Target]->GetType() != Made[Source]->GetType())
+                continue;
+            printf("%s_update_clean[%u,%u] = %08lX\n", Prefix, Source, Target,
+                   Device->UpdateTexture(Made[Source], Made[Target]));
+            switch (Made[Source]->GetType())
+            {
+            case D3DRTYPE_CUBETEXTURE:
+                static_cast<IDirect3DCubeTexture9*>(Made[Source])->AddDirtyRect(D3DCUBEMAP_FACE_POSITIVE_Y, nullptr);
+                break;
+            case D3DRTYPE_VOLUMETEXTURE:
+                static_cast<IDirect3DVolumeTexture9*>(Made[Source])->AddDirtyBox(nullptr);
+                break;
+            default:
+                static_cast<IDirect3DTexture9*>(Made[Source])->AddDirtyRect(nullptr);
+                break;
+            }
+            printf("%s_update[%u,%u] = %08lX\n", Prefix, Source, Target,
+                   Device->UpdateTexture(Made[Source], Made[Target]));
+        }
+    }
+    for (IDirect3DBaseTexture9* Item : Made)
+    {
+        if (Item != nullptr)
+            Item->Release();
+    }
+
+    /* Bytes through a dynamic texture the test can read back */
+    Device->CreateTexture(16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Memory, nullptr);
+    Device->CreateTexture(16, 8, 3, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Dynamic, nullptr);
+    if (Memory == nullptr || Dynamic == nullptr)
+    {
+        printf("%s_bytes = missing textures\n", Prefix);
+        if (Memory != nullptr)
+            Memory->Release();
+        if (Dynamic != nullptr)
+            Dynamic->Release();
+        return;
+    }
+    for (UINT Round = 0; Round < 6; Round++)
+    {
+        DWORD Flags = Round == 2 || Round == 3 ? D3DLOCK_NO_DIRTY_UPDATE : 0;
+        const RECT* Area = Round == 1 || Round == 3 ? &Dirty : nullptr;
+
+        for (UINT Index = 0; Index < 3; Index++)
+        {
+            UINT Rows = Index == 0 && Area != nullptr ? 4 : (8u >> Index);
+
+            if (FAILED(Memory->LockRect(Index, &Locked, Index == 0 ? Area : nullptr, Flags)))
+                continue;
+            for (UINT Row = 0; Row < Rows; Row++)
+            {
+                memset(static_cast<BYTE*>(Locked.pBits) + Row * Locked.Pitch, 0x10 * (Round + 1) + Index,
+                       Index == 0 && Area != nullptr ? 16 : (64u >> Index));
+            }
+            Memory->UnlockRect(Index);
+        }
+        if (Round == 4)
+            printf("%s_bytes_dirty[%u] = %08lX\n", Prefix, Round, Memory->AddDirtyRect(&Dirty));
+        if (Round == 5)
+            printf("%s_bytes_dirty[%u] = %08lX\n", Prefix, Round, Memory->AddDirtyRect(nullptr));
+        hr = Device->UpdateTexture(Memory, Dynamic);
+        printf("%s_bytes_update[%u] = %08lX\n", Prefix, Round, hr);
+        for (UINT Index = 0; Index < 3; Index++)
+        {
+            IDirect3DSurface9* Level = nullptr;
+
+            Dynamic->GetSurfaceLevel(Index, &Level);
+            sprintf_s(Name, "%s_bytes[%u,%u]", Prefix, Round, Index);
+            NcPrintSurfaceHash(Name, Level);
+            Level->Release();
+        }
+        printf("%s_bytes_again[%u] = %08lX\n", Prefix, Round, Device->UpdateTexture(Memory, Dynamic));
+    }
+    Memory->Release();
+    Dynamic->Release();
+}
+
+/* The copy calls on one device */
+static
+VOID
+NcCheckCopiesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    D3DCAPS9 Caps = {};
+    char Name[64];
+
+    Device->GetDeviceCaps(&Caps);
+    printf("%s_caps = stretch %08lX devcaps2 %08lX\n", Prefix, Caps.StretchRectFilterCaps, Caps.DevCaps2);
+    sprintf_s(Name, "%s_pair", Prefix);
+    NcCheckCopyPairs(Name, Device);
+    NcCheckCopyRects(Prefix, Device);
+    NcCheckSurfaceDcs(Prefix, Device);
+    NcCheckUpdateTextures(Prefix, Device);
+}
+
+/* Copies between surfaces and textures on a windowed extended device and a device of the plain object */
+static
+VOID
+NcCheckCopies(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferFormat = D3DFMT_A8R8G8B8;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                   nullptr, &DeviceEx);
+    printf("copies_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckCopiesOn("copies_ex", DeviceEx);
+        printf("copies_ex_release = %lu\n", DeviceEx->Release());
+    }
+
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    printf("copies_create_plain = %08lX\n", hr);
+    if (Device != nullptr)
+    {
+        NcCheckCopiesOn("copies_plain", Device);
+        printf("copies_plain_release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -2643,6 +3314,7 @@ static const NineCheckInfo NcChecks[] =
     { "textures", NcCheckTextures },
     { "reset", NcCheckReset },
     { "resources", NcCheckResources },
+    { "copies", NcCheckCopies },
 };
 
 static
