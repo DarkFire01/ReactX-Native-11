@@ -22,6 +22,7 @@
 #include <d3d12.h>
 #include <d3dkmthk.h>
 #include <d3d12umddi.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 
 #include <cstdarg>
@@ -500,6 +501,35 @@ TrDriverId(
     _In_opt_ const VOID* Handle)
 {
     return TrId(TrKindDriver, (ULONG_PTR)Handle);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATEELEMENTLAYOUT_0010* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{count %u [", Args->NumElements);
+    for (UINT Index = 0; Index < Args->NumElements; Index++)
+    {
+        const D3D12DDIARG_INPUT_ELEMENT_DESC& Element = Args->pVertexElements[Index];
+
+        TrAppend(Text, "%s%u:%u:%u:%u:%u:%u", Index != 0 ? " " : "", Element.InputSlot, Element.AlignedByteOffset,
+                 Element.Format, Element.InputSlotClass, Element.InstanceDataStepRate, Element.InputRegister);
+    }
+    TrAppend(Text, "] library %s %u}", TrDriverId(Args->LibraryReference.hLibrary.pDrvPrivate).c_str(),
+             Args->LibraryReference.PipelineIndex);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{type %u count %u flags %08X node %u}", Args->Type, Args->NumDescriptors, Args->Flags, Args->NodeMask);
 }
 
 static
@@ -2508,6 +2538,20 @@ TrScenarioRootSignatures(
     }
 }
 
+/* A vertex shader that reads some of the elements below; the normal is left unread */
+static const CHAR TrLayoutShader[] =
+    "struct In { float4 Color : COLOR; float3 Position : POSITION; float2 Uv : TEXCOORD0; uint Id : BLENDINDICES; };\n"
+    "float4 main(In I) : SV_Position { return float4(I.Position + I.Color.xyz, I.Uv.x + (float)I.Id); }\n";
+
+static const D3D12_INPUT_ELEMENT_DESC TrLayout[] =
+{
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "TEXCOORD", 0, DXGI_FORMAT_R16G16_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 4, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 2 },
+    { "blendindices", 0, DXGI_FORMAT_R8_UINT, 1, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 2 },
+};
+
 /* Pipeline states and the shaders and states shared between them */
 static
 VOID
@@ -2522,6 +2566,10 @@ TrScenarioPipelines(
     D3D12_GRAPHICS_PIPELINE_STATE_DESC Graphics = {};
     D3D12_COMPUTE_PIPELINE_STATE_DESC Compute = {};
     ComPtr<ID3D12PipelineState> States[6];
+    ComPtr<ID3D12PipelineState> Layouts[4];
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Valid = {};
+    D3D12_INPUT_ELEMENT_DESC Mixed[_countof(TrLayout)];
+    ComPtr<ID3DBlob> Vertex;
 
     if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))) ||
         Run.SerializeVersioned == nullptr)
@@ -2579,6 +2627,7 @@ TrScenarioPipelines(
     printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&States[0])));
     TrPhase("CreateGraphicsPipelineState same desc");
     printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&States[1])));
+    Valid = Graphics;
 
     Graphics.BlendState.IndependentBlendEnable = TRUE;
     Graphics.BlendState.RenderTarget[0].BlendEnable = TRUE;
@@ -2608,6 +2657,33 @@ TrScenarioPipelines(
     Compute.CS = { RxInternalComputeDxbc, sizeof(RxInternalComputeDxbc) };
     TrPhase("CreateComputePipelineState dxbc");
     printf("result %08X\n", (UINT)Device->CreateComputePipelineState(&Compute, IID_PPV_ARGS(&States[5])));
+
+    if (SUCCEEDED(D3DCompile(TrLayoutShader, strlen(TrLayoutShader), "layout", nullptr, nullptr, "main", "vs_5_0", 0, 0,
+                             &Vertex, &Errors)))
+    {
+        Graphics = Valid;
+        Graphics.VS = { Vertex->GetBufferPointer(), Vertex->GetBufferSize() };
+        Graphics.InputLayout = { TrLayout, _countof(TrLayout) };
+        TrPhase("CreateGraphicsPipelineState input layout");
+        printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[0])));
+        TrPhase("CreateGraphicsPipelineState same input layout");
+        printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[1])));
+        memcpy(Mixed, TrLayout, sizeof(Mixed));
+        Mixed[4].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        Mixed[4].InstanceDataStepRate = 0;
+        Graphics.InputLayout = { Mixed, _countof(Mixed) };
+        TrPhase("CreateGraphicsPipelineState input layout mixing steps in a slot");
+        printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[2])));
+        Graphics.InputLayout = { TrLayout + 1, 1 };
+        TrPhase("CreateGraphicsPipelineState input layout feeding too little");
+        printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[2])));
+        Graphics.VS = { RxInternalVertexDxil, sizeof(RxInternalVertexDxil) };
+        TrPhase("CreateGraphicsPipelineState input layout the shader does not read");
+        printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[3])));
+        TrPhase("Release input layouts");
+        for (ComPtr<ID3D12PipelineState>& State : Layouts)
+            State.Reset();
+    }
 
     TrPhase("Release");
     for (ComPtr<ID3D12PipelineState>& State : States)
