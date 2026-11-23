@@ -3604,16 +3604,22 @@ XcCheckReverb(
     PXC_CREATE_APO Create = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, Export));
     static const struct
     {
-        UINT32 Channels;
+        UINT32 InChannels;
+        UINT32 OutChannels;
         UINT32 Frames;
         DWORD Rate;
         BOOLEAN InPlace;
     } Layouts[] =
     {
-        { 1, 480, 48000, FALSE },
-        { 1, 441, 44100, TRUE },
-        { 1, 200, 20000, FALSE },
-        { 1, 1, 32000, FALSE },
+        { 1, 1, 480, 48000, FALSE },
+        { 1, 1, 441, 44100, TRUE },
+        { 1, 1, 200, 20000, FALSE },
+        { 1, 1, 1, 32000, FALSE },
+        { 1, 6, 480, 48000, FALSE },
+        { 1, 6, 320, 32000, FALSE },
+        { 1, 8, 441, 44100, FALSE },
+        { 1, 8, 480, 48000, FALSE },
+        { 1, 4, 100, 24000, FALSE },
     };
     IUnknown* Object = nullptr;
     IXAPO* Apo = nullptr;
@@ -3645,8 +3651,8 @@ XcCheckReverb(
             XcReverbParameters(Name, Apo, Legacy ? 56 : sizeof(XAUDIO2FX_REVERB_PARAMETERS));
         }
         Run.Apo = Apo;
-        Run.InChannels = Layouts[Index].Channels;
-        Run.OutChannels = Layouts[Index].Channels;
+        Run.InChannels = Layouts[Index].InChannels;
+        Run.OutChannels = Layouts[Index].OutChannels;
         Run.Frames = Layouts[Index].Frames;
         Run.InPlace = Layouts[Index].InPlace;
         Run.Amplitude = 0.5f;
