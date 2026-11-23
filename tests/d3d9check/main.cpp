@@ -9,6 +9,7 @@
 
 #include <windows.h>
 #include <d3d9.h>
+#include <d3d9on12.h>
 
 #include <cstdio>
 #include <string>
@@ -268,8 +269,130 @@ NcCheckDepthMatch(
     }
 }
 
+typedef IDirect3D9* (WINAPI* PFN_NC_CREATE_ON12)(UINT, D3D9ON12_ARGS*, UINT);
+typedef HRESULT (WINAPI* PFN_NC_CREATE_ON12_EX)(UINT, D3D9ON12_ARGS*, UINT, IDirect3D9Ex**);
+typedef int (WINAPI* PFN_NC_BEGIN)(D3DCOLOR, LPCWSTR);
+typedef int (WINAPI* PFN_NC_END)(VOID);
+typedef DWORD (WINAPI* PFN_NC_STATUS)(VOID);
+typedef BOOL (WINAPI* PFN_NC_REPEAT)(VOID);
+
+/* Prints whether a creation call produced an object, releasing it again */
+static
+VOID
+NcPrintCreated(
+    _In_z_ PCSTR Name,
+    _In_ UINT Version,
+    _In_opt_ IUnknown* Object)
+{
+    printf("%s[%08X] = %s\n", Name, Version, Object != nullptr ? "object" : "null");
+    if (Object != nullptr)
+        Object->Release();
+}
+
+static
+VOID
+NcCheckExports(
+    _Inout_ NineCheck* Check)
+{
+    static const UINT Versions[] = { 0, 1, 30, 31, 32, 33, 100, 131, 132, 0x80000020, 0x80000021, 0x7FFFFFFF };
+    PFN_NC_CREATE_ON12 CreateOn12 = reinterpret_cast<PFN_NC_CREATE_ON12>(GetProcAddress(Check->Module, "Direct3DCreate9On12"));
+    PFN_NC_CREATE_ON12_EX CreateOn12Ex =
+        reinterpret_cast<PFN_NC_CREATE_ON12_EX>(GetProcAddress(Check->Module, "Direct3DCreate9On12Ex"));
+    PFN_NC_BEGIN Begin = reinterpret_cast<PFN_NC_BEGIN>(GetProcAddress(Check->Module, "D3DPERF_BeginEvent"));
+    PFN_NC_END End = reinterpret_cast<PFN_NC_END>(GetProcAddress(Check->Module, "D3DPERF_EndEvent"));
+    PFN_NC_STATUS Status = reinterpret_cast<PFN_NC_STATUS>(GetProcAddress(Check->Module, "D3DPERF_GetStatus"));
+    PFN_NC_REPEAT Repeat = reinterpret_cast<PFN_NC_REPEAT>(GetProcAddress(Check->Module, "D3DPERF_QueryRepeatFrame"));
+    static const PCSTR Names[] =
+    {
+        "D3DPERF_BeginEvent", "D3DPERF_EndEvent", "D3DPERF_GetStatus", "D3DPERF_QueryRepeatFrame",
+        "D3DPERF_SetMarker", "D3DPERF_SetOptions", "D3DPERF_SetRegion", "DebugSetLevel", "DebugSetMute",
+        "Direct3D9EnableMaximizedWindowedModeShim", "Direct3DCreate9", "Direct3DCreate9Ex", "Direct3DCreate9On12",
+        "Direct3DCreate9On12Ex", "Direct3DShaderValidatorCreate9", "PSGPError", "PSGPSampleTexture",
+    };
+    D3D9ON12_ARGS Args = {};
+    IDirect3D9Ex* Ex = nullptr;
+    HRESULT hr;
+
+    for (PCSTR Name : Names)
+        printf("export %s = %s\n", Name, GetProcAddress(Check->Module, Name) != nullptr ? "present" : "missing");
+    for (WORD Ordinal = 16; Ordinal <= 38; Ordinal++)
+        printf("ordinal %u = %s\n", Ordinal, GetProcAddress(Check->Module, MAKEINTRESOURCEA(Ordinal)) != nullptr ? "present" : "missing");
+
+    for (UINT Version : Versions)
+    {
+        NcPrintCreated("create", Version, Check->Create(Version));
+        Ex = nullptr;
+        hr = Check->CreateEx(Version, &Ex);
+        printf("create_ex[%08X] = %08lX %s\n", Version, hr, Ex != nullptr ? "object" : "null");
+        if (Ex != nullptr)
+            Ex->Release();
+    }
+
+    if (CreateOn12 != nullptr && CreateOn12Ex != nullptr)
+    {
+        NcPrintCreated("create_on12_none", D3D_SDK_VERSION, CreateOn12(D3D_SDK_VERSION, nullptr, 0));
+        NcPrintCreated("create_on12_off", D3D_SDK_VERSION, CreateOn12(D3D_SDK_VERSION, &Args, 1));
+        Ex = nullptr;
+        hr = CreateOn12Ex(D3D_SDK_VERSION, &Args, 1, &Ex);
+        printf("create_on12_ex_off = %08lX %s\n", hr, Ex != nullptr ? "object" : "null");
+        if (Ex != nullptr)
+        {
+            printf("create_on12_ex_off adapters = %u\n", Ex->GetAdapterCount());
+            Ex->Release();
+        }
+    }
+
+    /* Nothing records the markers here, so these report the no tool answers */
+    printf("perf_status = %lu\n", Status());
+    printf("perf_begin = %d\n", Begin(0xFF00FF00, L"check"));
+    printf("perf_end = %d\n", End());
+    printf("perf_repeat = %d\n", Repeat());
+}
+
+/* QueryInterface answers of the creation objects */
+static
+VOID
+NcCheckInterfaces(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        GUID Iid;
+    }
+    Interfaces[] =
+    {
+        { "IUnknown", __uuidof(IUnknown) },
+        { "IDirect3D9", __uuidof(IDirect3D9) },
+        { "IDirect3D9Ex", __uuidof(IDirect3D9Ex) },
+        { "IDirect3DDevice9", __uuidof(IDirect3DDevice9) },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+
+    for (const auto& Interface : Interfaces)
+    {
+        VOID* Object = nullptr;
+        HRESULT hr = Check->Nine->QueryInterface(Interface.Iid, &Object);
+
+        printf("qi_ex[%s] = %08lX %s\n", Interface.Name, hr, Object == Check->Nine ? "same" : (Object != nullptr ? "other" : "null"));
+        if (Object != nullptr)
+            static_cast<IUnknown*>(Object)->Release();
+
+        Object = nullptr;
+        hr = Plain->QueryInterface(Interface.Iid, &Object);
+        printf("qi_plain[%s] = %08lX %s\n", Interface.Name, hr, Object == Plain ? "same" : (Object != nullptr ? "other" : "null"));
+        if (Object != nullptr)
+            static_cast<IUnknown*>(Object)->Release();
+    }
+    printf("addref = %lu\n", Plain->AddRef());
+    printf("release = %lu\n", Plain->Release());
+    printf("release_last = %lu\n", Plain->Release());
+}
+
 static const NineCheckInfo NcChecks[] =
 {
+    { "exports", NcCheckExports },
+    { "interfaces", NcCheckInterfaces },
     { "identifier", NcCheckIdentifier },
     { "modes", NcCheckModes },
     { "caps", NcCheckCaps },
@@ -329,6 +452,12 @@ wmain(
     {
         fprintf(stderr, "error: cannot load %ls (%lu)\n", Runtime.c_str(), GetLastError());
         return 1;
+    }
+    {
+        WCHAR Loaded[MAX_PATH] = {};
+
+        GetModuleFileNameW(Check.Module, Loaded, _countof(Loaded) - 1);
+        fprintf(stderr, "runtime: %ls\n", Loaded);
     }
     Check.Create = reinterpret_cast<PFN_NC_CREATE>(GetProcAddress(Check.Module, "Direct3DCreate9"));
     Check.CreateEx = reinterpret_cast<PFN_NC_CREATE_EX>(GetProcAddress(Check.Module, "Direct3DCreate9Ex"));
