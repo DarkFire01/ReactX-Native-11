@@ -1968,6 +1968,35 @@ RxWarpCompareValues(
     }
 }
 
+/* Depth bits of the normalized depth formats; zero for the float ones */
+static
+UINT
+RxWarpUnormDepthBits(
+    _In_ DXGI_FORMAT Format)
+{
+    if (Format == DXGI_FORMAT_D16_UNORM)
+        return 16;
+    if (Format == DXGI_FORMAT_D24_UNORM_S8_UINT)
+        return 24;
+    return 0;
+}
+
+/* The same rounding the depth write uses */
+static
+UINT
+RxWarpDepthToUnorm(
+    _In_ FLOAT Value,
+    _In_ UINT Bits)
+{
+    FLOAT Max = (FLOAT)((1u << Bits) - 1);
+
+    if (!(Value > 0.0f))
+        return 0;
+    if (Value >= 1.0f)
+        return (UINT)Max;
+    return (UINT)roundf(Value * Max);
+}
+
 static
 UINT
 RxWarpStencilOp(
@@ -2036,7 +2065,24 @@ RxWarpDraw::DepthStencilTest(
                                           (FLOAT)(Stencil & DepthState.StencilReadMask));
     }
     if (DepthState.DepthEnable && StencilPass)
-        DepthPass = RxWarpCompareValues(DepthState.DepthFunc, Depth, StoredDepth);
+    {
+        UINT DepthBits = RxWarpUnormDepthBits(View->Format);
+
+        /* Normalized depth compares as the integers the buffer holds */
+        if (DepthBits != 0)
+        {
+            UINT Incoming = RxWarpDepthToUnorm(Depth, DepthBits);
+            UINT Held;
+
+            memcpy(&Held, Element, sizeof(Held));
+            Held &= (1u << DepthBits) - 1;
+            DepthPass = RxWarpCompareValues(DepthState.DepthFunc, (FLOAT)Incoming, (FLOAT)Held);
+        }
+        else
+        {
+            DepthPass = RxWarpCompareValues(DepthState.DepthFunc, Depth, StoredDepth);
+        }
+    }
 
     NewStencil = Stencil;
     if (DepthState.StencilEnable)
