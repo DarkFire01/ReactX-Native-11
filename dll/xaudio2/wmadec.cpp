@@ -49,6 +49,27 @@ XaWmaLog2(
     return Result;
 }
 
+/* Whether the encoder fills some bands of the stream with noise instead of coding them */
+static
+BOOLEAN
+XaWmaNoiseFilled(
+    _In_ const XaWmaDecoder* Decoder)
+{
+    UINT32 Rate = Decoder->Layout.Rate;
+    double Bits = Decoder->Standard.BitsPerSample;
+    double Weighted = Decoder->Standard.WeightedBitsPerSample;
+
+    if (Rate > 48000)
+        return FALSE;
+    if (Rate >= 44100)
+        return Weighted < 0.61;
+    if (Rate >= 22050)
+        return Weighted < 1.16;
+    if (Rate >= 8000 && Rate < 11025)
+        return Bits <= 0.75;
+    return TRUE;
+}
+
 /* Whether the decoder can reconstruct the stream; anything else only drains */
 static
 BOOLEAN
@@ -56,8 +77,7 @@ XaWmaDecodable(
     _In_ const XaWmaDecoder* Decoder)
 {
     return Decoder->Layout.Version == XA_WMA_STANDARD_MAX && Decoder->Standard.SuperFrames && Decoder->Standard.Bark &&
-           Decoder->Standard.RateClass == XaWmaHighRate && Decoder->Layout.Channels >= 1 &&
-           Decoder->Layout.Channels <= XA_WMA_MAX_CHANNELS;
+           !XaWmaNoiseFilled(Decoder) && Decoder->Layout.Channels >= 1 && Decoder->Layout.Channels <= XA_WMA_MAX_CHANNELS;
 }
 
 static
