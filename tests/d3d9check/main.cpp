@@ -4965,6 +4965,164 @@ NcCheckBlocks(
     Plain->Release();
 }
 
+/* Shaders, declarations and the declarations formats stand for, with what binding them reads back */
+static
+VOID
+NcCheckShadersOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD VertexCode[] = { 0xFFFE0200, 0x0001FFFE, 0xABCDEF01, 0x05000051, 0xA00F0001, 0x3F800000,
+                                        0x3F800000, 0x3F800000, 0x3F800000, 0x0200001F, 0x80000000, 0x900F0000,
+                                        0x03000005, 0xC00F0000, 0x90E40000, 0xA0E40001, 0x0000FFFF };
+    static const DWORD PixelCode[] = { 0xFFFF0200, 0x0200001F, 0x80000000, 0xB0030000, 0x02000001, 0x800F0800,
+                                       0xB0E40000, 0x0000FFFF };
+    static const DWORD BadPixel[] = { 0xFFFF0200, 0x02000001, 0x800F0800, 0xB0E40000, 0x0000FFFF };
+    static const DWORD Lookup[] = { 0xFFFF0200, 0x0200001F, 0x80000000, 0xB0030000, 0x0200001F, 0x90000000,
+                                    0xA00F0800, 0x03000042, 0x800F0000, 0xB0E40000, 0xA0E40800, 0x02000001,
+                                    0x800F0800, 0x80E40000, 0x0000FFFF };
+    static const DWORD NarrowLookup[] = { 0xFFFF0200, 0x0200001F, 0x80000000, 0xB0010000, 0x0200001F, 0x90000000,
+                                          0xA00F0800, 0x03000042, 0x800F0000, 0xB0E40000, 0xA0E40800, 0x02000001,
+                                          0x800F0800, 0x80E40000, 0x0000FFFF };
+    static const DWORD PartialTemp[] = { 0xFFFF0200, 0x02000001, 0x80030000, 0xA0E40000, 0x02000001, 0x800F0800,
+                                         0x80E40000, 0x0000FFFF };
+    static const DWORD* const Checked[] = { BadPixel, Lookup, NarrowLookup, PartialTemp };
+    static const D3DVERTEXELEMENT9 Elements[] =
+    {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 1 },
+        { 0, 20, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+        { 0, 28, D3DDECLTYPE_UBYTE4N, 0, D3DDECLUSAGE_BINORMAL, 0 },
+        D3DDECL_END(),
+    };
+    static const DWORD Fvfs[] =
+    {
+        D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4 | D3DFVF_TEXCOORDSIZE3(3),
+        D3DFVF_XYZRHW | D3DFVF_TEX2 | D3DFVF_TEXCOORDSIZE4(0), D3DFVF_XYZB3 | D3DFVF_PSIZE,
+    };
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DPixelShader9* Pixel = nullptr;
+    IDirect3DPixelShader9* Broken = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexDeclaration9* Bound = nullptr;
+    D3DVERTEXELEMENT9 Read[MAXD3DDECLLENGTH + 1];
+    DWORD Function[32];
+    UINT Size = 0;
+    DWORD Fvf;
+    HRESULT hr;
+
+    printf("%s_vs = %08lX\n", Prefix, Device->CreateVertexShader(VertexCode, &Vertex));
+    printf("%s_ps = %08lX\n", Prefix, Device->CreatePixelShader(PixelCode, &Pixel));
+    for (UINT Index = 0; Index < _countof(Checked); Index++)
+    {
+        printf("%s_ps_checked[%u] = %08lX\n", Prefix, Index, Device->CreatePixelShader(Checked[Index], &Broken));
+        if (Broken != nullptr)
+            Broken->Release();
+        Broken = nullptr;
+    }
+    if (Vertex != nullptr)
+    {
+        memset(Function, 0xCC, sizeof(Function));
+        hr = Vertex->GetFunction(Function, &Size);
+        printf("%s_vs_function = %08lX %u %08X\n", Prefix, hr, Size, NcHashState(Function, sizeof(Function)));
+        printf("%s_vs_set = %08lX\n", Prefix, Device->SetVertexShader(Vertex));
+        printf("%s_vs_release_bound = %lu\n", Prefix, Vertex->Release());
+        printf("%s_vs_unset = %08lX\n", Prefix, Device->SetVertexShader(nullptr));
+    }
+    if (Pixel != nullptr)
+    {
+        printf("%s_ps_set = %08lX\n", Prefix, Device->SetPixelShader(Pixel));
+        printf("%s_ps_unset = %08lX\n", Prefix, Device->SetPixelShader(nullptr));
+        printf("%s_ps_release = %lu\n", Prefix, Pixel->Release());
+    }
+
+    hr = Device->CreateVertexDeclaration(Elements, &Declaration);
+    printf("%s_decl = %08lX\n", Prefix, hr);
+    if (Declaration != nullptr)
+    {
+        Size = 0;
+        memset(Read, 0xCC, sizeof(Read));
+        hr = Declaration->GetDeclaration(Read, &Size);
+        printf("%s_decl_read = %08lX %u %08X\n", Prefix, hr, Size, NcHashState(Read, sizeof(Read)));
+        Device->SetVertexDeclaration(Declaration);
+        Fvf = 0xCCCCCCCC;
+        Device->GetFVF(&Fvf);
+        printf("%s_decl_fvf = %08lX\n", Prefix, Fvf);
+        printf("%s_decl_release = %lu\n", Prefix, Declaration->Release());
+    }
+    for (DWORD Format : Fvfs)
+    {
+        printf("%s_fvf[%08lX] = %08lX\n", Prefix, Format, Device->SetFVF(Format));
+        hr = Device->GetVertexDeclaration(&Bound);
+        if (Bound == nullptr)
+        {
+            printf("%s_fvf_decl[%08lX] = %08lX none\n", Prefix, Format, hr);
+            continue;
+        }
+        Size = 0;
+        memset(Read, 0xCC, sizeof(Read));
+        Bound->GetDeclaration(Read, &Size);
+        printf("%s_fvf_decl[%08lX] = %08lX %u %08X\n", Prefix, Format, hr, Size, NcHashState(Read, sizeof(Read)));
+        printf("%s_fvf_decl_release[%08lX] = %lu\n", Prefix, Format, Bound->Release());
+        Bound = nullptr;
+    }
+    Device->SetVertexDeclaration(nullptr);
+}
+
+/* Shaders and declarations on every kind of vertex processing a windowed device can have */
+static
+VOID
+NcCheckShaders(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "shaders_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "shaders_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "shaders_sw", D3DCREATE_SOFTWARE_VERTEXPROCESSING, TRUE },
+        { "shaders_mixed", D3DCREATE_MIXED_VERTEXPROCESSING, TRUE },
+        { "shaders_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, nullptr,
+                                           &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckShadersOn(Case.Name, Device);
+        printf("%s_device_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* Shader constants on every kind of vertex processing a windowed device can have */
 static
 VOID
@@ -5050,6 +5208,7 @@ static const NineCheckInfo NcChecks[] =
     { "states", NcCheckStates },
     { "constants", NcCheckConstants },
     { "blocks", NcCheckBlocks },
+    { "shaders", NcCheckShaders },
 };
 
 static
