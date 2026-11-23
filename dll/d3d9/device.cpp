@@ -1371,7 +1371,19 @@ D9Device::SetGammaRamp(
     _In_ DWORD Flags,
     _In_opt_ const D3DGAMMARAMP* Ramp)
 {
-    RX_UNIMPLEMENTED();
+    D9_DEVICE_LOCK();
+
+    UNREFERENCED_PARAMETER(Flags);
+    if (NotReset || Ramp == nullptr || SwapChain != 0)
+    {
+        D9_TRACE_ONCE(L"SetGammaRamp: no ramp or no swap chain %u; the call is ignored", SwapChain);
+        return;
+    }
+
+    /* Only fullscreen chains hand the ramp to the display, and devices here stay windowed */
+    if (!ImplicitChain->PresentParameters().Windowed)
+        D9_TRACE_ONCE(L"SetGammaRamp: a fullscreen ramp is kept but not applied to the display");
+    ImplicitChain->GammaRamp() = *Ramp;
 }
 
 STDMETHODIMP_(VOID)
@@ -1379,7 +1391,14 @@ D9Device::GetGammaRamp(
     _In_ UINT SwapChain,
     _Out_ D3DGAMMARAMP* Ramp)
 {
-    RX_UNIMPLEMENTED();
+    D9_DEVICE_LOCK();
+
+    if (NotReset || Ramp == nullptr || SwapChain != 0)
+    {
+        D9_TRACE_ONCE(L"GetGammaRamp: no ramp or no swap chain %u; the call is ignored", SwapChain);
+        return;
+    }
+    *Ramp = ImplicitChain->GammaRamp();
 }
 
 /* Usage bits the extended surface creation calls accept */

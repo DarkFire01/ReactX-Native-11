@@ -20,6 +20,13 @@ D9SwapChain::D9SwapChain(
       Index(Position),
       FocusWindow(Owner->Focus())
 {
+    /* Each channel starts as its own index, not scaled to the full sixteen bits */
+    for (UINT Entry = 0; Entry < 256; Entry++)
+    {
+        Gamma.red[Entry] = static_cast<WORD>(Entry);
+        Gamma.green[Entry] = static_cast<WORD>(Entry);
+        Gamma.blue[Entry] = static_cast<WORD>(Entry);
+    }
 }
 
 D9SwapChain::~D9SwapChain()

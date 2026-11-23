@@ -791,6 +791,13 @@ public:
         return Parameters.hDeviceWindow != NULL ? Parameters.hDeviceWindow : FocusWindow;
     }
 
+    /* The ramp a windowed chain keeps for GetGammaRamp; the display's gamma is left alone */
+    D3DGAMMARAMP&
+    GammaRamp()
+    {
+        return Gamma;
+    }
+
     HRESULT
     PresentWindowed(
         _In_opt_ const RECT* SourceRect,
@@ -863,6 +870,7 @@ private:
     /* Flip swap chains keep one buffer more than they report, the one on screen */
     D9Surface* BackBuffers[D3DPRESENT_BACK_BUFFERS_MAX_EX + 1] = {};
     UINT BackBufferCount = 0;
+    D3DGAMMARAMP Gamma;
 };
 
 /* Vertex and index buffers share everything but their description */
