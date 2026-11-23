@@ -216,6 +216,7 @@ D9Device::~D9Device()
         VertexShader->Unbind();
     if (PixelShader != nullptr)
         PixelShader->Unbind();
+    ReleaseFvfDeclarations();
     UnbindTextures();
     UnbindStreams();
     delete[] Lights;
@@ -2389,31 +2390,6 @@ D9Device::ProcessVertices(
     _In_opt_ IDirect3DVertexBuffer9* DestBuffer,
     _In_opt_ IDirect3DVertexDeclaration9* VertexDecl,
     _In_ DWORD Flags)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateVertexDeclaration(
-    _In_opt_ const D3DVERTEXELEMENT9* VertexElements,
-    _Out_ IDirect3DVertexDeclaration9** Decl)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetVertexDeclaration(
-    _In_opt_ IDirect3DVertexDeclaration9* Decl)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetVertexDeclaration(
-    _Out_ IDirect3DVertexDeclaration9** Decl)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

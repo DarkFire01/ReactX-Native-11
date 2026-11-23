@@ -125,6 +125,18 @@ D9StateBlock::Hold(
             Shader->Unbind();
         break;
     }
+    case D9BlockOp::Declaration:
+    {
+        D9Declaration* Declaration = *static_cast<D9Declaration* const*>(Values);
+
+        if (Declaration == nullptr)
+            break;
+        if (Take)
+            Declaration->Bind();
+        else
+            Declaration->Unbind();
+        break;
+    }
     default:
         break;
     }
@@ -340,6 +352,9 @@ D9Device::ApplyBlock(
         case D9BlockOp::PixelShader:
             SetPixelShader(*static_cast<IDirect3DPixelShader9**>(Values));
             break;
+        case D9BlockOp::Declaration:
+            SetVertexDeclaration(*static_cast<IDirect3DVertexDeclaration9**>(Values));
+            break;
         }
     }
     return S_OK;
@@ -468,6 +483,11 @@ D9Device::CaptureBlock(
         case D9BlockOp::PixelShader:
             D9StateBlock::Hold(Entry, FALSE);
             *static_cast<D9PixelShader**>(Values) = PixelShader;
+            D9StateBlock::Hold(Entry, TRUE);
+            break;
+        case D9BlockOp::Declaration:
+            D9StateBlock::Hold(Entry, FALSE);
+            *static_cast<D9Declaration**>(Values) = Declaration;
             D9StateBlock::Hold(Entry, TRUE);
             break;
         }

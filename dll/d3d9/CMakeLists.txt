@@ -8,6 +8,7 @@ nt_add_usermode_dll(d3d9
         caps.cpp
         copy.cpp
         cursor.cpp
+        declaration.cpp
         device.cpp
         enum.cpp
         formats.cpp

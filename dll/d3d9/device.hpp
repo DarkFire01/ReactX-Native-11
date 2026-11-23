@@ -1322,6 +1322,65 @@ private:
 typedef D9Shader<IDirect3DVertexShader9> D9VertexShader;
 typedef D9Shader<IDirect3DPixelShader9> D9PixelShader;
 
+/* A vertex declaration: its elements, the format the fixed function pipeline reads it as and the driver's copy */
+class D9Declaration final : public IDirect3DVertexDeclaration9, public D9Child
+{
+public:
+    explicit
+    D9Declaration(
+        _In_ D9Device* Owner)
+        : D9Child(Owner)
+    {
+    }
+
+    ~D9Declaration();
+
+    D9Declaration(const D9Declaration&) = delete;
+    D9Declaration& operator=(const D9Declaration&) = delete;
+
+    HRESULT
+    Initialize(
+        _In_reads_(Count + 1) const D3DVERTEXELEMENT9* Source,
+        _In_ UINT Count,
+        _In_ DWORD Format);
+
+    STDMETHOD(QueryInterface)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Object) override;
+
+    STDMETHOD_(ULONG, AddRef)() override;
+
+    STDMETHOD_(ULONG, Release)() override;
+
+    STDMETHOD(GetDevice)(
+        _Out_ IDirect3DDevice9** Result) override;
+
+    STDMETHOD(GetDeclaration)(
+        _Out_writes_opt_(*NumElements) D3DVERTEXELEMENT9* Element,
+        _Inout_ UINT* NumElements) override;
+
+    VOID
+    Bind(VOID)
+    {
+        BindCount += 1;
+    }
+
+    VOID
+    Unbind(VOID);
+
+    UINT ElementCount = 0;
+    D3DVERTEXELEMENT9 Elements[MAXD3DDECLLENGTH + 1] = {};
+    DWORD Fvf = 0;
+    HANDLE DriverHandle = NULL;
+
+    /* Declarations the device made for formats are kept in a list and live until the device goes */
+    D9Declaration* NextKept = nullptr;
+    BOOLEAN Orphaned = FALSE;
+
+private:
+    LONG BindCount = 0;
+};
+
 /* hardware.cpp */
 VOID
 D9ApplyShare(
@@ -1440,6 +1499,7 @@ enum class D9BlockOp : UINT
     PixelBools,
     VertexShader,
     PixelShader,
+    Declaration,
 };
 
 /* An entry's header; the values it sets follow, padded to eight bytes */
@@ -1564,6 +1624,10 @@ public:
     VOID
     DestroyDriverShader(
         _In_ BOOLEAN Pixel,
+        _In_ HANDLE Handle);
+
+    VOID
+    DestroyDriverDeclaration(
         _In_ HANDLE Handle);
 
     /* State blocks replay and gather through the device's own calls */
@@ -2705,6 +2769,18 @@ private:
     BOOLEAN
     DriverHasVertexShaders(VOID) const;
 
+    HRESULT
+    DriverDeclaration(
+        _In_ const D9Declaration* Made,
+        _Out_ HANDLE* Handle);
+
+    HRESULT
+    BindFvfDeclaration(
+        _In_ DWORD Fvf);
+
+    VOID
+    ReleaseFvfDeclarations(VOID);
+
     VOID
     SendVertexConstants(
         _In_ D9BatchCall Call,
@@ -2995,6 +3071,10 @@ private:
     /* The shaders the application bound */
     D9VertexShader* VertexShader = nullptr;
     D9PixelShader* PixelShader = nullptr;
+
+    /* The bound declaration, and those made for formats */
+    D9Declaration* Declaration = nullptr;
+    D9Declaration* FvfDeclarations = nullptr;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;

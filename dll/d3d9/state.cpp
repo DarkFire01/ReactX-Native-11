@@ -827,7 +827,7 @@ D9Device::GetSoftwareVertexProcessing()
     return SoftwareVertices;
 }
 
-/* The vertex declaration a format stands for is made when something draws with it */
+/* A format binds a declaration the device makes for it; the driver sees it when something draws */
 STDMETHODIMP
 D9Device::SetFVF(
     _In_ DWORD FVF)
@@ -837,7 +837,7 @@ D9Device::SetFVF(
     if (Recording != nullptr)
         return Recording->Add(D9BlockOp::Fvf, 0, 0, &FVF, sizeof(FVF));
     CurrentFvf = FVF;
-    return S_OK;
+    return BindFvfDeclaration(FVF);
 }
 
 STDMETHODIMP
