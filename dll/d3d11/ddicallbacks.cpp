@@ -541,7 +541,57 @@ RxCreateContextVirtualCb2_0(
     return hr;
 }
 
-static const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
+/* The runtime never creates shader cache sessions, so a driver has no session to look in */
+static
+HRESULT
+APIENTRY
+RxShaderCacheGetValueCb(
+    _In_ D3DWDDM2_2DDI_HRTCACHESESSION hCacheSession,
+    _In_ const D3DWDDM2_2DDI_SHADERCACHE_HASH* pPrecomputedHash,
+    _In_reads_bytes_(KeyLen) const void* pKey,
+    _In_ SIZE_T KeyLen,
+    _Out_writes_bytes_opt_(*pValueLen) void* pValue,
+    _Inout_ SIZE_T* pValueLen)
+{
+    return E_NOTIMPL;
+}
+
+static
+HRESULT
+APIENTRY
+RxShaderCacheStoreValueCb(
+    _In_ D3DWDDM2_2DDI_HRTCACHESESSION hCacheSession,
+    _In_ const D3DWDDM2_2DDI_SHADERCACHE_HASH* pPrecomputedHash,
+    _In_reads_bytes_(KeyLen) const void* pKey,
+    _In_ SIZE_T KeyLen,
+    _In_reads_bytes_(ValueLen) const void* pValue,
+    _In_ SIZE_T ValueLen)
+{
+    return E_NOTIMPL;
+}
+
+static
+VOID
+APIENTRY
+RxShaderCacheReferenceCb(
+    _In_ D3DWDDM2_2DDI_HRTCACHESESSION hCacheSession)
+{
+}
+
+/* No scanout transformations are offered */
+static
+HRESULT
+APIENTRY
+RxQueryScanoutCapsCb(
+    _In_ D3D10DDI_HRTCORELAYER hDevice,
+    _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId,
+    _Out_ UINT* pCaps)
+{
+    *pCaps = 0;
+    return S_OK;
+}
+
+static const D3DWDDM2_6DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
 {
     .pfnSetErrorCb = RxSetErrorCb,
     .pfnStateVsConstBufCb = RxStateConstantBuffersCb<RxStage::Vertex>,
@@ -585,6 +635,11 @@ static const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
     .pfnStateCsConstBufCb = RxStateConstantBuffersCb<RxStage::Compute>,
     .pfnCreateContextCb = RxCreateContextCb2_0,
     .pfnCreateContextVirtualCb = RxCreateContextVirtualCb2_0,
+    .pfnShaderCacheGetValueCb = RxShaderCacheGetValueCb,
+    .pfnShaderCacheStoreValueCb = RxShaderCacheStoreValueCb,
+    .pfnShaderCacheAddRefCb = RxShaderCacheReferenceCb,
+    .pfnShaderCacheReleaseCb = RxShaderCacheReferenceCb,
+    .pfnQueryScanoutCapsCb = RxQueryScanoutCapsCb,
 };
 
 static
@@ -714,7 +769,7 @@ RxGetKernelCallbacks(VOID)
     return &Callbacks;
 }
 
-const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS*
+const D3DWDDM2_6DDI_CORELAYER_DEVICECALLBACKS*
 RxGetCoreLayerCallbacks(VOID)
 {
     return &CoreLayerCallbacks;

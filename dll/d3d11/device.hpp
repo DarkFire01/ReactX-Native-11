@@ -706,7 +706,7 @@ public:
     const D3DWDDM2_0DDI_DEVICEFUNCS&
     GetWddm2DeviceFuncs() const
     {
-        return DeviceFuncs;
+        return reinterpret_cast<const D3DWDDM2_0DDI_DEVICEFUNCS&>(DeviceFuncs);
     }
 
     BOOLEAN
@@ -947,8 +947,8 @@ private:
     D3D10DDI_HDEVICE DriverDevice = {};
     BOOLEAN IsDriverDeviceCreated = FALSE;
 
-    /* Filled as the WDDM 2.0 table; everything but the 2.0 additions reads it as the 1.3 one */
-    D3DWDDM2_0DDI_DEVICEFUNCS DeviceFuncs = {};
+    /* Sized for WDDM 2.6, whose table extends the 2.0 one; older drivers fill only their part */
+    D3DWDDM2_6DDI_DEVICEFUNCS DeviceFuncs = {};
     DXGI1_6_1_DDI_BASE_FUNCTIONS DxgiFuncs = {};
     PFND3D10DDI_RETRIEVESUBOBJECT RetrieveSubObject = nullptr;
 
@@ -1004,7 +1004,8 @@ RxApiResult(
 const D3DDDI_DEVICECALLBACKS*
 RxGetKernelCallbacks(VOID);
 
-const D3DWDDM2_0DDI_CORELAYER_DEVICECALLBACKS*
+/* Laid out as the WDDM 2.6 table; older drivers read only the entries their version has */
+const D3DWDDM2_6DDI_CORELAYER_DEVICECALLBACKS*
 RxGetCoreLayerCallbacks(VOID);
 
 DXGI_DDI_BASE_CALLBACKS*
