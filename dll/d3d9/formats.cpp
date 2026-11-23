@@ -283,7 +283,7 @@ D9DriverDepthFormat(
     }
 }
 
-/* The format table a device type answers from; only the hardware device has one so far */
+/* The format table a device type answers from */
 HRESULT
 D9Enum::DeviceTable(
     _In_ UINT Adapter,
@@ -296,8 +296,9 @@ D9Enum::DeviceTable(
     case D3DDEVTYPE_HAL:
         return SoftwareOnly ? D3DERR_NOTAVAILABLE : S_OK;
     case D3DDEVTYPE_REF:
+        *Table = ReferenceTable(Adapter);
+        return *Table != nullptr ? S_OK : D3DERR_NOTAVAILABLE;
     case D3DDEVTYPE_NULLREF:
-        D9_TRACE_ONCE(L"the reference rasterizer is not implemented yet");
         return D3DERR_NOTAVAILABLE;
     case D3DDEVTYPE_SW:
         return D3DERR_NOTAVAILABLE;

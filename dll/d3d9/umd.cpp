@@ -439,10 +439,10 @@ D9CollectWideModes(
 }
 
 /* Keeps only the capability bits Direct3D 9 defines, field by field */
-static
 VOID
 D9MaskDriverCaps(
-    _Inout_ D3DCAPS9* Caps)
+    _Inout_ D3DCAPS9* Caps,
+    _In_ BOOLEAN Hardware)
 {
     DWORD PrimitiveMisc = Caps->PrimitiveMiscCaps;
 
@@ -479,8 +479,11 @@ D9MaskDriverCaps(
     Caps->VS20Caps.Caps &= 0x00000001;
     Caps->PS20Caps.Caps &= 0x0000001F;
 
-    /* Copies between video and system memory are always offered on hardware */
-    Caps->Caps3 |= D3DCAPS3_COPY_TO_VIDMEM | D3DCAPS3_COPY_TO_SYSTEMMEM;
+    /* Copies between video and system memory are always offered on hardware and never by software */
+    if (Hardware)
+        Caps->Caps3 |= D3DCAPS3_COPY_TO_VIDMEM | D3DCAPS3_COPY_TO_SYSTEMMEM;
+    else
+        Caps->Caps3 &= ~(D3DCAPS3_COPY_TO_VIDMEM | D3DCAPS3_COPY_TO_SYSTEMMEM);
 
     if ((Caps->Caps2 & 0x00000200) == 0)
         Caps->DevCaps &= ~D3DDEVCAPS_TEXTURENONLOCALVIDMEM;
@@ -497,7 +500,6 @@ D9MaskDriverCaps(
 }
 
 /* Drops format operations Direct3D 9 does not define and fills in the ones others imply */
-static
 VOID
 D9NormalizeFormatOps(
     _Inout_updates_(Count) FORMATOP* Formats,
@@ -637,7 +639,7 @@ D9QueryDriverCaps(
         return FALSE;
     }
 
-    D9MaskDriverCaps(Caps);
+    D9MaskDriverCaps(Caps, TRUE);
     D9NormalizeFormatOps(Adapter->Formats, Adapter->FormatCount);
     return TRUE;
 }

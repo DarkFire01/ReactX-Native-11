@@ -95,6 +95,7 @@ D9Enum::GetDeviceCaps(
     _Out_ D3DCAPS9* Caps)
 {
     D9LockScope Scope(&Lock);
+    const D9Adapter* Table;
 
     /* The null reference device answers even when there is no display at all */
     if (Adapter >= AdapterCount && !(AdapterCount == 0 && DeviceType == D3DDEVTYPE_NULLREF && Adapter == 0))
@@ -115,9 +116,14 @@ D9Enum::GetDeviceCaps(
 
     case D3DDEVTYPE_REF:
     case D3DDEVTYPE_NULLREF:
-        D9_TRACE_ONCE(L"GetDeviceCaps: the reference rasterizer is not implemented yet");
-        ZeroMemory(Caps, sizeof(*Caps));
-        return D3DERR_NOTAVAILABLE;
+        Table = Adapter < AdapterCount ? ReferenceTable(Adapter) : nullptr;
+        if (Table == nullptr || !D9HasAcceleratedFormat(Table))
+        {
+            ZeroMemory(Caps, sizeof(*Caps));
+            return D3DERR_NOTAVAILABLE;
+        }
+        D9PresentCaps(Table, DeviceType, IsEx, CanCalibrateGamma, Caps);
+        return S_OK;
 
     case D3DDEVTYPE_SW:
         ZeroMemory(Caps, sizeof(*Caps));

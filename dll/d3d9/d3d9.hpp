@@ -302,6 +302,11 @@ private:
     VOID
     NotePresentSupport(VOID);
 
+    _Ret_maybenull_
+    const D9Adapter*
+    ReferenceTable(
+        _In_ UINT Adapter);
+
     HRESULT
     DeviceTable(
         _In_ UINT Adapter,
@@ -390,6 +395,10 @@ private:
     /* Multisample quality levels come from a driver adapter of their own, opened the first time one is asked for */
     D9Adapter* QualityDrivers[D9MaxAdapters] = {};
 
+    /* What the reference rasterizer answers on each adapter, shared by REF and NULLREF and made when first asked */
+    D9Adapter* ReferenceTables[D9MaxAdapters] = {};
+    BOOLEAN ReferenceTried[D9MaxAdapters] = {};
+
     BOOLEAN SoftwareOnly = FALSE;
     BOOLEAN CanCalibrateGamma = FALSE;
 };
@@ -471,6 +480,16 @@ D9ReadDriverAnswers(
 VOID
 D9FreeDriverAnswers(
     _Inout_ D9Adapter* Adapter);
+
+VOID
+D9MaskDriverCaps(
+    _Inout_ D3DCAPS9* Caps,
+    _In_ BOOLEAN Hardware);
+
+VOID
+D9NormalizeFormatOps(
+    _Inout_updates_(Count) FORMATOP* Formats,
+    _In_ UINT Count);
 
 _Ret_maybenull_
 D9Adapter*

@@ -26,6 +26,11 @@ D9Enum::~D9Enum()
     {
         D9CloseDriver(&Adapters[Index]);
         D9CloseSecondDriver(QualityDrivers[Index]);
+        if (ReferenceTables[Index] != nullptr)
+        {
+            D9FreeDriverAnswers(ReferenceTables[Index]);
+            delete ReferenceTables[Index];
+        }
         D9CloseAdapter(&Adapters[Index]);
     }
 
