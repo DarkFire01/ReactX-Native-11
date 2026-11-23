@@ -116,6 +116,20 @@ static const struct
     { D3DDDITSS_SRGBTEXTURE, 0 }, { D3DDDITSS_DMAPOFFSET, 0 }, { D3DDDITSS_ELEMENTINDEX, 0 },
 };
 
+/* What each sampler starts with, by the application's sampler state type */
+static const struct
+{
+    BYTE Type;
+    BYTE Value;
+} D9DefaultSamplerStates[] =
+{
+    { D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP }, { D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP },
+    { D3DSAMP_ADDRESSW, D3DTADDRESS_WRAP }, { D3DSAMP_BORDERCOLOR, 0 }, { D3DSAMP_MAGFILTER, D3DTEXF_POINT },
+    { D3DSAMP_MINFILTER, D3DTEXF_POINT }, { D3DSAMP_MIPFILTER, D3DTEXF_NONE }, { D3DSAMP_MIPMAPLODBIAS, 0 },
+    { D3DSAMP_MAXMIPLEVEL, 0 }, { D3DSAMP_MAXANISOTROPY, 1 }, { D3DSAMP_SRGBTEXTURE, 0 },
+    { D3DSAMP_ELEMENTINDEX, 0 }, { D3DSAMP_DMAPOFFSET, 0 },
+};
+
 /* Texture stages the fixed function pixel constants cover */
 static constexpr UINT D9PixelStages = 8;
 
@@ -364,6 +378,46 @@ D9Device::SetDefaultState(
         if (Retired.Kept)
             RenderStates[Retired.State] = Retired.Value;
     }
+
+    /* The first stage modulates the texture with the color and selects the texture's alpha; later ones are off */
+    for (UINT Stage = 0; Stage < D9StageCount; Stage++)
+    {
+        DWORD* Types = StageStates[Stage];
+
+        for (UINT Type = 0; Type < D9StageStateCount; Type++)
+            Types[Type] = D9UnsetState;
+        Types[D3DTSS_COLOROP] = Stage == 0 ? D3DTOP_MODULATE : D3DTOP_DISABLE;
+        Types[D3DTSS_COLORARG1] = D3DTA_TEXTURE;
+        Types[D3DTSS_COLORARG2] = D3DTA_CURRENT;
+        Types[D3DTSS_ALPHAOP] = Stage == 0 ? D3DTOP_SELECTARG1 : D3DTOP_DISABLE;
+        Types[D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
+        Types[D3DTSS_ALPHAARG2] = D3DTA_CURRENT;
+        Types[D3DTSS_BUMPENVMAT00] = 0;
+        Types[D3DTSS_BUMPENVMAT01] = 0;
+        Types[D3DTSS_BUMPENVMAT10] = 0;
+        Types[D3DTSS_BUMPENVMAT11] = 0;
+        Types[D3DTSS_TEXCOORDINDEX] = Stage;
+        Types[D3DTSS_BUMPENVLSCALE] = 0;
+        Types[D3DTSS_BUMPENVLOFFSET] = 0;
+        Types[D3DTSS_TEXTURETRANSFORMFLAGS] = D3DTTFF_DISABLE;
+        Types[D3DTSS_COLORARG0] = D3DTA_CURRENT;
+        Types[D3DTSS_ALPHAARG0] = D3DTA_CURRENT;
+        Types[D3DTSS_RESULTARG] = D3DTA_CURRENT;
+        Types[D3DTSS_CONSTANT] = 0;
+    }
+
+    /* The displacement map sampler starts unset unless the driver can sample one */
+    for (UINT Slot = 0; Slot < D9TextureSlotCount; Slot++)
+    {
+        BOOLEAN Displacement = Slot == D9PixelSamplers;
+
+        for (UINT Type = 0; Type < D9SamplerStateCount; Type++)
+            SamplerStates[Slot][Type] = D9UnsetState;
+        if (Displacement && (Caps.DevCaps2 & (D3DDEVCAPS2_DMAPNPATCH | D3DDEVCAPS2_PRESAMPLEDDMAPNPATCH)) == 0)
+            continue;
+        for (const auto& Default : D9DefaultSamplerStates)
+            SamplerStates[Slot][Default.Type] = Default.Value;
+    }
 }
 
 DWORD
@@ -399,7 +453,7 @@ D9Device::SendTextureStageState(
 
     Args.Stage = Stage;
     Args.State = static_cast<D3DDDITEXTURESTAGESTATETYPE>(State);
-    Args.Value = Value;
+    Args.Value = D9DriverStageValue(State, Value);
     DdiTextureStageState(&Args);
 }
 
@@ -2318,46 +2372,6 @@ D9Device::SetClipStatus(
 STDMETHODIMP
 D9Device::GetClipStatus(
     _Out_ D3DCLIPSTATUS9* ClipStatus)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetTextureStageState(
-    _In_ DWORD Stage,
-    _In_ D3DTEXTURESTAGESTATETYPE Type,
-    _Out_ DWORD* Value)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetTextureStageState(
-    _In_ DWORD Stage,
-    _In_ D3DTEXTURESTAGESTATETYPE Type,
-    _In_ DWORD Value)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetSamplerState(
-    _In_ DWORD Sampler,
-    _In_ D3DSAMPLERSTATETYPE Type,
-    _Out_ DWORD* Value)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetSamplerState(
-    _In_ DWORD Sampler,
-    _In_ D3DSAMPLERSTATETYPE Type,
-    _In_ DWORD Value)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

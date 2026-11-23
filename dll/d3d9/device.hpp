@@ -31,6 +31,13 @@ static constexpr UINT D9StagingBufferCount = 4;
 /* Sixteen pixel samplers, the displacement map sampler and four vertex samplers */
 static constexpr UINT D9TextureSlotCount = 21;
 
+/* Texture stages and the stage state types a device keeps, the last one being the stage constant */
+static constexpr UINT D9StageCount = 8;
+static constexpr UINT D9StageStateCount = 33;
+
+/* Sampler state types a device keeps per sampler */
+static constexpr UINT D9SamplerStateCount = 14;
+
 /* How a resource takes part in sharing */
 enum class D9ShareMode : UINT
 {
@@ -1247,6 +1254,11 @@ BOOLEAN
 D9IsRetiredState(
     _In_ DWORD State);
 
+DWORD
+D9DriverStageValue(
+    _In_ UINT Type,
+    _In_ DWORD Value);
+
 /* The IDirect3DDevice9Ex object CreateDevice and CreateDeviceEx hand out */
 class D9Device final : public IDirect3DDevice9Ex, public RxKernelDevice
 {
@@ -2284,6 +2296,18 @@ private:
         _In_ DWORD Value);
 
     VOID
+    SendStageValue(
+        _In_ UINT Stage,
+        _In_ UINT Type,
+        _In_ DWORD Value);
+
+    VOID
+    SendSamplerValue(
+        _In_ UINT Sampler,
+        _In_ UINT Type,
+        _In_ DWORD Value);
+
+    VOID
     SendInitialState(VOID);
 
     HRESULT
@@ -2512,6 +2536,9 @@ private:
     D9Surface* DepthStencil = nullptr;
     D9Surface* AutoDepthStencil = nullptr;
     DWORD RenderStates[D9RenderStateCount];
+
+    DWORD StageStates[D9StageCount][D9StageStateCount];
+    DWORD SamplerStates[D9TextureSlotCount][D9SamplerStateCount];
 
     /* Vertices go through the runtime's software pipeline; a mixed device switches this */
     BOOLEAN SoftwareVertices;
