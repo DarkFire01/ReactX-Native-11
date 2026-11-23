@@ -82,7 +82,16 @@ struct D9Adapter
     D3DKMT_FLIPQUEUEINFO FlipQueue;
     D3DKMT_ADAPTERTYPE AdapterType;
     D3DKMT_WDDM_1_2_CAPS Wddm12Caps;
+    D3DKMT_WDDM_1_3_CAPS Wddm13Caps;
+    UINT64 VideoMemory;
+    UINT PhysicalAdapterCount;
     BOOLEAN NoOverlayCap;
+    BOOLEAN Wddm11Plus;
+
+    /* Presentation support the object notes once every display is open */
+    BOOLEAN MaximizedWindowedForGameDvr;
+    BOOLEAN DirectFlip;
+    BOOLEAN MultiPlaneOverlay;
 
     /* The desktop mode when the object was created */
     D3DDISPLAYMODEEX DesktopMode;
@@ -269,6 +278,12 @@ private:
     VOID
     ReadSwitches(VOID);
 
+    VOID
+    ReviewAdapterParents(VOID);
+
+    VOID
+    NotePresentSupport(VOID);
+
     HRESULT
     DeviceTable(
         _In_ UINT Adapter,
@@ -306,6 +321,7 @@ private:
     ValidateCreation(
         _In_ UINT Adapter,
         _In_ D3DDEVTYPE DeviceType,
+        _In_opt_ HWND FocusWindow,
         _In_ DWORD BehaviorFlags,
         _Inout_ D3DPRESENT_PARAMETERS* Parameters,
         _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes);
@@ -405,6 +421,37 @@ VOID
 D9CloseDriver(
     _Inout_ D9Adapter* Adapter);
 
+BOOLEAN
+D9DriverUpdating(
+    _In_ D3DKMT_HANDLE Adapter);
+
+BOOLEAN
+D9ReadDriverAnswers(
+    _Inout_ D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx);
+
+VOID
+D9FreeDriverAnswers(
+    _Inout_ D9Adapter* Adapter);
+
+_Ret_maybenull_
+D9Adapter*
+D9CopyAdapter(
+    _In_ const D9Adapter* Adapter);
+
+HRESULT
+D9ProbeDriver(
+    _In_ const D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx,
+    _Out_ D3DCAPS9* Caps);
+
+/* hardware.cpp */
+BOOLEAN
+D9DriverMayThread(
+    _In_ DWORD BehaviorFlags,
+    _In_opt_ HWND FocusWindow,
+    _In_ BOOLEAN Windowed);
+
 HRESULT
 D9CallOpenAdapter(
     _In_ const D9Adapter* Adapter,
@@ -429,9 +476,16 @@ D9ReadDesktopMode(
     _Out_ D3DDISPLAYMODEEX* Mode,
     _Out_opt_ D3DDDI_ROTATION* Rotation);
 
+VOID
+D9AcquireKernelModes(VOID);
+
+VOID
+D9ReleaseKernelModes(VOID);
+
 HRESULT
 D9ReadKernelModes(
     _In_ const D9Adapter* Adapter,
+    _In_ BOOLEAN Refresh,
     _Outptr_result_buffer_maybenull_(*Count) D3DKMT_DISPLAYMODE** Modes,
     _Out_ UINT* Count);
 

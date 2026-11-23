@@ -6,6 +6,7 @@
  */
 
 #include "device.hpp"
+#include <d3d12.h>
 
 D9Enum::D9Enum(
     _In_ UINT SdkVersion,
@@ -15,10 +16,12 @@ D9Enum::D9Enum(
 {
     InitializeCriticalSection(&Lock);
     InterlockedIncrement(&D9State.LiveObjects);
+    D9AcquireKernelModes();
 }
 
 D9Enum::~D9Enum()
 {
+    D9ReleaseKernelModes();
     for (UINT Index = 0; Index < AdapterCount; Index++)
     {
         D9CloseDriver(&Adapters[Index]);
@@ -27,6 +30,64 @@ D9Enum::~D9Enum()
 
     InterlockedDecrement(&D9State.LiveObjects);
     DeleteCriticalSection(&Lock);
+}
+
+/* Game capture keeps a maximized window in windowed mode only for drivers from WDDM 2.0 (2.4 when linked) */
+static
+BOOLEAN
+D9SupportsMaximizedWindowed(
+    _In_ D3DKMT_HANDLE Adapter)
+{
+    D3DKMT_DRIVERVERSION Version = static_cast<D3DKMT_DRIVERVERSION>(0);
+    UINT PhysicalCount = 0;
+
+    if (!NT_SUCCESS(D9QueryKernel(Adapter, KMTQAITYPE_DRIVERVERSION, &Version, sizeof(Version))) ||
+        !NT_SUCCESS(D9QueryKernel(Adapter, KMTQAITYPE_PHYSICALADAPTERCOUNT, &PhysicalCount, sizeof(PhysicalCount))))
+    {
+        return FALSE;
+    }
+
+    if (PhysicalCount == 1)
+        return Version >= KMT_DRIVERVERSION_WDDM_2_0;
+    return Version >= KMT_DRIVERVERSION_WDDM_2_4;
+}
+
+/* The mapping layer settings the application passed for this adapter: one without a device fits any */
+static
+const D3D9ON12_ARGS*
+D9FindMappingArgs(
+    _In_ const D9Adapter* Adapter,
+    _In_reads_opt_(Count) const D3D9ON12_ARGS* Overrides,
+    _In_ UINT Count)
+{
+    for (UINT Index = 0; Overrides != nullptr && Index < Count; Index++)
+    {
+        ID3D12Device* Device = nullptr;
+        LUID Luid;
+
+        if (Overrides[Index].pD3D12Device == nullptr)
+            return &Overrides[Index];
+        if (FAILED(Overrides[Index].pD3D12Device->QueryInterface(IID_PPV_ARGS(&Device))))
+            continue;
+
+        Luid = Device->GetAdapterLuid();
+        Device->Release();
+        if (Luid.LowPart == Adapter->AdapterLuid.LowPart && Luid.HighPart == Adapter->AdapterLuid.HighPart)
+            return &Overrides[Index];
+    }
+    return nullptr;
+}
+
+/* A display whose kernel driver has no Direct3D 9 user mode driver asks for the mapping layer */
+static
+BOOLEAN
+D9DriverWantsMapping(
+    _In_ D3DKMT_HANDLE Adapter)
+{
+    D3DKMT_UMDFILENAMEINFO Name = {};
+
+    Name.Version = KMTUMDVERSION_DX9;
+    return D9QueryKernel(Adapter, KMTQAITYPE_UMDRIVERNAME, &Name, sizeof(Name)) == STATUS_INVALID_PARAMETER;
 }
 
 /* Copies one display into a slot of the adapter table */
@@ -104,24 +165,157 @@ D9Enum::Initialize(
 
     CollectDisplays();
     for (UINT Index = 0; Index < AdapterCount; Index++)
-        D9OpenAdapter(&Adapters[Index]);
-
-    /* The extended object only drives displays that have a WDDM driver */
-    for (UINT Index = 0; Index < AdapterCount; Index++)
     {
-        if ((D9State.HasWddmDriver || !IsEx) && D9OpenDriver(&Adapters[Index], IsEx))
-            Adapters[Index].GroupLuid = Adapters[Index].AdapterLuid;
+        D9Adapter* Adapter = &Adapters[Index];
+        const D3D9ON12_ARGS* Mapping;
+        BOOLEAN WantsMapping;
+
+        D9OpenAdapter(Adapter);
+        Adapter->MaximizedWindowedForGameDvr = D9SupportsMaximizedWindowed(Adapter->KernelAdapter);
+
+        /* The mapping layer is not part of ReactX; a request for it gets the native driver */
+        Mapping = D9FindMappingArgs(Adapter, Overrides, OverrideCount);
+        WantsMapping = Mapping != nullptr ? Mapping->Enable9On12 != FALSE : D9DriverWantsMapping(Adapter->KernelAdapter);
+        if (WantsMapping)
+            D9_TRACE_ONCE(L"Direct3D 9 on 12 was requested; using the native driver instead");
+
+        /* The extended object only drives displays once a WDDM driver was seen */
+        if ((D9State.HasWddmDriver || !IsEx) && D9OpenDriver(Adapter, IsEx))
+            Adapter->GroupLuid = Adapter->AdapterLuid;
     }
     GroupAdapters();
     ReadSwitches();
-
-    /* The mapping layer is not part of ReactX; a request for it gets the native driver */
-    for (UINT Index = 0; Overrides != nullptr && Index < OverrideCount; Index++)
-    {
-        if (Overrides[Index].Enable9On12)
-            D9_TRACE_ONCE(L"Direct3D 9 on 12 was requested; using the native driver instead");
-    }
+    ReviewAdapterParents();
+    NotePresentSupport();
     return S_OK;
+}
+
+/* Hybrid and indirect display adapters may hand a display to another render adapter; the system checks them here */
+VOID
+D9Enum::ReviewAdapterParents(VOID)
+{
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_ENUMADAPTERS2 Enum = {};
+    D3DKMT_ADAPTERTYPE* Types = nullptr;
+    BOOLEAN* CrossAdapter = nullptr;
+    const D9Adapter* Primary = nullptr;
+    UINT PrimaryIndex = MAXUINT;
+    BOOLEAN AnyIndirect = FALSE;
+
+    if (Kmt == nullptr || Kmt->EnumAdapters2 == nullptr || Kmt->CloseAdapter == nullptr || AdapterCount == 0)
+        return;
+    if (!NT_SUCCESS(Kmt->EnumAdapters2(&Enum)))
+        return;
+
+    Enum.pAdapters = new (std::nothrow) D3DKMT_ADAPTERINFO[Enum.NumAdapters]();
+    Types = new (std::nothrow) D3DKMT_ADAPTERTYPE[Enum.NumAdapters]();
+    CrossAdapter = new (std::nothrow) BOOLEAN[Enum.NumAdapters]();
+    if (Enum.pAdapters == nullptr || Types == nullptr || CrossAdapter == nullptr ||
+        !NT_SUCCESS(Kmt->EnumAdapters2(&Enum)))
+    {
+        goto Cleanup;
+    }
+
+    for (UINT Index = 0; Index < AdapterCount && Primary == nullptr; Index++)
+    {
+        if ((Adapters[Index].StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0)
+            Primary = &Adapters[Index];
+    }
+
+    for (UINT Index = 0; Primary != nullptr && Index < Enum.NumAdapters; Index++)
+    {
+        const LUID* Luid = &Enum.pAdapters[Index].AdapterLuid;
+
+        if (Luid->LowPart != Primary->AdapterLuid.LowPart || Luid->HighPart != Primary->AdapterLuid.HighPart)
+            continue;
+        if (NT_SUCCESS(D9QueryKernel(Enum.pAdapters[Index].hAdapter, KMTQAITYPE_ADAPTERTYPE, &Types[Index],
+                                     sizeof(Types[Index]))))
+        {
+            PrimaryIndex = Index;
+            break;
+        }
+    }
+
+    for (UINT Index = 0; Index < Enum.NumAdapters; Index++)
+    {
+        D3DKMT_HANDLE Handle = Enum.pAdapters[Index].hAdapter;
+        D3DKMT_QUERY_ADAPTER_UNIQUE_GUID Unique = {};
+        D3DKMT_WDDM_1_3_CAPS Caps = {};
+
+        if (!NT_SUCCESS(D9QueryKernel(Handle, KMTQAITYPE_ADAPTERTYPE, &Types[Index], sizeof(Types[Index]))) ||
+            !NT_SUCCESS(D9QueryKernel(Handle, KMTQAITYPE_QUERY_ADAPTER_UNIQUE_GUID, &Unique, sizeof(Unique))))
+        {
+            continue;
+        }
+
+        if (!Types[Index].PostDevice && Types[Index].IndirectDisplayDevice)
+            AnyIndirect = TRUE;
+        if (NT_SUCCESS(D9QueryKernel(Handle, KMTQAITYPE_WDDM_1_3_CAPS, &Caps, sizeof(Caps))))
+            CrossAdapter[Index] = Caps.SupportCrossAdapterResource;
+    }
+
+    if ((PrimaryIndex != MAXUINT && CrossAdapter[PrimaryIndex]) || AnyIndirect)
+        D9_TRACE_ONCE(L"hybrid and indirect display adapters keep their own displays; reparenting is not implemented");
+
+Cleanup:
+    for (UINT Index = 0; Enum.pAdapters != nullptr && Index < Enum.NumAdapters; Index++)
+    {
+        D3DKMT_CLOSEADAPTER Close;
+
+        if (Enum.pAdapters[Index].hAdapter == 0)
+            continue;
+        Close.hAdapter = Enum.pAdapters[Index].hAdapter;
+        Kmt->CloseAdapter(&Close);
+    }
+    delete[] Enum.pAdapters;
+    delete[] Types;
+    delete[] CrossAdapter;
+}
+
+/* Notes which displays flip straight to the screen and which have overlay planes to present on */
+VOID
+D9Enum::NotePresentSupport(VOID)
+{
+    typedef NTSTATUS (APIENTRY* PD9_GET_OVERLAY_CAPS)(D3DKMT_GET_MULTIPLANE_OVERLAY_CAPS*);
+    static PD9_GET_OVERLAY_CAPS GetOverlayCaps = reinterpret_cast<PD9_GET_OVERLAY_CAPS>(
+        GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTGetMultiPlaneOverlayCaps"));
+
+    for (UINT Index = 0; Index < AdapterCount; Index++)
+    {
+        D9Adapter* Adapter = &Adapters[Index];
+        D3DKMT_DIRECTFLIP_SUPPORT DirectFlip = {};
+        D3DKMT_MPOKERNELCAPS_SUPPORT KernelOverlays = {};
+        D3DKMT_GET_MULTIPLANE_OVERLAY_CAPS OverlayCaps = {};
+        BOOLEAN Overlays = Index == 0;
+
+        Adapter->DirectFlip = NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_DIRECTFLIP_SUPPORT,
+                                                       &DirectFlip, sizeof(DirectFlip))) &&
+                              DirectFlip.Supported;
+        Adapter->MultiPlaneOverlay = FALSE;
+
+        /* Displays after the first need the driver to offer overlays on secondary displays */
+        if (Index != 0)
+        {
+            D3DKMT_MULTIPLANEOVERLAY_SECONDARY_SUPPORT Secondary = {};
+
+            Overlays = NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_MULTIPLANEOVERLAY_SECONDARY_SUPPORT,
+                                                &Secondary, sizeof(Secondary))) &&
+                       Secondary.Supported;
+        }
+        if (!Overlays)
+            continue;
+
+        if (!NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_MPOKERNELCAPS_SUPPORT, &KernelOverlays,
+                                      sizeof(KernelOverlays))) ||
+            !KernelOverlays.Supported || GetOverlayCaps == nullptr)
+        {
+            continue;
+        }
+
+        OverlayCaps.hAdapter = Adapter->KernelAdapter;
+        OverlayCaps.VidPnSourceId = Adapter->SourceId;
+        Adapter->MultiPlaneOverlay = NT_SUCCESS(GetOverlayCaps(&OverlayCaps)) && OverlayCaps.MaxPlanes >= 2;
+    }
 }
 
 STDMETHODIMP
@@ -232,7 +426,7 @@ D9Enum::CreateDeviceCommon(
     if ((BehaviorFlags & D3DCREATE_DISABLE_DRIVER_MANAGEMENT_EX) != 0)
         BehaviorFlags |= D3DCREATE_DISABLE_DRIVER_MANAGEMENT;
 
-    hr = ValidateCreation(Adapter, DeviceType, BehaviorFlags, Parameters, FullscreenModes);
+    hr = ValidateCreation(Adapter, DeviceType, FocusWindow, BehaviorFlags, Parameters, FullscreenModes);
     if (FAILED(hr))
         return hr;
 

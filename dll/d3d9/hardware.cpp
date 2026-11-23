@@ -386,7 +386,6 @@ D9FillDeviceCallbacks(
 }
 
 /* Threads may call the driver unless vertices go through the runtime or a fullscreen device has no focus */
-static
 BOOLEAN
 D9DriverMayThread(
     _In_ DWORD BehaviorFlags,
@@ -426,11 +425,18 @@ D9Device::CreateKernelDevice(VOID)
     return S_OK;
 }
 
-/* Each device opens the driver's adapter again for itself */
+/* Each device opens the driver's adapter again for itself, looking the driver up first as the system does */
 HRESULT
 D9Device::OpenDriverAdapter(VOID)
 {
+    D3DKMT_UMDFILENAMEINFO Name;
     HRESULT hr;
+
+    if (!D9QueryUmdName(Adapter->KernelAdapter, KMTUMDVERSION_DX9, &Name))
+    {
+        D9Trace(L"%S lost its Direct3D 9 user mode driver", Adapter->DeviceName);
+        return E_FAIL;
+    }
 
     AdapterCallbacks = Adapter->Callbacks;
     hr = D9CallOpenAdapter(Adapter, &AdapterCallbacks, &AdapterFunctions, &DriverAdapter, &RuntimeVersion,
@@ -438,6 +444,24 @@ D9Device::OpenDriverAdapter(VOID)
     if (FAILED(hr))
         D9Trace(L"OpenAdapter for a new device failed 0x%08lX", hr);
     return hr;
+}
+
+/* The kernel facts and capabilities are read again through the device's own driver adapter */
+HRESULT
+D9Device::ReadDriverAnswers(VOID)
+{
+    D9Adapter* Answers = D9CopyAdapter(Adapter);
+    BOOLEAN Read;
+
+    if (Answers == nullptr)
+        return E_OUTOFMEMORY;
+
+    Answers->Functions = AdapterFunctions;
+    Answers->DriverAdapter = DriverAdapter;
+    Read = D9ReadDriverAnswers(Answers, IsEx);
+    D9FreeDriverAnswers(Answers);
+    delete Answers;
+    return Read ? S_OK : D3DERR_NOTAVAILABLE;
 }
 
 /* Interfaces from WDDM 1.2 on drop the old blit, create, flush and present entry points for newer ones */

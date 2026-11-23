@@ -462,13 +462,16 @@ HRESULT
 D9Enum::ValidateCreation(
     _In_ UINT Adapter,
     _In_ D3DDEVTYPE DeviceType,
+    _In_opt_ HWND FocusWindow,
     _In_ DWORD BehaviorFlags,
     _Inout_ D3DPRESENT_PARAMETERS* Parameters,
     _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes)
 {
     const D3DCAPS9* Caps;
+    D3DCAPS9 ProbeCaps;
     DWORD VertexProcessing;
     UINT Heads;
+    HRESULT hr;
 
     if (Adapter >= AdapterCount && !(AdapterCount == 0 && DeviceType == D3DDEVTYPE_NULLREF && Adapter == 0))
     {
@@ -512,6 +515,16 @@ D9Enum::ValidateCreation(
     if (!Adapters[Adapter].HasDriver)
         return D3DERR_NOTAVAILABLE;
     Caps = &Adapters[Adapter].DriverCaps;
+
+    /* The adapter's own driver object only serves devices created the way it was opened; others get a new one */
+    if (IsEx || (BehaviorFlags & D3DCREATE_ENABLE_PRESENTSTATS) != 0 ||
+        D9DriverMayThread(BehaviorFlags, FocusWindow, Parameters->Windowed != FALSE))
+    {
+        hr = D9ProbeDriver(&Adapters[Adapter], IsEx, &ProbeCaps);
+        if (FAILED(hr))
+            return hr;
+        Caps = &ProbeCaps;
+    }
 
     if ((BehaviorFlags & D9UndefinedBehaviorFlags) != 0)
     {

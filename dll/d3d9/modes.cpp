@@ -161,23 +161,59 @@ D9SameKernelMode(
            D9NominalRate(Left->IntegerRefreshRate) == D9NominalRate(Right->IntegerRefreshRate);
 }
 
-/* The kernel's modes for the current orientation, stereo modes and duplicates removed */
-HRESULT
-D9ReadKernelModes(
+/* The kernel's mode list of each display, shared by every live Direct3D object of the process */
+struct D9KernelModeList
+{
+    D3DKMT_DISPLAYMODE* Modes;
+    UINT Count;
+};
+
+static D9KernelModeList D9KernelModeLists[D9MaxAdapters];
+static ULONG D9KernelModeUsers;
+static SRWLOCK D9KernelModeLock = SRWLOCK_INIT;
+
+VOID
+D9AcquireKernelModes(VOID)
+{
+    AcquireSRWLockExclusive(&D9KernelModeLock);
+    if (D9KernelModeUsers == 0)
+        ZeroMemory(D9KernelModeLists, sizeof(D9KernelModeLists));
+    D9KernelModeUsers += 1;
+    ReleaseSRWLockExclusive(&D9KernelModeLock);
+}
+
+VOID
+D9ReleaseKernelModes(VOID)
+{
+    AcquireSRWLockExclusive(&D9KernelModeLock);
+    D9KernelModeUsers -= 1;
+    if (D9KernelModeUsers == 0)
+    {
+        for (D9KernelModeList& List : D9KernelModeLists)
+        {
+            delete[] List.Modes;
+            List.Modes = nullptr;
+            List.Count = 0;
+        }
+    }
+    ReleaseSRWLockExclusive(&D9KernelModeLock);
+}
+
+/* Asks the kernel for the display's modes; the list may grow between the two calls */
+static
+NTSTATUS
+D9FetchKernelModes(
     _In_ const D9Adapter* Adapter,
-    _Outptr_result_buffer_maybenull_(*Count) D3DKMT_DISPLAYMODE** Modes,
-    _Out_ UINT* Count)
+    _Out_ D9KernelModeList* Result)
 {
     const KmtThunks* Kmt = RxGetKmtThunks();
     D3DKMT_GETDISPLAYMODELIST List = {};
-    D3DKMT_DISPLAYMODE* Kept;
-    UINT KeptCount = 0;
     NTSTATUS Status;
 
-    *Modes = nullptr;
-    *Count = 0;
+    Result->Modes = nullptr;
+    Result->Count = 0;
     if (Kmt == nullptr || Kmt->GetDisplayModeList == nullptr)
-        return E_FAIL;
+        return STATUS_NOT_SUPPORTED;
 
     List.hAdapter = Adapter->KernelAdapter;
     List.VidPnSourceId = Adapter->SourceId;
@@ -186,7 +222,7 @@ D9ReadKernelModes(
     {
         List.pModeList = new (std::nothrow) D3DKMT_DISPLAYMODE[List.ModeCount]();
         if (List.pModeList == nullptr)
-            return E_OUTOFMEMORY;
+            return STATUS_NO_MEMORY;
 
         Status = Kmt->GetDisplayModeList(&List);
         if (Status != STATUS_BUFFER_TOO_SMALL)
@@ -196,23 +232,60 @@ D9ReadKernelModes(
     }
     if (!NT_SUCCESS(Status))
     {
-        D9Trace(L"D3DKMTGetDisplayModeList failed 0x%08lX", Status);
         delete[] List.pModeList;
-        return Status == STATUS_NOT_SUPPORTED ? HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) : D9HresultFromStatus(Status);
+        return Status;
     }
-    if (List.pModeList == nullptr)
-        return S_OK;
 
-    Kept = new (std::nothrow) D3DKMT_DISPLAYMODE[List.ModeCount];
+    Result->Modes = List.pModeList;
+    Result->Count = List.pModeList != nullptr ? List.ModeCount : 0;
+    return STATUS_SUCCESS;
+}
+
+/* The kernel's modes for the current orientation, stereo modes and duplicates removed */
+HRESULT
+D9ReadKernelModes(
+    _In_ const D9Adapter* Adapter,
+    _In_ BOOLEAN Refresh,
+    _Outptr_result_buffer_maybenull_(*Count) D3DKMT_DISPLAYMODE** Modes,
+    _Out_ UINT* Count)
+{
+    D9KernelModeList* Cached = &D9KernelModeLists[Adapter->Ordinal];
+    D3DKMT_DISPLAYMODE* Kept;
+    UINT KeptCount = 0;
+    NTSTATUS Status;
+
+    *Modes = nullptr;
+    *Count = 0;
+
+    AcquireSRWLockExclusive(&D9KernelModeLock);
+    if (Refresh || Cached->Modes == nullptr)
+    {
+        delete[] Cached->Modes;
+        Status = D9FetchKernelModes(Adapter, Cached);
+        if (!NT_SUCCESS(Status))
+        {
+            ReleaseSRWLockExclusive(&D9KernelModeLock);
+            D9Trace(L"D3DKMTGetDisplayModeList failed 0x%08lX", Status);
+            return Status == STATUS_NOT_SUPPORTED ? HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)
+                                                  : D9HresultFromStatus(Status);
+        }
+    }
+    if (Cached->Modes == nullptr)
+    {
+        ReleaseSRWLockExclusive(&D9KernelModeLock);
+        return S_OK;
+    }
+
+    Kept = new (std::nothrow) D3DKMT_DISPLAYMODE[Cached->Count];
     if (Kept == nullptr)
     {
-        delete[] List.pModeList;
+        ReleaseSRWLockExclusive(&D9KernelModeLock);
         return E_OUTOFMEMORY;
     }
 
-    for (UINT Index = 0; Index < List.ModeCount; Index++)
+    for (UINT Index = 0; Index < Cached->Count; Index++)
     {
-        D3DKMT_DISPLAYMODE Mode = List.pModeList[Index];
+        D3DKMT_DISPLAYMODE Mode = Cached->Modes[Index];
         BOOLEAN Duplicate = FALSE;
 
         if (Mode.Flags.Stereo || Mode.DisplayOrientation != Adapter->Rotation)
@@ -231,7 +304,7 @@ D9ReadKernelModes(
         }
     }
 
-    delete[] List.pModeList;
+    ReleaseSRWLockExclusive(&D9KernelModeLock);
     *Modes = Kept;
     *Count = KeptCount;
     return S_OK;
@@ -274,7 +347,7 @@ D9BuildKernelTable(
     UINT Count;
     HRESULT hr;
 
-    hr = D9ReadKernelModes(Adapter, &Kernel, &Count);
+    hr = D9ReadKernelModes(Adapter, TRUE, &Kernel, &Count);
     if (FAILED(hr))
         return hr;
 

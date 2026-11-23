@@ -1039,6 +1039,9 @@ private:
     OpenDriverAdapter(VOID);
 
     HRESULT
+    ReadDriverAnswers(VOID);
+
+    HRESULT
     CreateDriverDevice(
         _In_ BOOLEAN Windowed);
 

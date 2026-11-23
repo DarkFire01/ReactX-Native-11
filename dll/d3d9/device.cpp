@@ -560,6 +560,11 @@ D9Device::Initialize(
 {
     HRESULT hr;
 
+    if (D9DriverUpdating(Adapter->KernelAdapter))
+    {
+        D9Trace(L"the driver of %S is being updated", Adapter->DeviceName);
+        return D3DERR_NOTAVAILABLE;
+    }
     hr = CreateKernelDevice();
     if (FAILED(hr))
         return hr;
@@ -567,6 +572,9 @@ D9Device::Initialize(
     if (FAILED(hr))
         return hr;
     hr = CreateDriverDevice(Parameters->Windowed != FALSE);
+    if (FAILED(hr))
+        return hr;
+    hr = ReadDriverAnswers();
     if (FAILED(hr))
         return hr;
     ComputeCaps();

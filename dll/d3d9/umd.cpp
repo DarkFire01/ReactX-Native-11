@@ -317,19 +317,47 @@ BOOLEAN
 D9QueryKernelFacts(
     _Inout_ D9Adapter* Adapter)
 {
+    D3DKMT_SEGMENTSIZEINFO Segments = {};
+    UINT PhysicalCount = 0;
     DWORD Overlay = 0;
 
+    if (!NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_GETSEGMENTSIZE, &Segments, sizeof(Segments))))
+    {
+        D9Trace(L"the segment sizes of %S are unknown", Adapter->DeviceName);
+        return FALSE;
+    }
+    Adapter->VideoMemory = Segments.DedicatedVideoMemorySize + Segments.DedicatedSystemMemorySize +
+                           Segments.SharedSystemMemorySize;
+
     if (!NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_FLIPQUEUEINFO, &Adapter->FlipQueue,
-                                  sizeof(Adapter->FlipQueue))) ||
+                                  sizeof(Adapter->FlipQueue))))
+    {
+        D9Trace(L"the flip queue of %S is unknown", Adapter->DeviceName);
+        return FALSE;
+    }
+
+    /* The first count is optional and defaults to one; the system asks a second time and needs that answer */
+    Adapter->PhysicalAdapterCount = 1;
+    if (NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_PHYSICALADAPTERCOUNT, &PhysicalCount,
+                                 sizeof(PhysicalCount))))
+    {
+        Adapter->PhysicalAdapterCount = PhysicalCount;
+    }
+
+    if (!NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_PHYSICALADAPTERCOUNT, &PhysicalCount,
+                                  sizeof(PhysicalCount))) ||
         !NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_ADAPTERTYPE, &Adapter->AdapterType,
                                   sizeof(Adapter->AdapterType))) ||
         !NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_WDDM_1_2_CAPS, &Adapter->Wddm12Caps,
-                                  sizeof(Adapter->Wddm12Caps))))
+                                  sizeof(Adapter->Wddm12Caps))) ||
+        !NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_WDDM_1_3_CAPS, &Adapter->Wddm13Caps,
+                                  sizeof(Adapter->Wddm13Caps))))
     {
         D9Trace(L"kernel adapter queries failed for %S", Adapter->DeviceName);
         return FALSE;
     }
 
+    Adapter->NoOverlayCap = FALSE;
     if (NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, D9OverlayPropertyQuery, &Overlay, sizeof(Overlay))))
         Adapter->NoOverlayCap = (Overlay & 0x80) != 0;
     return TRUE;
@@ -369,7 +397,10 @@ D9CollectWideModes(
     UINT Count;
     UINT Wide = 0;
 
-    if (FAILED(D9ReadKernelModes(Adapter, &Modes, &Count)))
+    delete[] Adapter->WideModes;
+    Adapter->WideModes = nullptr;
+    Adapter->WideModeCount = 0;
+    if (FAILED(D9ReadKernelModes(Adapter, FALSE, &Modes, &Count)))
         return FALSE;
 
     for (UINT Index = 0; Index < Count; Index++)
@@ -486,16 +517,22 @@ D9NormalizeFormatOps(
     }
 }
 
-/* Reads the capabilities, formats and queries and applies the runtime's corrections */
+/* Reads the capabilities and, on the second pass, the format and query tables */
 static
 BOOLEAN
 D9QueryDriverCaps(
-    _Inout_ D9Adapter* Adapter)
+    _Inout_ D9Adapter* Adapter,
+    _In_ BOOLEAN WithTables)
 {
     D3DCAPS9* Caps = &Adapter->DriverCaps;
     DWORD GammaRamp = 0;
     BOOLEAN QueuedFlips;
     HRESULT hr;
+
+    delete[] Adapter->Formats;
+    delete[] Adapter->Queries;
+    Adapter->Formats = nullptr;
+    Adapter->Queries = nullptr;
 
     if (FAILED(D9ReadDesktopMode(Adapter->DeviceName, &Adapter->DesktopMode, &Adapter->Rotation)))
         return FALSE;
@@ -550,6 +587,16 @@ D9QueryDriverCaps(
         Caps->Caps2 |= D3DCAPS2_FULLSCREENGAMMA;
     else
         Caps->Caps2 &= ~D3DCAPS2_FULLSCREENGAMMA;
+
+    if (!WithTables)
+    {
+        if ((Caps->VertexProcessingCaps & D9VertexCapsNoUbyte4) != 0)
+        {
+            D9Trace(L"the driver sets the retired D3DVTXPCAPS_NO_VSDT_UBYTE4 cap; its HAL is not used");
+            return FALSE;
+        }
+        return TRUE;
+    }
 
     Adapter->Formats = new (std::nothrow) FORMATOP[Adapter->FormatCount]();
     if (Adapter->Formats == nullptr)
@@ -615,6 +662,100 @@ D9NoteDisplayFormats(
         Adapter->Display16Format = Adapter->DesktopMode.Format == D3DFMT_X1R5G5B5 ? D3DFMT_X1R5G5B5 : D3DFMT_R5G6B5;
 }
 
+/* A driver that is being updated is treated as gone */
+BOOLEAN
+D9DriverUpdating(
+    _In_ D3DKMT_HANDLE Adapter)
+{
+    BOOL Updating = FALSE;
+
+    if (!NT_SUCCESS(D9QueryKernel(Adapter, KMTQAITYPE_CHECKDRIVERUPDATESTATUS, &Updating, sizeof(Updating))))
+        return FALSE;
+    return Updating != FALSE;
+}
+
+/* The plain runtime does not open a driver while another desktop has the display */
+static
+BOOLEAN
+D9DesktopAccessible(VOID)
+{
+    typedef NTSTATUS (APIENTRY* PD9_GET_DEVICE_STATE)(D3DKMT_GETDEVICESTATE*);
+    static PD9_GET_DEVICE_STATE GetState = reinterpret_cast<PD9_GET_DEVICE_STATE>(
+        GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTGetDeviceState"));
+    D3DKMT_GETDEVICESTATE State = {};
+
+    if (GetState == nullptr)
+        return TRUE;
+
+    State.StateType = D3DKMT_DEVICESTATE_RESET;
+    GetState(&State);
+    return !State.ResetState.DesktopSwitched;
+}
+
+/* Everything read through a freshly opened driver adapter: kernel facts, then two capability passes */
+BOOLEAN
+D9ReadDriverAnswers(
+    _Inout_ D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx)
+{
+    D3DKMT_DRIVERVERSION Version = KMT_DRIVERVERSION_WDDM_1_0;
+
+    if (!D9QueryKernelFacts(Adapter))
+        return FALSE;
+    if (!IsEx && !D9DesktopAccessible())
+    {
+        D9Trace(L"the desktop of %S is not accessible", Adapter->DeviceName);
+        return FALSE;
+    }
+    if (!D9QueryDriverCaps(Adapter, FALSE) || !D9QueryDriverCaps(Adapter, TRUE))
+        return FALSE;
+
+    Adapter->Wddm11Plus = NT_SUCCESS(D9QueryKernel(Adapter->KernelAdapter, KMTQAITYPE_DRIVERVERSION, &Version,
+                                                   sizeof(Version))) &&
+                          Version > KMT_DRIVERVERSION_WDDM_1_0;
+    return TRUE;
+}
+
+/* Releases the tables D9ReadDriverAnswers filled */
+VOID
+D9FreeDriverAnswers(
+    _Inout_ D9Adapter* Adapter)
+{
+    delete[] Adapter->Formats;
+    delete[] Adapter->Queries;
+    delete[] Adapter->WideModes;
+    Adapter->Formats = nullptr;
+    Adapter->Queries = nullptr;
+    Adapter->WideModes = nullptr;
+    Adapter->FormatCount = 0;
+    Adapter->QueryCount = 0;
+    Adapter->WideModeCount = 0;
+}
+
+/* A copy of the adapter that shares nothing it frees with the original */
+D9Adapter*
+D9CopyAdapter(
+    _In_ const D9Adapter* Adapter)
+{
+    D9Adapter* Copy = new (std::nothrow) D9Adapter(*Adapter);
+
+    if (Copy == nullptr)
+        return nullptr;
+
+    Copy->DriverAdapter = NULL;
+    Copy->Formats = nullptr;
+    Copy->Queries = nullptr;
+    Copy->WideModes = nullptr;
+    Copy->Modes = nullptr;
+    Copy->FormatCount = 0;
+    Copy->QueryCount = 0;
+    Copy->WideModeCount = 0;
+    Copy->ModeCount = 0;
+    Copy->ExtendedModeCount = 0;
+    Copy->UnvalidatedModeCount = 0;
+    return Copy;
+}
+
 BOOLEAN
 D9OpenDriver(
     _Inout_ D9Adapter* Adapter,
@@ -623,8 +764,13 @@ D9OpenDriver(
     if (Adapter->KernelAdapter == 0)
         return FALSE;
 
-    if (!D9LoadDriverModule(Adapter) || !D9OpenDriverAdapter(Adapter) || !D9QueryKernelFacts(Adapter) ||
-        !D9QueryDriverCaps(Adapter))
+    if (D9DriverUpdating(Adapter->KernelAdapter))
+    {
+        D9Trace(L"the driver of %S is being updated", Adapter->DeviceName);
+        return FALSE;
+    }
+
+    if (!D9LoadDriverModule(Adapter) || !D9OpenDriverAdapter(Adapter) || !D9ReadDriverAnswers(Adapter, IsEx))
     {
         D9CloseDriver(Adapter);
         return FALSE;
@@ -633,6 +779,32 @@ D9OpenDriver(
     D9NoteDisplayFormats(Adapter);
     Adapter->HasDriver = TRUE;
     return TRUE;
+}
+
+/* Opens a second driver adapter to check a device creation against, as the system does, and closes it again */
+HRESULT
+D9ProbeDriver(
+    _In_ const D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx,
+    _Out_ D3DCAPS9* Caps)
+{
+    D9Adapter* Probe;
+    BOOLEAN Opened;
+
+    ZeroMemory(Caps, sizeof(*Caps));
+    if (D9DriverUpdating(Adapter->KernelAdapter))
+        return D3DERR_NOTAVAILABLE;
+
+    Probe = D9CopyAdapter(Adapter);
+    if (Probe == nullptr)
+        return E_OUTOFMEMORY;
+
+    Opened = D9LoadDriverModule(Probe) && D9OpenDriverAdapter(Probe) && D9ReadDriverAnswers(Probe, IsEx);
+    if (Opened)
+        *Caps = Probe->DriverCaps;
+    D9CloseDriver(Probe);
+    delete Probe;
+    return Opened ? S_OK : D3DERR_NOTAVAILABLE;
 }
 
 VOID
@@ -646,15 +818,7 @@ D9CloseDriver(
     /* The module stays mapped: drivers start worker threads that outlive the adapter */
     Adapter->Module = NULL;
 
-    delete[] Adapter->Formats;
-    delete[] Adapter->Queries;
-    delete[] Adapter->WideModes;
-    Adapter->Formats = nullptr;
-    Adapter->Queries = nullptr;
-    Adapter->WideModes = nullptr;
-    Adapter->FormatCount = 0;
-    Adapter->QueryCount = 0;
-    Adapter->WideModeCount = 0;
+    D9FreeDriverAnswers(Adapter);
     Adapter->HasDriver = FALSE;
     D9FreeModeTable(Adapter);
 }
