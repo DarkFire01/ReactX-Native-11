@@ -666,7 +666,6 @@ D9Device::CreateDriverResource(
     D3DDDIARG_CREATERESOURCE Create = {};
     HRESULT hr;
 
-    DrainBatch();
     if (DeviceFunctions.pfnCreateResource2 != nullptr)
     {
         Create2.Format = Resource->Format;
