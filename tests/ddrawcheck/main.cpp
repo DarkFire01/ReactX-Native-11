@@ -1859,7 +1859,8 @@ DcCheckPresent(
     UpdateWindow(Check->Window);
 
     /* DWM takes a newly shown window's first paint asynchronously, and it would land on top of the blits */
-    DwmFlush();
+    for (ULONG Frame = 0; Frame < 4; Frame++)
+        DwmFlush();
     Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
 
     Desc.dwSize = sizeof(Desc);
