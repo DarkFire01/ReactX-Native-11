@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "d3d11on12ddi.hpp"
+
 /* One DDI revision this runtime can drive, in the order umdadapter.cpp tries them */
 struct DdiRevision
 {
@@ -28,6 +30,30 @@ public:
     HRESULT
     Open(
         _In_opt_ const LUID* AdapterLuid);
+
+    /* Opens d3d11on12.dll over a D3D12 device in place of the vendor UMD */
+    HRESULT
+    OpenLayer(
+        _In_ const LUID& AdapterLuid,
+        _Inout_ On12OpenArgs* On12);
+
+    /* TRUE when the driver is the D3D11 on 12 layer */
+    BOOLEAN
+    IsLayer() const
+    {
+        return IsLayerAdapter;
+    }
+
+    /* The contract revision the layer agreed to */
+    UINT
+    GetLayerContractVersion() const
+    {
+        return LayerContractVersion;
+    }
+
+    /* The newest pipeline level the driver reports */
+    D3D11DDI_3DPIPELINELEVEL
+    GetHighestPipelineLevel() const;
 
     BOOLEAN
     SupportsPipelineLevel(
@@ -121,6 +147,9 @@ private:
     NegotiateRevision();
 
     HRESULT
+    NegotiateLayerRevision();
+
+    HRESULT
     QueryCaps();
 
     static
@@ -158,4 +187,6 @@ private:
     UINT NewestDriverInterface = 0;
     UINT PipelineCaps = 0;
     BOOLEAN IsSoftwareAdapter = FALSE;
+    BOOLEAN IsLayerAdapter = FALSE;
+    UINT LayerContractVersion = 0;
 };

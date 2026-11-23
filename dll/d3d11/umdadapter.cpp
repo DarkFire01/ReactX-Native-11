@@ -23,6 +23,21 @@ static constexpr DdiRevision RuntimeRevisions[] =
     { D3DWDDM2_0_DDI_INTERFACE_VERSION, D3DWDDM2_0_DDI_BUILD_VERSION, 0x0A00, L"WDDM 2.0" },
 };
 
+/* The revisions the D3D11 on 12 layer is driven at, newest first */
+static constexpr DdiRevision LayerRevisions[] =
+{
+    { D3DWDDM2_7_DDI_INTERFACE_VERSION, D3DWDDM2_7_DDI_BUILD_VERSION, 0x0A00, L"WDDM 2.7" },
+    { D3DWDDM2_6_DDI_INTERFACE_VERSION, D3DWDDM2_6_DDI_BUILD_VERSION, 0x0A00, L"WDDM 2.6" },
+};
+
+/* Exported by d3d11on12.dll, which is delay loaded by name */
+extern "C"
+HRESULT
+WINAPI
+OpenAdapter_D3D11On12(
+    _Inout_ D3D10DDIARG_OPENADAPTER* Args,
+    _Inout_ On12OpenArgs* On12);
+
 static
 BOOLEAN
 RxIsRevisionAllowed(
@@ -88,6 +103,133 @@ UmdAdapter::Open(
         return hr;
 
     return QueryCaps();
+}
+
+HRESULT
+UmdAdapter::OpenLayer(
+    _In_ const LUID& AdapterLuid,
+    _Inout_ On12OpenArgs* On12)
+{
+    D3D10DDIARG_OPENADAPTER Args = {};
+    HRESULT hr;
+
+    Kmt = RxGetKmtThunks();
+    if (Kmt == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Callbacks.pfnQueryAdapterInfoCb = QueryAdapterInfoCb;
+    Callbacks.pfnGetMultisampleMethodListCb = GetMultisampleMethodListCb;
+    Callbacks.pfnQueryAdapterInfoCb2 = QueryAdapterInfoCb2;
+    RxFillMissingCallbacks<&AdapterCallbacksName>(Callbacks);
+
+    /* Kernel queries still go to the adapter the D3D12 device runs on */
+    hr = OpenKernelAdapter(&AdapterLuid);
+    if (FAILED(hr))
+        return hr;
+
+    IsLayerAdapter = TRUE;
+
+    /* The layer is opened before any revision is known, so none is offered */
+    Args.hRTAdapter.handle = this;
+    Args.pAdapterCallbacks = &Callbacks;
+    Args.pAdapterFuncs_2 = &Functions;
+
+    hr = OpenAdapter_D3D11On12(&Args, On12);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"OpenAdapter_D3D11On12 failed 0x%08lX", hr);
+        return hr;
+    }
+
+    DriverAdapter = Args.hAdapter;
+    IsDriverAdapterOpen = TRUE;
+    LayerContractVersion = On12->ContractVersion;
+    RX_TRACE(L"D3D11 on 12 layer opened, contract %u", LayerContractVersion);
+
+    hr = QueryCaps();
+    if (FAILED(hr))
+        return hr;
+
+    return NegotiateLayerRevision();
+}
+
+HRESULT
+UmdAdapter::NegotiateLayerRevision()
+{
+    UINT64* Supported;
+    UINT32 Count = 0;
+    UINT32 Index;
+    HRESULT hr;
+
+    if (Functions.pfnGetSupportedVersions == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    hr = Functions.pfnGetSupportedVersions(DriverAdapter, &Count, nullptr);
+    if (FAILED(hr) || Count == 0)
+        return FAILED(hr) ? hr : DXGI_ERROR_UNSUPPORTED;
+
+    Supported = new (std::nothrow) UINT64[Count];
+    if (Supported == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Functions.pfnGetSupportedVersions(DriverAdapter, &Count, Supported);
+    if (FAILED(hr))
+    {
+        delete[] Supported;
+        return hr;
+    }
+
+    for (const DdiRevision& Candidate : LayerRevisions)
+    {
+        for (Index = 0; Index < Count; Index++)
+        {
+            if ((UINT)(Supported[Index] >> 32) == Candidate.Interface)
+            {
+                Revision = &Candidate;
+                break;
+            }
+        }
+
+        if (Revision != nullptr)
+            break;
+    }
+
+    delete[] Supported;
+
+    if (Revision == nullptr)
+    {
+        RX_TRACE(L"the layer offers no revision this runtime drives");
+        return DXGI_ERROR_UNSUPPORTED;
+    }
+
+    NewestDriverInterface = Revision->Interface;
+    RuntimeVersion = Revision->Build << 16;
+    RX_TRACE(L"using %s (interface 0x%08X version 0x%08X)", Revision->Name, Revision->Interface, RuntimeVersion);
+    return S_OK;
+}
+
+D3D11DDI_3DPIPELINELEVEL
+UmdAdapter::GetHighestPipelineLevel() const
+{
+    static constexpr D3D11DDI_3DPIPELINELEVEL Strongest[] =
+    {
+        D3DWDDM2_0DDI_3DPIPELINELEVEL_12_1,
+        D3DWDDM2_0DDI_3DPIPELINELEVEL_12_0,
+        D3D11_1DDI_3DPIPELINELEVEL_11_1,
+        D3D11DDI_3DPIPELINELEVEL_11_0,
+        D3D11DDI_3DPIPELINELEVEL_10_1,
+        D3D11DDI_3DPIPELINELEVEL_10_0,
+        D3D11_1DDI_3DPIPELINELEVEL_9_3,
+        D3D11_1DDI_3DPIPELINELEVEL_9_2,
+    };
+
+    for (D3D11DDI_3DPIPELINELEVEL Level : Strongest)
+    {
+        if (PipelineCaps & D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(Level))
+            return Level;
+    }
+
+    return D3D11_1DDI_3DPIPELINELEVEL_9_1;
 }
 
 BOOLEAN

@@ -179,6 +179,9 @@ DdiResource::CreateTexture(
     if (IsPrimary)
         Args.pPrimaryDesc = &PrimaryDesc;
 
+    if (Runtime != nullptr)
+        Runtime->ApiFlags = { Shape.BindFlags, Shape.MiscFlags, Shape.CPUAccessFlags, 0 };
+
     return Create(Args);
 }
 
@@ -512,6 +515,9 @@ DdiResource::CreateBuffer(
     Args.ByteStride = (Desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) ? Desc.StructureByteStride : 0;
     Args.DecoderBufferType = D3D11_1DDI_VIDEO_DECODER_BUFFER_UNKNOWN;
     Args.TextureLayout = D3DWDDM2_0DDI_TL_UNDEFINED;
+
+    if (Runtime != nullptr)
+        Runtime->ApiFlags = { Desc.BindFlags, Desc.MiscFlags, Desc.CPUAccessFlags, Desc.StructureByteStride };
 
     return Create(Args);
 }

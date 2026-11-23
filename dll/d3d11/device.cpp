@@ -164,14 +164,22 @@ RxDevice::Initialize(
     UINT Flags;
     HRESULT hr;
 
-    KmCreate.hAdapter = Adapter->GetKmtHandle();
-    Status = RxGetKmtThunks()->CreateDevice(&KmCreate);
-    if (!NT_SUCCESS(Status))
+    /* The layer runs on the D3D12 device's kernel device and always at its strongest level */
+    if (Adapter->IsLayer())
     {
-        RX_TRACE(L"D3DKMTCreateDevice failed 0x%08lX", Status);
-        return RxHresultFromStatus(Status);
+        PipelineLevel = Adapter->GetHighestPipelineLevel();
     }
-    KmDevice = KmCreate.hDevice;
+    else
+    {
+        KmCreate.hAdapter = Adapter->GetKmtHandle();
+        Status = RxGetKmtThunks()->CreateDevice(&KmCreate);
+        if (!NT_SUCCESS(Status))
+        {
+            RX_TRACE(L"D3DKMTCreateDevice failed 0x%08lX", Status);
+            return RxHresultFromStatus(Status);
+        }
+        KmDevice = KmCreate.hDevice;
+    }
 
     Flags = RxEncodePipelineLevel(PipelineLevel);
     if (CreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED)

@@ -40,17 +40,7 @@ static constexpr D3D_FEATURE_LEVEL DefaultFeatureLevels[] =
     D3D_FEATURE_LEVEL_9_1,
 };
 
-static constexpr UINT KnownCreateFlags =
-    D3D11_CREATE_DEVICE_SINGLETHREADED |
-    D3D11_CREATE_DEVICE_DEBUG |
-    D3D11_CREATE_DEVICE_SWITCH_TO_REF |
-    D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS |
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT |
-    D3D11_CREATE_DEVICE_DEBUGGABLE |
-    D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY |
-    D3D11_CREATE_DEVICE_DISABLE_GPU_TIMEOUT |
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT |
-    RxD3D10DeviceFlag;
+
 
 _Ret_maybenull_
 static
@@ -170,7 +160,7 @@ D3D11CreateDevice(
 
     if (SDKVersion != D3D11_SDK_VERSION)
         return E_INVALIDARG;
-    if ((Flags & ~KnownCreateFlags) != 0)
+    if ((Flags & ~RxKnownCreateFlags) != 0)
         return E_INVALIDARG;
 
     /* An explicit adapter goes with UNKNOWN, and UNKNOWN needs an adapter */

@@ -65,6 +65,9 @@ struct RxRuntimeResource
 {
     D3DKMT_HANDLE KmResource = 0;
 
+    /* The API flags the resource was created with, which the D3D11 on 12 layer asks back for */
+    D3D11_RESOURCE_FLAGS ApiFlags = {};
+
     /* Set for shared textures and swapchain buffers; written with the kernel resource */
     const VOID* SharedRecord = nullptr;
     UINT SharedRecordSize = 0;
@@ -973,6 +976,19 @@ public:
     CRITICAL_SECTION ThreadLock;
     BOOL IsThreadProtected = FALSE;
 };
+
+/* Every creation flag the runtime accepts */
+inline constexpr UINT RxKnownCreateFlags =
+    D3D11_CREATE_DEVICE_SINGLETHREADED |
+    D3D11_CREATE_DEVICE_DEBUG |
+    D3D11_CREATE_DEVICE_SWITCH_TO_REF |
+    D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS |
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+    D3D11_CREATE_DEVICE_DEBUGGABLE |
+    D3D11_CREATE_DEVICE_PREVENT_ALTERING_LAYER_SETTINGS_FROM_REGISTRY |
+    D3D11_CREATE_DEVICE_DISABLE_GPU_TIMEOUT |
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT |
+    RxD3D10DeviceFlag;
 
 /* Private interface id: QueryInterface with it yields the RxDevice itself, without a reference */
 DEFINE_GUID(IID_RxDevice, 0x3b6e8a52, 0x71d4, 0x4c9a, 0x9e, 0x0f, 0x5a, 0x21, 0xc7, 0x84, 0xd3, 0x6b);
