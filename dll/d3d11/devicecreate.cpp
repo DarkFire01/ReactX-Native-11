@@ -125,13 +125,12 @@ RxDevice::CreateVertexShader(
 {
     RxVertexShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppVertexShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
-    return RxHandOut(RxVertexShader::Create(*this, pShaderBytecode, BytecodeLength, &Shader), Shader, ppVertexShader);
+    return RxHandOut(RxVertexShader::Create(*this, pShaderBytecode, BytecodeLength, pClassLinkage, &Shader), Shader,
+                     ppVertexShader);
 }
 
 HRESULT
@@ -144,13 +143,12 @@ RxDevice::CreatePixelShader(
 {
     RxPixelShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppPixelShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
-    return RxHandOut(RxPixelShader::Create(*this, pShaderBytecode, BytecodeLength, &Shader), Shader, ppPixelShader);
+    return RxHandOut(RxPixelShader::Create(*this, pShaderBytecode, BytecodeLength, pClassLinkage, &Shader), Shader,
+                     ppPixelShader);
 }
 
 HRESULT
@@ -163,13 +161,12 @@ RxDevice::CreateGeometryShader(
 {
     RxGeometryShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppGeometryShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
-    return RxHandOut(RxGeometryShader::Create(*this, pShaderBytecode, BytecodeLength, &Shader), Shader, ppGeometryShader);
+    return RxHandOut(RxGeometryShader::Create(*this, pShaderBytecode, BytecodeLength, pClassLinkage, &Shader), Shader,
+                     ppGeometryShader);
 }
 
 HRESULT
@@ -182,13 +179,12 @@ RxDevice::CreateHullShader(
 {
     RxHullShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppHullShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
-    return RxHandOut(RxHullShader::Create(*this, pShaderBytecode, BytecodeLength, &Shader), Shader, ppHullShader);
+    return RxHandOut(RxHullShader::Create(*this, pShaderBytecode, BytecodeLength, pClassLinkage, &Shader), Shader,
+                     ppHullShader);
 }
 
 HRESULT
@@ -201,13 +197,12 @@ RxDevice::CreateDomainShader(
 {
     RxDomainShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppDomainShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
-    return RxHandOut(RxDomainShader::Create(*this, pShaderBytecode, BytecodeLength, &Shader), Shader, ppDomainShader);
+    return RxHandOut(RxDomainShader::Create(*this, pShaderBytecode, BytecodeLength, pClassLinkage, &Shader), Shader,
+                     ppDomainShader);
 }
 
 HRESULT
@@ -220,13 +215,12 @@ RxDevice::CreateComputeShader(
 {
     RxComputeShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppComputeShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
-    return RxHandOut(RxComputeShader::Create(*this, pShaderBytecode, BytecodeLength, &Shader), Shader, ppComputeShader);
+    return RxHandOut(RxComputeShader::Create(*this, pShaderBytecode, BytecodeLength, pClassLinkage, &Shader), Shader,
+                     ppComputeShader);
 }
 
 HRESULT
@@ -245,14 +239,12 @@ RxDevice::CreateGeometryShaderWithStreamOutput(
     RxStreamOutputDesc StreamOutput = { pSODeclaration, NumEntries, pBufferStrides, NumStrides, RasterizedStream };
     RxGeometryShader* Shader = nullptr;
 
-    UNREFERENCED_PARAMETER(pClassLinkage);
-
     RxClearOutput(ppGeometryShader);
     if (pShaderBytecode == nullptr)
         return E_INVALIDARG;
 
     return RxHandOut(RxGeometryShader::CreateWithStreamOutput(*this, pShaderBytecode, BytecodeLength, StreamOutput,
-                                                              &Shader),
+                                                              pClassLinkage, &Shader),
                      Shader, ppGeometryShader);
 }
 

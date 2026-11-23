@@ -111,11 +111,34 @@ RxShader<Interface>::Finish(
     return S_OK;
 }
 
+/* Non geometry stages hand the layer the bytecode as the caller gave it */
+template <typename Interface>
+HRESULT
+RxShader<Interface>::CreateLayerShader(
+    _In_ const RxShaderSource& Source)
+{
+    if constexpr (Stage::Form == RxSignatureForm::Geometry)
+    {
+        return E_NOTIMPL;
+    }
+    else
+    {
+        On12ShaderDesc Desc;
+
+        Desc.Code = static_cast<const BYTE*>(Source.Code);
+        Desc.Size = (UINT)Source.Size;
+        Desc.Linkage = Source.Linkage;
+        return Finish((this->Device.GetLayerDevice()->*Stage::LayerCreate)(Handle, &Desc));
+    }
+}
+
 template <typename Interface>
 HRESULT
 RxShader<Interface>::CreateDriverShader(
+    _In_ const RxShaderSource& Source,
     _In_opt_ const RxStreamOutputDesc* StreamOutput)
 {
+    IOn12DdiDevice* Layer = this->Device.GetLayerDevice();
     const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = this->Device.GetDeviceFuncs();
     D3D10DDI_HDEVICE DriverDevice = this->Device.GetDriverDevice();
     const UINT* Program = Bytecode.GetProgram();
@@ -141,6 +164,9 @@ RxShader<Interface>::CreateDriverShader(
         if (Handle.pDrvPrivate == nullptr)
             return E_OUTOFMEMORY;
 
+        if (Layer != nullptr)
+            return CreateLayerShader(Source);
+
         (Funcs.*Stage::Create)(DriverDevice, Program, Handle, RuntimeHandle, &TessellationSignatures);
         return Finish(this->Device.TakeDriverError());
     }
@@ -151,12 +177,16 @@ RxShader<Interface>::CreateDriverShader(
         if (Handle.pDrvPrivate == nullptr)
             return E_OUTOFMEMORY;
 
+        if (Layer != nullptr)
+            return CreateLayerShader(Source);
+
         (Funcs.*Stage::Create)(DriverDevice, Program, Handle, RuntimeHandle);
         return Finish(this->Device.TakeDriverError());
     }
     else if constexpr (Stage::Form == RxSignatureForm::Geometry)
     {
         D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT Args = {};
+        On12GeometryShaderDesc LayerDesc = {};
         D3D11DDIARG_STREAM_OUTPUT_DECLARATION_ENTRY Decl;
         D3D11_1DDIARG_STAGE_IO_SIGNATURES Unsized = {};
         UINT SlotDwords[D3D11_SO_BUFFER_SLOT_COUNT] = {};
@@ -166,6 +196,10 @@ RxShader<Interface>::CreateDriverShader(
         UINT Chunk;
         UINT First;
         UINT Index;
+
+        LayerDesc.Code = static_cast<const BYTE*>(Source.Code);
+        LayerDesc.Size = (UINT)Source.Size;
+        LayerDesc.Linkage = Source.Linkage;
 
         if (StreamOutput == nullptr || StreamOutput->EntryCount == 0)
         {
@@ -181,6 +215,9 @@ RxShader<Interface>::CreateDriverShader(
             Handle.pDrvPrivate = Memory.Allocate(PrivateSize);
             if (Handle.pDrvPrivate == nullptr)
                 return E_OUTOFMEMORY;
+
+            if (Layer != nullptr)
+                return Finish(Layer->CreateGeometryShader(Handle, &LayerDesc, nullptr));
 
             (Funcs.*Stage::Create)(DriverDevice, Program, Handle, RuntimeHandle, &Unsized);
             return Finish(this->Device.TakeDriverError());
@@ -253,6 +290,16 @@ RxShader<Interface>::CreateDriverShader(
         if (Handle.pDrvPrivate == nullptr)
             return E_OUTOFMEMORY;
 
+        if (Layer != nullptr)
+        {
+            LayerDesc.Declaration = StreamOutput->Entries;
+            LayerDesc.ElementCount = StreamOutput->EntryCount;
+            LayerDesc.Strides = StreamOutput->Strides;
+            LayerDesc.StrideCount = StreamOutput->StrideCount;
+            LayerDesc.RasterizedStream = StreamOutput->RasterizedStream;
+            return Finish(Layer->CreateGeometryShader(Handle, &LayerDesc, &Args));
+        }
+
         Funcs.pfnCreateGeometryShaderWithStreamOutput(DriverDevice, &Args, Handle, RuntimeHandle, &Signatures);
         return Finish(this->Device.TakeDriverError());
     }
@@ -270,6 +317,9 @@ RxShader<Interface>::CreateDriverShader(
         if (Handle.pDrvPrivate == nullptr)
             return E_OUTOFMEMORY;
 
+        if (Layer != nullptr)
+            return CreateLayerShader(Source);
+
         (Funcs.*Stage::Create)(DriverDevice, Program, Handle, RuntimeHandle, &Signatures);
         return Finish(this->Device.TakeDriverError());
     }
@@ -281,8 +331,10 @@ RxShader<Interface>::Create(
     _In_ RxDevice& Device,
     _In_reads_bytes_(Size) const VOID* Bytecode,
     _In_ SIZE_T Size,
+    _In_opt_ ID3D11ClassLinkage* Linkage,
     _Outptr_ RxShader** Shader)
 {
+    RxShaderSource Source = { Bytecode, Size, Linkage };
     RxShader* NewShader;
     HRESULT hr;
 
@@ -300,7 +352,7 @@ RxShader<Interface>::Create(
         return E_INVALIDARG;
     }
 
-    hr = NewShader->CreateDriverShader(nullptr);
+    hr = NewShader->CreateDriverShader(Source, nullptr);
     if (FAILED(hr))
     {
         NewShader->Release();
@@ -318,6 +370,7 @@ RxShader<Interface>::CreateWithStreamOutput(
     _In_reads_bytes_(Size) const VOID* Bytecode,
     _In_ SIZE_T Size,
     _In_ const RxStreamOutputDesc& StreamOutput,
+    _In_opt_ ID3D11ClassLinkage* Linkage,
     _Outptr_ RxShader** Shader)
 {
     *Shader = nullptr;
@@ -328,6 +381,7 @@ RxShader<Interface>::CreateWithStreamOutput(
     }
     else
     {
+        RxShaderSource Source = { Bytecode, Size, Linkage };
         RxShader* NewShader;
         UINT ProgramType;
         UINT Index;
@@ -359,7 +413,7 @@ RxShader<Interface>::CreateWithStreamOutput(
             }
         }
 
-        hr = NewShader->CreateDriverShader(&StreamOutput);
+        hr = NewShader->CreateDriverShader(Source, &StreamOutput);
         if (FAILED(hr))
         {
             NewShader->Release();

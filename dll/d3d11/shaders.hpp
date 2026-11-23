@@ -33,6 +33,7 @@ struct RxShaderStage<ID3D11VertexShader>
     static constexpr RxSignatureForm Form = RxSignatureForm::InputOutput;
     static constexpr GUID PrivateId = { 0x6f1a8c34, 0x2b7e, 0x4d59, { 0x9c, 0x03, 0xe1, 0x47, 0x5a, 0x2d, 0x88, 0x16 } };
     static constexpr auto Create = &D3DWDDM1_3DDI_DEVICEFUNCS::pfnCreateVertexShader;
+    static constexpr auto LayerCreate = &IOn12DdiDevice::CreateVertexShader;
 };
 
 template <>
@@ -42,6 +43,7 @@ struct RxShaderStage<ID3D11PixelShader>
     static constexpr RxSignatureForm Form = RxSignatureForm::InputOutput;
     static constexpr GUID PrivateId = { 0x1d94e7b0, 0x63c5, 0x4a2f, { 0xb8, 0x7e, 0x0d, 0x9a, 0x31, 0x6c, 0x45, 0xf2 } };
     static constexpr auto Create = &D3DWDDM1_3DDI_DEVICEFUNCS::pfnCreatePixelShader;
+    static constexpr auto LayerCreate = &IOn12DdiDevice::CreatePixelShader;
 };
 
 template <>
@@ -60,6 +62,7 @@ struct RxShaderStage<ID3D11HullShader>
     static constexpr RxSignatureForm Form = RxSignatureForm::Tessellation;
     static constexpr GUID PrivateId = { 0x0f7d93b2, 0xc148, 0x4e6a, { 0x95, 0x2d, 0x6b, 0x30, 0xe8, 0x1f, 0x74, 0xa9 } };
     static constexpr auto Create = &D3DWDDM1_3DDI_DEVICEFUNCS::pfnCreateHullShader;
+    static constexpr auto LayerCreate = &IOn12DdiDevice::CreateHullShader;
 };
 
 template <>
@@ -69,6 +72,7 @@ struct RxShaderStage<ID3D11DomainShader>
     static constexpr RxSignatureForm Form = RxSignatureForm::Tessellation;
     static constexpr GUID PrivateId = { 0xd56a28e4, 0x17bf, 0x4f81, { 0xa0, 0x6c, 0x39, 0xd2, 0x84, 0x5e, 0x1b, 0xc7 } };
     static constexpr auto Create = &D3DWDDM1_3DDI_DEVICEFUNCS::pfnCreateDomainShader;
+    static constexpr auto LayerCreate = &IOn12DdiDevice::CreateDomainShader;
 };
 
 template <>
@@ -78,6 +82,7 @@ struct RxShaderStage<ID3D11ComputeShader>
     static constexpr RxSignatureForm Form = RxSignatureForm::None;
     static constexpr GUID PrivateId = { 0x49b03e7c, 0x8d26, 0x4a15, { 0xb3, 0xf1, 0x0e, 0x75, 0xc6, 0x92, 0x5d, 0x08 } };
     static constexpr auto Create = &D3DWDDM1_3DDI_DEVICEFUNCS::pfnCreateComputeShader;
+    static constexpr auto LayerCreate = &IOn12DdiDevice::CreateComputeShader;
 };
 
 /* What CreateGeometryShaderWithStreamOutput adds on top of the bytecode */
@@ -88,6 +93,14 @@ struct RxStreamOutputDesc
     const UINT* Strides;
     UINT StrideCount;
     UINT RasterizedStream;
+};
+
+/* The caller's bytecode as given, which a layer device takes whole */
+struct RxShaderSource
+{
+    const VOID* Code;
+    SIZE_T Size;
+    ID3D11ClassLinkage* Linkage;
 };
 
 template <typename Interface>
@@ -103,6 +116,7 @@ public:
         _In_ RxDevice& Device,
         _In_reads_bytes_(Size) const VOID* Bytecode,
         _In_ SIZE_T Size,
+        _In_opt_ ID3D11ClassLinkage* Linkage,
         _Outptr_ RxShader** Shader);
 
     /* Geometry shaders only; vertex shader bytecode is taken too and streams its outputs */
@@ -113,6 +127,7 @@ public:
         _In_reads_bytes_(Size) const VOID* Bytecode,
         _In_ SIZE_T Size,
         _In_ const RxStreamOutputDesc& StreamOutput,
+        _In_opt_ ID3D11ClassLinkage* Linkage,
         _Outptr_ RxShader** Shader);
 
     HRESULT
@@ -148,7 +163,12 @@ private:
 
     HRESULT
     CreateDriverShader(
+        _In_ const RxShaderSource& Source,
         _In_opt_ const RxStreamOutputDesc* StreamOutput);
+
+    HRESULT
+    CreateLayerShader(
+        _In_ const RxShaderSource& Source);
 
     RxShaderBytecode Bytecode;
 
