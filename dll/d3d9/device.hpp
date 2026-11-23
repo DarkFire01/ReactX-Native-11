@@ -19,6 +19,9 @@ static constexpr UINT D9MaxRenderTargets = 4;
 /* Render states a device keeps a value for */
 static constexpr UINT D9RenderStateCount = 256;
 
+/* Kernel contexts a device tracks for its driver */
+static constexpr UINT D9MaxKernelContexts = 16;
+
 /* A resource the driver made; its address is the runtime handle the driver passes back */
 struct D9Resource
 {
@@ -389,6 +392,14 @@ public:
     VOID
     RetireKernelResource(
         _In_ HANDLE RuntimeResource) override;
+
+    VOID
+    NoteKernelContext(
+        _In_ D3DKMT_HANDLE Context) override;
+
+    VOID
+    ForgetKernelContext(
+        _In_ D3DKMT_HANDLE Context) override;
 
     /* IDirect3DDevice9 and IDirect3DDevice9Ex */
     STDMETHOD(QueryInterface)(
@@ -1077,4 +1088,8 @@ private:
     DWORD RenderStates[D9RenderStateCount];
     INT GpuPriority = 0;
     UINT FrameLatency = 3;
+
+    /* The driver's contexts in creation order; the kernel is told about them newest first */
+    D3DKMT_HANDLE KernelContexts[D9MaxKernelContexts] = {};
+    UINT KernelContextCount = 0;
 };

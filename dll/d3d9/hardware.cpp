@@ -71,6 +71,36 @@ D9Device::RetireKernelResource(
     static_cast<D9Resource*>(RuntimeResource)->KernelResource = 0;
 }
 
+VOID
+D9Device::NoteKernelContext(
+    _In_ D3DKMT_HANDLE Context)
+{
+    if (KernelContextCount == D9MaxKernelContexts)
+    {
+        D9_TRACE_ONCE(L"the driver made more than %u contexts; later ones keep the default priority",
+                      D9MaxKernelContexts);
+        return;
+    }
+    KernelContexts[KernelContextCount] = Context;
+    KernelContextCount += 1;
+}
+
+VOID
+D9Device::ForgetKernelContext(
+    _In_ D3DKMT_HANDLE Context)
+{
+    for (UINT Index = 0; Index < KernelContextCount; Index++)
+    {
+        if (KernelContexts[Index] != Context)
+            continue;
+
+        MoveMemory(&KernelContexts[Index], &KernelContexts[Index + 1],
+                   (KernelContextCount - Index - 1) * sizeof(KernelContexts[0]));
+        KernelContextCount -= 1;
+        return;
+    }
+}
+
 HRESULT
 D9Device::AllocateCallback(
     _Inout_ D3DDDICB_ALLOCATE* Args)

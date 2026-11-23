@@ -781,6 +781,30 @@ D9Device::GetGPUThreadPriority(
     if (!IsEx)
         return D3DERR_INVALIDCALL;
 
+    if (Lost)
+    {
+        *Priority = GpuPriority;
+        return S_OK;
+    }
+
+    /* Queued work goes to the driver first; the kernel holds the value once the driver has a context */
+    FlushDriver();
+    if (KernelContextCount != 0)
+    {
+        D3DKMT_GETCONTEXTSCHEDULINGPRIORITY Query = {};
+        NTSTATUS Status;
+
+        Query.hContext = KernelContexts[KernelContextCount - 1];
+        Status = RxGetKmtThunks()->GetContextSchedulingPriority(&Query);
+        if (!NT_SUCCESS(Status))
+        {
+            D9Trace(L"D3DKMTGetContextSchedulingPriority failed 0x%08lX", Status);
+            return D9HresultFromStatus(Status);
+        }
+        *Priority = Query.Priority;
+        return S_OK;
+    }
+
     *Priority = GpuPriority;
     return S_OK;
 }
@@ -796,6 +820,21 @@ D9Device::SetGPUThreadPriority(
     if (Priority < -7 || Priority > 7)
         return E_INVALIDARG;
 
+    for (UINT Remaining = Lost ? 0 : KernelContextCount; Remaining > 0; Remaining -= 1)
+    {
+        D3DKMT_SETCONTEXTSCHEDULINGPRIORITY Set = {};
+        NTSTATUS Status;
+
+        Set.hContext = KernelContexts[Remaining - 1];
+        Set.Priority = Priority;
+        Status = RxGetKmtThunks()->SetContextSchedulingPriority(&Set);
+        if (!NT_SUCCESS(Status))
+        {
+            D9Trace(L"D3DKMTSetContextSchedulingPriority(%d) failed 0x%08lX", Priority, Status);
+            return D9HresultFromStatus(Status);
+        }
+    }
+
     GpuPriority = Priority;
     return S_OK;
 }
@@ -808,6 +847,28 @@ D9Device::SetMaximumFrameLatency(
 
     if (!IsEx)
         return D3DERR_INVALIDCALL;
+    if (MaxLatency > D3DPRESENT_BACK_BUFFERS_MAX_EX)
+    {
+        D9_TRACE_ONCE(L"SetMaximumFrameLatency: %u is more than the back buffer limit", MaxLatency);
+        return D3DERR_INVALIDCALL;
+    }
+
+    /* Zero restores the kernel's default queue of three presents */
+    if (!Lost)
+    {
+        D3DKMT_SETQUEUEDLIMIT Limit = {};
+        NTSTATUS Status;
+
+        Limit.hDevice = DeviceHandle;
+        Limit.Type = D3DKMT_SET_QUEUEDLIMIT_PRESENT;
+        Limit.QueuedPresentLimit = MaxLatency != 0 ? MaxLatency : 3;
+        Status = RxGetKmtThunks()->SetQueuedLimit(&Limit);
+        if (!NT_SUCCESS(Status))
+        {
+            D9Trace(L"D3DKMTSetQueuedLimit(%u) failed 0x%08lX", Limit.QueuedPresentLimit, Status);
+            return D9HresultFromStatus(Status);
+        }
+    }
 
     FrameLatency = MaxLatency;
     return S_OK;
