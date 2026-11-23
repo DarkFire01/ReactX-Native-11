@@ -507,6 +507,23 @@ D9Device::CreateVertexDeclaration(
     if (Count > MAXD3DDECLLENGTH || !D9CheckElements(VertexElements, Count))
         return E_FAIL;
 
+    /* Types beyond the plain ones need the device's caps for them */
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        BYTE Type = VertexElements[Index].Type;
+        DWORD Needed = 0;
+
+        if (Type == D3DDECLTYPE_UBYTE4)
+            Needed = D3DDTCAPS_UBYTE4;
+        else if (Type >= D3DDECLTYPE_UBYTE4N && Type <= D3DDECLTYPE_FLOAT16_4)
+            Needed = D3DDTCAPS_UBYTE4N << (Type - D3DDECLTYPE_UBYTE4N);
+        if ((CurrentCaps()->DeclTypes & Needed) != Needed)
+        {
+            D9Trace(L"CreateVertexDeclaration: the device has no caps for element type %u", Type);
+            return E_FAIL;
+        }
+    }
+
     Made = new (std::nothrow) D9Declaration(this);
     if (Made == nullptr)
         return E_OUTOFMEMORY;
