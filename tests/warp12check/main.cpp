@@ -2864,6 +2864,7 @@ static const TcScene Scenes[] =
     { "opsclamp", SceneOpsClamp },
     { "opssize", SceneOpsSize },
     { "opswave", SceneOpsWave },
+    { "opsheap", SceneOpsHeap },
     { "timestamp", SceneTimestamp },
 };
 

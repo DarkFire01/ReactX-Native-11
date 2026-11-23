@@ -157,6 +157,7 @@ struct TcOpsKit
         Parameters[2].DescriptorTable.pDescriptorRanges = &SamplerRange;
         Desc.NumParameters = ARRAYSIZE(Parameters);
         Desc.pParameters = Parameters;
+        Desc.Flags = Flags;
         hr = TcRootSignature(Device, &Desc, &Signature);
         Kit->Keep(Signature);
         if (FAILED(hr))
@@ -265,6 +266,7 @@ struct TcOpsKit
         D3D12_SHADER_RESOURCE_VIEW_DESC Bytes = {};
         D3D12_SHADER_RESOURCE_VIEW_DESC Slices = {};
         D3D12_UNORDERED_ACCESS_VIEW_DESC Access = {};
+        D3D12_CONSTANT_BUFFER_VIEW_DESC Constants = {};
         D3D12_SAMPLER_DESC Sampler = {};
 
         Device->CreateShaderResourceView(Image, NULL, TcHandle(Device, Views, 0));
@@ -299,6 +301,9 @@ struct TcOpsKit
         Slices.Texture2D.MostDetailedMip = 1;
         Slices.Texture2D.MipLevels = 1;
         Device->CreateShaderResourceView(Image, &Slices, TcHandle(Device, Views, 9));
+        Constants.BufferLocation = Raw->GetGPUVirtualAddress();
+        Constants.SizeInBytes = 256;
+        Device->CreateConstantBufferView(&Constants, TcHandle(Device, Views, 10));
 
         Sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
         Sampler.AddressU = Sampler.AddressV = Sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -397,6 +402,7 @@ struct TcOpsKit
     ID3D12Resource *Readback = NULL;
     ID3D12DescriptorHeap *Views = NULL;
     ID3D12DescriptorHeap *Samplers = NULL;
+    D3D12_ROOT_SIGNATURE_FLAGS Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 };
 
 static const char TcOpsCommon[] =
@@ -425,7 +431,8 @@ TcOpsRun(
     _In_z_ PCSTR Entry,
     _In_reads_(BuildCount) const TcOpsBuild *Builds,
     _In_ UINT BuildCount,
-    _In_ UINT Groups)
+    _In_ UINT Groups,
+    _In_ D3D12_ROOT_SIGNATURE_FLAGS Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE)
 {
     static const UINT Constants[4] = { 3, 0x9E3779B9u, 5, 0x40490FDBu };
     SIZE_T LogStart = TcLogMark();
@@ -434,6 +441,7 @@ TcOpsRun(
     TcQueue Queue;
     HRESULT hr;
 
+    Ops.Flags = Flags;
     hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
     if (SUCCEEDED(hr))
         hr = Ops.Create(Device, &Queue, &Kit);
@@ -779,4 +787,42 @@ SceneOpsWave(
     if (SUCCEEDED(hr))
         hr = TcOpsRun(Device, Result, TcOpsWavePartSource, "parts", TcOpsWaveBuilds, ARRAYSIZE(TcOpsWaveBuilds), 3);
     return hr;
+}
+
+/* Views, a constant buffer and samplers picked from the descriptor heaps by values that differ across lanes */
+static const char TcOpsHeapSource[] =
+    "struct Pair { uint4 A; uint4 B; };\n"
+    "[numthreads(64, 1, 1)] void heaps(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 64;\n"
+    "    Texture2D Picked = ResourceDescriptorHeap[NonUniformResourceIndex((t % 3 == 0) ? 0 : 9)];\n"
+    "    SamplerState Which = SamplerDescriptorHeap[NonUniformResourceIndex((t % 3 == 1) ? 1 : ((t & 1) ? 3 : 0))];\n"
+    "    ByteAddressBuffer Bytes = ResourceDescriptorHeap[3];\n"
+    "    RWByteAddressBuffer Target = ResourceDescriptorHeap[4];\n"
+    "    RWTexture2D<uint> Cells = ResourceDescriptorHeap[6];\n"
+    "    ConstantBuffer<Pair> Values = ResourceDescriptorHeap[10];\n"
+    "    float2 Uv = float2((t % 8) * 0.13, (t / 8) * 0.11);\n"
+    "    uint w, h;\n"
+    "    Out.Store4(Base, asuint(Picked.SampleLevel(Which, Uv, 0)));\n"
+    "    Out.Store4(Base + 16, Bytes.Load4((t % 16) * 16));\n"
+    "    Out.Store4(Base + 32, Values.A + Values.B * t);\n"
+    "    Picked.GetDimensions(w, h);\n"
+    "    Out.Store(Base + 48, w | (h << 16));\n"
+    "    Target.Store(Base + 52, asuint(Picked.Load(int3(t % 4, t / 16, 0)).x));\n"
+    "    InterlockedAdd(Cells[uint2(t % 8, (t / 8) % 8)], t);\n"
+    "}\n";
+
+static const TcOpsBuild TcOpsHeapBuilds[] =
+{
+    { NULL, L"cs_6_6", NULL },
+};
+
+static
+HRESULT
+SceneOpsHeap(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsHeapSource, "heaps", TcOpsHeapBuilds, ARRAYSIZE(TcOpsHeapBuilds), 1,
+                    D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED);
 }
