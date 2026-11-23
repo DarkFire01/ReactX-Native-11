@@ -696,19 +696,23 @@ NineDescribeCreation(
         Create->m_FormatEmulation = TL::FormatEmulation::YV12;
 }
 
-/* Creates the translation layer resource and the views the resource's use calls for */
+/*
+ * Creates the translation layer resource, or takes over an opened one, and the views the resource's
+ * use calls for.
+ */
 static
 HRESULT
 NineInitResource(
     _Inout_ NineResource* Resource,
-    _In_ const D3DDDIARG_CREATERESOURCE2* Args)
+    _In_ const D3DDDIARG_CREATERESOURCE2* Args,
+    _Inout_opt_ TL::unique_comptr<TL::Resource>* Existing)
 {
     const UINT Flags = Args->Flags.Value;
     TL::ResourceCreationArgs Create = {};
     BOOLEAN WantsSrgb;
     HRESULT hr;
 
-    hr = NineDescribeResource(Resource, Args, FALSE);
+    hr = NineDescribeResource(Resource, Args, Existing != nullptr);
     if (FAILED(hr))
         return hr;
 
@@ -720,13 +724,22 @@ NineInitResource(
     }
 
     NineDescribeCreation(Resource, Args, &Create);
-    Resource->Underlying.reset(TL::Resource::CreateResource(&*Resource->Device->Context, Create,
-                                                            TL::ResourceAllocationContext::ImmediateContextThreadLongLived)
-                                   .release());
+    if (Existing != nullptr && *Existing)
+    {
+        Resource->Underlying.reset(Existing->release());
+    }
+    else
+    {
+        Resource->Underlying.reset(TL::Resource::CreateResource(&*Resource->Device->Context, Create,
+                                                                TL::ResourceAllocationContext::ImmediateContextThreadLongLived)
+                                       .release());
+    }
 
+    /* Render targets always get their sRGB twins; an opened resource gets no sRGB shader view */
     WantsSrgb = NineSrgbFormat(Resource->DxgiFormat) != DXGI_FORMAT_UNKNOWN;
     if (NineWantsRenderTarget(Flags, Args->Pool))
         NineMakeRenderTargetViews(Resource, Resource->DxgiFormat, WantsSrgb);
+    WantsSrgb = WantsSrgb && Existing == nullptr;
     if (NineWantsDepthStencil(Flags, Args->Pool))
         NineMakeDepthStencilViews(Resource);
     if (NineWantsShaderView(Flags, Args->Pool))
@@ -804,7 +817,7 @@ NineCreateResource2(
 
     try
     {
-        hr = NineInitResource(Resource, Args);
+        hr = NineInitResource(Resource, Args, nullptr);
     }
     catch (_com_error& Error)
     {
@@ -841,6 +854,154 @@ NineDestroyResource(
 
     NineFreeResource(Resource);
     return NineDxgiResult(S_OK);
+}
+
+/* Creation arguments for a resource another device made, described from what Direct3D 12 reports */
+static
+VOID
+NineDescribeShared(
+    _In_ ID3D12Device* Device,
+    _In_ const TL::ResourceInfo* Info,
+    _Out_ TL::ResourceCreationArgs* Create)
+{
+    D3D12_RESOURCE_DESC Desc = Info->Resource.m_ResourceDesc;
+    const BOOLEAN Volume = Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    const UINT ArraySize = Volume ? 1 : Desc.DepthOrArraySize;
+    const UINT Depth = Volume ? Desc.DepthOrArraySize : 1;
+    D3D12_RESOURCE_ALLOCATION_INFO Allocation;
+    UINT Planes;
+    UINT Bind = 0;
+
+    /* Targets placed at the small alignment are asked for at the default one */
+    if ((Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0 &&
+        Desc.Alignment == D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT)
+    {
+        Desc.Alignment = 0;
+    }
+
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0)
+        Bind |= TL::RESOURCE_BIND_RENDER_TARGET;
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0)
+        Bind |= TL::RESOURCE_BIND_DEPTH_STENCIL;
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0)
+        Bind |= TL::RESOURCE_BIND_SHADER_RESOURCE;
+
+    Planes = CD3D11FormatHelper::NonOpaquePlaneCount(Desc.Format);
+    Create->m_desc12 = Desc;
+    Create->m_appDesc = TL::AppResourceDesc(ArraySize * Desc.MipLevels, static_cast<UINT8>(Planes),
+                                            Planes * ArraySize * Desc.MipLevels, static_cast<UINT8>(Desc.MipLevels),
+                                            static_cast<UINT16>(ArraySize), Depth, static_cast<UINT>(Desc.Width),
+                                            Desc.Height, Desc.Format, Desc.SampleDesc.Count, Desc.SampleDesc.Quality,
+                                            TL::RESOURCE_USAGE_DEFAULT, static_cast<TL::RESOURCE_CPU_ACCESS>(0),
+                                            static_cast<TL::RESOURCE_BIND_FLAGS>(Bind), Desc.Dimension);
+
+    Allocation = Device->GetResourceAllocationInfo(0, 1, &Desc);
+    Create->m_heapDesc = {};
+    Create->m_heapDesc.SizeInBytes = Allocation.SizeInBytes;
+    Create->m_heapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    Create->m_heapDesc.Properties.CreationNodeMask = 1;
+    Create->m_heapDesc.Properties.VisibleNodeMask = 1;
+    Create->m_heapDesc.Alignment = Allocation.Alignment;
+}
+
+/* Takes over the resource behind a shared handle and describes it the way a created one would be */
+static
+HRESULT
+NineOpenShared(
+    _Inout_ NineResource* Resource,
+    _In_ UINT Kmt,
+    _In_reads_bytes_(TL::SharedResourceHelpers::cPrivateResourceDriverDataSize) VOID* Data,
+    _In_ D3DDDIFORMAT Format)
+{
+    NineDevice* Device = Resource->Device;
+    TL::ResourceCreationArgs Create = {};
+    TL::ResourceInfo Info = {};
+    D3DDDIARG_CREATERESOURCE2 Args = {};
+    D3DDDI_SURFACEINFO Surface = {};
+    TL::unique_comptr<TL::Resource> Opened;
+    UINT ArraySize;
+
+    Device->Sharing->QueryResourceInfoFromKMTHandle(Kmt, nullptr, &Info);
+    NineDescribeShared(Device->Device12, &Info, &Create);
+
+    /* The opened resource starts out in the common state, as a freshly shared one is */
+    Opened = Device->Sharing->OpenResourceFromKmtHandle(Create, Kmt, Data,
+                                                        TL::SharedResourceHelpers::cPrivateResourceDriverDataSize,
+                                                        D3D12_RESOURCE_STATE_COMMON);
+
+    const D3D12_RESOURCE_DESC& Desc = Opened->Parent()->m_desc12;
+    const BOOLEAN Buffer = Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+
+    Surface.Width = static_cast<UINT>(Desc.Width);
+    Surface.Height = Desc.Height;
+    Surface.Depth = Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? Desc.DepthOrArraySize : 1;
+    ArraySize = Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Desc.DepthOrArraySize;
+
+    /* Buffers come back as index buffers and planar video formats are never plain textures */
+    Args.Format = Format;
+    Args.Pool = D3DDDIPOOL_LOCALVIDMEM;
+    Args.pSurfList = &Surface;
+    Args.SurfCount = Desc.MipLevels * ArraySize;
+    Args.MipLevels = Desc.MipLevels;
+    if (Buffer)
+        Args.Flags.Value |= NineFlagIndexBuffer;
+    else if (!CD3D11FormatHelper::YUV(Desc.Format))
+        Args.Flags.Value |= NineFlagTexture;
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0)
+        Args.Flags.Value |= NineFlagRenderTarget;
+
+    return NineInitResource(Resource, &Args, std::addressof(Opened));
+}
+
+HRESULT
+APIENTRY
+NineOpenResource(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_OPENRESOURCE* Args,
+    _In_ const NineOpenResourceArgs* OpenArgs)
+{
+    NineResource* Resource;
+    HRESULT hr;
+
+    if (hDevice == NULL || Args == nullptr)
+        return E_INVALIDARG;
+    if (Args->PrivateDriverDataSize != TL::SharedResourceHelpers::cPrivateResourceDriverDataSize ||
+        Args->pPrivateDriverData == nullptr || OpenArgs == nullptr)
+    {
+        return E_INVALIDARG;
+    }
+
+    Resource = new (std::nothrow) NineResource();
+    if (Resource == nullptr)
+        return NineDxgiResult(E_OUTOFMEMORY);
+
+    Resource->Device = static_cast<NineDevice*>(hDevice);
+    Resource->RuntimeResource = Args->hResource;
+    Resource->UniqueId = static_cast<UINT64>(InterlockedIncrement64(&NineResourceSerial));
+    Resource->CpuDirty = TRUE;
+
+    try
+    {
+        hr = NineOpenShared(Resource, Args->hKMResource, Args->pPrivateDriverData, OpenArgs->Format);
+    }
+    catch (_com_error& Error)
+    {
+        hr = Error.Error();
+    }
+    catch (std::bad_alloc&)
+    {
+        hr = E_OUTOFMEMORY;
+    }
+
+    if (FAILED(hr))
+    {
+        NineTrace(L"shared resource %u is not opened (0x%08lX)", Args->hKMResource, hr);
+        NineFreeResource(Resource);
+        return NineDxgiResult(hr);
+    }
+
+    Args->hResource = Resource;
+    return NineDxgiResult(hr);
 }
 
 /* Maps a runtime subresource and plane to the translation layer's subresource */

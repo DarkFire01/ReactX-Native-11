@@ -11,6 +11,7 @@ nt_add_usermode_dll(d3d9on12
         output.cpp
         resource.cpp
         settings.cpp
+        share.cpp
         state.cpp)
 
 # The device runs on D3D12TranslationLayer, whose failures arrive as C++ exceptions

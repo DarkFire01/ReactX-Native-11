@@ -123,6 +123,34 @@ struct NineDevice
     /* Discarded ranges of each buffer locked since it was created */
     std::mutex LockRangesLock;
     std::unordered_map<NineResource*, std::vector<NineLockRange>> LockRanges;
+
+    /* Objects the runtime registered as its own, which share without reopening */
+    std::mutex WrappedLock;
+    std::set<IUnknown*> Wrapped;
+};
+
+/* What d3d9.dll passes beside an open of a shared resource */
+struct NineOpenResourceArgs
+{
+    D3DDDIFORMAT Format;
+};
+
+/* What d3d9.dll learns about a shared resource before opening it */
+struct NineSharedResourceInfo
+{
+    UINT Width;
+    UINT Height;
+    D3DDDIFORMAT Format;
+    D3DRESOURCETYPE Type;
+    UINT64 Usage;
+    BOOL NtHandle;
+    BOOL CreatedBy9On12;
+
+    /* Textures give their multisample type and quality, buffers their size in the second */
+    UINT Multisample;
+    UINT QualityOrSize;
+    UINT Levels;
+    UINT Depth;
 };
 
 /* Clears what the translation layer still has bound before letting a resource go */
@@ -223,6 +251,13 @@ NineDestroyResource(
 
 HRESULT
 APIENTRY
+NineOpenResource(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_OPENRESOURCE* Args,
+    _In_ const NineOpenResourceArgs* OpenArgs);
+
+HRESULT
+APIENTRY
 NineLock(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDIARG_LOCK* Args);
@@ -291,6 +326,47 @@ NineBlt(
 VOID
 NineUnbindOutputs(
     _Inout_ NineResource* Resource);
+
+/* share.cpp */
+UINT
+APIENTRY
+NineQueryResourceDriverDataSize(
+    _In_ HANDLE hDevice);
+
+HRESULT
+APIENTRY
+NineCreateKmtHandle(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE Object,
+    _Out_ UINT* Kmt,
+    _Out_writes_bytes_(DataSize) VOID* Data,
+    _In_ UINT DataSize);
+
+HRESULT
+APIENTRY
+NineQueryResourceFromKmtHandle(
+    _In_ HANDLE hDevice,
+    _In_ UINT Kmt,
+    _Out_ NineSharedResourceInfo* Info);
+
+HRESULT
+APIENTRY
+NineDestroyKmtHandle(
+    _In_ HANDLE hDevice,
+    _In_ UINT Kmt);
+
+HRESULT
+APIENTRY
+NineCreateWrappingHandle(
+    _In_ HANDLE hDevice,
+    _In_ IUnknown* Object,
+    _Out_ HANDLE* Wrapping);
+
+VOID
+APIENTRY
+NineDestroyWrappingHandle(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE Wrapping);
 
 /* device.cpp */
 HRESULT

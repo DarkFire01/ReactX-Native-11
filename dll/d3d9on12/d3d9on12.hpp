@@ -31,6 +31,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -162,6 +163,11 @@ NineGetCaps(
 DXGI_FORMAT
 NineDxgiFormat(
     _In_ D3DDDIFORMAT Format);
+
+/* The Direct3D 9 format a shared Direct3D 12 resource is reported with; unknown when there is none */
+D3DDDIFORMAT
+NineD3dFormat(
+    _In_ DXGI_FORMAT Format);
 
 /* Formats the hardware vendors defined that map onto a Direct3D 12 format of their own */
 BOOLEAN

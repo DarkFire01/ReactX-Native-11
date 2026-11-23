@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "d3d9on12.hpp"
+#include "device.hpp"
 
 /* Without SetAppCompatData every limit is left open */
 NineAppCompatInfo NineAppCompat = { 0, { ULONG_MAX, ULONG_MAX }, ULONG_MAX, ULONG_MAX, ULONG_MAX, 0 };
@@ -46,13 +46,13 @@ static const NinePrivateTable NinePrivate =
     reinterpret_cast<PVOID>(NineMissingEntry<9>),
     reinterpret_cast<PVOID>(NineMissingEntry<10>),
     reinterpret_cast<PVOID>(NineMissingEntry<11>),
-    reinterpret_cast<PVOID>(NineMissingEntry<12>),
-    reinterpret_cast<PVOID>(NineMissingCall<13>),
-    reinterpret_cast<PVOID>(NineMissingEntry<14>),
-    reinterpret_cast<PVOID>(NineMissingEntry<15>),
-    reinterpret_cast<PVOID>(NineMissingEntry<16>),
-    reinterpret_cast<PVOID>(NineMissingEntry<17>),
-    reinterpret_cast<PVOID>(NineMissingEntry<18>),
+    reinterpret_cast<PVOID>(NineQueryResourceDriverDataSize),
+    reinterpret_cast<PVOID>(NineOpenResource),
+    reinterpret_cast<PVOID>(NineCreateKmtHandle),
+    reinterpret_cast<PVOID>(NineQueryResourceFromKmtHandle),
+    reinterpret_cast<PVOID>(NineDestroyKmtHandle),
+    reinterpret_cast<PVOID>(NineCreateWrappingHandle),
+    reinterpret_cast<PVOID>(NineDestroyWrappingHandle),
     reinterpret_cast<PVOID>(NineMissingEntry<19>),
     reinterpret_cast<PVOID>(NineMissingEntry<20>),
     reinterpret_cast<PVOID>(NineMissingEntry<21>),
