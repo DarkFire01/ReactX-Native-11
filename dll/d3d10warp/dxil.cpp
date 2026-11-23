@@ -33,6 +33,7 @@
 #include "dxc/DXIL/DxilSampler.h"
 
 #include <d3d11TokenizedProgramFormat.hpp>
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -134,6 +135,14 @@ typedef struct _RX_HANDLE
     UINT Slot;
     UINT Kind;              /* hlsl::DXIL::ResourceKind */
 } RX_HANDLE;
+
+/* A pointer as the object it points into, a constant byte offset and scaled dynamic terms */
+typedef struct _RX_POINTER
+{
+    llvm::Value *Base;
+    UINT Bytes;
+    std::vector<std::pair<llvm::Value *, UINT>> Terms;
+} RX_POINTER;
 
 typedef struct _RX_LOOP
 {
@@ -288,12 +297,33 @@ private:
         _In_ llvm::BasicBlock *From,
         _In_ llvm::BasicBlock *Target);
 
+    BOOLEAN
+    Cases(
+        _In_ llvm::BasicBlock *Block,
+        _In_ llvm::SwitchInst *Switch,
+        _In_opt_ llvm::BasicBlock *Merge);
+
+    BOOLEAN
+    Resolve(
+        _In_ llvm::Value *Pointer,
+        _Out_ RX_POINTER *Place);
+
+    RxTokens
+    Offset(
+        _In_ const RX_POINTER &Place,
+        _In_ UINT Unit);
+
+    BOOLEAN
+    Memory(
+        _In_ llvm::Instruction *Instruction);
+
     hlsl::DxilModule &Dxil;
     hlsl::OP *Op;
     RxTokens Decls;
     RxTokens Body;
     std::unordered_map<const llvm::Value *, UINT> Slots;
     std::unordered_map<const llvm::Value *, UINT> SharedRegisters;
+    std::unordered_map<const llvm::Value *, UINT> Arrays;
     std::unordered_map<const llvm::Value *, std::pair<UINT, UINT>> Inputs;
     UINT NextSlot = 0;
     llvm::DominatorTreeBase<llvm::BasicBlock> PostDominators{ true };
@@ -301,6 +331,7 @@ private:
     llvm::LoopInfo Loops;
     std::vector<RX_LOOP> Open;
     BOOLEAN PixelShader = FALSE;
+    BOOLEAN Failed = FALSE;
 };
 
 UINT
@@ -738,33 +769,6 @@ RxBinaryOf(
     return FALSE;
 }
 
-/* A byte offset into a group shared array from its element pointer */
-BOOLEAN
-RxSharedAddress(
-    _In_ llvm::Value *Pointer,
-    _Out_ llvm::GlobalVariable **Global,
-    _Out_ llvm::Value **Index,
-    _Out_ UINT *Scale,
-    _Out_ UINT *Base)
-{
-    llvm::GEPOperator *Element = llvm::dyn_cast<llvm::GEPOperator>(Pointer);
-
-    *Global = llvm::dyn_cast<llvm::GlobalVariable>(Pointer);
-    *Index = nullptr;
-    *Scale = 4;
-    *Base = 0;
-    if (*Global != nullptr)
-        return TRUE;
-    if (Element == nullptr || Element->getNumIndices() != 2)
-        return FALSE;
-    *Global = llvm::dyn_cast<llvm::GlobalVariable>(Element->getPointerOperand());
-    if (*Global == nullptr)
-        return FALSE;
-    *Index = Element->getOperand(2);
-    *Scale = (UINT)Element->getType()->getPointerElementType()->getPrimitiveSizeInBits() / 8;
-    return *Scale == 4;
-}
-
 BOOLEAN
 RxLowering::Lower(
     _In_ llvm::Instruction *Instruction)
@@ -860,45 +864,177 @@ RxLowering::Lower(
         }
         case llvm::Instruction::GetElementPtr:
             return TRUE;
-        case llvm::Instruction::Load:
-        case llvm::Instruction::Store:
+        case llvm::Instruction::Alloca:
         {
-            BOOLEAN Loading = Instruction->getOpcode() == llvm::Instruction::Load;
-            llvm::Value *Pointer = Loading ? Instruction->getOperand(0) : Instruction->getOperand(1);
-            llvm::GlobalVariable *Global;
-            llvm::Value *Index;
-            UINT Scale;
-            UINT Base;
-            UINT Offset = Fresh();
-            RxTokens Address;
-            RxTokens Region;
+            llvm::AllocaInst *Alloca = llvm::cast<llvm::AllocaInst>(Instruction);
+            const llvm::DataLayout &Layout = Dxil.GetModule()->getDataLayout();
+            llvm::ConstantInt *Count = llvm::dyn_cast<llvm::ConstantInt>(Alloca->getArraySize());
+            UINT Bytes;
+            UINT Register = (UINT)Arrays.size();
 
-            if (!RxSharedAddress(Pointer, &Global, &Index, &Scale, &Base) || SharedRegisters.count(Global) == 0)
+            if (Count == nullptr)
                 return FALSE;
-            if (Index != nullptr)
-            {
-                Emit(D3D10_SB_OPCODE_ISHL, { Temp(Offset / 4, RxMaskMode, 1u << (Offset & 3)), Source(Index), RxImmediate(2) });
-                Address = Temp(Offset / 4, RxSelectMode, Offset & 3);
-            }
-            else
-            {
-                Address = RxImmediate(0);
-            }
-            if (Loading)
-            {
-                Region = RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxSelectMode, 0, { SharedRegisters[Global] });
-                Emit(D3D11_SB_OPCODE_LD_RAW, { Dest(Instruction), Address, Region });
-            }
-            else
-            {
-                Region = RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, 1, { SharedRegisters[Global] });
-                Emit(D3D11_SB_OPCODE_STORE_RAW, { Region, Address, Source(Instruction->getOperand(0)) });
-            }
+            Bytes = (UINT)(Layout.getTypeAllocSize(Alloca->getAllocatedType()) * Count->getZExtValue());
+            if (Bytes == 0 || (Bytes & 3) != 0)
+                return FALSE;
+            Arrays[Alloca] = Register;
+            Decls.insert(Decls.end(), { ENCODE_D3D10_SB_OPCODE_TYPE(D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP) |
+                                        ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(4), Register, Bytes / 4, 4 });
             return TRUE;
         }
+        case llvm::Instruction::Load:
+        case llvm::Instruction::Store:
+            return Memory(Instruction);
         default:
             return FALSE;
     }
+}
+
+/* Follows casts and element pointers back to the alloca or group shared array they index */
+BOOLEAN
+RxLowering::Resolve(
+    _In_ llvm::Value *Pointer,
+    _Out_ RX_POINTER *Place)
+{
+    const llvm::DataLayout &Layout = Dxil.GetModule()->getDataLayout();
+
+    Place->Base = nullptr;
+    Place->Bytes = 0;
+    Place->Terms.clear();
+    for (;;)
+    {
+        llvm::GEPOperator *Element;
+        llvm::Type *Type;
+
+        if (llvm::isa<llvm::AllocaInst>(Pointer) || llvm::isa<llvm::GlobalVariable>(Pointer))
+        {
+            Place->Base = Pointer;
+            return TRUE;
+        }
+        if (llvm::isa<llvm::BitCastOperator>(Pointer) || llvm::isa<llvm::AddrSpaceCastInst>(Pointer))
+        {
+            Pointer = llvm::cast<llvm::User>(Pointer)->getOperand(0);
+            continue;
+        }
+        if (llvm::ConstantExpr *Expression = llvm::dyn_cast<llvm::ConstantExpr>(Pointer))
+        {
+            if (Expression->getOpcode() == llvm::Instruction::AddrSpaceCast)
+            {
+                Pointer = Expression->getOperand(0);
+                continue;
+            }
+        }
+        Element = llvm::dyn_cast<llvm::GEPOperator>(Pointer);
+        if (Element == nullptr)
+            return FALSE;
+
+        Type = Element->getPointerOperandType();
+        for (UINT Index = 1; Index < Element->getNumOperands(); Index++)
+        {
+            llvm::Value *Step = Element->getOperand(Index);
+            llvm::ConstantInt *Fixed = llvm::dyn_cast<llvm::ConstantInt>(Step);
+            UINT Size;
+
+            if (llvm::StructType *Structure = llvm::dyn_cast<llvm::StructType>(Type))
+            {
+                if (Fixed == nullptr)
+                    return FALSE;
+                Place->Bytes += (UINT)Layout.getStructLayout(Structure)->getElementOffset((UINT)Fixed->getZExtValue());
+                Type = Structure->getElementType((UINT)Fixed->getZExtValue());
+                continue;
+            }
+            Type = llvm::cast<llvm::SequentialType>(Type)->getElementType();
+            Size = (UINT)Layout.getTypeAllocSize(Type);
+            if (Fixed != nullptr)
+                Place->Bytes += (UINT)Fixed->getSExtValue() * Size;
+            else
+                Place->Terms.push_back({ Step, Size });
+        }
+        Pointer = Element->getPointerOperand();
+    }
+}
+
+/* The place's offset in units of Unit bytes: an immediate, or a temp the terms are summed into */
+RxTokens
+RxLowering::Offset(
+    _In_ const RX_POINTER &Place,
+    _In_ UINT Unit)
+{
+    RxTokens Sum = RxImmediate(Place.Bytes / Unit);
+
+    for (const std::pair<llvm::Value *, UINT> &Term : Place.Terms)
+    {
+        UINT Slot = Fresh();
+
+        Emit(D3D10_SB_OPCODE_IMAD, { Temp(Slot / 4, RxMaskMode, 1u << (Slot & 3)), Source(Term.first), RxImmediate(Term.second / Unit), Sum });
+        Sum = Temp(Slot / 4, RxSelectMode, Slot & 3);
+    }
+    return Sum;
+}
+
+/* Loads and stores: allocas live in indexable temps, one element per 32 bits; group shared arrays in raw g# regions */
+BOOLEAN
+RxLowering::Memory(
+    _In_ llvm::Instruction *Instruction)
+{
+    BOOLEAN Loading = Instruction->getOpcode() == llvm::Instruction::Load;
+    llvm::Value *Pointer = Loading ? Instruction->getOperand(0) : Instruction->getOperand(1);
+    llvm::Type *Element = llvm::cast<llvm::PointerType>(Pointer->getType())->getElementType();
+    RX_POINTER Place;
+    RxTokens Address;
+
+    if (!Resolve(Pointer, &Place) || Dxil.GetModule()->getDataLayout().getTypeAllocSize(Element) != 4)
+        return FALSE;
+
+    auto Array = Arrays.find(Place.Base);
+
+    if (Array != Arrays.end())
+    {
+        UINT Mode = Loading ? RxSelectMode : RxMaskMode;
+        UINT Bits = Loading ? 0 : 1;
+        RxTokens Cell;
+
+        if ((Place.Bytes & 3) != 0)
+            return FALSE;
+        for (const std::pair<llvm::Value *, UINT> &Term : Place.Terms)
+        {
+            if ((Term.second & 3) != 0)
+                return FALSE;
+        }
+        Address = Offset(Place, 4);
+        if (Place.Terms.empty())
+        {
+            Cell = RxRegister(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, Mode, Bits, { Array->second, Place.Bytes / 4 });
+        }
+        else
+        {
+            Cell = { RxOperandHead(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, 2) | RxFourComponents(Mode, Bits) |
+                     ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(1, D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE), Array->second, 0 };
+            Cell.insert(Cell.end(), Address.begin(), Address.end());
+        }
+        if (Loading)
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Cell });
+        else
+            Emit(D3D10_SB_OPCODE_MOV, { Cell, Source(Instruction->getOperand(0)) });
+        return TRUE;
+    }
+
+    auto Shared = SharedRegisters.find(Place.Base);
+
+    if (Shared == SharedRegisters.end())
+        return FALSE;
+    Address = Offset(Place, 1);
+    if (Loading)
+    {
+        Emit(D3D11_SB_OPCODE_LD_RAW, { Dest(Instruction), Address,
+                                       RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxSelectMode, 0, { Shared->second }) });
+    }
+    else
+    {
+        Emit(D3D11_SB_OPCODE_STORE_RAW, { RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, 1, { Shared->second }),
+                                          Address, Source(Instruction->getOperand(0)) });
+    }
+    return TRUE;
 }
 
 /* A call that only reads a value per lane: one DXBC instruction with the same operands */
@@ -1084,6 +1220,22 @@ RxLowering::LowerCall(
         case OpCode::Discard:
             Emit(D3D10_SB_OPCODE_DISCARD, { Source(Call->getArgOperand(1)) }, ENCODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(D3D10_SB_INSTRUCTION_TEST_NONZERO));
             return TRUE;
+        case OpCode::UDiv:
+        case OpCode::UMul:
+        case OpCode::IMul:
+        case OpCode::UAddc:
+        case OpCode::USubb:
+        {
+            UINT Opcode = (Code == OpCode::UDiv) ? D3D10_SB_OPCODE_UDIV : (Code == OpCode::UMul) ? D3D10_SB_OPCODE_UMUL :
+                          (Code == OpCode::IMul) ? D3D10_SB_OPCODE_IMUL : (Code == OpCode::UAddc) ? D3D11_SB_OPCODE_UADDC : D3D11_SB_OPCODE_USUBB;
+
+            /* Both results land in one register, the first in x and the second in y */
+            Register = Fresh4();
+            Slots[Call] = Register * 4;
+            Emit(Opcode, { Temp(Register, RxMaskMode, 1), Temp(Register, RxMaskMode, 2), Source(Call->getArgOperand(1)),
+                           Source(Call->getArgOperand(2)) });
+            return TRUE;
+        }
         case OpCode::Cos:
         case OpCode::Sin:
             Emit(D3D10_SB_OPCODE_SINCOS, { (Code == OpCode::Sin) ? Dest(Call) : RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}),
@@ -1356,6 +1508,15 @@ RxLowering::Leaves(
         Emit(D3D10_SB_OPCODE_BREAK, {});
         return TRUE;
     }
+
+    /* A side exit runs its blocks here; they end by reaching the exit, which breaks */
+    if (!Open.back().Loop->contains(Target))
+    {
+        Edge(From, Target);
+        if (!Region(Target, nullptr))
+            Failed = TRUE;
+        return TRUE;
+    }
     return FALSE;
 }
 
@@ -1376,6 +1537,56 @@ RxLowering::Arm(
     return Region(Target, Merge);
 }
 
+/*
+ * A switch becomes a chain of tests, one per target block, each comparing the selector with
+ * every case value that leads there; the default target closes the chain.
+ */
+BOOLEAN
+RxLowering::Cases(
+    _In_ llvm::BasicBlock *Block,
+    _In_ llvm::SwitchInst *Switch,
+    _In_opt_ llvm::BasicBlock *Merge)
+{
+    std::vector<llvm::BasicBlock *> Targets;
+    UINT Depth = 0;
+
+    for (auto Case = Switch->case_begin(); Case != Switch->case_end(); ++Case)
+    {
+        llvm::BasicBlock *Target = Case.getCaseSuccessor();
+
+        if (Target != Switch->getDefaultDest() && std::find(Targets.begin(), Targets.end(), Target) == Targets.end())
+            Targets.push_back(Target);
+    }
+    for (llvm::BasicBlock *Target : Targets)
+    {
+        RxTokens Test;
+
+        for (auto Case = Switch->case_begin(); Case != Switch->case_end(); ++Case)
+        {
+            UINT Slot;
+
+            if (Case.getCaseSuccessor() != Target)
+                continue;
+            Slot = Fresh();
+            Emit(D3D10_SB_OPCODE_IEQ, { Temp(Slot / 4, RxMaskMode, 1u << (Slot & 3)), Source(Switch->getCondition()),
+                                        RxImmediate((UINT)Case.getCaseValue()->getZExtValue()) });
+            if (!Test.empty())
+                Emit(D3D10_SB_OPCODE_OR, { Temp(Slot / 4, RxMaskMode, 1u << (Slot & 3)), Temp(Slot / 4, RxSelectMode, Slot & 3), Test });
+            Test = Temp(Slot / 4, RxSelectMode, Slot & 3);
+        }
+        Emit(D3D10_SB_OPCODE_IF, { Test }, ENCODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(D3D10_SB_INSTRUCTION_TEST_NONZERO));
+        if (!Arm(Block, Target, Merge))
+            return FALSE;
+        Emit(D3D10_SB_OPCODE_ELSE, {});
+        Depth += 1;
+    }
+    if (!Arm(Block, Switch->getDefaultDest(), Merge))
+        return FALSE;
+    for (UINT Remaining = Depth; Remaining > 0; Remaining -= 1)
+        Emit(D3D10_SB_OPCODE_ENDIF, {});
+    return TRUE;
+}
+
 BOOLEAN
 RxLowering::Region(
     _In_ llvm::BasicBlock *Block,
@@ -1389,9 +1600,21 @@ RxLowering::Region(
         /* Entering a loop: its body runs until a break */
         if (Loop != nullptr && Loop->getHeader() == Block && (Open.empty() || Open.back().Header != Block))
         {
-            llvm::BasicBlock *Exit = Loop->getExitBlock();
+            llvm::SmallVector<llvm::BasicBlock *, 4> Exits;
+            llvm::BasicBlock *Exit;
 
-            if (Exit == nullptr)
+            /* Several exits meet where they all join; the others run inside the loop and then break */
+            Loop->getExitBlocks(Exits);
+            if (Exits.empty())
+                return FALSE;
+            Exit = Exits[0];
+            for (llvm::BasicBlock *Other : Exits)
+            {
+                Exit = PostDominators.findNearestCommonDominator(Exit, Other);
+                if (Exit == nullptr)
+                    return FALSE;
+            }
+            if (Loop->contains(Exit))
                 return FALSE;
             Open.push_back({ Block, Exit, Loop });
             Emit(D3D10_SB_OPCODE_LOOP, {});
@@ -1422,6 +1645,20 @@ RxLowering::Region(
         {
             Emit(D3D10_SB_OPCODE_RET, {});
             return TRUE;
+        }
+        if (llvm::SwitchInst *Switch = llvm::dyn_cast<llvm::SwitchInst>(Terminator))
+        {
+            llvm::DomTreeNodeBase<llvm::BasicBlock> *Node = PostDominators.getNode(Block);
+            llvm::BasicBlock *Merge = (Node && Node->getIDom()) ? Node->getIDom()->getBlock() : nullptr;
+
+            if (Merge != nullptr && !Open.empty() && !Open.back().Loop->contains(Merge))
+                Merge = nullptr;
+            if (!Cases(Block, Switch, Merge))
+                return FALSE;
+            if (Merge == nullptr)
+                return TRUE;
+            Block = Merge;
+            continue;
         }
         llvm::BranchInst *Branch = llvm::dyn_cast<llvm::BranchInst>(Terminator);
         if (Branch == nullptr)
@@ -1483,7 +1720,7 @@ RxLowering::Run(
     Dominators.recalculate(*Entry);
     PostDominators.recalculate(*Entry);
     Loops.Analyze(Dominators);
-    if (!Region(&Entry->getEntryBlock(), nullptr))
+    if (!Region(&Entry->getEntryBlock(), nullptr) || Failed)
         return FALSE;
 
     Program->clear();
