@@ -103,6 +103,61 @@ XaMixMonoToStereo(
     }
 }
 
+/* 5.1 folded to stereo, the sums split in two halves the way the system pairs them */
+static
+VOID
+XaMixFiveOneToStereo(
+    _In_ const XaMixBlock* Block)
+{
+    float M[12];
+
+    memcpy(M, Block->Matrix, sizeof(M));
+    for (UINT32 Frame = 0; Frame < Block->Frames; Frame++)
+    {
+        const float* X = Block->Input + static_cast<SIZE_T>(Frame) * 6;
+        float* Out = Block->Output + static_cast<SIZE_T>(Frame) * 2;
+        float Front;
+        float Rear;
+
+        if (Block->Delta == nullptr)
+        {
+            Front = fmaf(M[0], X[0], fmaf(M[1], X[1], M[2] * X[2]));
+            if (Block->Accumulate)
+                Out[0] = Front + (M[4] * X[4] + fmaf(M[3], X[3], fmaf(M[5], X[5], Out[0])));
+            else
+                Out[0] = Front + fmaf(M[3], X[3], fmaf(M[5], X[5], M[4] * X[4]));
+            Front = fmaf(M[6], X[0], fmaf(M[7], X[1], M[8] * X[2]));
+            if (Block->Accumulate)
+                Out[1] = Front + (M[10] * X[4] + fmaf(M[9], X[3], fmaf(M[11], X[5], Out[1])));
+            else
+                Out[1] = Front + fmaf(M[9], X[3], fmaf(M[11], X[5], M[10] * X[4]));
+            continue;
+        }
+
+        /* While ramping the gains step once a frame */
+        if (Block->Accumulate)
+        {
+            Front = fmaf(M[1], X[1], fmaf(M[2], X[2], M[0] * X[0]));
+            Rear = fmaf(M[3], X[3], fmaf(M[4], X[4], fmaf(M[5], X[5], Out[0])));
+            Out[0] = Front + Rear;
+            Rear = fmaf(M[10], X[4], fmaf(M[9], X[3], fmaf(M[11], X[5], Out[1])));
+            Front = fmaf(M[7], X[1], fmaf(M[6], X[0], M[8] * X[2]));
+            Out[1] = Front + Rear;
+        }
+        else
+        {
+            Front = fmaf(M[1], X[1], fmaf(M[2], X[2], M[0] * X[0]));
+            Rear = fmaf(M[3], X[3], fmaf(M[5], X[5], M[4] * X[4]));
+            Out[0] = Front + Rear;
+            Front = fmaf(M[7], X[1], fmaf(M[8], X[2], M[6] * X[0]));
+            Rear = fmaf(M[9], X[3], fmaf(M[11], X[5], M[10] * X[4]));
+            Out[1] = Front + Rear;
+        }
+        for (UINT32 Cell = 0; Cell < 12; Cell++)
+            M[Cell] = M[Cell] + Block->Delta[Cell];
+    }
+}
+
 /* Channel for channel, sample by sample */
 static
 VOID
@@ -154,6 +209,8 @@ XaMatrixMix(
 {
     if (Block->InputChannels == 1 && Block->OutputChannels == 2)
         XaMixMonoToStereo(Block);
+    else if (Block->InputChannels == 6 && Block->OutputChannels == 2)
+        XaMixFiveOneToStereo(Block);
     else if (Block->InputChannels == Block->OutputChannels && Block->InputChannels <= 8 &&
              XaMatrixDiagonal(Block->Matrix, Block->InputChannels))
         XaMixDiagonal(Block);
