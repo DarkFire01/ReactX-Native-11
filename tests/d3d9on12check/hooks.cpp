@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -119,11 +120,12 @@ struct CkHookState
     PFN_CK_FORWARD Originals[CkFamilyCount][CkSlotLimit];
     std::unordered_map<const VOID*, std::string> Ids;
     std::vector<CkThread*> Threads;
+    std::map<std::string, UINT> StateCalls;
     DWORD MainThread;
     SRWLOCK Lock;
 };
 
-static CkHookState CkHooks = { {}, {}, {}, 0, SRWLOCK_INIT };
+static CkHookState CkHooks = { {}, {}, {}, {}, 0, SRWLOCK_INIT };
 static thread_local CkThread* CkSelf;
 
 static
@@ -545,6 +547,32 @@ CkDescribeDdiResult(
     }
 }
 
+/* Device DDI entries that only record state and make no Direct3D 12 calls */
+static
+BOOLEAN
+CkIsStateSlot(
+    _In_ UINT Slot)
+{
+    static const UINT StateSlots[] = { 0, 1, 3, 6, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 48, 49, 50, 65, 66 };
+
+    for (UINT Index = 0; Index < _countof(StateSlots); Index++)
+    {
+        if (StateSlots[Index] == Slot)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+VOID
+CkFlushState(VOID)
+{
+    AcquireSRWLockExclusive(&CkHooks.Lock);
+    for (const auto& Call : CkHooks.StateCalls)
+        printf("state %s x%u\n", Call.first.c_str(), Call.second);
+    CkHooks.StateCalls.clear();
+    ReleaseSRWLockExclusive(&CkHooks.Lock);
+}
+
 static
 UINT_PTR
 CkDispatch(
@@ -600,10 +628,27 @@ CkDispatch(
         CkAppend(&Line, " = %08lX", static_cast<ULONG>(Result));
     }
 
+    /*
+     * The runtime hands state calls to a worker thread at varying points, so they are counted
+     * instead of printed in order.
+     */
+    if (Family == CkFamilyDdi && Depth == 0 && CkIsStateSlot(Slot))
+    {
+        AcquireSRWLockExclusive(&CkHooks.Lock);
+        CkHooks.StateCalls[Text.substr(4) + Line.substr(Line.rfind(" = "))] += 1;
+        ReleaseSRWLockExclusive(&CkHooks.Lock);
+        return Result;
+    }
+
     if (Self->Index == 0)
         printf("%s\n", Line.c_str());
     else
+    {
+        /* The main thread drains these lines while workers keep adding to them */
+        AcquireSRWLockExclusive(&CkHooks.Lock);
         Self->Lines.push_back(Line);
+        ReleaseSRWLockExclusive(&CkHooks.Lock);
+    }
     return Result;
 }
 

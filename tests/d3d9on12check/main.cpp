@@ -490,6 +490,115 @@ CkQueryAdapter(
     }
 }
 
+/* Reads a render target back through a system memory surface and prints a few pixels and a sum */
+static
+VOID
+CkReadBack(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Target,
+    _In_z_ PCSTR Label)
+{
+    static const POINT Probes[] = { { 0, 0 }, { 10, 10 }, { 30, 20 }, { 63, 47 } };
+    IDirect3DSurface9* Copy = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    D3DSURFACE_DESC Desc = {};
+    HRESULT hr;
+
+    Target->GetDesc(&Desc);
+    hr = Device->CreateOffscreenPlainSurface(Desc.Width, Desc.Height, Desc.Format, D3DPOOL_SYSTEMMEM, &Copy, nullptr);
+    printf("%s CreateOffscreenPlainSurface hr %08lX\n", Label, hr);
+    if (FAILED(hr))
+        return;
+
+    hr = Device->GetRenderTargetData(Target, Copy);
+    printf("%s GetRenderTargetData hr %08lX\n", Label, hr);
+    hr = Copy->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    printf("%s LockRect hr %08lX\n", Label, hr);
+    if (SUCCEEDED(hr))
+    {
+        ULONG Sum = 0;
+
+        for (UINT Row = 0; Row < Desc.Height; Row++)
+        {
+            const DWORD* Line = reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(Locked.pBits) + Row * Locked.Pitch);
+
+            for (UINT Column = 0; Column < Desc.Width; Column++)
+                Sum = Sum * 31 + Line[Column];
+        }
+        printf("%s pixels", Label);
+        for (const POINT& Probe : Probes)
+        {
+            const DWORD* Line =
+                reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(Locked.pBits) + Probe.y * Locked.Pitch);
+
+            printf(" %08lX", Line[Probe.x]);
+        }
+        printf(" sum %08lX\n", Sum);
+        Copy->UnlockRect();
+    }
+    Copy->Release();
+}
+
+/* Clears, fills, copies and presents the back buffer, reading the results back */
+static
+VOID
+CkScene(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSurface9* Back = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Depth = nullptr;
+    RECT Fill = { 8, 8, 24, 24 };
+    RECT Source = { 0, 0, 32, 24 };
+    RECT Dest = { 0, 0, 64, 48 };
+    HRESULT hr;
+
+    printf("== scene\n");
+    hr = Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF336699, 1.0f, 0);
+    printf("Clear hr %08lX\n", hr);
+
+    hr = Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back);
+    printf("GetBackBuffer hr %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+
+    hr = Device->ColorFill(Back, &Fill, 0xFF00FF00);
+    printf("ColorFill hr %08lX\n", hr);
+    CkReadBack(Device, Back, "back");
+
+    hr = Device->CreateDepthStencilSurface(64, 48, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, TRUE, &Depth, nullptr);
+    printf("CreateDepthStencilSurface hr %08lX\n", hr);
+    if (Depth != nullptr)
+    {
+        hr = Device->SetDepthStencilSurface(Depth);
+        printf("SetDepthStencilSurface hr %08lX\n", hr);
+        hr = Device->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 0.5f, 3);
+        printf("Clear depth hr %08lX\n", hr);
+    }
+
+    hr = Device->CreateRenderTarget(64, 48, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Target, nullptr);
+    printf("CreateRenderTarget hr %08lX\n", hr);
+    if (Target != nullptr)
+    {
+        hr = Device->StretchRect(Back, &Source, Target, &Dest, D3DTEXF_POINT);
+        printf("StretchRect hr %08lX\n", hr);
+        CkReadBack(Device, Target, "target");
+    }
+
+    hr = Device->Present(nullptr, nullptr, nullptr, nullptr);
+    printf("Present hr %08lX\n", hr);
+
+    if (Target != nullptr)
+        Target->Release();
+    if (Depth != nullptr)
+    {
+        Device->SetDepthStencilSurface(nullptr);
+        Depth->Release();
+    }
+    Back->Release();
+    CkFlushWorkers();
+}
+
 static
 VOID
 CkCreateDevice(
@@ -512,8 +621,13 @@ CkCreateDevice(
     hr = D3D->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Parameters, &Device);
     printf("IDirect3D9::CreateDevice behavior %08lX hr %08lX\n", Behavior, hr);
     if (Device != nullptr)
+    {
+        CkFlushWorkers();
+        CkScene(Device);
         printf("  device released %lu\n", Device->Release());
+    }
     CkFlushWorkers();
+    CkFlushState();
 }
 
 static
