@@ -1109,7 +1109,7 @@ ScVertexContext::WriteDeclarations()
 
     Asm->EmitTempsDecl(TempCount);
     if (VertexFlags & ScVertexIndexedOutputs)
-        Asm->EmitIndexableTempDecl(0, 32, 4);
+        Asm->EmitIndexableTempDecl(0, 12, 4);
 
     if (FloatSize)
     {
