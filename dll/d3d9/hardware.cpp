@@ -1393,14 +1393,12 @@ D9DriverLockFlags(
     Driver->NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
 }
 
-/* A batching device locks dynamic and system memory buffers asynchronously when the lock discards, does not
-   overwrite or only tells the driver; a discard renames the buffer in the batch */
+/* A batching device locks dynamic and system memory resources asynchronously when the lock discards, does not
+   overwrite or only tells the driver; a discard renames the resource in the batch */
 HRESULT
-D9Device::LockAsyncBuffer(
-    _In_ D9Resource* Resource,
-    _In_ const D3DDDIARG_LOCK* Request,
-    _In_ UINT LockCount,
-    _Outptr_ VOID** Data)
+D9Device::LockAsyncResource(
+    _Inout_ D3DDDIARG_LOCK* Request,
+    _In_ UINT LockCount)
 {
     D3DDDIARG_LOCKASYNC Args = {};
     D3DDDIARG_RENAME Rename = {};
@@ -1410,6 +1408,7 @@ D9Device::LockAsyncBuffer(
         return E_FAIL;
 
     Args.hResource = Request->hResource;
+    Args.SubResourceIndex = Request->SubResourceIndex;
     Args.Flags.NoOverwrite = Request->Flags.NoOverwrite;
     Args.Flags.Discard = Request->Flags.Discard && !Request->Flags.NotifyOnly;
     Args.Flags.NotifyOnly = Request->Flags.NotifyOnly;
@@ -1418,8 +1417,18 @@ D9Device::LockAsyncBuffer(
         Args.Flags.RangeValid = TRUE;
         Args.Range = Request->Range;
     }
+    if (Request->Flags.AreaValid)
+    {
+        Args.Flags.AreaValid = TRUE;
+        Args.Area = Request->Area;
+    }
+    if (Request->Flags.BoxValid)
+    {
+        Args.Flags.BoxValid = TRUE;
+        Args.Box = Request->Box;
+    }
 
-    /* Notifying the driver of a buffer the batch still uses waits for the batch */
+    /* Notifying the driver of a resource the batch still uses waits for the batch */
     if (!Request->Flags.NotifyOnly || Request->Flags.NoOverwrite)
     {
         Args.Flags.NoExistingReferences = !Batch->IsReferenced(Request->hResource);
@@ -1434,17 +1443,75 @@ D9Device::LockAsyncBuffer(
     hr = DeviceFunctions.pfnLockAsync(DriverDevice, &Args);
     if (FAILED(hr))
         return hr;
-    *Data = Args.pSurfData;
+    Request->pSurfData = Args.pSurfData;
+    Request->Pitch = Args.Pitch;
+    Request->SlicePitch = Args.SlicePitch;
 
     if (Args.Flags.Discard && LockCount == 0)
     {
         Rename.hResource = Request->hResource;
+        Rename.SubResourceIndex = Request->SubResourceIndex;
         Rename.hCookie = Args.hCookie;
         if (!D9RecordCall(Batch, D9BatchCall::Rename, &Rename, sizeof(Rename)))
             DeviceFunctions.pfnRename(DriverDevice, &Rename);
         Batch->Reference(Request->hResource);
     }
     return S_OK;
+}
+
+/* Dynamic and system memory resources of a batching device may lock without waiting for the batch */
+BOOLEAN
+D9Device::LocksAsync(
+    _In_ const D9Resource* Resource) const
+{
+    return Batch != nullptr && (Resource->Flags.Dynamic || Resource->Pool == D3DDDIPOOL_SYSTEMMEM);
+}
+
+/* Locks a surface or texture resource, asynchronously when it may */
+HRESULT
+D9Device::LockDriverResource(
+    _In_ D9Resource* Resource,
+    _Inout_ D3DDDIARG_LOCK* Args,
+    _Out_ BOOLEAN* Asynchronous)
+{
+    HRESULT hr;
+
+    *Asynchronous = FALSE;
+    if (LocksAsync(Resource) && SUCCEEDED(LockAsyncResource(Args, 0)))
+    {
+        *Asynchronous = TRUE;
+        return S_OK;
+    }
+
+    DrainBatch();
+    hr = DeviceFunctions.pfnLock(DriverDevice, Args);
+    if (FAILED(hr) && hr != D3DERR_WASSTILLDRAWING)
+        D9Trace(L"UMD Lock failed 0x%08lX", hr);
+    return hr;
+}
+
+/* Unlocks what LockDriverResource locked, the same way it was locked */
+HRESULT
+D9Device::UnlockDriverResource(
+    _In_ D9Resource* Resource,
+    _In_ UINT Index,
+    _In_ BOOLEAN Asynchronous)
+{
+    D3DDDIARG_UNLOCKASYNC Quick = {};
+    D3DDDIARG_UNLOCK Unlock = {};
+
+    if (Asynchronous)
+    {
+        Quick.hResource = Resource->DriverResource;
+        Quick.SubResourceIndex = Index;
+        Quick.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
+        return DeviceFunctions.pfnUnlockAsync(DriverDevice, &Quick);
+    }
+    Unlock.hResource = Resource->DriverResource;
+    Unlock.SubResourceIndex = Index;
+    Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
+    DrainBatch();
+    return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
 }
 
 HRESULT
@@ -1472,9 +1539,12 @@ D9Device::LockDriverBuffer(
 
     if (*Asynchronous && Batch != nullptr)
     {
-        hr = LockAsyncBuffer(Resource, &Args, LockCount, Data);
+        hr = LockAsyncResource(&Args, LockCount);
         if (SUCCEEDED(hr))
+        {
+            *Data = Args.pSurfData;
             return S_OK;
+        }
     }
     *Asynchronous = FALSE;
 
@@ -1495,7 +1565,8 @@ D9Device::LockDriverSurface(
     _In_ D9Resource* Resource,
     _In_opt_ const RECT* Rect,
     _In_ DWORD Flags,
-    _Out_ D3DLOCKED_RECT* Locked)
+    _Out_ D3DLOCKED_RECT* Locked,
+    _Out_ BOOLEAN* Asynchronous)
 {
     D3DDDIARG_LOCK Args = {};
     HRESULT hr;
@@ -1508,14 +1579,9 @@ D9Device::LockDriverSurface(
         Args.Area = *Rect;
     }
 
-    DrainBatch();
-    hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
+    hr = LockDriverResource(Resource, &Args, Asynchronous);
     if (FAILED(hr))
-    {
-        if (hr != D3DERR_WASSTILLDRAWING)
-            D9Trace(L"UMD Lock failed 0x%08lX", hr);
         return hr;
-    }
 
     Locked->pBits = Args.pSurfData;
     Locked->Pitch = static_cast<INT>(Args.Pitch);
@@ -1530,7 +1596,7 @@ D9Device::UnlockDriverBuffer(
     D3DDDIARG_UNLOCKASYNC Unlock = {};
 
     if (!Asynchronous)
-        return UnlockDriverSurface(Resource);
+        return UnlockDriverSurface(Resource, FALSE);
 
     Unlock.hResource = Resource->DriverResource;
     Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
@@ -1539,14 +1605,10 @@ D9Device::UnlockDriverBuffer(
 
 HRESULT
 D9Device::UnlockDriverSurface(
-    _In_ D9Resource* Resource)
+    _In_ D9Resource* Resource,
+    _In_ BOOLEAN Asynchronous)
 {
-    D3DDDIARG_UNLOCK Unlock = {};
-
-    Unlock.hResource = Resource->DriverResource;
-    Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
-    DrainBatch();
-    return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
+    return UnlockDriverResource(Resource, 0, Asynchronous);
 }
 
 HRESULT
@@ -1571,7 +1633,8 @@ D9Device::LockDriverSubresource(
     _In_opt_ const D3DBOX* Box,
     _In_ BOOLEAN IsVolume,
     _In_ DWORD Flags,
-    _Out_ D3DLOCKED_BOX* Locked)
+    _Out_ D3DLOCKED_BOX* Locked,
+    _Out_ BOOLEAN* Asynchronous)
 {
     D3DDDIARG_LOCK Args = {};
     HRESULT hr;
@@ -1601,14 +1664,9 @@ D9Device::LockDriverSubresource(
         }
     }
 
-    DrainBatch();
-    hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
+    hr = LockDriverResource(Resource, &Args, Asynchronous);
     if (FAILED(hr))
-    {
-        if (hr != D3DERR_WASSTILLDRAWING)
-            D9Trace(L"UMD Lock of a texture failed 0x%08lX", hr);
         return hr;
-    }
     Locked->pBits = Args.pSurfData;
     Locked->RowPitch = static_cast<INT>(Args.Pitch);
     Locked->SlicePitch = static_cast<INT>(Args.SlicePitch);
@@ -1618,16 +1676,10 @@ D9Device::LockDriverSubresource(
 HRESULT
 D9Device::UnlockDriverSubresource(
     _In_ D9Resource* Resource,
-    _In_ UINT Index)
+    _In_ UINT Index,
+    _In_ BOOLEAN Asynchronous)
 {
-    D3DDDIARG_UNLOCK Unlock = {};
-
-    Unlock.hResource = Resource->DriverResource;
-    Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
-    if (!Unlock.Flags.NotifyOnly)
-        Unlock.SubResourceIndex = Index;
-    DrainBatch();
-    return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
+    return UnlockDriverResource(Resource, Resource->Pool == D3DDDIPOOL_SYSTEMMEM ? 0 : Index, Asynchronous);
 }
 
 /* Copies a region of one face's top level, which the driver repeats down the levels */

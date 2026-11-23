@@ -702,7 +702,7 @@ D9TextureCore::LockMemorySubresource(
         return D3DERR_INVALIDCALL;
     if (Resource != nullptr)
     {
-        hr = Device->LockDriverSubresource(Resource, 0, nullptr, FALSE, Flags, &Driver);
+        hr = Device->LockDriverSubresource(Resource, 0, nullptr, FALSE, Flags, &Driver, &Entry->LockedAsync);
         if (FAILED(hr))
             return hr;
     }
@@ -777,7 +777,7 @@ D9TextureCore::LockSubresource(
             D9_TRACE_ONCE(L"a texture level cannot be locked now");
             return D3DERR_INVALIDCALL;
         }
-        hr = Device->LockDriverSubresource(Resource, Index, Box, IsVolume, Flags, Locked);
+        hr = Device->LockDriverSubresource(Resource, Index, Box, IsVolume, Flags, Locked, &Entry->LockedAsync);
         if (SUCCEEDED(hr))
             Entry->Locked = TRUE;
     }
@@ -805,11 +805,11 @@ D9TextureCore::UnlockSubresource(
     if (Memory != nullptr)
     {
         if (Resource != nullptr)
-            hr = Device->UnlockDriverSubresource(Resource, 0);
+            hr = Device->UnlockDriverSubresource(Resource, 0, Entry->LockedAsync);
     }
     else if (Lockable)
     {
-        hr = Device->UnlockDriverSubresource(Resource, Index);
+        hr = Device->UnlockDriverSubresource(Resource, Index, Entry->LockedAsync);
     }
     if (SUCCEEDED(hr))
         Entry->Locked = FALSE;

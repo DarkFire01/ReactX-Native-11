@@ -621,7 +621,7 @@ D9Surface::LockMemory(
         return D3DERR_INVALIDCALL;
     if (Resource != nullptr)
     {
-        hr = Device->LockDriverSurface(Resource, nullptr, Flags, Locked);
+        hr = Device->LockDriverSurface(Resource, nullptr, Flags, Locked, &LockedAsync);
         if (FAILED(hr))
             return hr;
     }
@@ -691,7 +691,7 @@ D9Surface::LockRect(
         return D3DERR_INVALIDCALL;
     }
 
-    hr = Device->LockDriverSurface(Resource, Rect, Flags, Locked);
+    hr = Device->LockDriverSurface(Resource, Rect, Flags, Locked, &LockedAsync);
     if (FAILED(hr))
         return hr;
 
@@ -713,7 +713,7 @@ D9Surface::UnlockRect()
         return D3DERR_INVALIDCALL;
 
     if (Resource != nullptr)
-        hr = Device->UnlockDriverSurface(Resource);
+        hr = Device->UnlockDriverSurface(Resource, LockedAsync);
     IsLocked = FALSE;
     return hr;
 }

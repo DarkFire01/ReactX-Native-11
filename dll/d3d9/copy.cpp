@@ -191,6 +191,7 @@ D9Device::GetRenderTargetData(
     D3DDDIARG_BLT Blt = {};
     D3DLOCKED_BOX Box;
     D3DLOCKED_RECT Locked;
+    BOOLEAN Asynchronous;
     D9Resource* Memory;
     UINT Index;
 
@@ -222,12 +223,12 @@ D9Device::GetRenderTargetData(
     Memory = Target->CopyResource(&Index);
     if (Target->OwnerTexture() != nullptr)
     {
-        if (SUCCEEDED(LockDriverSubresource(Memory, Index, nullptr, FALSE, 0, &Box)))
-            UnlockDriverSubresource(Memory, Index);
+        if (SUCCEEDED(LockDriverSubresource(Memory, Index, nullptr, FALSE, 0, &Box, &Asynchronous)))
+            UnlockDriverSubresource(Memory, Index, Asynchronous);
     }
-    else if (SUCCEEDED(LockDriverSurface(Memory, nullptr, 0, &Locked)))
+    else if (SUCCEEDED(LockDriverSurface(Memory, nullptr, 0, &Locked, &Asynchronous)))
     {
-        UnlockDriverSurface(Memory);
+        UnlockDriverSurface(Memory, Asynchronous);
     }
 
     Blt.hSrcResource = Source->CopyResource(&Blt.SrcSubResourceIndex)->DriverResource;

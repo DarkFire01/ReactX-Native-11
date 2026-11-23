@@ -626,6 +626,7 @@ private:
     BOOLEAN Lockable;
     BOOLEAN Discard;
     BOOLEAN IsLocked = FALSE;
+    BOOLEAN LockedAsync = FALSE;
     DWORD ResourcePriority = 0;
 
     /* Surfaces the application made on their own go away with their last reference */
@@ -752,6 +753,7 @@ struct D9Subresource
     UINT SlicePitch;
     SIZE_T Offset;
     BOOLEAN Locked;
+    BOOLEAN LockedAsync;
 };
 
 /* Managed textures remember up to this many dirty regions per face before they count as wholly dirty */
@@ -1976,11 +1978,13 @@ public:
         _In_ D9Resource* Resource,
         _In_opt_ const RECT* Rect,
         _In_ DWORD Flags,
-        _Out_ D3DLOCKED_RECT* Locked);
+        _Out_ D3DLOCKED_RECT* Locked,
+        _Out_ BOOLEAN* Asynchronous);
 
     HRESULT
     UnlockDriverSurface(
-        _In_ D9Resource* Resource);
+        _In_ D9Resource* Resource,
+        _In_ BOOLEAN Asynchronous);
 
     /* Textures: one driver resource holding every level and face */
     HRESULT
@@ -1997,12 +2001,14 @@ public:
         _In_opt_ const D3DBOX* Box,
         _In_ BOOLEAN IsVolume,
         _In_ DWORD Flags,
-        _Out_ D3DLOCKED_BOX* Locked);
+        _Out_ D3DLOCKED_BOX* Locked,
+        _Out_ BOOLEAN* Asynchronous);
 
     HRESULT
     UnlockDriverSubresource(
         _In_ D9Resource* Resource,
-        _In_ UINT Index);
+        _In_ UINT Index,
+        _In_ BOOLEAN Asynchronous);
 
     VOID
     DriverTexBlt(
@@ -3216,11 +3222,25 @@ private:
     QueryProtection(VOID);
 
     HRESULT
-    LockAsyncBuffer(
+    LockAsyncResource(
+        _Inout_ D3DDDIARG_LOCK* Request,
+        _In_ UINT LockCount);
+
+    BOOLEAN
+    LocksAsync(
+        _In_ const D9Resource* Resource) const;
+
+    HRESULT
+    LockDriverResource(
         _In_ D9Resource* Resource,
-        _In_ const D3DDDIARG_LOCK* Request,
-        _In_ UINT LockCount,
-        _Outptr_ VOID** Data);
+        _Inout_ D3DDDIARG_LOCK* Args,
+        _Out_ BOOLEAN* Asynchronous);
+
+    HRESULT
+    UnlockDriverResource(
+        _In_ D9Resource* Resource,
+        _In_ UINT Index,
+        _In_ BOOLEAN Asynchronous);
 
     template <class Buffer>
     HRESULT
