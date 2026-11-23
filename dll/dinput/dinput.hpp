@@ -16,6 +16,7 @@
 #include <dinput.h>
 #include <dinputd.h>
 
+#include "effecthost.hpp"
 #include "trace.hpp"
 
 #ifndef MAXULONG
@@ -85,22 +86,6 @@ struct RX_DI_SOURCE;
 /* GetDeviceData flag that reads what is left after the device was lost */
 #define DI_GDD_RESIDUAL         0x00000002
 
-/* How RxDiDevice::ConvertObjects reads and writes objects, combined with the wanted type bits */
-#define DI_CONVERT_FROM_ID      0x00000100
-#define DI_CONVERT_FROM_OFFSET  0x00000200
-#define DI_CONVERT_TO_ID        0x00001000
-#define DI_CONVERT_TO_OFFSET    0x00002000
-
-/* SetForceFeedbackState command the runtime sends when a device is acquired */
-#define DI_FF_ACQUIRE           0x80000000
-
-/* What the device hands the effect shepherd to name itself */
-typedef struct _RX_DI_FF_HANDLE
-{
-    DWORD Id;
-    DWORD Tag;
-} RX_DI_FF_HANDLE;
-
 /* Force feedback state each joystick shares across processes */
 #define DI_JOY_SLOTS            16
 
@@ -110,27 +95,6 @@ typedef struct _RX_DI_JOY_SLOT
     DWORD GlobalGain;
     DWORD DeviceGain;
 } RX_DI_JOY_SLOT;
-
-/* Per device go between for the force feedback driver */
-class RxDiShepherd
-{
-public:
-    virtual ~RxDiShepherd() {}
-
-    virtual HRESULT DeviceID(_In_ DWORD ExternalId, _In_ DWORD Begin, _In_ PVOID Info) = 0;
-    virtual HRESULT GetVersions(_Inout_ LPDIDRIVERVERSIONS Versions) = 0;
-    virtual HRESULT Escape(_In_ RX_DI_FF_HANDLE* Handle, _Inout_ LPDIEFFESCAPE Request) = 0;
-    virtual HRESULT DeviceEscape(_In_ RX_DI_FF_HANDLE* Handle, _Inout_ LPDIEFFESCAPE Request) = 0;
-    virtual HRESULT SetGain(_In_ RX_DI_FF_HANDLE* Handle, _In_ DWORD Gain) = 0;
-    virtual HRESULT SetForceFeedbackState(_In_ RX_DI_FF_HANDLE* Handle, _In_ DWORD Command) = 0;
-    virtual HRESULT GetForceFeedbackState(_In_ RX_DI_FF_HANDLE* Handle, _Inout_ LPDIDEVICESTATE State) = 0;
-    virtual HRESULT DownloadEffect(_Inout_ RX_DI_FF_HANDLE* Handle, _In_ DWORD EffectId, _In_ LPCDIEFFECT Params, _In_ DWORD Flags) = 0;
-    virtual HRESULT DestroyEffect(_Inout_ RX_DI_FF_HANDLE* Handle) = 0;
-    virtual HRESULT StartEffect(_In_ RX_DI_FF_HANDLE* Handle, _In_ DWORD Mode, _In_ DWORD Count) = 0;
-    virtual HRESULT StopEffect(_In_ RX_DI_FF_HANDLE* Handle) = 0;
-    virtual HRESULT GetEffectStatus(_In_ RX_DI_FF_HANDLE* Handle, _Out_ LPDWORD Status) = 0;
-    virtual HRESULT SetGlobalGain(_In_ DWORD Gain) = 0;
-};
 
 /* One device instance's view of an emulated input class */
 typedef struct _RX_DI_SINK
@@ -242,20 +206,6 @@ HRESULT
 (*PRX_DI_BACKEND_CREATE)(
     _In_ REFGUID Instance,
     _Outptr_ RxDiBackend** Backend);
-
-/* One effect a force feedback driver lists in the registry */
-struct RX_DI_EFFECT_ENTRY
-{
-    DWORD Id;
-    DWORD EffectType;
-    DWORD StaticParams;
-    DWORD DynamicParams;
-    DWORD Coordinates;
-    GUID Guid;
-    WCHAR Name[MAX_PATH];
-};
-
-static_assert(sizeof(RX_DI_EFFECT_ENTRY) == 556, "registry effect record");
 
 /* Reference counting shared by the COM objects, with aggregation and holds */
 class RxDiUnknown
@@ -371,10 +321,8 @@ private:
 };
 
 /* IDirectInputDevice, 2 and 7 in both character sets */
-class RxDiDevice final : public RxDiUnknown, public IDirectInputDevice7W, public IDirectInputDevice7A
+class RxDiDevice final : public RxDiUnknown, public IDirectInputDevice7W, public IDirectInputDevice7A, public RxDiEffectHost
 {
-    friend class RxDiEffect;
-
 public:
     static
     HRESULT
@@ -405,12 +353,19 @@ public:
         return CreatedVersion;
     }
 
-    /* Turns object ids or data format offsets into ids or offsets of objects with the wanted type */
-    HRESULT
-    ConvertObjects(
-        _In_ ULONG Count,
-        _Inout_updates_(Count) PDWORD Values,
-        _In_ DWORD How);
+    /* RxDiEffectHost */
+    VOID EnterHost(VOID) override { Enter(); }
+    VOID LeaveHost(VOID) override { Leave(); }
+    VOID HoldHost(VOID) override { Hold(); }
+    VOID UnholdHost(VOID) override { Unhold(); }
+    DWORD HostVersion(VOID) override { return CreatedVersion; }
+    HRESULT CheckExclusive(VOID) override;
+    RxDiShepherd* HostDriver(VOID) override { return EffectDriver; }
+    DWORD HostDriverTag(VOID) override { return DriverId.Tag; }
+    BOOLEAN FindEffect(_In_ REFGUID Guid, _Out_ RX_DI_EFFECT_ENTRY* Entry) override;
+    HRESULT ListEffect(_In_ PVOID Effect) override;
+    BOOLEAN UnlistEffect(_In_ PVOID Effect) override;
+    HRESULT ConvertObjects(_In_ ULONG Count, _Inout_updates_(Count) PDWORD Values, _In_ DWORD How) override;
 
     /* Fits an effect read from a file to this device's actuators */
     HRESULT
@@ -552,39 +507,7 @@ private:
     RX_DI_APP_HACKS Hacks;
 };
 
-/* effect.cpp */
-
-HRESULT
-DiReadAttributes(
-    _In_ HKEY Key,
-    _Out_ LPDIFFDEVICEATTRIBUTES Attributes);
-
-BOOLEAN
-DiReadEffectEntry(
-    _In_ HKEY Effects,
-    _In_ DWORD Index,
-    _Inout_ RX_DI_EFFECT_ENTRY* Entry);
-
-HRESULT
-DiCreateEffect(
-    _In_ RxDiDevice* Device,
-    _In_ REFGUID Guid,
-    _In_opt_ LPCDIEFFECT Params,
-    _Outptr_ LPDIRECTINPUTEFFECT* Effect,
-    _In_opt_ IUnknown* OuterUnknown);
-
-LPDIRECTINPUTEFFECT
-DiHoldEffect(
-    _In_ PVOID Effect);
-
-VOID
-DiUnholdEffect(
-    _In_ LPDIRECTINPUTEFFECT Effect);
-
-VOID
-DiReleaseCreatedEffects(
-    _In_reads_opt_(Count) PVOID* Effects,
-    _In_ ULONG Count);
+/* effectfile.cpp */
 
 HRESULT
 DiEnumEffectsInFile(
@@ -603,11 +526,6 @@ DiWriteEffectToFile(
     _In_ DWORD Flags);
 
 /* shepherd.cpp */
-
-HRESULT
-DiCreateShepherd(
-    _In_opt_ HKEY Config,
-    _Outptr_ RxDiShepherd** Shepherd);
 
 DWORD
 DiReadJoystickGain(

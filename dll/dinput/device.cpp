@@ -2734,6 +2734,68 @@ RxDiDevice::RefreshGain(VOID)
 }
 
 HRESULT
+RxDiDevice::CheckExclusive(VOID)
+{
+    if ((CoopFlags & DISCL_EXCLUSIVE) == 0)
+        return DIERR_NOTEXCLUSIVEACQUIRED;
+    if (State & DI_DEV_ACQUIRED)
+        return S_OK;
+    return (LostResult == DIERR_NOTACQUIRED) ? DIERR_NOTEXCLUSIVEACQUIRED : LostResult;
+}
+
+BOOLEAN
+RxDiDevice::FindEffect(
+    _In_ REFGUID Guid,
+    _Out_ RX_DI_EFFECT_ENTRY* Entry)
+{
+    BOOLEAN Found = FALSE;
+
+    Enter();
+    for (ULONG Index = 0; Index < EffectCount; Index++)
+    {
+        if (IsEqualGUID(EffectList[Index].Guid, Guid))
+        {
+            *Entry = EffectList[Index];
+            Found = TRUE;
+            break;
+        }
+    }
+    Leave();
+    return Found;
+}
+
+HRESULT
+RxDiDevice::ListEffect(
+    _In_ PVOID Effect)
+{
+    PVOID* Grown = CreatedEffects;
+    HRESULT hr;
+
+    hr = DiAllocate(sizeof(*Grown) * (CreatedEffectCount + 1), reinterpret_cast<PVOID*>(&Grown));
+    if (FAILED(hr))
+        return hr;
+    CreatedEffects = Grown;
+    Grown[CreatedEffectCount++] = Effect;
+    return S_OK;
+}
+
+BOOLEAN
+RxDiDevice::UnlistEffect(
+    _In_ PVOID Effect)
+{
+    for (ULONG Index = 0; Index < CreatedEffectCount; Index++)
+    {
+        if (CreatedEffects[Index] == Effect)
+        {
+            CreatedEffectCount -= 1;
+            CreatedEffects[Index] = CreatedEffects[CreatedEffectCount];
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+HRESULT
 RxDiDevice::ConvertObjects(
     _In_ ULONG Count,
     _Inout_updates_(Count) PDWORD Values,

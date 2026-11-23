@@ -78,7 +78,7 @@ DiReadEffectEntry(
 #define DI_EFF_DELAY_START      1
 #define DI_EFF_DELAY_STOP       2
 
-/* Object conversion for triggers and axes, see RxDiDevice::ConvertObjects */
+/* Object conversion for triggers and axes, see RxDiEffectHost::ConvertObjects */
 #define DI_EFF_TRIGGER_IN       (DIDFT_FFEFFECTTRIGGER | DI_CONVERT_TO_ID | DIDFT_BUTTON)
 #define DI_EFF_AXES_IN          (DIDFT_FFACTUATOR | DI_CONVERT_TO_ID | DIDFT_AXIS)
 #define DI_EFF_TRIGGER_OUT      (DI_CONVERT_FROM_ID | DIDFT_BUTTON)
@@ -307,32 +307,29 @@ public:
     static
     HRESULT
     Create(
-        _In_ RxDiDevice* Owner,
+        _In_ RxDiEffectHost* Owner,
         _Outptr_ RxDiEffect** Created)
     {
         RxDiEffect* Effect = new RxDiEffect();
-        PVOID* Grown;
+        HRESULT hr;
 
         *Created = nullptr;
         if (Effect == nullptr)
             return E_OUTOFMEMORY;
 
         Effect->Device = Owner;
-        Owner->Hold();
-        Effect->Driver = Owner->EffectDriver;
+        Owner->HoldHost();
+        Effect->Driver = Owner->HostDriver();
 
         /* The device keeps its own hold on every effect it hands out */
-        Owner->Enter();
-        Grown = Owner->CreatedEffects;
-        if (FAILED(DiAllocate(sizeof(*Grown) * (Owner->CreatedEffectCount + 1), reinterpret_cast<PVOID*>(&Grown))))
+        Owner->EnterHost();
+        hr = Owner->ListEffect(Effect);
+        Owner->LeaveHost();
+        if (FAILED(hr))
         {
-            Owner->Leave();
             Effect->InnerUnknown()->Release();
-            return E_OUTOFMEMORY;
+            return hr;
         }
-        Owner->CreatedEffects = Grown;
-        Grown[Owner->CreatedEffectCount++] = Effect;
-        Owner->Leave();
 
         Effect->Hold();
         Effect->Listed = TRUE;
@@ -359,7 +356,6 @@ public:
         REFGUID Guid) override
     {
         RX_DI_EFFECT_ENTRY Entry = {};
-        BOOLEAN Found = FALSE;
         HRESULT hr;
 
         hr = DiCheckVersion(Instance, Version);
@@ -368,20 +364,10 @@ public:
         if (&Guid == nullptr)
             return E_POINTER;
 
-        Device->Enter();
-        for (ULONG Index = 0; Index < Device->EffectCount; Index++)
+        Device->EnterHost();
+        if (!Device->FindEffect(Guid, &Entry))
         {
-            if (IsEqualGUID(Device->EffectList[Index].Guid, Guid))
-            {
-                Entry = Device->EffectList[Index];
-                Found = TRUE;
-                break;
-            }
-        }
-
-        if (!Found)
-        {
-            Device->Leave();
+            Device->LeaveHost();
             return REGDB_E_CLASSNOTREG;
         }
 
@@ -414,7 +400,7 @@ public:
 
         Supported = Entry.Coordinates & DI_EFF_COORD_MASK;
         CheckSpecific = DiPickParamsCheck(EffectType);
-        Device->Leave();
+        Device->LeaveHost();
         return S_OK;
     }
 
@@ -453,11 +439,11 @@ public:
                 return E_INVALIDARG;
         }
 
-        Device->Enter();
+        Device->EnterHost();
         hr = CheckReadable(Params, Flags);
         if (SUCCEEDED(hr))
             hr = ReadParameters(Params, Flags);
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -476,7 +462,7 @@ public:
         if (Flags & ((Params->dwSize == sizeof(DIEFFECT)) ? 0x1FFFFC00 : 0x1FFFFE00))
             return E_INVALIDARG;
 
-        Device->Enter();
+        Device->EnterHost();
         hr = CheckWritable(Params, Flags);
         if (FAILED(hr))
             goto Done;
@@ -519,7 +505,7 @@ public:
         DiFree(&StagedParams);
 
     Done:
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -534,13 +520,17 @@ public:
         if (Flags & ~(DIES_SOLO | DIES_NODOWNLOAD))
             return E_INVALIDARG;
 
-        Device->Enter();
+        Device->EnterHost();
         hr = CanAccess();
         if (SUCCEEDED(hr))
         {
             StartCount = Iterations;
             StartFlags = Flags;
+#if DIRECTINPUT_VERSION >= 0x0800
+            if (DelayThread != nullptr)
+#else
             if (StopEvent != nullptr)
+#endif
             {
                 hr = Download(&Current, 0);
                 if (WakeEvent != nullptr)
@@ -551,7 +541,7 @@ public:
                 hr = StartNow(Iterations, Flags);
             }
         }
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -561,13 +551,13 @@ public:
     {
         HRESULT hr;
 
-        Device->Enter();
+        Device->EnterHost();
         hr = CanAccess();
         if (SUCCEEDED(hr))
             hr = Driver->StopEffect(&Handle);
         if (WakeEvent != nullptr)
             Wake(DI_EFF_DELAY_STOP);
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -582,7 +572,7 @@ public:
             return E_POINTER;
 
         *Status = 0;
-        Device->Enter();
+        Device->EnterHost();
         hr = CanAccess();
         if (SUCCEEDED(hr))
         {
@@ -597,7 +587,7 @@ public:
                 hr = Driver->GetEffectStatus(&Handle, Status);
             }
         }
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -607,9 +597,9 @@ public:
     {
         HRESULT hr;
 
-        Device->Enter();
+        Device->EnterHost();
         hr = Download(&Current, 0);
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -619,9 +609,9 @@ public:
     {
         HRESULT hr;
 
-        Device->Enter();
+        Device->EnterHost();
         hr = Remove();
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -641,12 +631,12 @@ public:
             return E_POINTER;
         }
 
-        Device->Enter();
+        Device->EnterHost();
         if (FAILED(Download(&Current, 0)))
             hr = DIERR_NOTDOWNLOADED;
         else
             hr = Driver->Escape(&Handle, Request);
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -670,7 +660,7 @@ private:
         if (Device != nullptr)
         {
             Reset();
-            Device->Unhold();
+            Device->UnholdHost();
         }
     }
 
@@ -693,27 +683,18 @@ private:
             return;
         Listed = FALSE;
 
-        Device->Enter();
+        Device->EnterHost();
         StopDelayThread();
         if (FAILED(CanAccess()))
             Handle.Id = 0;
         else
             Driver->DestroyEffect(&Handle);
         Dirty = DI_EFF_PARAM_MASK;
-        Device->Leave();
+        Device->LeaveHost();
 
-        Device->Enter();
-        for (ULONG Index = 0; Index < Device->CreatedEffectCount; Index++)
-        {
-            if (Device->CreatedEffects[Index] == this)
-            {
-                Device->CreatedEffectCount -= 1;
-                Device->CreatedEffects[Index] = Device->CreatedEffects[Device->CreatedEffectCount];
-                Removed = TRUE;
-                break;
-            }
-        }
-        Device->Leave();
+        Device->EnterHost();
+        Removed = Device->UnlistEffect(this);
+        Device->LeaveHost();
 
         if (Removed)
             Unhold();
@@ -734,6 +715,16 @@ private:
     VOID
     StopDelayThread(VOID)
     {
+#if DIRECTINPUT_VERSION >= 0x0800
+        /* DirectInput 8 lets go of every handle, but only once the thread confirmed it stopped */
+        if (StopEvent == nullptr || !SetEvent(StopEvent) || DoneEvent == nullptr)
+            return;
+        WaitForSingleObject(DoneEvent, INFINITE);
+        CloseEvent(&DoneEvent);
+        CloseEvent(&StopEvent);
+        CloseEvent(&WakeEvent);
+        CloseEvent(&DelayThread);
+#else
         if (StopEvent != nullptr && SetEvent(StopEvent) && DoneEvent != nullptr)
         {
             WaitForSingleObject(DoneEvent, INFINITE);
@@ -744,6 +735,7 @@ private:
             CloseHandle(DelayThread);
             DelayThread = nullptr;
         }
+#endif
     }
 
     VOID
@@ -785,14 +777,16 @@ private:
     VOID
     Reset(VOID)
     {
-        Device->Enter();
+        Device->EnterHost();
         Driver->DestroyEffect(&Handle);
         DiFree(&Current.lpvTypeSpecificParams);
         StopDelayThread();
+#if DIRECTINPUT_VERSION < 0x0800
         CloseEvent(&StopEvent);
         CloseEvent(&WakeEvent);
+#endif
         ResetFields();
-        Device->Leave();
+        Device->LeaveHost();
     }
 
     HRESULT
@@ -800,21 +794,19 @@ private:
     {
         if (!Ready)
             return DIERR_NOTINITIALIZED;
-        if ((Device->CoopFlags & DISCL_EXCLUSIVE) == 0)
-            return DIERR_NOTEXCLUSIVEACQUIRED;
-        if (Device->State & DI_DEV_ACQUIRED)
-            return S_OK;
-        return (Device->LostResult == DIERR_NOTACQUIRED) ? DIERR_NOTEXCLUSIVEACQUIRED : Device->LostResult;
+        return Device->CheckExclusive();
     }
 
     /* A device reset hands out a new tag, after which the driver has to hear everything again */
     VOID
     SyncTag(VOID)
     {
-        if (Handle.Tag != Device->DriverId.Tag)
+        DWORD Tag = Device->HostDriverTag();
+
+        if (Handle.Tag != Tag)
         {
             Handle.Id = 0;
-            Handle.Tag = Device->DriverId.Tag;
+            Handle.Tag = Tag;
             Dirty = DI_EFF_PARAM_MASK;
         }
     }
@@ -874,7 +866,7 @@ private:
         if (Flags & ~(DIES_SOLO | DIES_NODOWNLOAD))
             return E_INVALIDARG;
 
-        Device->Enter();
+        Device->EnterHost();
         hr = CanAccess();
         if (SUCCEEDED(hr) && (Flags & DIES_NODOWNLOAD) == 0)
         {
@@ -885,7 +877,7 @@ private:
                 if (Flags == 0 && Iterations == 1)
                 {
                     hr = Download(&Current, DIEP_START);
-                    Device->Leave();
+                    Device->LeaveHost();
                     return hr;
                 }
                 hr = Download(&Current, 0);
@@ -893,7 +885,7 @@ private:
         }
         if (SUCCEEDED(hr))
             hr = Driver->StartEffect(&Handle, Flags & DIES_SOLO, Iterations);
-        Device->Leave();
+        Device->LeaveHost();
         return hr;
     }
 
@@ -1317,7 +1309,7 @@ private:
         }
     }
 
-    RxDiDevice* Device = nullptr;
+    RxDiEffectHost* Device = nullptr;
     RxDiShepherd* Driver = nullptr;
     BOOLEAN Listed = FALSE;
     BOOLEAN Ready;
@@ -1352,7 +1344,7 @@ private:
 
 HRESULT
 DiCreateEffect(
-    _In_ RxDiDevice* Device,
+    _In_ RxDiEffectHost* Device,
     _In_ REFGUID Guid,
     _In_opt_ LPCDIEFFECT Params,
     _Outptr_ LPDIRECTINPUTEFFECT* Effect,
@@ -1371,7 +1363,7 @@ DiCreateEffect(
     if (FAILED(hr))
         return hr;
 
-    hr = Created->Initialize(DiModule, Device->Version(), Guid);
+    hr = Created->Initialize(DiModule, Device->HostVersion(), Guid);
     if (SUCCEEDED(hr) && Params != nullptr)
         hr = Created->SetParameters(Params, (Params->dwSize < sizeof(DIEFFECT)) ? 0x1FF : DI_EFF_PARAM_MASK);
 
