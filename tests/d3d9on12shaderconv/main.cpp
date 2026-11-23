@@ -9,8 +9,9 @@
  * The system d3d9on12.dll is mapped and its converter is called by address with the same arguments
  * the ReactX converter gets. Shaders come from D3DAssemble in d3dcompiler_47.dll. Every output is
  * compared: the result, the tokens, the inline constants, the buffer sizes, the counters and the
- * vertex inputs and outputs written back. Only the build of the system driver the address was taken
- * from is used.
+ * vertex inputs and outputs written back. Converted vertex shaders then go through both final steps:
+ * the input and output signatures, the input layout and the signed container. Only the build of the
+ * system driver the address was taken from is used.
  */
 
 #include <windows.h>
@@ -22,7 +23,9 @@
 #include <string>
 #include <vector>
 
-#include "../../dll/d3d9on12/shaderconv.hpp"
+#include "../../dll/d3d9on12/scfinal.hpp"
+#include <DxbcBuilder.hpp>
+#include <new>
 #include "corpus.hpp"
 
 typedef HRESULT (WINAPI* PFN_SC_ASSEMBLE)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, UINT,
@@ -47,6 +50,7 @@ struct ScContext
     PFN_SC_ASSEMBLE Assemble;
     PFN_SC_CONVERT SystemConvert;
     PFN_SC_CONVERT_TL SystemConvertTl;
+    PBYTE System;
     PVOID SystemState[4];
     PVOID SystemOldState[4];
     NineScTranslator* Translator;
@@ -117,6 +121,7 @@ ScLoad(
     }
     Context->SystemConvert = reinterpret_cast<PFN_SC_CONVERT>(reinterpret_cast<PBYTE>(System) + ScConvertOffset);
     Context->SystemConvertTl = reinterpret_cast<PFN_SC_CONVERT_TL>(reinterpret_cast<PBYTE>(System) + ScConvertTlOffset);
+    Context->System = reinterpret_cast<PBYTE>(System);
     return TRUE;
 }
 
@@ -289,6 +294,348 @@ ScCompare(
     return Same;
 }
 
+/*
+ * The final step of a vertex shader is not an export either. The system's VertexShader object, its
+ * device and its adapter are stood in for by zeroed memory with the few fields the step reads, and the
+ * two calls that would leave the converter's world (the container step and the D3D12 shader creation)
+ * are redirected here so their inputs can be kept.
+ */
+static constexpr ULONG ScSetupFinalOffset = 0x20990;
+static constexpr ULONG ScGenerateFinalOffset = 0x1F290;
+static constexpr ULONG ScCreateShaderOffset = 0x1F1C0;
+
+/* Where the step finds things in the objects it is given */
+static constexpr SIZE_T ScShaderBuilderOffset = 0x68;
+static constexpr SIZE_T ScShaderDeviceOffset = 0x88;
+static constexpr SIZE_T ScDeviceAdapterOffset = 0x4258;
+static constexpr SIZE_T ScDeviceFrequencyOffset = 0x687C;
+static constexpr SIZE_T ScTargetLayoutOffset = 0x118;
+static constexpr SIZE_T ScTargetOutputsOffset = 0x130;
+static constexpr SIZE_T ScLayoutCountOffset = 0x100;
+static constexpr UINT ScLayoutMaxElements = 32;
+
+/* The system's view of a byte range */
+struct ScSizedBuffer
+{
+    const BYTE* Data;
+    SIZE_T Size;
+};
+
+typedef HRESULT (*PFN_SC_SETUP_FINAL)(PVOID, ScSizedBuffer*, NineScInputs*, PVOID, PVOID);
+typedef HRESULT (*PFN_SC_GENERATE_FINAL)(PVOID, ScSizedBuffer*, PVOID, ScSizedBuffer*, ScSizedBuffer*);
+
+/* What the redirected calls saw */
+static NineScBlob ScSeenInput;
+static NineScBlob ScSeenOutput;
+static NineScBlob ScSeenCode;
+static NineScBlob ScSeenContainer;
+static ScSizedBuffer ScSeenViews[2];
+
+static
+HRESULT
+ScKeepSignatures(
+    _In_ PVOID Shader,
+    _In_ ScSizedBuffer* Code,
+    _In_ PVOID Target,
+    _In_ ScSizedBuffer* Input,
+    _In_ ScSizedBuffer* Output)
+{
+    UNREFERENCED_PARAMETER(Shader);
+    UNREFERENCED_PARAMETER(Target);
+
+    ScSeenCode.assign(Code->Data, Code->Data + Code->Size);
+    ScSeenInput.assign(Input->Data, Input->Data + Input->Size);
+    ScSeenOutput.assign(Output->Data, Output->Data + Output->Size);
+    return S_OK;
+}
+
+static
+HRESULT
+ScKeepContainer(
+    _Inout_ ScSizedBuffer* Target,
+    _In_ PVOID Device,
+    _Inout_ BYTE** Container,
+    _In_ SIZE_T Size)
+{
+    UNREFERENCED_PARAMETER(Device);
+
+    /* The views point into the container, which is freed here; keep them as offsets into the copy */
+    ScSeenContainer.assign(*Container, *Container + Size);
+    for (UINT Index = 0; Index < 2; Index += 1)
+    {
+        ScSeenViews[Index].Data = ScSeenContainer.data() + (Target[Index].Data - *Container);
+        ScSeenViews[Index].Size = Target[Index].Size;
+    }
+    free(*Container);
+    *Container = NULL;
+    return S_OK;
+}
+
+/* Points the first instructions of a system function at Target: ldr x16, #8; br x16; the address */
+static
+VOID
+ScRedirect(
+    _In_ PBYTE Site,
+    _In_ PVOID Target,
+    _Out_writes_bytes_opt_(16) PBYTE Saved)
+{
+    UINT Code[4] = { 0x58000050, 0xD61F0200 };
+    DWORD Protect;
+
+    Code[2] = static_cast<UINT>(reinterpret_cast<ULONG_PTR>(Target));
+    Code[3] = static_cast<UINT>(reinterpret_cast<ULONG_PTR>(Target) >> 32);
+    VirtualProtect(Site, sizeof(Code), PAGE_EXECUTE_READWRITE, &Protect);
+    if (Saved)
+        memcpy(Saved, Site, sizeof(Code));
+    memcpy(Site, Code, sizeof(Code));
+    VirtualProtect(Site, sizeof(Code), Protect, &Protect);
+    FlushInstructionCache(GetCurrentProcess(), Site, sizeof(Code));
+}
+
+static
+VOID
+ScRestore(
+    _In_ PBYTE Site,
+    _In_reads_bytes_(16) const BYTE* Saved)
+{
+    DWORD Protect;
+
+    VirtualProtect(Site, 16, PAGE_EXECUTE_READWRITE, &Protect);
+    memcpy(Site, Saved, 16);
+    VirtualProtect(Site, 16, Protect, &Protect);
+    FlushInstructionCache(GetCurrentProcess(), Site, 16);
+}
+
+/* The stand in objects the system's final step reads */
+struct ScFinalObjects
+{
+    BYTE Shader[0x100];
+    BYTE Adapter[0x80];
+    BYTE Target[0x200];
+    BYTE Layout[0x108];
+    std::vector<BYTE> Device;
+};
+
+static
+VOID
+ScResetBuilder(
+    _Inout_ ScFinalObjects* Objects)
+{
+    ZeroMemory(Objects->Shader, sizeof(Objects->Shader));
+    new (Objects->Shader + ScShaderBuilderOffset) CDXBCBuilder(false);
+    *reinterpret_cast<PBYTE*>(Objects->Shader + ScShaderDeviceOffset) = Objects->Device.data();
+}
+
+/* A declaration for the shader's inputs: their elements, some the shader does not read, in any order */
+static
+UINT
+ScMakeDeclaration(
+    _Inout_ ScContext* Context,
+    _In_ const NineScInputs* Inputs,
+    _Out_writes_(ScLayoutMaxElements) NineScElement* Elements)
+{
+    UINT Count = 0;
+
+    for (NineScInput Input : Inputs->Inputs)
+    {
+        NineScElement* Element = &Elements[Count++];
+
+        Element->Stream = static_cast<USHORT>(ScRandom(Context) % 3 ? 0 : ScRandom(Context) % 16);
+        Element->Offset = static_cast<USHORT>((ScRandom(Context) % 64) * 4);
+        Element->Type = static_cast<BYTE>(ScRandom(Context) % 18);
+        Element->Method = 0;
+        Element->Usage = static_cast<BYTE>(NineScInputUsage(Input));
+        Element->UsageIndex = static_cast<BYTE>(NineScInputIndex(Input));
+    }
+    for (UINT Extra = ScRandom(Context) % 4; Extra > 0 && Count < ScLayoutMaxElements; Extra -= 1)
+    {
+        NineScElement* Element = &Elements[Count++];
+
+        Element->Stream = static_cast<USHORT>(ScRandom(Context) % 16);
+        Element->Offset = static_cast<USHORT>((ScRandom(Context) % 64) * 4);
+        Element->Type = static_cast<BYTE>(ScRandom(Context) % 18);
+        Element->Method = 0;
+        Element->Usage = static_cast<BYTE>(ScRandom(Context) % 14);
+        Element->UsageIndex = static_cast<BYTE>(ScRandom(Context) % 10);
+    }
+    for (UINT Remaining = Count; Remaining > 1; Remaining -= 1)
+    {
+        UINT Other = ScRandom(Context) % Remaining;
+        NineScElement Swap = Elements[Remaining - 1];
+
+        Elements[Remaining - 1] = Elements[Other];
+        Elements[Other] = Swap;
+    }
+    return Count;
+}
+
+static
+BOOL
+ScSameBlob(
+    _In_z_ PCSTR Label,
+    _In_ const NineScBlob& System,
+    _In_ const NineScBlob& ReactX)
+{
+    SIZE_T Index = 0;
+
+    if (System == ReactX)
+        return TRUE;
+    while (Index < System.size() && Index < ReactX.size() && System[Index] == ReactX[Index])
+        Index += 1;
+    printf("  %s differs at byte %Iu: size %Iu, reactx %Iu\n", Label, Index, System.size(), ReactX.size());
+    return FALSE;
+}
+
+/* Builds signatures, layout and container of a converted vertex shader through both final steps */
+static
+VOID
+ScRunFinal(
+    _Inout_ ScContext* Context,
+    _In_ const ScRun* Converted,
+    _In_ const NineScInputs* Declared,
+    _In_z_ PCSTR Name)
+{
+    static ScFinalObjects Objects;
+    static BOOL Ready;
+    PBYTE Base = Context->System;
+    PFN_SC_SETUP_FINAL SystemSetup = reinterpret_cast<PFN_SC_SETUP_FINAL>(Base + ScSetupFinalOffset);
+    PFN_SC_GENERATE_FINAL SystemGenerate = reinterpret_cast<PFN_SC_GENERATE_FINAL>(Base + ScGenerateFinalOffset);
+    NineScElement Elements[ScLayoutMaxElements];
+    UINT Frequencies[NineScStreamCount];
+    NineScInputs Inputs = *Declared;
+    std::vector<D3D12_INPUT_ELEMENT_DESC>* SystemLayout;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> Layout;
+    NineScBlob InputSignature;
+    NineScBlob OutputSignature;
+    NineScBlob Container;
+    ScSizedBuffer Code;
+    ScSizedBuffer Views[2] = {};
+    BYTE Saved[16];
+    HRESULT SystemResult;
+    HRESULT Result;
+    BOOL Same = TRUE;
+    BOOL NoLayout = ScRandom(Context) % 8 == 0;
+    UINT Count;
+
+    if (!Ready)
+    {
+        Objects.Device.assign(ScDeviceFrequencyOffset + sizeof(Frequencies), 0);
+        *reinterpret_cast<PBYTE*>(Objects.Device.data() + ScDeviceAdapterOffset) = Objects.Adapter;
+        ScRedirect(Base + ScCreateShaderOffset, reinterpret_cast<PVOID>(ScKeepContainer), NULL);
+        Ready = TRUE;
+    }
+
+    for (UINT Stream = 0; Stream < NineScStreamCount; Stream += 1)
+    {
+        switch (ScRandom(Context) % 4)
+        {
+            case 0:
+                Frequencies[Stream] = 0x80000000 | (ScRandom(Context) % 5);
+                break;
+            case 1:
+                Frequencies[Stream] = 0x40000000 | (1 + ScRandom(Context) % 7);
+                break;
+            default:
+                Frequencies[Stream] = 1;
+                break;
+        }
+    }
+    memcpy(Objects.Device.data() + ScDeviceFrequencyOffset, Frequencies, sizeof(Frequencies));
+
+    Count = ScMakeDeclaration(Context, &Inputs, Elements);
+    ZeroMemory(Objects.Layout, sizeof(Objects.Layout));
+    memcpy(Objects.Layout, Elements, Count * sizeof(Elements[0]));
+    *reinterpret_cast<UINT*>(Objects.Layout + ScLayoutCountOffset) = Count;
+
+    ZeroMemory(Objects.Target, sizeof(Objects.Target));
+    memcpy(Objects.Target + ScTargetOutputsOffset, &Converted->Outputs, sizeof(Converted->Outputs));
+    SystemLayout = reinterpret_cast<std::vector<D3D12_INPUT_ELEMENT_DESC>*>(Objects.Target + ScTargetLayoutOffset);
+
+    /* The signatures and the layout */
+    Code.Data = static_cast<const BYTE*>(Converted->Args.Tokens);
+    Code.Size = Converted->Args.TokenSize;
+    ScResetBuilder(&Objects);
+    ScRedirect(Base + ScGenerateFinalOffset, reinterpret_cast<PVOID>(ScKeepSignatures), Saved);
+    SystemResult = SystemSetup(Objects.Shader, &Code, &Inputs, NoLayout ? NULL : Objects.Layout, Objects.Target);
+    ScRestore(Base + ScGenerateFinalOffset, Saved);
+
+    NineScBuildInputSignature(&Inputs, NoLayout ? NULL : Elements, Count, Frequencies, &Layout, &InputSignature);
+    NineScBuildOutputSignature(&Converted->Outputs, &OutputSignature);
+
+    Context->Cases += 1;
+    if (FAILED(SystemResult))
+    {
+        printf("  final step result %08lX\n", SystemResult);
+        Same = FALSE;
+    }
+    Same &= ScSameBlob("input signature", ScSeenInput, InputSignature);
+    Same &= ScSameBlob("output signature", ScSeenOutput, OutputSignature);
+    Same &= ScSameBlob("code", ScSeenCode, NineScBlob(Code.Data, Code.Data + Code.Size));
+    if (SystemLayout->size() != Layout.size())
+    {
+        printf("  layout has %Iu elements, reactx %Iu\n", SystemLayout->size(), Layout.size());
+        Same = FALSE;
+    }
+    for (SIZE_T Index = 0; Index < SystemLayout->size() && Index < Layout.size(); Index += 1)
+    {
+        const D3D12_INPUT_ELEMENT_DESC* Left = &(*SystemLayout)[Index];
+        const D3D12_INPUT_ELEMENT_DESC* Right = &Layout[Index];
+
+        if (strcmp(Left->SemanticName, Right->SemanticName) != 0 || Left->SemanticIndex != Right->SemanticIndex ||
+            Left->Format != Right->Format || Left->InputSlot != Right->InputSlot ||
+            Left->AlignedByteOffset != Right->AlignedByteOffset || Left->InputSlotClass != Right->InputSlotClass ||
+            Left->InstanceDataStepRate != Right->InstanceDataStepRate)
+        {
+            printf("  layout element %Iu: %s %u %u %u %u %u %u, reactx %s %u %u %u %u %u %u\n", Index,
+                   Left->SemanticName, Left->SemanticIndex, Left->Format, Left->InputSlot, Left->AlignedByteOffset,
+                   Left->InputSlotClass, Left->InstanceDataStepRate, Right->SemanticName, Right->SemanticIndex,
+                   Right->Format, Right->InputSlot, Right->AlignedByteOffset, Right->InputSlotClass,
+                   Right->InstanceDataStepRate);
+            Same = FALSE;
+        }
+    }
+
+    /* The container, from the system's own signatures */
+    ScSeenContainer.clear();
+    ZeroMemory(ScSeenViews, sizeof(ScSeenViews));
+    ScResetBuilder(&Objects);
+    {
+        ScSizedBuffer Input = { ScSeenInput.data(), ScSeenInput.size() };
+        ScSizedBuffer Output = { ScSeenOutput.data(), ScSeenOutput.size() };
+
+        SystemResult = SystemGenerate(Objects.Shader, &Code, Views, &Input, &Output);
+    }
+    Result = NineScPackageShader(Code.Data, Code.Size, &InputSignature, &OutputSignature, NULL, &Container);
+    if (SystemResult != Result)
+    {
+        printf("  container result %08lX, reactx %08lX\n", SystemResult, Result);
+        Same = FALSE;
+    }
+    Same &= ScSameBlob("container", ScSeenContainer, Container);
+    if (ScSeenContainer.empty() || ScSeenViews[0].Size != ScSeenInput.size() ||
+        ScSeenViews[1].Size != ScSeenOutput.size() ||
+        memcmp(ScSeenViews[0].Data, ScSeenInput.data(), ScSeenInput.size()) != 0 ||
+        memcmp(ScSeenViews[1].Data, ScSeenOutput.data(), ScSeenOutput.size()) != 0)
+    {
+        printf("  the system's signature views do not point at its signatures\n");
+        Same = FALSE;
+    }
+
+    if (!Same)
+    {
+        printf("%s final: differs\n", Name);
+        Context->Failures += 1;
+    }
+    else if (Context->Dump)
+    {
+        printf("%s final: same, %Iu bytes\n", Name, Container.size());
+    }
+
+    if (SystemLayout->data())
+        free(SystemLayout->data());
+    ZeroMemory(SystemLayout, sizeof(*SystemLayout));
+}
+
 static
 VOID
 ScRunCase(
@@ -330,6 +677,14 @@ ScRunCase(
         ScPrintTokens("system", System.Args.Tokens, System.Args.TokenSize);
         ScPrintTokens("reactx", ReactX.Args.Tokens, ReactX.Args.TokenSize);
         Context->Failures += 1;
+    }
+
+    if (!Case->Pixel && SUCCEEDED(System.Result) && System.Args.TokenSize)
+    {
+        char Name[96];
+
+        sprintf_s(Name, "%s%s", Case->Name, Label);
+        ScRunFinal(Context, &System, &ReactX.Inputs, Name);
     }
 
     /* Each converter allocated its own copy; both come from the process heap */
