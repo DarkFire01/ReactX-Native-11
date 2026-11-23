@@ -1,6 +1,7 @@
 # The shader converter is a library of its own so tests can drive it beside the system one
 nt_add_usermode_lib(d3d9on12sc
     sccontext.cpp
+    scgs.cpp
     scops.cpp
     scpixel.cpp
     sctexture.cpp

@@ -148,6 +148,20 @@ struct NineScTlArgs
 
 static_assert(sizeof(NineScTlArgs) == 64, "arguments keep the converter's layout");
 
+/* The geometry shader for point sprites, point fill, flat shading and texture wrapping */
+struct NineScGsArgs
+{
+    UINT Flags;
+    UINT Version;
+    const NineScOutputs* VertexOutputs;
+    NineScOutputs* Outputs;
+    const NineScRasterStates* Raster;
+    PVOID Tokens;
+    SIZE_T TokenSize;
+};
+
+static_assert(sizeof(NineScGsArgs) == 48, "arguments keep the converter's layout");
+
 class NineScTranslator;
 
 /* Converts one shader; Translator is created on first use and kept by the caller */
@@ -161,6 +175,12 @@ HRESULT
 NineScConvertTlShader(
     _Inout_ NineScTranslator** Translator,
     _Inout_ NineScTlArgs* Args);
+
+/* Builds the geometry shader the raster state needs; the translator must exist already */
+HRESULT
+NineScCreateGeometryShader(
+    _In_ NineScTranslator* Translator,
+    _Inout_ NineScGsArgs* Args);
 
 /* Frees a translator made by NineScConvertShader */
 VOID

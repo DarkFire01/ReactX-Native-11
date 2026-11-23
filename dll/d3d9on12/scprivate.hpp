@@ -136,11 +136,17 @@ public:
     VOID
     Begin(
         _In_ D3D10_SB_TOKENIZED_PROGRAM_TYPE Type,
-        _In_ UINT Options);
+        _In_ UINT Options,
+        _In_ UINT Major = 5);
 
     VOID
     Add(
         _In_ const SB::CInstruction& Instruction);
+
+    /* Writes an instruction or declaration that is only its opcode token, without counting it */
+    VOID
+    AddBare(
+        _In_ UINT Opcode);
 
 private:
     VOID
@@ -372,6 +378,13 @@ public:
     EndLoop(
         _In_ BOOL Loop);
 };
+
+/* Writes dp4 of the position with each plane in the mask to the clip distance outputs */
+VOID
+ScWriteClipPlanes(
+    _In_ ScAsm* Asm,
+    _In_ UINT Planes,
+    _In_ const SB::COperandBase& Position);
 
 /* Emits one instruction through the writer */
 VOID

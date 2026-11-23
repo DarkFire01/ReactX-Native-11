@@ -13,12 +13,21 @@
 VOID
 ScAsm::Begin(
     _In_ D3D10_SB_TOKENIZED_PROGRAM_TYPE Type,
-    _In_ UINT NewOptions)
+    _In_ UINT NewOptions,
+    _In_ UINT Major)
 {
     Options = NewOptions;
     Emitted = 0;
     Patched = 0;
-    StartShader(Type, 5, 0);
+    StartShader(Type, Major, 0);
+}
+
+VOID
+ScAsm::AddBare(
+    _In_ UINT Opcode)
+{
+    OPCODE(Opcode);
+    ENDINSTRUCTION();
 }
 
 /* Only the converter's own constant buffers 3 to 5 are known to hold finite values */
@@ -1323,9 +1332,18 @@ ScVertexContext::WriteDeclarations()
     return S_OK;
 }
 
-/* Writes the user clip distances: dp4 of the position with each enabled plane */
 VOID
 ScContext::WriteClipPlanes(
+    _In_ UINT Planes,
+    _In_ const SB::COperandBase& Position)
+{
+    ScWriteClipPlanes(Asm, Planes, Position);
+}
+
+/* Writes the user clip distances: dp4 of the position with each enabled plane */
+VOID
+ScWriteClipPlanes(
+    _In_ ScAsm* Asm,
     _In_ UINT Planes,
     _In_ const SB::COperandBase& Position)
 {
