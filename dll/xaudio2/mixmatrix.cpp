@@ -158,6 +158,40 @@ XaMixFiveOneToStereo(
     }
 }
 
+/* Quad spread over 5.1: each output sums the fronts, then the right rear, then the left rear */
+static
+VOID
+XaMixQuadToFiveOne(
+    _In_ const XaMixBlock* Block)
+{
+    float M[24];
+
+    memcpy(M, Block->Matrix, sizeof(M));
+    for (UINT32 Frame = 0; Frame < Block->Frames; Frame++)
+    {
+        const float* X = Block->Input + static_cast<SIZE_T>(Frame) * 4;
+        float* Out = Block->Output + static_cast<SIZE_T>(Frame) * 6;
+
+        for (UINT32 Row = 0; Row < 6; Row++)
+        {
+            const float* G = M + Row * 4;
+            float Sum;
+
+            if (Row == 0 || Row == 4)
+                Sum = fmaf(G[0], X[0], G[1] * X[1]);
+            else
+                Sum = fmaf(G[1], X[1], G[0] * X[0]);
+            Sum = fmaf(G[2], X[2], fmaf(G[3], X[3], Sum));
+            Out[Row] = Block->Accumulate ? Sum + Out[Row] : Sum;
+        }
+        if (Block->Delta != nullptr)
+        {
+            for (UINT32 Cell = 0; Cell < 24; Cell++)
+                M[Cell] = M[Cell] + Block->Delta[Cell];
+        }
+    }
+}
+
 /* Channel for channel, sample by sample */
 static
 VOID
@@ -211,6 +245,8 @@ XaMatrixMix(
         XaMixMonoToStereo(Block);
     else if (Block->InputChannels == 6 && Block->OutputChannels == 2)
         XaMixFiveOneToStereo(Block);
+    else if (Block->InputChannels == 4 && Block->OutputChannels == 6)
+        XaMixQuadToFiveOne(Block);
     else if (Block->InputChannels == Block->OutputChannels && Block->InputChannels <= 8 &&
              XaMatrixDiagonal(Block->Matrix, Block->InputChannels))
         XaMixDiagonal(Block);
