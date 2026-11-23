@@ -185,9 +185,10 @@ RxWarpAddressPoint(
         }
         default:
         {
-            FLOAT Clamped = (Coordinate > 0.0f) ? Coordinate : 0.0f;
+            /* Offsets move the texel before it clamps; the coordinate is only bounded to keep the integer small */
+            FLOAT Clamped = (Coordinate > -1.0f) ? Coordinate : -1.0f;
 
-            Clamped = (Clamped >= 1.0f) ? 1.0f : Clamped;
+            Clamped = (Clamped >= 2.0f) ? 2.0f : Clamped;
             Texel = (((INT)floorf(Scale * Clamped)) >> 8) + Offset;
             *Index = (Texel < 0) ? 0 : ((Texel > Size - 1) ? Size - 1 : Texel);
             return;
@@ -240,8 +241,8 @@ RxWarpAddressLinear(
             Folded = (Folded >= 1.0f) ? 1.0f : Folded;
             break;
         default:
-            Folded = (Coordinate > 0.0f) ? Coordinate : 0.0f;
-            Folded = (Folded >= 1.0f) ? 1.0f : Folded;
+            Folded = (Coordinate > -1.0f) ? Coordinate : -1.0f;
+            Folded = (Folded >= 2.0f) ? 2.0f : Folded;
             break;
     }
 
@@ -852,13 +853,32 @@ RxWarpSample(
         FLOAT First[4];
         FLOAT Second[4];
 
+        INT FirstFixed[4];
+        BOOLEAN FirstBytes;
+
         RxWarpFilterLevel(Request, &Extent, &Shape, Lower, Slice, Lookup, MinLinear, First);
         if (Blend == 0.0f || Upper == Lower)
         {
             memcpy(Result, First, sizeof(First));
             return;
         }
+        FirstBytes = RxWarpByteFilterValid;
+        memcpy(FirstFixed, RxWarpByteFilterFixed, sizeof(FirstFixed));
         RxWarpFilterLevel(Request, &Extent, &Shape, Upper, Slice, Lookup, MinLinear, Second);
+
+        /* Eight bit levels blend in their fixed point form, by the level fraction rounded to eight bits */
+        if (FirstBytes && RxWarpByteFilterValid)
+        {
+            INT Weight = (INT)nearbyintf(Blend * 256.0f);
+
+            for (UINT Component = 0; Component < 4; Component++)
+            {
+                RxWarpByteFilterFixed[Component] = FirstFixed[Component] + (((RxWarpByteFilterFixed[Component] - FirstFixed[Component]) * Weight) >> 8);
+                Result[Component] = RxWarpByteResult(RxWarpByteFilterFixed[Component]);
+            }
+            return;
+        }
+        RxWarpByteFilterValid = FALSE;
         for (UINT Component = 0; Component < 4; Component++)
             Result[Component] = First[Component] + (Second[Component] - First[Component]) * Blend;
     }
