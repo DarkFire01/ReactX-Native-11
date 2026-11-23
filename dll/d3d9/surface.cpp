@@ -329,6 +329,14 @@ D9Surface::D9Surface(
 {
 }
 
+BOOLEAN
+D9Surface::CanLock() const
+{
+    if (Texture != nullptr)
+        return Texture->IsLockable();
+    return Desc.Pool != D3DPOOL_DEFAULT || Lockable;
+}
+
 /* A lock may discard along with any other flag but read only */
 BOOLEAN
 D9LockFlagsAllowed(
@@ -457,14 +465,44 @@ D9Surface::Release()
     if (!Standalone)
         return ReleaseChild();
 
-    /* The device outlives the surface it destroys */
+    /* The device outlives the surface it destroys; a pinned surface waits for the runtime to let go */
     Count = InterlockedDecrement(&RefCount);
     if (Count == 0)
     {
+        if (PinCount > 0)
+        {
+            Orphaned = TRUE;
+            Owner->Release();
+            return 0;
+        }
         delete this;
         Owner->Release();
     }
     return static_cast<ULONG>(Count);
+}
+
+VOID
+D9Surface::Pin(VOID)
+{
+    if (Texture != nullptr)
+    {
+        Texture->Bind();
+        return;
+    }
+    PinCount += 1;
+}
+
+VOID
+D9Surface::Unpin(VOID)
+{
+    if (Texture != nullptr)
+    {
+        Texture->Unbind();
+        return;
+    }
+    PinCount -= 1;
+    if (PinCount == 0 && Orphaned)
+        delete this;
 }
 
 STDMETHODIMP

@@ -1321,16 +1321,42 @@ D9Device::GetAvailableTextureMem()
     return (static_cast<UINT>(Available) + 0x80000) & 0xFFF00000;
 }
 
-/* Entry points that are not implemented yet */
-
+/* The cursor image must be a lockable A8R8G8B8 surface of this device, sized in powers of two that fit the display */
 STDMETHODIMP
 D9Device::SetCursorProperties(
     _In_ UINT XHotSpot,
     _In_ UINT YHotSpot,
     _In_opt_ IDirect3DSurface9* CursorBitmap)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9Surface* Bitmap = static_cast<D9Surface*>(CursorBitmap);
+    D3DDISPLAYMODE Mode = {};
+    D3DSURFACE_DESC Desc = {};
+
+    D9_DEVICE_LOCK();
+
+    if (NotReset)
+        return D3DERR_INVALIDCALL;
+    if (Bitmap == nullptr || Bitmap->Owner() != this)
+    {
+        D9_TRACE_ONCE(L"SetCursorProperties: the bitmap is missing or belongs to another device");
+        return D3DERR_INVALIDCALL;
+    }
+    if (Bitmap->OwnerTexture() != nullptr && !Bitmap->CanLock())
+    {
+        D9_TRACE_ONCE(L"SetCursorProperties: the cursor bitmap must be lockable");
+        return D3DERR_INVALIDCALL;
+    }
+    Bitmap->GetDesc(&Desc);
+    if (Desc.Format != D3DFMT_A8R8G8B8)
+        return D3DERR_INVALIDCALL;
+    if ((Desc.Width & (Desc.Width - 1)) != 0 || (Desc.Height & (Desc.Height - 1)) != 0)
+        return D3DERR_INVALIDCALL;
+    if (XHotSpot >= Desc.Width || YHotSpot >= Desc.Height)
+        return D3DERR_INVALIDCALL;
+    Enum->GetAdapterDisplayMode(Adapter->Ordinal, &Mode);
+    if (Desc.Width > Mode.Width || Desc.Height > Mode.Height)
+        return D3DERR_INVALIDCALL;
+    return ImplicitChain->CursorState().SetProperties(XHotSpot, YHotSpot, Bitmap);
 }
 
 STDMETHODIMP_(VOID)
@@ -1339,16 +1365,25 @@ D9Device::SetCursorPosition(
     _In_ INT Y,
     _In_ DWORD Flags)
 {
-    RX_UNIMPLEMENTED();
+    D9_DEVICE_LOCK();
+
+    UNREFERENCED_PARAMETER(Flags);
+    if (!NotReset)
+        ImplicitChain->CursorState().SetPosition(X, Y);
 }
 
 STDMETHODIMP_(BOOL)
 D9Device::ShowCursor(
     _In_ BOOL Show)
 {
-    RX_UNIMPLEMENTED();
-    return 0;
+    D9_DEVICE_LOCK();
+
+    if (NotReset)
+        return FALSE;
+    return ImplicitChain->CursorState().SetVisibility(Show);
 }
+
+/* Entry points that are not implemented yet */
 
 STDMETHODIMP
 D9Device::CreateAdditionalSwapChain(

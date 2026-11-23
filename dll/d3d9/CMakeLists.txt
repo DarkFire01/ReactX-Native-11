@@ -6,6 +6,7 @@ nt_add_usermode_dll(d3d9
         buffer.cpp
         caps.cpp
         copy.cpp
+        cursor.cpp
         device.cpp
         enum.cpp
         formats.cpp

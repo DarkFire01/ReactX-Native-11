@@ -397,6 +397,17 @@ public:
         return Discard;
     }
 
+    /* Whether the application can lock the surface, through its texture for a level */
+    BOOLEAN
+    CanLock() const;
+
+    /* The runtime holds the surface without a reference the application sees, as the cursor does */
+    VOID
+    Pin(VOID);
+
+    VOID
+    Unpin(VOID);
+
     /* A surface made to share, or opened by handle, says so before Create */
     VOID
     Share(
@@ -497,6 +508,8 @@ private:
     BOOLEAN CountedDefault = FALSE;
     D9PrivateData Private;
     D9ShareRequest Sharing = {};
+    LONG PinCount = 0;
+    BOOLEAN Orphaned = FALSE;
 
     /* The device context GetDC handed out and the bitmap behind it */
     HDC HeldDc = NULL;
@@ -657,6 +670,12 @@ public:
     IsManaged() const
     {
         return Pool == D3DPOOL_MANAGED;
+    }
+
+    BOOLEAN
+    IsLockable() const
+    {
+        return Lockable;
     }
 
     HRESULT
@@ -826,6 +845,69 @@ private:
     DestroyLevelObjects(VOID);
 };
 
+/* The cursor of one swap chain; each reset of the chain starts it over */
+class D9Cursor
+{
+public:
+    D9Cursor() = default;
+
+    D9Cursor(const D9Cursor&) = delete;
+    D9Cursor& operator=(const D9Cursor&) = delete;
+
+    VOID
+    Start(
+        _In_ D9Device* Owner,
+        _In_ INT X,
+        _In_ INT Y,
+        _In_ BOOLEAN IsWindowed);
+
+    /* Lets go of the image and everything made for the cursor, as a reset or the swap chain going away does */
+    VOID
+    Release(VOID);
+
+    HRESULT
+    SetProperties(
+        _In_ UINT HotX,
+        _In_ UINT HotY,
+        _In_ D9Surface* Bitmap);
+
+    VOID
+    SetPosition(
+        _In_ INT X,
+        _In_ INT Y);
+
+    BOOL
+    SetVisibility(
+        _In_ BOOL Show);
+
+private:
+    VOID
+    Destroy(VOID);
+
+    HRESULT
+    MakeDriverSurfaces(
+        _In_ const D3DSURFACE_DESC* Desc);
+
+    D9Device* Device = nullptr;
+    HCURSOR Icon = NULL;
+    INT PositionX = 0;
+    INT PositionY = 0;
+    UINT Trails = 0;
+    BOOLEAN Windowed = TRUE;
+
+    /* The image the cursor holds until the next one replaces it */
+    D9Surface* Held = nullptr;
+
+    /* The surfaces the runtime draws a cursor with when the window manager cannot, and the size made for */
+    D9Resource Surfaces[3] = {};
+    UINT SurfaceWidth = 0;
+    UINT SurfaceHeight = 0;
+
+    /* Set once the window manager has the cursor image, and while the application wants it shown */
+    BOOLEAN Hardware = FALSE;
+    BOOLEAN Visible = FALSE;
+};
+
 /* A swap chain: the back buffers of one window and how they reach it */
 class D9SwapChain final : public IDirect3DSwapChain9Ex, public D9Child
 {
@@ -867,6 +949,12 @@ public:
     GammaRamp()
     {
         return Gamma;
+    }
+
+    D9Cursor&
+    CursorState()
+    {
+        return Cursor;
     }
 
     HRESULT
@@ -942,6 +1030,7 @@ private:
     D9Surface* BackBuffers[D3DPRESENT_BACK_BUFFERS_MAX_EX + 1] = {};
     UINT BackBufferCount = 0;
     D3DGAMMARAMP Gamma;
+    D9Cursor Cursor;
 };
 
 /* Vertex and index buffers share everything but their description */

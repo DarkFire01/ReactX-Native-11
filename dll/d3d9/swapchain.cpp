@@ -31,6 +31,7 @@ D9SwapChain::D9SwapChain(
 
 D9SwapChain::~D9SwapChain()
 {
+    Cursor.Release();
     ReleaseBuffers();
 }
 
@@ -106,6 +107,7 @@ D9SwapChain::Reset(
         return D3DERR_INVALIDCALL;
     }
 
+    Cursor.Release();
     ReleaseBuffers();
     Device->FlushDriver();
     Desc.Format = Requested->BackBufferFormat;
@@ -138,6 +140,20 @@ D9SwapChain::Reset(
     }
 
     Parameters = *Requested;
+
+    /* The cursor starts in the middle of the back buffers, or of the display a fullscreen chain takes */
+    if (Parameters.Windowed)
+    {
+        Cursor.Start(Device, static_cast<INT>(Parameters.BackBufferWidth / 2),
+                     static_cast<INT>(Parameters.BackBufferHeight / 2), TRUE);
+    }
+    else
+    {
+        D3DDISPLAYMODE Mode = {};
+
+        Device->Owner()->GetAdapterDisplayMode(Device->AdapterInfo()->Ordinal, &Mode);
+        Cursor.Start(Device, static_cast<INT>(Mode.Width / 2), static_cast<INT>(Mode.Height / 2), FALSE);
+    }
     return S_OK;
 }
 
