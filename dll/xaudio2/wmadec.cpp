@@ -6,15 +6,10 @@
  */
 
 #include "xaudio2.hpp"
-#include "wma.hpp"
+#include "wmadec.hpp"
 
-struct XaWmaDecoder
-{
-    XaWmaPull Pull;
-    void* Context;
-    UINT32 PacketBytes;
-    UINT32 Channels;
-};
+/* What the decoder returns for a header it has no encoding for */
+#define XA_WMA_E_FORMAT         static_cast<HRESULT>(0x80040000)
 
 HRESULT
 XaWmaCreate(
@@ -23,16 +18,29 @@ XaWmaCreate(
     _In_ void* Context,
     _Outptr_ XaWmaDecoder** Decoder)
 {
-    XaWmaDecoder* Created = new (std::nothrow) XaWmaDecoder;
+    XaWmaDecoder* Created;
+    XaWmaLayout Layout;
 
     *Decoder = nullptr;
+    if (!XaWmaDescribe(Format, &Layout))
+    {
+        /* WMA Pro is not decoded yet, so it keeps the header's packet size meanwhile */
+        if (XaFormatTag(Format) != XA_TAG_WMA3)
+            return XA_WMA_E_FORMAT;
+        Layout.Version = XA_WMA_PRO;
+        Layout.Channels = Format->nChannels;
+        Layout.Rate = Format->nSamplesPerSec;
+        Layout.PacketBytes = Format->nBlockAlign;
+    }
+    Created = new (std::nothrow) XaWmaDecoder;
     if (Created == nullptr)
         return E_OUTOFMEMORY;
     memset(Created, 0, sizeof(*Created));
+    Created->Layout = Layout;
+    if (Layout.Version <= XA_WMA_STANDARD_MAX)
+        XaWmaSetupStandard(&Created->Layout, &Created->Standard);
     Created->Pull = Pull;
     Created->Context = Context;
-    Created->PacketBytes = Format->nBlockAlign;
-    Created->Channels = Format->nChannels;
     *Decoder = Created;
     return S_OK;
 }
@@ -48,15 +56,14 @@ UINT32
 XaWmaPacketBytes(
     _In_ const XaWmaDecoder* Decoder)
 {
-    return Decoder->PacketBytes;
+    return Decoder->Layout.PacketBytes;
 }
 
 UINT32
 XaWmaMaxFrames(
     _In_ const XaWmaDecoder* Decoder)
 {
-    UNREFERENCED_PARAMETER(Decoder);
-    return 0;
+    return Decoder->Layout.FrameSamples;
 }
 
 VOID

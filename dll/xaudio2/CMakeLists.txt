@@ -22,6 +22,7 @@ nt_add_usermode_dll(xaudio2_9
         source.cpp
         voice.cpp
         wmadec.cpp
+        wmaformat.cpp
         wmasource.cpp
         x3daudio.cpp
         xapobase.cpp)
