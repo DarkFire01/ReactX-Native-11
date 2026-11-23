@@ -341,11 +341,19 @@ private:
 
     HRESULT
     Initialize(
-        _In_ D3D12_COMMAND_LIST_TYPE ListType);
+        _In_ D3D12_COMMAND_LIST_TYPE ListType,
+        _In_opt_ RxCommandAllocator* FirstAllocator);
+
+    HRESULT
+    Claim(
+        _In_ RxCommandAllocator* NewAllocator);
 
     HRESULT
     Begin(
-        _In_ RxCommandAllocator* Allocator,
+        _In_opt_ ID3D12PipelineState* InitialState);
+
+    VOID
+    ResetPipeline(
         _In_opt_ ID3D12PipelineState* InitialState);
 
     VOID
@@ -369,6 +377,8 @@ private:
     const D3D12DDI_COMMAND_LIST_FUNCS_3D_0114* DriverTable = nullptr;
     RxListState State = RxListState::Closed;
     RxCommandAllocator* Allocator = nullptr;
+    UINT64 ListId = UINT64_MAX;
+    BOOLEAN TakesSessions = FALSE;
     HRESULT Error = S_OK;
 };
 

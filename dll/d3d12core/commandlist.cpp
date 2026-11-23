@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "objects.hpp"
+#include "pipeline.hpp"
 
 /* Values the API defines denormals away from before they reach the driver */
 static
@@ -71,9 +71,9 @@ RxCommandList::Create(
     if (Created == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Created->Initialize(Type);
+    hr = Created->Initialize(Type, Allocator);
     if (SUCCEEDED(hr) && Allocator != nullptr)
-        hr = Created->Begin(Allocator, InitialState);
+        hr = Created->Begin(InitialState);
     if (FAILED(hr))
     {
         Created->Release();
@@ -84,26 +84,59 @@ RxCommandList::Create(
     return S_OK;
 }
 
+/* Takes the allocator a recording goes into and the id the driver knows that recording by */
+HRESULT
+RxCommandList::Claim(
+    _In_ RxCommandAllocator* NewAllocator)
+{
+    if (!NewAllocator->Acquire())
+        return E_INVALIDARG;
+
+    Allocator = NewAllocator;
+    Allocator->AddRef();
+    ListId = Device.NextCommandListId();
+    return S_OK;
+}
+
 HRESULT
 RxCommandList::Initialize(
-    _In_ D3D12_COMMAND_LIST_TYPE ListType)
+    _In_ D3D12_COMMAND_LIST_TYPE ListType,
+    _In_opt_ RxCommandAllocator* FirstAllocator)
 {
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3D12DDIARG_CREATE_COMMAND_LIST_0040 Args = {};
     D3D12DDI_HRTCOMMANDLIST Runtime;
+    SIZE_T Size;
     HRESULT hr;
 
     Type = ListType;
 
+    /* Sizing needs only the type, queue and node */
     Args.Type = Type == D3D12_COMMAND_LIST_TYPE_BUNDLE ? D3D12DDI_COMMAND_LIST_TYPE_BUNDLE
                                                        : D3D12DDI_COMMAND_LIST_TYPE_DIRECT;
     Args.QueueFlags = RxQueueFlagsOf(Type);
-    Args.ID = Device.NextCommandListId();
     Args.NodeMask = 1;
+    Size = Ddi.pfnCalcPrivateCommandListSize(Device.Handle(), &Args);
 
-    DriverList.pDrvPrivate = Memory.Allocate(Ddi.pfnCalcPrivateCommandListSize(Device.Handle(), &Args));
+    /* Every list type but bundles drops its protected session on each reset where sessions exist */
+    if (Type != D3D12_COMMAND_LIST_TYPE_BUNDLE)
+    {
+        hr = Device.SessionSupport(0, &TakesSessions);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    if (FirstAllocator != nullptr)
+    {
+        hr = Claim(FirstAllocator);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    DriverList.pDrvPrivate = Memory.Allocate(Size);
     if (DriverList.pDrvPrivate == nullptr)
         return E_OUTOFMEMORY;
+    Args.ID = ListId;
 
     Bypass.pInterfaceVtable = *reinterpret_cast<void**>(static_cast<ID3D12GraphicsCommandList10*>(this));
     Bypass.pDriverObject = DriverList.pDrvPrivate;
@@ -139,27 +172,19 @@ RxCommandList::~RxCommandList()
         Device.Ddi().pfnDestroyCommandList(Device.Handle(), DriverList);
 }
 
-/* Starts recording into an allocator the list then holds until it closes */
+/* Starts recording into the claimed allocator, which the list holds until it closes */
 HRESULT
 RxCommandList::Begin(
-    _In_ RxCommandAllocator* NewAllocator,
     _In_opt_ ID3D12PipelineState* InitialState)
 {
     D3D12DDIARG_RESETCOMMANDLIST_0040 Args = {};
 
-    if (!NewAllocator->Acquire())
-        return E_INVALIDARG;
-
-    Allocator = NewAllocator;
-    Allocator->AddRef();
-
     Args.hDrvCommandRecorder = Allocator->GetRecorder();
-    Args.ID = Device.NextCommandListId();
+    Args.ID = ListId;
     DriverTable->pfnResetCommandList(DriverList, &Args);
 
-    /* Pipeline states are not made yet, so there is never one to bind here */
-    if (InitialState != nullptr)
-        RX_TRACE(L"initial pipeline state ignored");
+    if (Type != D3D12_COMMAND_LIST_TYPE_COPY)
+        ResetPipeline(InitialState);
 
     State = RxListState::Recording;
     Error = S_OK;
@@ -167,31 +192,72 @@ RxCommandList::Begin(
     return S_OK;
 }
 
+/* The application's initial pipeline, or the device's default one of the list's kind */
+VOID
+RxCommandList::ResetPipeline(
+    _In_opt_ ID3D12PipelineState* InitialState)
+{
+    RxPipelineState* Pipeline = RxUnwrap12<RxPipelineState>(InitialState);
+
+    if (Pipeline == nullptr)
+        Pipeline = Device.DefaultPipeline(Type == D3D12_COMMAND_LIST_TYPE_COMPUTE);
+    if (Pipeline != nullptr)
+        DriverTable->pfnSetPipelineState(Api(), Pipeline->Api());
+}
+
 /* The state a list starts recording with, sent to the driver so nothing carries over from the last use */
 VOID
 RxCommandList::ResetState()
 {
     static const FLOAT BlendFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    static const D3D12DDI_VERTEX_BUFFER_VIEW NoVertexBuffers[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    static const D3D12DDI_STREAM_OUTPUT_BUFFER_VIEW NoStreamTargets[D3D12_SO_BUFFER_SLOT_COUNT] = {};
+    static const D3D12DDI_SHADING_RATE_COMBINER_0062 Passthrough[D3D12_RS_SET_SHADING_RATE_COMBINER_COUNT] = {};
+    const D3D12DDI_D3D12_OPTIONS_DATA_0089& Options = Device.GetOptions();
+    D3D12DDI_HDESCRIPTORHEAP NoHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES] = {};
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE NoTargets[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    D3D12DDI_HRESOURCE NoResource = {};
+    D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
 
-    if (Type == D3D12_COMMAND_LIST_TYPE_COPY)
-        return;
+    if (Type != D3D12_COMMAND_LIST_TYPE_COPY)
+    {
+        if (Type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+            DriverTable->pfnIaSetTopology(Api(), D3D12DDI_PRIMITIVE_TOPOLOGY_UNDEFINED);
+        DriverTable->pfnSetDescriptorHeaps(DriverList, 0, NoHeaps);
+    }
 
-    DriverTable->pfnSetDescriptorHeaps(DriverList, 0, nullptr);
-    if (DriverTable->pfnClearRootArguments != nullptr)
-        DriverTable->pfnClearRootArguments(DriverList);
+    if (Type == D3D12_COMMAND_LIST_TYPE_DIRECT)
+    {
+        DriverTable->pfnIASetVertexBuffers(Api(), 0, _countof(NoVertexBuffers), NoVertexBuffers);
+        DriverTable->pfnIASetIndexBuffer(Api(), nullptr);
+        DriverTable->pfnSOSetTargets(Api(), 0, _countof(NoStreamTargets), NoStreamTargets);
+        DriverTable->pfnOMSetRenderTargets(Api(), 0, NoTargets, TRUE, nullptr);
+        DriverTable->pfnRsSetViewports(Api(), 0, nullptr);
+        DriverTable->pfnRsSetScissorRects(Api(), 0, nullptr);
+        DriverTable->pfnOmSetBlendFactor(Api(), BlendFactor);
+        if (DriverTable->pfnOmSetFrontAndBackStencilRef != nullptr)
+            DriverTable->pfnOmSetFrontAndBackStencilRef(Api(), 0, 0);
+        else
+            DriverTable->pfnOmSetStencilRef(Api(), 0);
+        if (Options.DepthBoundsTestSupported)
+            DriverTable->pfnOMSetDepthBounds(Api(), 0.0f, 1.0f);
+        if (Options.VariableShadingRateTier != D3D12DDI_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED)
+        {
+            DriverTable->pfnRSSetShadingRate(Api(), D3D12DDI_SHADING_RATE_0062_1X1, Passthrough);
+            if (Options.VariableShadingRateTier == D3D12DDI_VARIABLE_SHADING_RATE_TIER_2)
+                DriverTable->pfnRSSetShadingRateImage(DriverList, NoResource);
+        }
+    }
 
-    if (Type != D3D12_COMMAND_LIST_TYPE_DIRECT && Type != D3D12_COMMAND_LIST_TYPE_BUNDLE)
-        return;
+    if (Type == D3D12_COMMAND_LIST_TYPE_DIRECT || Type == D3D12_COMMAND_LIST_TYPE_COMPUTE)
+    {
+        DriverTable->pfnSetPredication(DriverList, NoResource, 0, D3D12DDI_PREDICATION_OP_EQUAL_ZERO);
+        if (DriverTable->pfnClearRootArguments != nullptr)
+            DriverTable->pfnClearRootArguments(DriverList);
+    }
 
-    DriverTable->pfnIaSetTopology(Api(), D3D12DDI_PRIMITIVE_TOPOLOGY_UNDEFINED);
-    DriverTable->pfnOMSetRenderTargets(Api(), 0, nullptr, TRUE, nullptr);
-    DriverTable->pfnRsSetViewports(Api(), 0, nullptr);
-    DriverTable->pfnRsSetScissorRects(Api(), 0, nullptr);
-    DriverTable->pfnOmSetBlendFactor(Api(), BlendFactor);
-    if (DriverTable->pfnOmSetFrontAndBackStencilRef != nullptr)
-        DriverTable->pfnOmSetFrontAndBackStencilRef(Api(), 0, 0);
-    else
-        DriverTable->pfnOmSetStencilRef(Api(), 0);
+    if (TakesSessions)
+        DriverTable->pfnSetProtectedResourceSession(DriverList, NoSession);
 }
 
 HRESULT
@@ -274,6 +340,7 @@ RxCommandList::Close(VOID)
 
     DriverTable->pfnCloseCommandList(DriverList);
     State = RxListState::Closed;
+    ListId = UINT64_MAX;
 
     Allocator->Unhold();
     Allocator->Release();
@@ -292,6 +359,7 @@ RxCommandList::Reset(
     _In_opt_ ID3D12PipelineState* pInitialState)
 {
     RxCommandAllocator* NewAllocator = RxUnwrap12<RxCommandAllocator>(pAllocator);
+    HRESULT hr;
 
     /* A list still recording can not start over */
     if (State == RxListState::Recording)
@@ -299,7 +367,10 @@ RxCommandList::Reset(
     if (NewAllocator == nullptr || NewAllocator->GetType() != Type)
         return E_INVALIDARG;
 
-    return Begin(NewAllocator, pInitialState);
+    hr = Claim(NewAllocator);
+    if (FAILED(hr))
+        return hr;
+    return Begin(pInitialState);
 }
 
 /* Copies */

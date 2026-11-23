@@ -1207,6 +1207,17 @@ RxDevice12::CreateInternalObjects()
     return S_OK;
 }
 
+HRESULT
+RxDevice12::SessionSupport(
+    _In_ UINT NodeIndex,
+    _Out_ BOOLEAN* Supported)
+{
+    HRESULT hr = QuerySessionCaps();
+
+    *Supported = SUCCEEDED(hr) && NodeIndex < ApiNodeCount && Sessions[NodeIndex].Support != 0;
+    return hr;
+}
+
 /* Protected session support of every node, read once */
 HRESULT
 RxDevice12::QuerySessionCaps()

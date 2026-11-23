@@ -192,6 +192,16 @@ public:
         return DriverState;
     }
 
+    /* What list entries take: a bypass header that leads the driver to its pipeline */
+    D3D12DDI_API_HPIPELINESTATE
+    Api()
+    {
+        D3D12DDI_API_HPIPELINESTATE Handle;
+
+        Handle.pDrvPrivate = &Bypass;
+        return Handle;
+    }
+
 private:
     using RxDeviceChild12::RxDeviceChild12;
     ~RxPipelineState() override;
@@ -213,5 +223,6 @@ private:
     RxPipelinePart* RasterizerState = nullptr;
     RxDriverMemory12 Memory;
     D3D12DDI_HPIPELINESTATE DriverState = {};
+    D3D12DDI_RUNTIME_BYPASS_HEADER Bypass = {};
     BOOLEAN IsDriverStateCreated = FALSE;
 };

@@ -358,6 +358,20 @@ public:
         return (UINT64)InterlockedIncrement64(&CommandListCounter);
     }
 
+    /* The pipeline a list starts recording with when the application names none */
+    RxPipelineState*
+    DefaultPipeline(
+        _In_ BOOLEAN Compute) const
+    {
+        return Compute ? DefaultCompute : DefaultGraphics;
+    }
+
+    /* Whether protected sessions exist on an API node; the caps are read on first use */
+    HRESULT
+    SessionSupport(
+        _In_ UINT NodeIndex,
+        _Out_ BOOLEAN* Supported);
+
     SIZE_T
     DriverRtvIncrement() const
     {

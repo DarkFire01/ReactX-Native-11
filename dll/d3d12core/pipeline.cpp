@@ -1215,6 +1215,8 @@ RxPipelineState::Initialize(
         return hr;
     }
     IsDriverStateCreated = TRUE;
+    Bypass.pInterfaceVtable = *reinterpret_cast<void**>(static_cast<ID3D12PipelineState*>(this));
+    Bypass.pDriverObject = DriverState.pDrvPrivate;
 
     return Device.MakePageableResident(nullptr, D3D12DDI_HT_PIPELINE_STATE);
 }
