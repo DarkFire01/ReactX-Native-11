@@ -134,6 +134,9 @@ typedef struct _RX_HANDLE
     UINT Class;             /* hlsl::DXIL::ResourceClass */
     UINT Slot;
     UINT Kind;              /* hlsl::DXIL::ResourceKind */
+    llvm::Value *Index;     /* a register index the program computes, or null */
+    UINT Lower;             /* the range's first register */
+    UINT Count;             /* registers in the range */
 } RX_HANDLE;
 
 /* A pointer as the object it points into, a constant byte offset and scaled dynamic terms */
@@ -258,6 +261,35 @@ private:
         _In_ llvm::Value *Value,
         _Out_ RX_HANDLE *Handle);
 
+    UINT
+    Place(
+        _In_ UINT Class,
+        _In_ UINT Range,
+        _In_ UINT Space,
+        _In_ UINT Lower,
+        _In_ UINT Count,
+        _In_ UINT Limit);
+
+    BOOLEAN
+    LowerDynamic(
+        _In_ llvm::CallInst *Call,
+        _In_ llvm::Value *Handle,
+        _In_ const RX_HANDLE &Range);
+
+    UINT
+    ResultRegister(
+        _In_ const llvm::Value *Value)
+    {
+        auto Found = Slots.find(Value);
+        UINT Register;
+
+        if (Found != Slots.end())
+            return Found->second / 4;
+        Register = Fresh4();
+        Slots[Value] = Register * 4;
+        return Register;
+    }
+
     RxTokens
     ResourceOperand(
         _In_ const RX_HANDLE &Handle,
@@ -324,6 +356,9 @@ private:
     std::unordered_map<const llvm::Value *, UINT> Slots;
     std::unordered_map<const llvm::Value *, UINT> SharedRegisters;
     std::unordered_map<const llvm::Value *, UINT> Arrays;
+    std::unordered_map<UINT64, UINT> Bases;
+    std::unordered_map<const llvm::Value *, UINT> Overrides;
+    UINT HighSlot[4] = { 128, 64, 14, 16 };
     std::unordered_map<const llvm::Value *, std::pair<UINT, UINT>> Inputs;
     UINT NextSlot = 0;
     llvm::DominatorTreeBase<llvm::BasicBlock> PostDominators{ true };
@@ -332,6 +367,10 @@ private:
     std::vector<RX_LOOP> Open;
     BOOLEAN PixelShader = FALSE;
     BOOLEAN Failed = FALSE;
+
+public:
+    /* Class, slot, space and register of every slot not named by its own register */
+    std::vector<UINT> Sources;
 };
 
 UINT
@@ -569,27 +608,66 @@ RxReturnType(
 }
 
 /* Resources declared in space 0 keep their register numbers */
+/*
+ * Executor slots for one resource range. Space 0 ranges keep their registers as slots;
+ * other spaces, and registers past the executor's slots, take slots from the top down.
+ */
+UINT
+RxLowering::Place(
+    _In_ UINT Class,
+    _In_ UINT Range,
+    _In_ UINT Space,
+    _In_ UINT Lower,
+    _In_ UINT Count,
+    _In_ UINT Limit)
+{
+    UINT Base;
+
+    if (Count > Limit)
+        return UINT_MAX;
+    if (Space == 0 && Lower <= Limit - Count)
+    {
+        Base = Lower;
+    }
+    else
+    {
+        if (HighSlot[Class] < Count)
+            return UINT_MAX;
+        HighSlot[Class] -= Count;
+        Base = HighSlot[Class];
+        for (UINT Index = 0; Index < Count; Index++)
+            Sources.insert(Sources.end(), { Class, Base + Index, Space, Lower + Index });
+    }
+    Bases[((UINT64)Class << 32) | Range] = Base;
+    return Base;
+}
+
 BOOLEAN
 RxLowering::Resources(VOID)
 {
     for (const std::unique_ptr<hlsl::DxilCBuffer> &Buffer : Dxil.GetCBuffers())
     {
-        if (Buffer->GetSpaceID() != 0)
+        UINT Base = Place((UINT)hlsl::DXIL::ResourceClass::CBuffer, Buffer->GetID(), Buffer->GetSpaceID(), Buffer->GetLowerBound(),
+                          Buffer->GetRangeSize(), 14);
+
+        if (Base == UINT_MAX)
             return FALSE;
-        for (UINT Index = 0; Index < Buffer->GetRangeSize() && Index < 16; Index++)
+        for (UINT Index = 0; Index < Buffer->GetRangeSize(); Index++)
             Declare(D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER, { RxRegister(D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER, RxSwizzleMode, RxXyzw,
-                                                                      { Buffer->GetLowerBound() + Index, (Buffer->GetSize() + 15) / 16 }) });
+                                                                      { Base + Index, (Buffer->GetSize() + 15) / 16 }) });
     }
     for (const std::unique_ptr<hlsl::DxilSampler> &Sampler : Dxil.GetSamplers())
     {
         UINT Mode = (Sampler->GetSamplerKind() == hlsl::DXIL::SamplerKind::Comparison) ? D3D10_SB_SAMPLER_MODE_COMPARISON :
                                                                                          D3D10_SB_SAMPLER_MODE_DEFAULT;
 
-        if (Sampler->GetSpaceID() != 0)
+        UINT Base = Place((UINT)hlsl::DXIL::ResourceClass::Sampler, Sampler->GetID(), Sampler->GetSpaceID(), Sampler->GetLowerBound(),
+                          Sampler->GetRangeSize(), 16);
+
+        if (Base == UINT_MAX)
             return FALSE;
-        for (UINT Index = 0; Index < Sampler->GetRangeSize() && Index < 16; Index++)
-            Declare(D3D10_SB_OPCODE_DCL_SAMPLER, { RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Sampler->GetLowerBound() + Index }) },
-                    ENCODE_D3D10_SB_SAMPLER_MODE(Mode));
+        for (UINT Index = 0; Index < Sampler->GetRangeSize(); Index++)
+            Declare(D3D10_SB_OPCODE_DCL_SAMPLER, { RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Base + Index }) }, ENCODE_D3D10_SB_SAMPLER_MODE(Mode));
     }
     for (UINT Pass = 0; Pass < 2; Pass++)
     {
@@ -603,11 +681,14 @@ RxLowering::Resources(VOID)
             RxTokens Returns = { ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 0) | ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 1) |
                                  ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 2) | ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 3) };
 
-            if (Resource->GetSpaceID() != 0)
+            UINT Base = Place(Pass ? (UINT)hlsl::DXIL::ResourceClass::UAV : (UINT)hlsl::DXIL::ResourceClass::SRV, Resource->GetID(),
+                              Resource->GetSpaceID(), Resource->GetLowerBound(), Resource->GetRangeSize(), Pass ? 64 : 128);
+
+            if (Base == UINT_MAX)
                 return FALSE;
-            for (UINT Index = 0; Index < Resource->GetRangeSize() && Index < 128; Index++)
+            for (UINT Index = 0; Index < Resource->GetRangeSize(); Index++)
             {
-                RxTokens Register = RxBare(Type, { Resource->GetLowerBound() + Index });
+                RxTokens Register = RxBare(Type, { Base + Index });
 
                 if (Kind == hlsl::DXIL::ResourceKind::RawBuffer)
                     Declare(Pass ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW : D3D11_SB_OPCODE_DCL_RESOURCE_RAW, { Register });
@@ -675,7 +756,7 @@ RxLowering::HandleOf(
     Handle->Class = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue();
     Range = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(2))->getZExtValue();
     Index = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(3));
-    if (Index == nullptr)
+    if (Bases.count(((UINT64)Handle->Class << 32) | Range) == 0)
         return FALSE;
     switch ((hlsl::DXIL::ResourceClass)Handle->Class)
     {
@@ -694,10 +775,59 @@ RxLowering::HandleOf(
             Base = &Dxil.GetSampler(Range);
             break;
     }
-    Handle->Slot = (UINT)Index->getZExtValue();
-    if (Handle->Slot < Base->GetLowerBound())
-        Handle->Slot += Base->GetLowerBound();
+    Handle->Lower = Base->GetLowerBound();
+    Handle->Count = Base->GetRangeSize();
+    Handle->Slot = Bases[((UINT64)Handle->Class << 32) | Range];
+
+    /* A lowering of one case of a computed index fixes the slot */
+    auto Fixed = Overrides.find(Value);
+
+    if (Fixed != Overrides.end())
+    {
+        Handle->Slot = Fixed->second;
+        return TRUE;
+    }
+    if (Index == nullptr)
+    {
+        Handle->Index = Call->getArgOperand(3);
+        return TRUE;
+    }
+    if ((UINT)Index->getZExtValue() >= Handle->Lower)
+        Handle->Slot += (UINT)Index->getZExtValue() - Handle->Lower;
+    else
+        Handle->Slot += (UINT)Index->getZExtValue();
     return TRUE;
+}
+
+/*
+ * A resource picked by a computed index: one test per register of its range, each lowering
+ * the operation with that register's slot. Lanes with an index past the range do nothing.
+ */
+BOOLEAN
+RxLowering::LowerDynamic(
+    _In_ llvm::CallInst *Call,
+    _In_ llvm::Value *Handle,
+    _In_ const RX_HANDLE &Range)
+{
+    UINT Relative = Fresh();
+    BOOLEAN Lowered = TRUE;
+
+    if (Range.Count > 64)
+        return FALSE;
+    Emit(D3D10_SB_OPCODE_IADD, { Temp(Relative / 4, RxMaskMode, 1u << (Relative & 3)), Source(Range.Index), RxImmediate(0u - Range.Lower) });
+    for (UINT Index = 0; Index < Range.Count && Lowered; Index++)
+    {
+        UINT Test = Fresh();
+
+        Emit(D3D10_SB_OPCODE_IEQ, { Temp(Test / 4, RxMaskMode, 1u << (Test & 3)), Temp(Relative / 4, RxSelectMode, Relative & 3),
+                                    RxImmediate(Index) });
+        Emit(D3D10_SB_OPCODE_IF, { Temp(Test / 4, RxSelectMode, Test & 3) }, ENCODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(D3D10_SB_INSTRUCTION_TEST_NONZERO));
+        Overrides[Handle] = Range.Slot + Index;
+        Lowered = LowerCall(Call);
+        Overrides.erase(Handle);
+        Emit(D3D10_SB_OPCODE_ENDIF, {});
+    }
+    return Lowered;
 }
 
 /* The executor's opcode for each LLVM operator, and whether the operands swap or the second negates */
@@ -1102,6 +1232,21 @@ RxLowering::LowerCall(
     }
     Code = hlsl::OP::getOpCode(Call);
 
+    /* Operations on a resource picked at run time run once per register it may name */
+    if (Code != OpCode::CreateHandle)
+    {
+        for (UINT Argument = 1; Argument < Call->getNumArgOperands() && Argument < 3; Argument++)
+        {
+            RX_HANDLE Range;
+
+            if (Call->getArgOperand(Argument)->getType() == Op->GetHandleType() && HandleOf(Call->getArgOperand(Argument), &Range) &&
+                Range.Index != nullptr)
+            {
+                return LowerDynamic(Call, Call->getArgOperand(Argument), Range);
+            }
+        }
+    }
+
     for (const RX_SIMPLE &Simple : RxSimpleOps)
     {
         if (Simple.Code != Code)
@@ -1168,8 +1313,7 @@ RxLowering::LowerCall(
 
             if (!HandleOf(Call->getArgOperand(1), &Handle))
                 return FALSE;
-            Register = Fresh4();
-            Slots[Call] = Register * 4;
+            Register = ResultRegister(Call);
             if (llvm::ConstantInt *Fixed = llvm::dyn_cast<llvm::ConstantInt>(Row))
             {
                 Buffer = RxRegister(D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER, RxSwizzleMode, RxXyzw, { Handle.Slot, (UINT)Fixed->getZExtValue() });
@@ -1230,8 +1374,7 @@ RxLowering::LowerCall(
                           (Code == OpCode::IMul) ? D3D10_SB_OPCODE_IMUL : (Code == OpCode::UAddc) ? D3D11_SB_OPCODE_UADDC : D3D11_SB_OPCODE_USUBB;
 
             /* Both results land in one register, the first in x and the second in y */
-            Register = Fresh4();
-            Slots[Call] = Register * 4;
+            Register = ResultRegister(Call);
             Emit(Opcode, { Temp(Register, RxMaskMode, 1), Temp(Register, RxMaskMode, 2), Source(Call->getArgOperand(1)),
                            Source(Call->getArgOperand(2)) });
             return TRUE;
@@ -1359,8 +1502,7 @@ RxLowering::LowerResource(
                 Address = GatherRange(Call, 3, Count);
                 Coordinates = Temp(Address, RxSwizzleMode, RxXyzw);
             }
-            Result = Fresh4();
-            Slots[Call] = Result * 4;
+            Result = ResultRegister(Call);
             SamplerOperand = RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Sampler.Slot });
             switch (Code)
             {
@@ -1397,8 +1539,7 @@ RxLowering::LowerResource(
                 Emit(D3D10_SB_OPCODE_MOV, { Temp(Address, RxMaskMode, 1u << Component),
                                             (Component < Count) ? Source(Call->getArgOperand(3 + Component)) : RxImmediate(0) });
             Emit(D3D10_SB_OPCODE_MOV, { Temp(Address, RxMaskMode, 8), Multisampled ? RxImmediate(0) : Source(Call->getArgOperand(2)) });
-            Result = Fresh4();
-            Slots[Call] = Result * 4;
+            Result = ResultRegister(Call);
             if (Multisampled)
                 Emit(D3D10_SB_OPCODE_LD_MS, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle),
                                               Source(Call->getArgOperand(2)) }, 0, Extended.empty() ? nullptr : &Extended);
@@ -1412,8 +1553,7 @@ RxLowering::LowerResource(
         {
             UINT Kind = Handle.Kind;
 
-            Result = Fresh4();
-            Slots[Call] = Result * 4;
+            Result = ResultRegister(Call);
             if (Kind == (UINT)hlsl::DXIL::ResourceKind::RawBuffer)
                 Emit(D3D11_SB_OPCODE_LD_RAW, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)), ResourceOperand(Handle) });
             else if (Kind == (UINT)hlsl::DXIL::ResourceKind::StructuredBuffer)
@@ -1791,6 +1931,10 @@ RxWarpLowerDxil(
 
         if (!Lowering.Run(&Program))
             return nullptr;
+
+        /* The program, then how many slot sources follow it, then the sources */
+        Program.push_back((UINT)(Lowering.Sources.size() / 4));
+        Program.insert(Program.end(), Lowering.Sources.begin(), Lowering.Sources.end());
         Tokens = static_cast<UINT *>(HeapAlloc(GetProcessHeap(), 0, Program.size() * sizeof(UINT)));
         if (Tokens != nullptr)
             memcpy(Tokens, Program.data(), Program.size() * sizeof(UINT));

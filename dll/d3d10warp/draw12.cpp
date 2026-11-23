@@ -101,6 +101,13 @@ typedef struct _RX_WARP12_STAGE_USE
     UINT Samplers;
     BOOLEAN Views[128];
     BOOLEAN Uavs[64];
+
+    /* Slots a lowered program fills from another space or register, as class, slot, space, register */
+    std::vector<UINT> Sources;
+    UINT MovedConstants;
+    UINT MovedSamplers;
+    BOOLEAN MovedViews[128];
+    BOOLEAN MovedUavs[64];
 } RX_WARP12_STAGE_USE;
 
 static
@@ -115,6 +122,21 @@ RxWarp12Gather(
         Use->Views[Slot] |= Shader->ResourceDimension[Slot] != 0;
     for (UINT Slot = 0; Slot < 64; Slot++)
         Use->Uavs[Slot] |= Shader->UavDimension[Slot] != 0;
+    for (SIZE_T Index = 0; Index + 4 <= Shader->SlotSources.size(); Index += 4)
+    {
+        UINT Class = Shader->SlotSources[Index];
+        UINT Slot = Shader->SlotSources[Index + 1];
+
+        Use->Sources.insert(Use->Sources.end(), Shader->SlotSources.begin() + Index, Shader->SlotSources.begin() + Index + 4);
+        if (Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV && Slot < 128)
+            Use->MovedViews[Slot] = TRUE;
+        else if (Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV && Slot < 64)
+            Use->MovedUavs[Slot] = TRUE;
+        else if (Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV && Slot < RxWarpConstantBufferSlots)
+            Use->MovedConstants |= 1u << Slot;
+        else if (Slot < 16)
+            Use->MovedSamplers |= 1u << Slot;
+    }
     for (const RxWarpShader &Phase : Shader->Phases)
         RxWarp12Gather(&Phase, Use);
 }
@@ -139,6 +161,33 @@ RxWarp12BindConstants(
     Bindings->ConstantCount[Slot] = (UINT)(Size / 16);
 }
 
+/* One descriptor into one executor slot of its kind */
+static
+VOID
+RxWarp12BindSlot(
+    _In_ UINT Kind,
+    _In_ UINT Slot,
+    _In_ RX_WARP12_DESCRIPTOR *Descriptor,
+    _Inout_ RX_WARP_STAGE_BINDINGS *Bindings)
+{
+    switch (Kind)
+    {
+        case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV:
+            Bindings->Views[Slot] = (Descriptor->Kind == RxWarp12DescriptorShaderResource) ? &Descriptor->View : nullptr;
+            break;
+        case D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV:
+            Bindings->Uavs[Slot] = (Descriptor->Kind == RxWarp12DescriptorUnorderedAccess) ? &Descriptor->View : nullptr;
+            break;
+        case D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV:
+            if (Descriptor->Kind == RxWarp12DescriptorConstants)
+                RxWarp12BindConstants(Bindings, Slot, Descriptor->Constants.Resource, Descriptor->Constants.Offset, Descriptor->Constants.Size);
+            break;
+        default:
+            Bindings->Samplers[Slot] = (Descriptor->Kind == RxWarp12DescriptorSampler) ? &Descriptor->Sampler : nullptr;
+            break;
+    }
+}
+
 /* One range of a descriptor table, onto the slots the stage declares */
 static
 VOID
@@ -149,6 +198,21 @@ RxWarp12BindRange(
     _Inout_ RX_WARP_STAGE_BINDINGS *Bindings)
 {
     UINT Limit;
+
+    /* Slots moved by the lowering find their register in the range */
+    for (SIZE_T Index = 0; Index + 4 <= Use.Sources.size(); Index += 4)
+    {
+        UINT Register = Use.Sources[Index + 3];
+
+        if (Use.Sources[Index] != (UINT)Range.Kind || Use.Sources[Index + 2] != Range.Space || Register < Range.Base ||
+            Register - Range.Base >= Range.Count)
+        {
+            continue;
+        }
+        RxWarp12BindSlot(Range.Kind, Use.Sources[Index + 1],
+                         RxWarp12Descriptor((SIZE_T)(Table + (UINT64)(Range.Offset + Register - Range.Base) * RxWarp12DescriptorStride)),
+                         Bindings);
+    }
 
     if (Range.Space != 0)
         return;
@@ -170,45 +234,28 @@ RxWarp12BindRange(
     for (UINT Index = 0; Index < Range.Count && Range.Base + Index < Limit; Index++)
     {
         UINT Slot = Range.Base + Index;
-        RX_WARP12_DESCRIPTOR *Descriptor;
 
         switch (Range.Kind)
         {
             case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV:
-                if (!Use.Views[Slot])
+                if (!Use.Views[Slot] || Use.MovedViews[Slot])
                     continue;
                 break;
             case D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV:
-                if (!Use.Uavs[Slot])
+                if (!Use.Uavs[Slot] || Use.MovedUavs[Slot])
                     continue;
                 break;
             case D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV:
-                if (!(Use.Constants & (1u << Slot)))
+                if (!(Use.Constants & (1u << Slot)) || (Use.MovedConstants & (1u << Slot)))
                     continue;
                 break;
             default:
-                if (!(Use.Samplers & (1u << Slot)))
+                if (!(Use.Samplers & (1u << Slot)) || (Use.MovedSamplers & (1u << Slot)))
                     continue;
                 break;
         }
-
-        Descriptor = RxWarp12Descriptor((SIZE_T)(Table + (UINT64)(Range.Offset + Index) * RxWarp12DescriptorStride));
-        switch (Range.Kind)
-        {
-            case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV:
-                Bindings->Views[Slot] = (Descriptor->Kind == RxWarp12DescriptorShaderResource) ? &Descriptor->View : nullptr;
-                break;
-            case D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV:
-                Bindings->Uavs[Slot] = (Descriptor->Kind == RxWarp12DescriptorUnorderedAccess) ? &Descriptor->View : nullptr;
-                break;
-            case D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV:
-                if (Descriptor->Kind == RxWarp12DescriptorConstants)
-                    RxWarp12BindConstants(Bindings, Slot, Descriptor->Constants.Resource, Descriptor->Constants.Offset, Descriptor->Constants.Size);
-                break;
-            default:
-                Bindings->Samplers[Slot] = (Descriptor->Kind == RxWarp12DescriptorSampler) ? &Descriptor->Sampler : nullptr;
-                break;
-        }
+        RxWarp12BindSlot(Range.Kind, Slot, RxWarp12Descriptor((SIZE_T)(Table + (UINT64)(Range.Offset + Index) * RxWarp12DescriptorStride)),
+                         Bindings);
     }
 }
 
@@ -281,21 +328,58 @@ RxWarp12BindStage(
                 break;
             }
             case D3D12DDI_ROOT_PARAMETER_TYPE_SRV:
-                if (Parameter.Space == 0 && Parameter.Register < 128 && Use.Views[Parameter.Register])
+                if (Parameter.Space == 0 && Parameter.Register < 128 && Use.Views[Parameter.Register] && !Use.MovedViews[Parameter.Register])
                     Bindings->Views[Parameter.Register] = RxWarp12RootView(State, Index, Value);
                 break;
             case D3D12DDI_ROOT_PARAMETER_TYPE_UAV:
-                if (Parameter.Space == 0 && Parameter.Register < 64 && Use.Uavs[Parameter.Register])
+                if (Parameter.Space == 0 && Parameter.Register < 64 && Use.Uavs[Parameter.Register] && !Use.MovedUavs[Parameter.Register])
                     Bindings->Uavs[Parameter.Register] = RxWarp12RootView(State, Index, Value);
                 break;
             default:
                 break;
         }
+
+        /* Root arguments for slots the lowering moved */
+        for (SIZE_T Source = 0; Source + 4 <= Use.Sources.size(); Source += 4)
+        {
+            UINT Class = Use.Sources[Source];
+            UINT Slot = Use.Sources[Source + 1];
+
+            if (Use.Sources[Source + 2] != Parameter.Space || Use.Sources[Source + 3] != Parameter.Register)
+                continue;
+            if (Parameter.Type == D3D12DDI_ROOT_PARAMETER_TYPE_SRV && Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV)
+                Bindings->Views[Slot] = RxWarp12RootView(State, Index, Value);
+            else if (Parameter.Type == D3D12DDI_ROOT_PARAMETER_TYPE_UAV && Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV)
+                Bindings->Uavs[Slot] = RxWarp12RootView(State, Index, Value);
+            else if (Parameter.Type == D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS && Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV)
+            {
+                Bindings->ConstantBuffer[Slot] = reinterpret_cast<const BYTE *>(Root->Constants[Index]);
+                Bindings->ConstantCount[Slot] = (Parameter.Values + 3) / 4;
+            }
+            else if (Parameter.Type == D3D12DDI_ROOT_PARAMETER_TYPE_CBV && Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV && Value != 0)
+            {
+                UINT64 Offset = 0;
+                RxWarp12Resource *Resource = RxWarp12ResolveAddress(State->Device, Value, &Offset);
+
+                if (Resource != nullptr)
+                    RxWarp12BindConstants(Bindings, Slot, &Resource->Storage, Offset, (UINT64)RxWarp12RootBufferConstants * 16);
+            }
+        }
     }
     for (const RX_WARP12_STATIC_SAMPLER &Sampler : Signature->Samplers)
     {
-        if (Sampler.Space == 0 && Sampler.Register < 16 && RxWarp12Visible(Sampler.Visibility, Stage))
+        if (!RxWarp12Visible(Sampler.Visibility, Stage))
+            continue;
+        if (Sampler.Space == 0 && Sampler.Register < 16 && !(Use.MovedSamplers & (1u << Sampler.Register)))
             Bindings->Samplers[Sampler.Register] = &Sampler.Sampler;
+        for (SIZE_T Source = 0; Source + 4 <= Use.Sources.size(); Source += 4)
+        {
+            if (Use.Sources[Source] == D3D12DDI_DESCRIPTOR_RANGE_TYPE_SAMPLER && Use.Sources[Source + 2] == Sampler.Space &&
+                Use.Sources[Source + 3] == Sampler.Register)
+            {
+                Bindings->Samplers[Use.Sources[Source + 1]] = &Sampler.Sampler;
+            }
+        }
     }
 }
 

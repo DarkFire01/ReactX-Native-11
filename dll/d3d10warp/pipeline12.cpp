@@ -55,6 +55,8 @@ RxWarp12NewShader(
     }
     if (Program == nullptr || FAILED(Object->Initialize(Program)))
         RX_WARP_TRACE("D3D12 shader decode failed\n");
+    else if (Lowered != nullptr)
+        Object->SlotSources.assign(Lowered + Lowered[1] + 1, Lowered + Lowered[1] + 1 + (SIZE_T)Lowered[Lowered[1]] * 4);
     RxWarpFreeLowered(Lowered);
     return Object;
 }

@@ -159,6 +159,9 @@ public:
     std::vector<RX_WARP_SHARED> Shared;
     UINT SharedBytes = 0;
 
+    /* Lowered DXIL: class, slot, space and register for each slot not named by its own register */
+    std::vector<UINT> SlotSources;
+
     /* Geometry shaders, and the stream output that may come with them */
     UINT GsInputPrimitive = 0;          /* D3D10_SB_PRIMITIVE */
     UINT GsOutputTopology = 0;          /* D3D10_SB_PRIMITIVE_TOPOLOGY */
