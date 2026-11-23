@@ -1424,6 +1424,9 @@ public:
     /* The vertices hold transformed positions, which no vertex shader processes */
     BOOLEAN Transformed = FALSE;
 
+    /* The device made the declaration for a vertex format */
+    BOOLEAN ForFormat = FALSE;
+
     /* Declarations the device made for formats are kept in a list and live until the device goes */
     D9Declaration* NextKept = nullptr;
     BOOLEAN Orphaned = FALSE;

@@ -266,7 +266,7 @@ D9Device::ApplySwitch(VOID)
         PixelShaders.SetPointSprite(Switch.DrewPoints && RenderStates[D3DRS_POINTSPRITEENABLE] != 0);
     if ((Acting & D9SwitchVertexInput) != 0 && Switch.HasVertexConverter && Declaration != nullptr)
     {
-        if (Declaration->Fvf != 0)
+        if (Declaration->ForFormat)
             VertexShaders.SetFvf(Declaration->Fvf);
         else
             VertexShaders.SetElements(Declaration->Elements);

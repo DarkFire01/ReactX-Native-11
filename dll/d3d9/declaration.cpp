@@ -547,6 +547,7 @@ D9Device::BindFvfDeclaration(
             return hr;
         }
         Found->Bind();
+        Found->ForFormat = TRUE;
         Found->Orphaned = TRUE;
         Found->NextKept = FvfDeclarations;
         FvfDeclarations = Found;

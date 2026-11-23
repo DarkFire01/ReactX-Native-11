@@ -912,15 +912,15 @@ D9BuildFixedVertexShader(
     D9_VS_SOURCE Size = {};
     D9_VS_SOURCE Weights = {};
     D9_VS_SOURCE Indices = {};
+    D9_VS_SOURCE Position2 = {};
+    D9_VS_SOURCE Normal2 = {};
+    BOOLEAN TweenPosition = FALSE;
+    BOOLEAN TweenNormal = FALSE;
     D9_VS_SOURCE Sets[D9VertexStages];
     DWORD Writes = D9VsWritesPosition;
     UINT Stages;
 
     *Count = 0;
-
-    /* Parts not converted yet */
-    if ((In & D9VsTweening) != 0)
-        return FALSE;
 
     Position = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Position), D9VsAll);
     Out.Put(0xFFFE0200);
@@ -937,6 +937,22 @@ D9BuildFixedVertexShader(
     {
         Out.Declare(D9VsUsageNormal, 0, Inputs.Take(&Inputs.Normal));
         Normal = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Normal), D9VsAll);
+    }
+    /* Tweening reads a second position and normal */
+    if ((In & D9VsTweening) != 0)
+    {
+        if ((In & D9VsInPosition2) != 0)
+        {
+            Out.Declare(D9VsUsagePosition, 1, Inputs.Take(&Inputs.Position2));
+            Position2 = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Position2), D9VsAll);
+            TweenPosition = TRUE;
+        }
+        if (HasNormal && (In & D9VsInNormal2) != 0)
+        {
+            Out.Declare(D9VsUsageNormal, 1, Inputs.Take(&Inputs.Normal2));
+            Normal2 = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Normal2), D9VsAll);
+            TweenNormal = TRUE;
+        }
     }
     if (DiffuseOut)
     {
@@ -1009,6 +1025,26 @@ D9BuildFixedVertexShader(
         {
             Sets[Set] = D9VsWhole(D9VsConstZero);
         }
+    }
+
+    /* Tweening moves the position and normal toward the second ones by the tween factor */
+    if (TweenPosition)
+    {
+        D9_VS_SOURCE Tweened = D9VsSrc(D9VsTemp, 2, D9VsAll);
+
+        Out.Op(D9VsMov, D9VsDst(D9VsTemp, 2, 0xF), Position2);
+        Out.Op(D9VsAdd, D9VsDst(D9VsTemp, 2, 0x7), Tweened, D9VsNegated(Position));
+        Out.Op(D9VsMad, D9VsDst(D9VsTemp, 2, 0x7), D9VsConstant(D9VsConstFog, 3), Tweened, Position);
+        Position = Tweened;
+    }
+    if (TweenNormal)
+    {
+        D9_VS_SOURCE Tweened = D9VsSrc(D9VsTemp, 3, D9VsAll);
+
+        Out.Op(D9VsMov, D9VsDst(D9VsTemp, 3, 0x7), Normal2);
+        Out.Op(D9VsAdd, D9VsDst(D9VsTemp, 3, 0x7), Tweened, D9VsNegated(Normal));
+        Out.Op(D9VsMad, D9VsDst(D9VsTemp, 3, 0x7), D9VsConstant(D9VsConstFog, 3), Tweened, Normal);
+        Normal = Tweened;
     }
 
     /* The eye space position and normal the later parts read, then the clip space position */
