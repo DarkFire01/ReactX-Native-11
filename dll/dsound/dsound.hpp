@@ -739,6 +739,16 @@ DsFreeDeviceRecords(
     _In_reads_opt_(Count) DsDeviceRecord* Records,
     _In_ ULONG Count);
 
+/* config.cpp */
+
+/* The class of the buffer configuration objects DirectMusic files describe */
+extern const CLSID DsBufferConfigClass;
+
+HRESULT
+DsCreateBufferConfig(
+    _In_ REFIID Iid,
+    _COM_Outptr_ void** Object);
+
 /* private.cpp */
 
 /* The class that hands out the device configuration property sets */

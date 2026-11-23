@@ -3,6 +3,7 @@ nt_add_usermode_dll(dsound
     SOURCES
         buffer.cpp
         capture.cpp
+        config.cpp
         device.cpp
         effects.cpp
         focus.cpp

@@ -22,6 +22,7 @@ enum DsFactoryKind
     DsMakeCapture8,
     DsMakeFullDuplex,
     DsMakePrivate,
+    DsMakeBufferConfig,
 };
 
 class DsFactory;
@@ -90,6 +91,8 @@ DsFactoryFace::CreateInstance(
             return DsCreateCapture(DS_VERSION_8, nullptr, FALSE, Iid, Object);
         case DsMakePrivate:
             return DsCreatePrivate(Iid, Object);
+        case DsMakeBufferConfig:
+            return DsCreateBufferConfig(Iid, Object);
         case DsMakeFullDuplex:
         {
             IDirectSoundFullDuplex* Duplex = nullptr;
@@ -342,6 +345,8 @@ DllGetClassObject(
         Kind = DsMakePrivate;
     else if (Class == CLSID_DirectSoundFullDuplex)
         Kind = DsMakeFullDuplex;
+    else if (Class == DsBufferConfigClass)
+        Kind = DsMakeBufferConfig;
     else
         return CLASS_E_CLASSNOTAVAILABLE;
 
