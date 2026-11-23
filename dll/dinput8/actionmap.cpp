@@ -682,6 +682,302 @@ Exit:
     return Result;
 }
 
+/* Fields of a semantic and of the hints a default map keeps per object */
+#define DI_SEM_CLASS(Semantic)      (((Semantic) >> 9) & 3)
+#define DI_SEM_KIND(Semantic)       (((Semantic) >> 15) & 0xF)
+#define DI_SEM_GENRE(Semantic)      ((Semantic) >> 24)
+#define DI_SEM_ANY_GENRE            0xFF
+#define DI_SEM_CLASS_AXIS           1
+#define DI_SEM_CLASS_BUTTON         2
+#define DI_SEM_CLASS_POV            3
+#define DI_SEM_LAST_BUTTONS         0xFC
+#define DI_HINT_TAKEN               0x00080000
+#define DI_HINT_TAKEN_MASK          0x00F80000
+
+/* Bits of a semantic a kinded button compares with the axis actions it may stand in for */
+#define DI_SEM_PAIR_MASK            0x0007B800
+#define DI_SEM_PAIR_MASK_ANY_KIND   0x00003800
+#define DI_SEM_KIND_ANY             0xF
+
+/* The object bits a force feedback action needs on an axis or a button */
+#define DI_FF_AXIS_BITS             DIDFT_FFACTUATOR
+#define DI_FF_BUTTON_BITS           DIDFT_FFEFFECTTRIGGER
+
+/* Only these object type bits decide whether a stored action names an object */
+#define DI_MAP_TYPE_MATCH_MASK      0xFCFFFFFF
+
+static
+BOOLEAN
+DiHintTaken(
+    _In_ const DI_MAP_OBJECT* Object)
+{
+    return (Object->Hints & DI_HINT_TAKEN_MASK) != 0;
+}
+
+static
+VOID
+DiTakeObject(
+    _Inout_ DIACTIONW* Action,
+    _Inout_ DI_MAP_OBJECT* Object)
+{
+    Action->dwObjID = Object->Type;
+    Object->Hints |= DI_HINT_TAKEN;
+}
+
+/* Maps an action to the object its semantic names by position, as the first and third passes do */
+static
+BOOLEAN
+DiMapByPosition(
+    _Inout_ DIACTIONW* Action,
+    _Inout_updates_(Axes + Povs + Buttons) DI_MAP_OBJECT* Objects,
+    _In_ DWORD Axes,
+    _In_ DWORD Povs,
+    _In_ DWORD Buttons,
+    _Inout_ PDWORD NextPov)
+{
+    DWORD Semantic = Action->dwSemantic;
+    BOOLEAN Feedback = (Action->dwFlags & DIA_FORCEFEEDBACK) != 0;
+    DI_MAP_OBJECT* ButtonList = Objects + Axes + Povs;
+
+    if (DI_SEM_CLASS(Semantic) == DI_SEM_CLASS_AXIS)
+    {
+        DWORD Needed = DiSemanticObjectType(Semantic) | (Feedback ? DI_FF_AXIS_BITS : 0);
+
+        for (DWORD Index = 0; Index < Axes; Index++)
+        {
+            DI_MAP_OBJECT* Object = &Objects[Index];
+
+            if (DI_SEM_KIND(Object->Hints) != DI_SEM_KIND(Semantic) || (Needed & ~Object->Type) != 0 || DiHintTaken(Object))
+                continue;
+            DiTakeObject(Action, Object);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (DI_SEM_CLASS(Semantic) == DI_SEM_CLASS_BUTTON)
+    {
+        DWORD Slot = LOBYTE(Semantic);
+        DWORD Index;
+
+        /* The last few button numbers count back from the device's last button */
+        if (Slot < DI_SEM_LAST_BUTTONS)
+            Index = Slot - 1;
+        else
+            Index = Slot + Buttons - 0xFF;
+        if (Index >= Buttons || DiHintTaken(&ButtonList[Index]))
+            return FALSE;
+        if (Feedback && (ButtonList[Index].Type & DI_FF_BUTTON_BITS) == 0)
+            return FALSE;
+        DiTakeObject(Action, &ButtonList[Index]);
+        return TRUE;
+    }
+
+    /* Hats are handed out in order and never shared */
+    if (*NextPov >= Povs || Feedback)
+        return FALSE;
+    DiTakeObject(Action, &Objects[Axes + *NextPov]);
+    *NextPov += 1;
+    return TRUE;
+}
+
+/* Maps an action to any free object that can serve it, as the second and fourth passes do */
+static
+BOOLEAN
+DiMapByFit(
+    _Inout_ DIACTIONW* Action,
+    _In_ const DIACTIONFORMATW* Format,
+    _Inout_updates_(Axes + Povs + Buttons) DI_MAP_OBJECT* Objects,
+    _In_ DWORD Axes,
+    _In_ DWORD Povs,
+    _In_ DWORD Buttons,
+    _In_ DWORD NextPov)
+{
+    DWORD Semantic = Action->dwSemantic;
+    BOOLEAN Feedback = (Action->dwFlags & DIA_FORCEFEEDBACK) != 0;
+    DWORD Total = Axes + Povs + Buttons;
+    DWORD Needed;
+    LONG First;
+    LONG End;
+    LONG Step = 1;
+
+    /* A button with an axis kind stands in for that axis unless an axis action already got it */
+    if (DI_SEM_CLASS(Semantic) == DI_SEM_CLASS_BUTTON && DI_SEM_KIND(Semantic) != 0)
+    {
+        DWORD Mask = (DI_SEM_KIND(Semantic) == DI_SEM_KIND_ANY) ? DI_SEM_PAIR_MASK_ANY_KIND : DI_SEM_PAIR_MASK;
+
+        if (DI_SEM_GENRE(Semantic) != DI_SEM_ANY_GENRE)
+        {
+            for (DWORD Index = 0; Index < Format->dwNumActions; Index++)
+            {
+                const DIACTIONW* Other = &Format->rgoAction[Index];
+
+                if (DI_SEM_CLASS(Other->dwSemantic) == DI_SEM_CLASS_BUTTON || ((Semantic ^ Other->dwSemantic) & Mask) != 0)
+                    continue;
+                if (Other->dwHow & DI_HOW_MAPPED_MASK)
+                    return FALSE;
+                break;
+            }
+        }
+
+        for (DWORD Index = Axes + Povs; Index < Total; Index++)
+        {
+            if (DiHintTaken(&Objects[Index]) || (Feedback && (Objects[Index].Type & DI_FF_BUTTON_BITS) == 0))
+                continue;
+            DiTakeObject(Action, &Objects[Index]);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    Needed = DiSemanticObjectType(Semantic) | (Feedback ? (DI_FF_AXIS_BITS | DI_FF_BUTTON_BITS) : 0);
+    switch (DI_SEM_CLASS(Semantic))
+    {
+        case DI_SEM_CLASS_AXIS:
+            Needed &= DI_FF_AXIS_BITS | DIDFT_AXIS;
+            First = 0;
+            End = static_cast<LONG>(Axes);
+            break;
+
+        case DI_SEM_CLASS_BUTTON:
+            Needed &= DI_FF_BUTTON_BITS;
+            if (LOBYTE(Semantic) < DI_SEM_LAST_BUTTONS)
+            {
+                First = static_cast<LONG>(Axes + Povs);
+                End = static_cast<LONG>(Total);
+            }
+            else
+            {
+                First = static_cast<LONG>(Total) - 1;
+                End = static_cast<LONG>(Axes + Povs) - 1;
+                Step = -1;
+            }
+            break;
+
+        case DI_SEM_CLASS_POV:
+            if (Feedback)
+                return FALSE;
+            Needed = 0;
+            First = static_cast<LONG>(Axes + NextPov);
+            End = static_cast<LONG>(Axes + Povs);
+            break;
+
+        default:
+            return FALSE;
+    }
+
+    for (LONG Index = First; Index != End; Index += Step)
+    {
+        DI_MAP_OBJECT* Object = &Objects[Index];
+
+        if (DiHintTaken(Object) || (Needed & ~Object->Type) != 0)
+            continue;
+        if (DI_SEM_KIND(Semantic) == 0 || DI_SEM_KIND(Semantic) == DI_SEM_KIND(Object->Hints))
+        {
+            DiTakeObject(Action, Object);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+HRESULT
+DiBuildDeviceDefaultMap(
+    _Inout_ LPDIACTIONFORMATW Format,
+    _In_ REFGUID Device,
+    _Inout_updates_(Axes + Povs + Buttons) DI_MAP_OBJECT* Objects,
+    _In_ DWORD Axes,
+    _In_ DWORD Povs,
+    _In_ DWORD Buttons)
+{
+    DWORD Total = Axes + Povs + Buttons;
+    DWORD NextPov = 0;
+    BOOLEAN AnyMapped = FALSE;
+
+    /* Objects already mapped to this device are not handed out again */
+    for (DWORD Index = 0; Index < Format->dwNumActions; Index++)
+    {
+        const DIACTIONW* Action = &Format->rgoAction[Index];
+
+        if ((Action->dwFlags & DIA_APPNOMAP) || (Action->dwHow & DI_HOW_MAPPED_MASK) == 0 ||
+            !IsEqualGUID(Action->guidInstance, Device))
+        {
+            continue;
+        }
+        for (DWORD Object = 0; Object < Total; Object++)
+        {
+            if (((Objects[Object].Type ^ Action->dwObjID) & DI_MAP_TYPE_MATCH_MASK) == 0)
+            {
+                Objects[Object].Hints |= DI_HINT_TAKEN;
+                break;
+            }
+        }
+    }
+
+    /*
+     * Actions aimed at this device go first, then the unaimed ones. Each group is mapped by
+     * position first and by fit second, and the fit passes leave genre bound axes alone.
+     */
+    for (DWORD Pass = 0; Pass < 4; Pass++)
+    {
+        BOOLEAN Aimed = Pass < 2;
+        BOOLEAN ByFit = (Pass & 1) != 0;
+
+        for (DWORD Index = 0; Index < Format->dwNumActions; Index++)
+        {
+            DIACTIONW* Action = &Format->rgoAction[Index];
+            DWORD Semantic = Action->dwSemantic;
+            BOOLEAN Mapped;
+
+            if ((Action->dwHow & DI_HOW_MAPPED_MASK) || (Action->dwFlags & DIA_APPNOMAP))
+                continue;
+
+            if (ByFit)
+            {
+                if (DI_SEM_GENRE(Semantic) != DI_SEM_ANY_GENRE && DI_SEM_CLASS(Semantic) == DI_SEM_CLASS_AXIS)
+                    continue;
+            }
+            else if (DI_SEM_GENRE(Semantic) == DI_SEM_ANY_GENRE ||
+                     (DI_SEM_CLASS(Semantic) == DI_SEM_CLASS_BUTTON && DI_SEM_KIND(Semantic) != 0))
+            {
+                continue;
+            }
+
+            if (Aimed)
+            {
+                if (!IsEqualGUID(Action->guidInstance, Device))
+                    continue;
+            }
+            else if (!IsEqualGUID(Action->guidInstance, GUID_NULL) ||
+                     (DI_SEM_GENRE(Semantic) >= (DI_SEMANTIC_KEYBOARD >> 24) && DI_SEM_GENRE(Semantic) <= (DI_SEMANTIC_COMMS >> 24)))
+            {
+                continue;
+            }
+
+            if (ByFit)
+            {
+                Mapped = DiMapByFit(Action, Format, Objects, Axes, Povs, Buttons, NextPov);
+            }
+            else
+            {
+                if (DI_SEM_CLASS(Semantic) == 0)
+                {
+                    Action->dwHow = DIAH_ERROR;
+                    return E_INVALIDARG;
+                }
+                Mapped = DiMapByPosition(Action, Objects, Axes, Povs, Buttons, &NextPov);
+            }
+            if (!Mapped)
+                continue;
+
+            Action->dwHow = DIAH_DEFAULT;
+            Action->guidInstance = Device;
+            AnyMapped = TRUE;
+        }
+    }
+    return AnyMapped ? S_OK : S_FALSE;
+}
+
 VOID
 DiActionHeaderFromAnsi(
     _Out_ LPDIACTIONFORMATW Wide,

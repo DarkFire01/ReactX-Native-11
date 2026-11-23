@@ -197,6 +197,13 @@ public:
     }
 };
 
+/* One object a game controller's default map can hand out, and what the map knows about it */
+struct DI_MAP_OBJECT
+{
+    DWORD Type;
+    DWORD Hints;
+};
+
 typedef
 HRESULT
 (*PDI_BACKEND_CREATE)(
@@ -211,6 +218,16 @@ DiBuildSystemDefaultMap(
     _In_ REFGUID Device,
     _In_ const DI_FORMAT* Native,
     _In_ DWORD FirstButton);
+
+/* Maps a game controller's axes, hats and buttons to the actions its semantics fit */
+HRESULT
+DiBuildDeviceDefaultMap(
+    _Inout_ LPDIACTIONFORMATW Format,
+    _In_ REFGUID Device,
+    _Inout_updates_(Axes + Povs + Buttons) DI_MAP_OBJECT* Objects,
+    _In_ DWORD Axes,
+    _In_ DWORD Povs,
+    _In_ DWORD Buttons);
 
 /* Finds the HID device a GUID names, refreshing the device list once when it is not there */
 HRESULT

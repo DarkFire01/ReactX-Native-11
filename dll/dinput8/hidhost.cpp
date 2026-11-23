@@ -24,6 +24,12 @@ extern const BYTE DiKeyTranslations[9][256];
 #define DI8_GENRE_KEYBOARD      0x81000000
 #define DI8_GENRE_MOUSE         0x82000000
 
+/* Object classes as semantics write them, which the default map compares against */
+#define DI_MAP_ABSOLUTE_AXIS    0x0200
+#define DI_MAP_RELATIVE_AXIS    0x0300
+#define DI_MAP_BUTTON           0x0400
+#define DI_MAP_POV              0x0600
+
 static_assert(sizeof(DI_OBJECT) == sizeof(DIOBJECTDATAFORMAT), "object layout");
 static_assert(sizeof(DI_JOYSTICK_SLOT) == sizeof(RX_DI_JOY_SLOT), "joystick slot layout");
 static_assert(DI_JOYSTICK_SLOTS == DI_JOY_SLOTS, "joystick slot count");
@@ -386,13 +392,25 @@ public:
         return Inner->RunControlPanel(Window, Flags);
     }
 
-    /* Plain HID devices have nothing to map, HID keyboards and mice map like the system ones */
+    /*
+     * Plain HID devices have nothing to map and HID keyboards and mice map like the system ones.
+     * Game controllers list their axes, hats and buttons with the kind of axis each one is.
+     */
     HRESULT
     BuildDefaultActionMap(
         _Inout_ LPDIACTIONFORMATW Format,
         _In_ DWORD Flags,
         _In_ REFGUID Instance) override
     {
+        DIDEVCAPS Caps = {};
+        DI_MAP_OBJECT* Objects;
+        DWORD Axes;
+        DWORD Povs;
+        DWORD Buttons;
+        DWORD Placed[3] = {};
+        BYTE Counts[16] = {};
+        HRESULT Result;
+
         UNREFERENCED_PARAMETER(Flags);
         switch (LOBYTE(DevType))
         {
@@ -402,10 +420,60 @@ public:
                 return DiBuildSystemDefaultMap(Format, DI8_GENRE_MOUSE, Instance, &Native, 0);
             case DI8DEVTYPE_KEYBOARD:
                 return DiBuildSystemDefaultMap(Format, DI8_GENRE_KEYBOARD, Instance, &Native, 0);
-            default:
-                DI_TRACE_ONCE(L"no default action map for HID game controllers yet");
-                return E_NOTIMPL;
         }
+
+        Caps.dwSize = sizeof(DIDEVCAPS_DX3);
+        Result = Inner->GetCapabilities(&Caps);
+        if (FAILED(Result))
+            return Result;
+        Axes = Caps.dwAxes;
+        Povs = Caps.dwPOVs;
+        Buttons = Caps.dwButtons;
+        if (Axes + Povs < Axes || Axes + Povs + Buttons < Axes + Povs ||
+            static_cast<ULONG64>(Axes + Povs + Buttons) * sizeof(*Objects) > MAXDWORD)
+        {
+            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+        }
+        Objects = static_cast<DI_MAP_OBJECT*>(calloc(Axes + Povs + Buttons + 1, sizeof(*Objects)));
+        if (Objects == nullptr)
+            return E_OUTOFMEMORY;
+
+        for (DWORD Index = 0; Index < Native.ObjectCount; Index++)
+        {
+            DWORD Type = Native.Objects[Index].Type;
+
+            if (Type & DIDFT_NODATA)
+                continue;
+            if (Type & DIDFT_AXIS)
+            {
+                ULONG Traits = Inner->GetAxisTraits(Index);
+                BYTE Kind = LOBYTE(Traits) & 0xF;
+                DWORD Hints = (Traits & DI_AXIS_ABSOLUTE) ? DI_MAP_ABSOLUTE_AXIS : DI_MAP_RELATIVE_AXIS;
+
+                /* Axes of one kind are told apart by their order */
+                if (Kind != 0)
+                {
+                    Hints |= (static_cast<DWORD>(Kind) << 15) | Counts[Kind - 1];
+                    Counts[Kind - 1] += 1;
+                }
+                if (Placed[0] < Axes)
+                    Objects[Placed[0]++] = { Type, Hints };
+            }
+            else if (Type & DIDFT_POV)
+            {
+                if (Placed[1] < Povs)
+                    Objects[Axes + Placed[1]++] = { Type, DI_MAP_POV };
+            }
+            else if (Type & DIDFT_BUTTON)
+            {
+                if (Placed[2] < Buttons)
+                    Objects[Axes + Povs + Placed[2]++] = { Type, DI_MAP_BUTTON };
+            }
+        }
+
+        Result = DiBuildDeviceDefaultMap(Format, Instance, Objects, Axes, Povs, Buttons);
+        free(Objects);
+        return Result;
     }
 };
 
