@@ -545,18 +545,6 @@ RxDevice12::ShaderCacheControl(
 
 HRESULT
 STDMETHODCALLTYPE
-RxDevice12::CreateCommandQueue1(
-    _In_ const D3D12_COMMAND_QUEUE_DESC* pDesc,
-    REFIID CreatorID,
-    REFIID riid,
-    _COM_Outptr_ void** ppCommandQueue)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxDevice12::CreateCommittedResource3(
     _In_ const D3D12_HEAP_PROPERTIES* pHeapProperties,
     D3D12_HEAP_FLAGS HeapFlags,

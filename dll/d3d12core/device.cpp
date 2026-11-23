@@ -67,10 +67,12 @@ HRESULT
 RxDevice12::Get(
     _In_ const LUID& AdapterLuid,
     _In_ D3D_FEATURE_LEVEL MinimumFeatureLevel,
+    _In_ UINT Sharing,
     _Outptr_ RxDevice12** Device)
 {
     RxAdapter12* Adapter;
     RxDevice12* Created;
+    BOOLEAN Stored = FALSE;
     UINT Index;
     HRESULT hr;
 
@@ -82,11 +84,14 @@ RxDevice12::Get(
     {
         RxDevice12* Existing = RxDevices[Index].Device;
 
-        if (Existing == nullptr || !RxSameLuid(RxDevices[Index].Luid, AdapterLuid) ||
-            !RxTryAddRef(&Existing->RefCount))
-        {
+        if (Existing == nullptr || !RxSameLuid(RxDevices[Index].Luid, AdapterLuid))
             continue;
-        }
+
+        /* A live singleton is either handed back or left in place beside the new device */
+        if (Existing->RefCount != 0)
+            Stored = TRUE;
+        if ((Sharing & RxDeviceReuseSingleton) == 0 || !RxTryAddRef(&Existing->RefCount))
+            continue;
 
         ReleaseSRWLockExclusive(&RxDeviceListLock);
         if (Existing->Adapter->GetMaxFeatureLevel() < MinimumFeatureLevel)
@@ -129,7 +134,7 @@ RxDevice12::Get(
         return hr;
     }
 
-    for (Index = 0; Index < _countof(RxDevices); Index++)
+    for (Index = 0; Index < _countof(RxDevices) && !Stored && (Sharing & RxDeviceStoreSingleton) != 0; Index++)
     {
         if (RxDevices[Index].Device == nullptr)
         {
@@ -527,6 +532,18 @@ RxDevice12::CreateCommandQueue(
     REFIID riid,
     _COM_Outptr_ void** ppCommandQueue)
 {
+    return CreateCommandQueue1(pDesc, GUID_NULL, riid, ppCommandQueue);
+}
+
+/* The creator ID keeps queues of different components out of each other's scheduling groups */
+HRESULT
+STDMETHODCALLTYPE
+RxDevice12::CreateCommandQueue1(
+    _In_ const D3D12_COMMAND_QUEUE_DESC* pDesc,
+    REFIID CreatorID,
+    REFIID riid,
+    _COM_Outptr_ void** ppCommandQueue)
+{
     RxCommandQueue* Queue;
     HRESULT hr;
 
@@ -551,7 +568,7 @@ RxDevice12::CreateCommandQueue(
     if (ppCommandQueue == nullptr)
         return E_UNEXPECTED;
 
-    hr = RxCommandQueue::Create(*this, *pDesc, &Queue);
+    hr = RxCommandQueue::Create(*this, *pDesc, CreatorID, &Queue);
     if (FAILED(hr))
         return hr;
 

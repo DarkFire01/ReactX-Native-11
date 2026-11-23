@@ -130,6 +130,7 @@ public:
     Create(
         _In_ RxDevice12& Device,
         _In_ const D3D12_COMMAND_QUEUE_DESC& Desc,
+        _In_ const GUID& Creator,
         _Outptr_ RxCommandQueue** Queue);
 
     /* The checks a queue description passes before anything is made */

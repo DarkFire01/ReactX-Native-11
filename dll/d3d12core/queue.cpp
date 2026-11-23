@@ -14,6 +14,7 @@ HRESULT
 RxCommandQueue::Create(
     _In_ RxDevice12& Device,
     _In_ const D3D12_COMMAND_QUEUE_DESC& Desc,
+    _In_ const GUID& Creator,
     _Outptr_ RxCommandQueue** Queue)
 {
     RxCommandQueue* Created;
@@ -34,7 +35,7 @@ RxCommandQueue::Create(
         return E_OUTOFMEMORY;
 
     /* Grouped queues share the group's contexts; a group comes before the queue it serves */
-    hr = Device.JoinSchedulingGroup(Desc.Type, 1, GUID_NULL, &Created->Group);
+    hr = Device.JoinSchedulingGroup(Desc.Type, 1, Creator, &Created->Group);
     if (SUCCEEDED(hr))
         hr = Created->Initialize(Desc);
     if (FAILED(hr))
