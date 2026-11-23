@@ -11,6 +11,7 @@
 #include <d3d10umddi.h>
 #include <d3d12umddi.h>
 #include <dxgi1_6.h>
+#include <dwmapi.h>
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -79,6 +80,7 @@ enum TC_TAG : UINT
     TcTagDeviceCall,
     TcTagDestroyDevice,
     TcTagClose,
+    TcTagAllocate,
 };
 
 static PFND3D12DDI_OPENADAPTER TcRealOpen;
@@ -90,6 +92,8 @@ static constexpr UINT TcDeviceSlots = 128;
 static constexpr UINT TcFeatureSlotBase = 200;
 static constexpr UINT TcTracedSlots = 256;
 static constexpr UINT TcProgramIdentifierSlot = 122;
+static constexpr UINT TcAllocationInfoSlot = 75;
+static constexpr UINT TcExistingAllocationInfoSlot = 77;
 
 struct TcPair
 {
@@ -115,9 +119,17 @@ TcDeviceThunk(
     _In_ UINT64 A7)
 {
     UINT Record[2] = { TcTagDeviceCall, Slot };
+    TcPair Value;
 
     TcLog(Record);
-    return TcRealDevice[Slot](A0, A1, A2, A3, A4, A5, A6, A7);
+    Value = TcRealDevice[Slot](A0, A1, A2, A3, A4, A5, A6, A7);
+
+    /* Allocation info answers decide what the runtime does next, so they are part of the traffic */
+    if constexpr (Slot == TcAllocationInfoSlot)
+        TcLogBytes(reinterpret_cast<const VOID *>(A5), sizeof(D3D12DDI_RESOURCE_ALLOCATION_INFO_0022));
+    if constexpr (Slot == TcExistingAllocationInfoSlot)
+        TcLogBytes(reinterpret_cast<const VOID *>(A2), sizeof(D3D12DDI_RESOURCE_ALLOCATION_INFO_0022));
+    return Value;
 }
 
 template <UINT... Slots>
@@ -146,6 +158,32 @@ TcCalcPrivateDeviceSize(
     return Size;
 }
 
+static PFND3D12DDI_ALLOCATE_CB_0022 TcRealAllocate;
+
+/* Kernel allocations: what the driver tells the kernel driver about each one */
+static
+HRESULT
+APIENTRY
+TcAllocate(
+    _In_ D3D12DDI_HRTDEVICE Device,
+    _Inout_ D3D12DDICB_ALLOCATE_0022 *Args)
+{
+    HRESULT hr = TcRealAllocate(Device, Args);
+    UINT Record[5] = { TcTagAllocate, (UINT)hr, Args->NumAllocations, Args->PrivateDriverDataSize, Args->hResource != NULL };
+
+    TcLog(Record);
+    for (UINT Index = 0; Index < Args->NumAllocations; Index++)
+    {
+        const D3D12DDI_ALLOCATION_INFO_0022 &Info = Args->pAllocationInfo[Index];
+        UINT Header[3] = { Info.PrivateDriverDataSize, Info.VidPnSourceId, (UINT)Info.Flags };
+
+        TcLog(Header);
+        if (Info.pPrivateDriverData != NULL)
+            TcLogBytes(Info.pPrivateDriverData, Info.PrivateDriverDataSize);
+    }
+    return hr;
+}
+
 static
 HRESULT
 APIENTRY
@@ -153,7 +191,22 @@ TcCreateDevice(
     _In_ D3D12DDI_HADAPTER Adapter,
     _In_ const D3D12DDIARG_CREATEDEVICE_0003 *Args)
 {
-    HRESULT hr = TcRealAdapter.pfnCreateDevice(Adapter, Args);
+    HRESULT hr;
+
+    /* The runtime's callback table is patched in place; it is larger than the SDK's view of it */
+    if (Args->p12UMCallbacks_0022 != NULL && Args->p12UMCallbacks_0022->pfnAllocateCb != TcAllocate)
+    {
+        PFND3D12DDI_ALLOCATE_CB_0022 *Slot = const_cast<PFND3D12DDI_ALLOCATE_CB_0022 *>(&Args->p12UMCallbacks_0022->pfnAllocateCb);
+        DWORD Protect;
+
+        if (VirtualProtect(Slot, sizeof(*Slot), PAGE_READWRITE, &Protect))
+        {
+            TcRealAllocate = *Slot;
+            *Slot = TcAllocate;
+            VirtualProtect(Slot, sizeof(*Slot), Protect, &Protect);
+        }
+    }
+    hr = TcRealAdapter.pfnCreateDevice(Adapter, Args);
     UINT Record[5] = { TcTagCreateDevice, (UINT)hr, Args->Interface, Args->Version, (UINT)Args->Flags };
 
     TcLog(Record);
@@ -974,6 +1027,18 @@ SceneCopy(
         { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_NV12, 64, 64, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
         { D3D12_RESOURCE_DIMENSION_TEXTURE3D, DXGI_FORMAT_R32_FLOAT, 32, 16, 8, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 1 },
         { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8_UNORM, 4096, 4096, 1, 0, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 17, 9, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R32_FLOAT, 17, 9, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_D32_FLOAT, 17, 9, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_D16_UNORM, 33, 7, 3, 3, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R16_UNORM, 17, 9, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R32_TYPELESS, 17, 9, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 17, 9, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 4 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_NV12, 34, 18, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_YUY2, 34, 18, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R9G9B9E5_SHAREDEXP, 17, 9, 1, 0, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE3D, DXGI_FORMAT_R8G8B8A8_UNORM, 17, 9, 5, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE1D, DXGI_FORMAT_R8G8B8A8_UNORM, 17, 1, 3, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 1 },
     };
     SIZE_T LogStart = TcLogMark();
     TcQueue Queue;
@@ -1381,6 +1446,7 @@ SceneFence(
     ID3D12Resource *Upload = NULL;
     ID3D12Resource *Middle = NULL;
     ID3D12Resource *Readback = NULL;
+    ID3D12CommandAllocator *SecondAllocator = NULL;
     ID3D12GraphicsCommandList *Second = NULL;
     ID3D12Fence *Shared = NULL;
     HRESULT hr;
@@ -1389,7 +1455,9 @@ SceneFence(
     if (SUCCEEDED(hr))
         hr = Copy.Create(Device, D3D12_COMMAND_LIST_TYPE_COPY);
     if (SUCCEEDED(hr))
-        hr = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, Direct.Allocator, NULL, IID_PPV_ARGS(&Second));
+        hr = Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&SecondAllocator));
+    if (SUCCEEDED(hr))
+        hr = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, SecondAllocator, NULL, IID_PPV_ARGS(&Second));
     if (SUCCEEDED(hr))
         hr = Device->CreateFence(5, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Shared));
     TcAppend(Result, &hr, sizeof(hr));
@@ -1467,12 +1535,138 @@ Done:
         Shared->Release();
     if (Second)
         Second->Release();
+    if (SecondAllocator)
+        SecondAllocator->Release();
     if (Readback)
         Readback->Release();
     if (Middle)
         Middle->Release();
     if (Upload)
         Upload->Release();
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* A windowed flip swap chain: back buffers cleared on the GPU, presented, then read from the window through GDI */
+static
+HRESULT
+ScenePresent(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const DXGI_FORMAT Formats[] = { DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM };
+    static const FLOAT Colors[3][4] = { { 1.0f, 0.5f, 0.25f, 1.0f }, { 0.0f, 0.75f, 0.5f, 1.0f }, { 0.2f, 0.4f, 0.8f, 1.0f } };
+    SIZE_T LogStart = TcLogMark();
+    WNDCLASSW Class = {};
+    IDXGIFactory4 *Factory = NULL;
+    ID3D12DescriptorHeap *Rtvs = NULL;
+    D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1 };
+    TcQueue Queue;
+    HWND Window;
+    HRESULT hr;
+
+    Class.lpfnWndProc = DefWindowProcW;
+    Class.hInstance = GetModuleHandleW(NULL);
+    Class.lpszClassName = L"Warp12CheckPresent";
+    RegisterClassW(&Class);
+    Window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, Class.lpszClassName, L"", WS_POPUP | WS_VISIBLE, 0, 0, 64, 64,
+                             NULL, NULL, Class.hInstance, NULL);
+    if (Window == NULL)
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&Factory));
+    if (SUCCEEDED(hr))
+        hr = Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Rtvs));
+    TcAppend(Result, &hr, sizeof(hr));
+
+    for (UINT Case = 0; Case < ARRAYSIZE(Formats) && SUCCEEDED(hr); Case++)
+    {
+        DXGI_SWAP_CHAIN_DESC1 Desc = {};
+        IDXGISwapChain1 *Chain = NULL;
+        IDXGISwapChain3 *Chain3 = NULL;
+        BITMAPINFO Info = {};
+        VOID *Bits = NULL;
+        HDC WindowDc;
+        HDC MemoryDc;
+        HBITMAP Bitmap;
+        MSG Message;
+
+        Desc.Width = 64;
+        Desc.Height = 64;
+        Desc.Format = Formats[Case];
+        Desc.SampleDesc.Count = 1;
+        Desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        Desc.BufferCount = 2;
+        Desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        hr = Factory->CreateSwapChainForHwnd(Queue.Queue, Window, &Desc, NULL, NULL, &Chain);
+        if (SUCCEEDED(hr))
+            hr = Chain->QueryInterface(IID_PPV_ARGS(&Chain3));
+        for (UINT Frame = 0; Frame < 2 && SUCCEEDED(hr); Frame++)
+        {
+            ID3D12Resource *Back = NULL;
+            D3D12_RESOURCE_BARRIER Barrier = {};
+            D3D12_CPU_DESCRIPTOR_HANDLE Rtv = Rtvs->GetCPUDescriptorHandleForHeapStart();
+
+            hr = Chain3->GetBuffer(Chain3->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&Back));
+            if (FAILED(hr))
+                break;
+            Device->CreateRenderTargetView(Back, NULL, Rtv);
+            Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            Barrier.Transition.pResource = Back;
+            Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+            Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            Queue.List->ResourceBarrier(1, &Barrier);
+            Queue.List->ClearRenderTargetView(Rtv, Colors[(Case + Frame) % 3], 0, NULL);
+            Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+            Queue.List->ResourceBarrier(1, &Barrier);
+            hr = Queue.Submit();
+            Back->Release();
+            if (SUCCEEDED(hr))
+                hr = Chain3->Present(0, 0);
+            TcAppend(Result, &hr, sizeof(hr));
+            if (SUCCEEDED(hr))
+                hr = Queue.Wait();
+        }
+        DwmFlush();
+        while (PeekMessageW(&Message, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&Message);
+
+        Info.bmiHeader.biSize = sizeof(Info.bmiHeader);
+        Info.bmiHeader.biWidth = 64;
+        Info.bmiHeader.biHeight = -64;
+        Info.bmiHeader.biPlanes = 1;
+        Info.bmiHeader.biBitCount = 32;
+        WindowDc = GetDC(Window);
+        MemoryDc = CreateCompatibleDC(WindowDc);
+        Bitmap = CreateDIBSection(MemoryDc, &Info, DIB_RGB_COLORS, &Bits, NULL, 0);
+        if (Bitmap != NULL)
+        {
+            HGDIOBJ Previous = SelectObject(MemoryDc, Bitmap);
+
+            BitBlt(MemoryDc, 0, 0, 64, 64, WindowDc, 0, 0, SRCCOPY);
+            GdiFlush();
+            for (UINT Index = 0; Index < 64 * 64; Index++)
+                TcAppend(Result, static_cast<BYTE *>(Bits) + Index * 4, 3);
+            SelectObject(MemoryDc, Previous);
+            DeleteObject(Bitmap);
+        }
+        DeleteDC(MemoryDc);
+        ReleaseDC(Window, WindowDc);
+        if (Chain3)
+            Chain3->Release();
+        if (Chain)
+            Chain->Release();
+    }
+
+    if (Rtvs)
+        Rtvs->Release();
+    if (Factory)
+        Factory->Release();
+    DestroyWindow(Window);
     TcLogSince(LogStart, Result);
     return hr;
 }
@@ -1485,6 +1679,7 @@ static const TcScene Scenes[] =
     { "copy", SceneCopy },
     { "clear", SceneClear },
     { "fence", SceneFence },
+    { "present", ScenePresent },
 };
 
 static
