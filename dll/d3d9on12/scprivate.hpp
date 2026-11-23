@@ -123,6 +123,13 @@ public:
     VOID
     Add(
         _In_ const SB::CInstruction& Instruction);
+
+private:
+    VOID
+    GuardFactor(
+        _In_ UINT Temp,
+        _In_ const SB::COperandBase& Other,
+        _Inout_ SB::COperandBase* Value);
 };
 
 /* Option: multiplicands that are zero win over infinities, as Direct3D 9 hardware does */

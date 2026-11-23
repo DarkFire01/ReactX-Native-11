@@ -21,10 +21,85 @@ ScAsm::Begin(
     StartShader(Type, 5, 0);
 }
 
+/* Only the converter's own constant buffers 3 to 5 are known to hold finite values */
+static
+BOOL
+ScMayBeInfinite(
+    _In_ const SB::COperandBase& Operand)
+{
+    if (Operand.m_Type != D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER)
+        return TRUE;
+    return Operand.m_Index[0].m_RegIndex < 3 || Operand.m_Index[0].m_RegIndex > 5;
+}
+
+static
+BOOL
+ScNonzeroImmediate(
+    _In_ const SB::COperandBase& Operand)
+{
+    return Operand.m_Type == D3D10_SB_OPERAND_TYPE_IMMEDIATE32 && Operand.m_Valuef[0] != 0.0f;
+}
+
+/* Replaces Value by a temp that is zero wherever Other is zero */
+VOID
+ScAsm::GuardFactor(
+    _In_ UINT Temp,
+    _In_ const SB::COperandBase& Other,
+    _Inout_ SB::COperandBase* Value)
+{
+    SB::COperandBase Dst = ScTempDst(Temp, ScMaskAll);
+    SB::COperandBase Magnitude = ScAbsolute(Other);
+    SB::COperandBase Test = ScTempOperand(Temp);
+    SB::COperand Zero(0.0f);
+    SB::CInstruction Copy(D3D10_SB_OPCODE_MOV, Dst, Magnitude);
+    SB::CInstruction Select(D3D10_SB_OPCODE_MOVC, Dst, Test, *Value, Zero);
+
+    Emitted += 2;
+    Patched += 2;
+    EmitInstruction(Copy);
+    EmitInstruction(Select);
+    *Value = ScTempOperand(Temp);
+}
+
 VOID
 ScAsm::Add(
     _In_ const SB::CInstruction& Instruction)
 {
+    BOOL Multiplies;
+
+    switch (Instruction.m_OpCode)
+    {
+        case D3D10_SB_OPCODE_DP2:
+        case D3D10_SB_OPCODE_DP3:
+        case D3D10_SB_OPCODE_DP4:
+        case D3D10_SB_OPCODE_MAD:
+        case D3D10_SB_OPCODE_MUL:
+            Multiplies = (Options & ScOptionPatchMultiply) != 0;
+            break;
+        default:
+            Multiplies = FALSE;
+            break;
+    }
+
+    if (Multiplies)
+    {
+        SB::CInstruction Guarded(Instruction);
+        SB::COperandBase* Left = &Guarded.m_Operands[1];
+        SB::COperandBase* Right = &Guarded.m_Operands[2];
+
+        /* A zero factor makes the product zero even when the other one is infinite */
+        if (memcmp(Left, Right, sizeof(*Left)) != 0 && !ScNonzeroImmediate(*Left) && !ScNonzeroImmediate(*Right))
+        {
+            if (ScMayBeInfinite(*Right))
+                GuardFactor(3, *Left, Right);
+            if (ScMayBeInfinite(*Left))
+                GuardFactor(4, *Right, Left);
+        }
+        Emitted += 1;
+        EmitInstruction(Guarded);
+        return;
+    }
+
     Emitted += 1;
     EmitInstruction(Instruction);
 }
