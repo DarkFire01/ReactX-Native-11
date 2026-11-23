@@ -318,6 +318,15 @@ RxWarp12AllocateHeap(
             Data.BindFlags = Resource->Storage.BindFlags & (D3D10_DDI_BIND_RENDER_TARGET | D3D10_DDI_BIND_DEPTH_STENCIL);
         Data.SampleCount = Resource->Storage.SampleCount;
         Flags = (Resource->Flags & D3D12DDI_RESOURCE_FLAG_0003_CROSS_ADAPTER) ? RX_WARP_ALLOCATION_CROSS_ADAPTER : 0;
+
+        /* The kernel driver sees multisampled textures as rows of 2x2 quads over an even width */
+        if (Data.SampleCount > 1)
+        {
+            UINT EvenWidth = (First->Width + 1) & ~1u;
+
+            Data.RowPitch = RxWarpFormatRowBytes(Resource->Storage.Format, EvenWidth) * Data.SampleCount * 2;
+            Flags |= RX_WARP_ALLOCATION_QUAD_LAYOUT;
+        }
         if (Args->Flags & D3D12DDI_HEAP_FLAG_PRIMARY)
         {
             Flags |= RX_WARP_ALLOCATION_PRIMARY;
