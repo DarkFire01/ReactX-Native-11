@@ -231,12 +231,25 @@ D9Device::~D9Device()
     delete AutoDepthStencil;
     delete ImplicitChain;
     if (DriverDevice != NULL)
+    {
+        ReleasePixelShaders();
         DestroyStagingBuffers();
+    }
     DestroyHardware();
     delete[] SyncPackets;
     delete[] SyncFreeSlots;
     DeleteCriticalSection(&Lock);
     Enum->Release();
+}
+
+/* The pixel converter starts from the default stages, texture factor and specular state */
+VOID
+D9Device::StartPixelConverter(VOID)
+{
+    if (!Switch.HasPixelConverter)
+        return;
+    PixelShaders.Start(&StageStates[0][0], RenderStates[D3DRS_TEXTUREFACTOR]);
+    PixelShaders.SetSpecular(RenderStates[D3DRS_SPECULARENABLE] != 0);
 }
 
 /* Copies the adapter's caps and applies what this device's vertex processing changes */
@@ -775,6 +788,7 @@ D9Device::Initialize(
     BindRenderTargets();
     SetDefaultState(Parameters);
     SendInitialState();
+    StartPixelConverter();
     return S_OK;
 }
 
@@ -1179,6 +1193,8 @@ D9Device::ResetCommon(
     ClearConstants();
     SetDefaultState(Parameters);
     SendInitialState();
+    ReleasePixelShaders();
+    StartPixelConverter();
     return S_OK;
 }
 

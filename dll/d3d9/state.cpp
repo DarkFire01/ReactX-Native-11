@@ -105,11 +105,21 @@ D9Device::SendStateValue(
     if (!SoftwareVertices && D9ListHolds(D9ShaderPipelineStates, _countof(D9ShaderPipelineStates), State))
         return;
 
+    /* Point sprites change the coordinates the converters read */
+    if (State == D3DRS_POINTSPRITEENABLE)
+        UpdateSwitch(D9SwitchPointSize, 0);
+
     /* The pixel shaders standing in for the fixed function stages take these two */
     if (State == D3DRS_SPECULARENABLE)
+    {
+        if (Switch.HasPixelConverter)
+            PixelShaders.SetSpecular(Value != 0);
         return;
+    }
     if (State == D3DRS_TEXTUREFACTOR)
     {
+        if (Switch.HasPixelConverter)
+            PixelShaders.SetFactor(Value);
         SendPixelConstant(D9FactorRegister, D9Channel(Value, 16), D9Channel(Value, 8), D9Channel(Value, 0),
                           D9Channel(Value, 24));
         return;
@@ -172,6 +182,10 @@ D9Device::SendStageValue(
     D3DDDIARG_SETPIXELSHADERCONST Constant = {};
     DWORD Bits[4] = {};
     BOOLEAN Pass = TRUE;
+
+    /* A new count of active stages changes the coordinates the vertex converter writes */
+    if (Switch.HasPixelConverter && Stage < D9FixedStages && PixelShaders.SetStage(Stage, Type, Value))
+        UpdateSwitch(D9SwitchPixelShaderUse, 0);
 
     switch (Type)
     {

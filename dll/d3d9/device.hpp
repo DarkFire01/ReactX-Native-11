@@ -9,6 +9,7 @@
 
 #include "d3d9.hpp"
 #include "kmcallbacks.hpp"
+#include "ffpixel.hpp"
 
 class D9Device;
 class D9SwapChain;
@@ -783,6 +784,18 @@ public:
     UsageOf() const
     {
         return Usage;
+    }
+
+    D3DFORMAT
+    FormatOf() const
+    {
+        return Format;
+    }
+
+    D9TextureKind
+    KindOf() const
+    {
+        return Kind;
     }
 
     BOOLEAN
@@ -1685,6 +1698,10 @@ struct D9ShaderSwitch
     HANDLE InputDeclaration;
     DWORD PixelFvf;
     HANDLE PixelDeclaration;
+
+    /* The layout transformed vertices hand the pixel converter, and the converter's shader the driver has */
+    const D9Declaration* PixelLayout;
+    HANDLE ConverterBound;
 };
 
 /* Draw state that changed since the last draw and reaches the driver before the next one */
@@ -3060,8 +3077,21 @@ private:
 
     VOID
     SwitchDeclaration(
-        _In_ HANDLE Handle,
-        _In_ BOOLEAN Transformed);
+        _In_ const D9Declaration* Bound);
+
+    VOID
+    FeedPixelTexture(
+        _In_ UINT Stage,
+        _In_opt_ IDirect3DBaseTexture9* Texture);
+
+    VOID
+    PreparePixelShader(VOID);
+
+    VOID
+    StartPixelConverter(VOID);
+
+    VOID
+    ReleasePixelShaders(VOID);
 
     VOID
     SettleSwitch(
@@ -3293,6 +3323,9 @@ private:
 
     /* The application's shaders or the fixed function converters' */
     D9ShaderSwitch Switch = {};
+
+    /* The pixel shaders standing in for the texture stages */
+    D9PixelConverter PixelShaders;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;

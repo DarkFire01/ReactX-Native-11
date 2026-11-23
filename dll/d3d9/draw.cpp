@@ -121,16 +121,19 @@ D9Device::SwitchPixelShader(
         DdiPixelShader(Shader);
 }
 
-/* Transformed vertices skip the vertex converter; untransformed ones of a declaration feed it */
+/* Transformed vertices skip the vertex converter and feed the pixel converter directly; untransformed ones
+   of a declaration feed the vertex converter */
 VOID
 D9Device::SwitchDeclaration(
-    _In_ HANDLE Handle,
-    _In_ BOOLEAN Transformed)
+    _In_ const D9Declaration* Bound)
 {
-    if (Transformed)
+    HANDLE Handle = Bound->DriverHandle;
+
+    if (Bound->Transformed)
     {
-        Switch.PixelFvf = 0;
+        Switch.PixelFvf = Bound->Fvf;
         Switch.PixelDeclaration = Handle;
+        Switch.PixelLayout = Bound->Fvf != 0 ? nullptr : Bound;
         UpdateSwitch(D9SwitchTransformedInput | D9SwitchPixelInput, D9SwitchShaderInput);
     }
     else
@@ -211,10 +214,16 @@ D9Device::ApplySwitch(VOID)
 
         if ((Acting & D9SwitchWantPixelConverter) != 0)
         {
+            D3DDDIARG_SETPIXELSHADERCONST Restore = {};
+
+            /* The converter's constants come back and its shader is bound again at the next draw */
             Switch.PixelMode = 2;
             Switch.Pending &= ~D9SwitchWantPixelConverter;
             Switch.Allowed = (Switch.Allowed | D9AllowPixelConverter) & ~D9SwitchWantPixelConverter;
-            D9_TRACE_ONCE(L"a draw needs the fixed function pixel pipeline, which is not converted yet");
+            Restore.Count = PixelShaders.ConstantMark;
+            DdiPixelShaderConst(&Restore, &PixelShaders.Constants[0][0]);
+            Switch.ConverterBound = NULL;
+            PixelShaders.Dirty = TRUE;
         }
         else if ((Acting & D9SwitchWantApiPixelShader) != 0)
         {
@@ -234,8 +243,96 @@ D9Device::ApplySwitch(VOID)
 
     /* What the converters read changed; they take it when they next make a shader */
     Acting = Switch.Pending & Switch.Allowed;
-    if ((Acting & D9SwitchInputChanges) != 0)
-        Switch.Pending &= ~(Acting & D9SwitchInputChanges);
+    if ((Acting & D9SwitchInputChanges) == 0)
+        return;
+    if ((Acting & D9SwitchPointSize) != 0)
+        PixelShaders.SetPointSprite(Switch.DrewPoints && RenderStates[D3DRS_POINTSPRITEENABLE] != 0);
+    if ((Acting & D9SwitchPixelInput) != 0)
+    {
+        if (!Switch.ShaderInput)
+        {
+            if (Switch.PixelLayout != nullptr)
+                PixelShaders.SetElements(Switch.PixelLayout->Elements);
+            else
+                PixelShaders.SetFvf(Switch.PixelFvf);
+        }
+        else if (!Switch.VertexConverting)
+        {
+            PixelShaders.SetFvf(Switch.ApiVertexInputs);
+        }
+    }
+    Switch.Pending &= ~(Acting & D9SwitchInputChanges);
+}
+
+/* The fixed function pixel shader for the stages as they stand, made the first time they come up */
+VOID
+D9Device::PreparePixelShader(VOID)
+{
+    HANDLE Shader;
+    HANDLE Evicted;
+
+    if (!PixelShaders.Find(&Shader))
+    {
+        DWORD* Tokens = new (std::nothrow) DWORD[D9FixedPixelTokenLimit];
+        UINT Count = 0;
+
+        if (Tokens == nullptr)
+            return;
+        if (!D9BuildFixedPixelShader(&PixelShaders.Key, PixelShaders.StageZeroTextured, Tokens, &Count) ||
+            FAILED(CreateDriverShader(TRUE, Tokens, Count * sizeof(*Tokens), &Shader)))
+        {
+            D9_TRACE_ONCE(L"a fixed function pixel shader could not be made");
+            delete[] Tokens;
+            return;
+        }
+        delete[] Tokens;
+        if (!PixelShaders.Keep(Shader, &Evicted))
+        {
+            DestroyDriverShader(TRUE, Shader);
+            return;
+        }
+        if (Evicted != NULL)
+            DestroyDriverShader(TRUE, Evicted);
+    }
+    PixelShaders.Dirty = FALSE;
+    if (Shader != Switch.ConverterBound)
+    {
+        DdiPixelShader(Shader);
+        Switch.ConverterBound = Shader;
+    }
+}
+
+/* The shaders the converter made go with the device, oldest first */
+VOID
+D9Device::ReleasePixelShaders(VOID)
+{
+    HANDLE Shader;
+
+    while (PixelShaders.TakeOldest(&Shader))
+        DestroyDriverShader(TRUE, Shader);
+}
+
+/* A stage's texture kind and format pick the sampler its shader declares */
+VOID
+D9Device::FeedPixelTexture(
+    _In_ UINT Stage,
+    _In_opt_ IDirect3DBaseTexture9* Texture)
+{
+    DWORD Kind = D9FixedTexNone;
+    DWORD Format = 0;
+
+    if (!Switch.HasPixelConverter || Stage >= D9FixedStages)
+        return;
+    if (Texture != nullptr)
+    {
+        const D9TextureCore* Core = D9CoreOf(Texture);
+
+        Kind = Core->KindOf() == D9TextureKind::Cube ? D9FixedTexCube
+                                                     : Core->KindOf() == D9TextureKind::Volume ? D9FixedTexVolume
+                                                                                               : D9FixedTex2D;
+        Format = Core->FormatOf();
+    }
+    PixelShaders.SetTexture(Stage, Kind, Format);
 }
 
 /* Moving between points and other primitives changes what the converters make; then the switch acts */
@@ -255,6 +352,8 @@ D9Device::SettleSwitch(
     }
     if ((Switch.Pending & Switch.Allowed) != 0)
         ApplySwitch();
+    if (Switch.PixelMode != 0 && PixelShaders.Dirty)
+        PreparePixelShader();
 }
 
 /* BeginScene binds every sampler and stream again at the next draw */
@@ -321,12 +420,9 @@ D9Device::FlushVertexInput(VOID)
             return hr;
     }
 
+    SwitchDeclaration(Bound);
     if (Bound->Transformed)
-    {
-        SwitchDeclaration(Bound->DriverHandle, TRUE);
         return S_OK;
-    }
-    SwitchDeclaration(Bound->DriverHandle, FALSE);
     if (VertexShader != nullptr)
         SwitchVertexShader(VertexShader->DriverHandle, 0);
     else
@@ -364,7 +460,10 @@ D9Device::FlushTextures(VOID)
             }
         }
         if (Changed)
+        {
+            FeedPixelTexture(Slot, Bound);
             DdiTexture(D9SlotStage(Slot), Resource != nullptr ? Resource->DriverResource : NULL);
+        }
     }
 }
 
