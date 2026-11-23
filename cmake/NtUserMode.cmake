@@ -54,11 +54,14 @@ function(nt_usermode_init)
         _UNICODE
         WIN32_LEAN_AND_MEAN
         NOMINMAX
-        _HAS_EXCEPTIONS=0
+        _HAS_EXCEPTIONS=$<IF:$<BOOL:$<TARGET_PROPERTY:NT_CXX_EXCEPTIONS>>,1,0>
         DBG=$<IF:$<CONFIG:Debug>,1,0>)
 
+    # NT_CXX_EXCEPTIONS is for targets built on vendored code that throws, such as D3D12TranslationLayer
     target_compile_options(nt_usermode_settings INTERFACE
-        $<$<COMPILE_LANGUAGE:CXX>:/EHs-c- /GR- /Zc:__cplusplus>
+        $<$<COMPILE_LANGUAGE:CXX>:$<IF:$<BOOL:$<TARGET_PROPERTY:NT_CXX_EXCEPTIONS>>,/EHsc,/EHs-c->>
+        $<$<COMPILE_LANGUAGE:CXX>:$<IF:$<BOOL:$<TARGET_PROPERTY:NT_CXX_EXCEPTIONS>>,/GR,/GR->>
+        $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>
         /permissive-
         /utf-8
         /Gy
