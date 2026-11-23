@@ -10,6 +10,7 @@
 #define INITGUID
 #include <windows.h>
 #include <ddraw.h>
+#include <dwmapi.h>
 
 #include <cstdio>
 #include <string>
@@ -1856,6 +1857,9 @@ DcCheckPresent(
         return;
     ShowWindow(Check->Window, SW_SHOWNOACTIVATE);
     UpdateWindow(Check->Window);
+
+    /* DWM takes a newly shown window's first paint asynchronously, and it would land on top of the blits */
+    DwmFlush();
     Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
 
     Desc.dwSize = sizeof(Desc);
