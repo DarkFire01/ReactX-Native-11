@@ -188,6 +188,7 @@ struct TrState
     DWORD MainThread;
     BOOLEAN AllThreads;
     BOOLEAN DdiOnly;
+    BOOLEAN Tokens;
     BOOLEAN LineOpen;
     UINT Depth;
     UINT DriverVersion;
@@ -363,6 +364,21 @@ TrShouldLog(VOID)
     if (Tr.DdiOnly && TrCallbackDepth != 0)
         return FALSE;
     return Tr.AllThreads || GetCurrentThreadId() == Tr.MainThread;
+}
+
+/* With -tokens, a shader's tokens go to stderr so the trace itself stays the same */
+static
+VOID
+TrDumpTokens(
+    _In_reads_bytes_(Size) const DWORD* Tokens,
+    _In_ UINT Size)
+{
+    if (!Tr.Tokens || Tokens == nullptr)
+        return;
+    fprintf(stderr, "tokens %u:", Size);
+    for (UINT Index = 0; Index < Size / sizeof(*Tokens); Index++)
+        fprintf(stderr, " %08X", Tokens[Index]);
+    fprintf(stderr, "\n");
 }
 
 static
@@ -785,6 +801,7 @@ TrDeviceInputs(
     {
         const D3DDDIARG_CREATEVERTEXSHADERFUNC* Shader = static_cast<const D3DDDIARG_CREATEVERTEXSHADERFUNC*>(Args);
         TrAppend(Text, " %u %08X", Shader->Size, TrHash(reinterpret_cast<VOID*>(A[2]), Shader->Size));
+        TrDumpTokens(reinterpret_cast<const DWORD*>(A[2]), Shader->Size);
         break;
     }
     case TR_DEVICE_SLOT(pfnCreateVertexShaderDecl):
@@ -798,6 +815,7 @@ TrDeviceInputs(
     {
         const D3DDDIARG_CREATEPIXELSHADER* Shader = static_cast<const D3DDDIARG_CREATEPIXELSHADER*>(Args);
         TrAppend(Text, " %u %08X", Shader->CodeSize, TrHash(reinterpret_cast<VOID*>(A[2]), Shader->CodeSize));
+        TrDumpTokens(reinterpret_cast<const DWORD*>(A[2]), Shader->CodeSize);
         break;
     }
     case TR_DEVICE_SLOT(pfnSetScissorRect):
@@ -5931,6 +5949,526 @@ TrScenarioDrawsPlain(
     Plain->Release();
 }
 
+/* A state one fixed function case sets: a stage state, or a render state when the stage is TrFixedRender */
+struct TrFixedSet
+{
+    DWORD Stage;
+    DWORD Type;
+    DWORD Value;
+};
+
+static constexpr DWORD TrFixedRender = 0xFF;
+
+/* Textures a case binds on a stage */
+enum TrFixedTexture
+{
+    TrFixedFlat,
+    TrFixedSecond,
+    TrFixedCube,
+    TrFixedVolume,
+    TrFixedNone,
+};
+
+/* How a case draws: its vertex format or a declaration, the primitive and which textures it binds */
+struct TrFixedDraw
+{
+    DWORD Fvf;
+    BOOLEAN Declared;
+    BOOLEAN Points;
+    BYTE Textures[3];
+};
+
+struct TrFixedCase
+{
+    PCSTR Name;
+    TrFixedDraw Draw;
+    TrFixedSet Sets[10];
+};
+
+static constexpr DWORD TrFixedFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX2;
+static constexpr TrFixedDraw TrFixedPlain = { TrFixedFvf, FALSE, FALSE, { TrFixedFlat, TrFixedSecond, TrFixedFlat } };
+
+/* Colors of the four corners: diffuse and specular */
+static const DWORD TrFixedColors[4][2] =
+{
+    { 0xC0FF2040, 0x40102030 }, { 0x8040FF20, 0x20302010 }, { 0x402040FF, 0x60203040 }, { 0xFFFFFFFF, 0x10101010 },
+};
+
+/* A color the application gives its own pixel shader */
+static const FLOAT TrFixedShaderColor[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+
+/* Every color op with two args read from the texture and the diffuse color, the third from specular */
+static const DWORD TrFixedColorOps[] =
+{
+    D3DTOP_SELECTARG1, D3DTOP_SELECTARG2, D3DTOP_MODULATE, D3DTOP_MODULATE2X, D3DTOP_MODULATE4X, D3DTOP_ADD,
+    D3DTOP_ADDSIGNED, D3DTOP_ADDSIGNED2X, D3DTOP_SUBTRACT, D3DTOP_ADDSMOOTH, D3DTOP_BLENDDIFFUSEALPHA,
+    D3DTOP_BLENDTEXTUREALPHA, D3DTOP_BLENDFACTORALPHA, D3DTOP_BLENDTEXTUREALPHAPM, D3DTOP_BLENDCURRENTALPHA,
+    D3DTOP_PREMODULATE, D3DTOP_MODULATEALPHA_ADDCOLOR, D3DTOP_MODULATECOLOR_ADDALPHA,
+    D3DTOP_MODULATEINVALPHA_ADDCOLOR, D3DTOP_MODULATEINVCOLOR_ADDALPHA, D3DTOP_DOTPRODUCT3, D3DTOP_MULTIPLYADD,
+    D3DTOP_LERP,
+};
+
+/* Stage setups beyond the op sweeps */
+static const TrFixedCase TrFixedCases[] =
+{
+    { "untextured stage", { TrFixedFvf, FALSE, FALSE, { TrFixedNone, TrFixedSecond, TrFixedFlat } }, {} },
+    { "untextured blend", { TrFixedFvf, FALSE, FALSE, { TrFixedNone, TrFixedSecond, TrFixedFlat } },
+      { { 0, D3DTSS_COLOROP, D3DTOP_BLENDTEXTUREALPHA }, { 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE },
+        { 0, D3DTSS_COLORARG2, D3DTA_SPECULAR } } },
+    { "disabled", TrFixedPlain, { { 0, D3DTSS_COLOROP, D3DTOP_DISABLE } } },
+    { "no colors", { D3DFVF_XYZRHW | D3DFVF_TEX1, FALSE, FALSE, { TrFixedFlat, TrFixedNone, TrFixedNone } }, {} },
+    { "no colors disabled", { D3DFVF_XYZRHW | D3DFVF_TEX1, FALSE, FALSE, { TrFixedFlat, TrFixedNone, TrFixedNone } },
+      { { 0, D3DTSS_COLOROP, D3DTOP_DISABLE } } },
+    { "complement", TrFixedPlain,
+      { { 0, D3DTSS_COLORARG1, D3DTA_TEXTURE | D3DTA_COMPLEMENT },
+        { 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE | D3DTA_ALPHAREPLICATE },
+        { 0, D3DTSS_ALPHAOP, D3DTOP_MODULATE }, { 0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR | D3DTA_COMPLEMENT },
+        { TrFixedRender, D3DRS_TEXTUREFACTOR, 0x80406080 } } },
+    { "complement replicate", TrFixedPlain,
+      { { 0, D3DTSS_COLORARG1, D3DTA_TFACTOR | D3DTA_COMPLEMENT | D3DTA_ALPHAREPLICATE },
+        { 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE | D3DTA_COMPLEMENT } } },
+    { "constant", TrFixedPlain,
+      { { 0, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 0, D3DTSS_COLORARG2, D3DTA_CONSTANT },
+        { 0, D3DTSS_CONSTANT, 0x8020C040 }, { 0, D3DTSS_ALPHAOP, D3DTOP_ADD }, { 0, D3DTSS_ALPHAARG2, D3DTA_CONSTANT } } },
+    { "two stages", TrFixedPlain,
+      { { 1, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 1, D3DTSS_COLORARG1, D3DTA_TEXTURE },
+        { 1, D3DTSS_COLORARG2, D3DTA_CURRENT }, { 1, D3DTSS_ALPHAOP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+    { "three stages", TrFixedPlain,
+      { { 1, D3DTSS_COLOROP, D3DTOP_ADDSIGNED }, { 1, D3DTSS_TEXCOORDINDEX, 1 },
+        { 2, D3DTSS_COLOROP, D3DTOP_BLENDCURRENTALPHA }, { 2, D3DTSS_COLORARG2, D3DTA_SPECULAR },
+        { 2, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2 } } },
+    { "temp", TrFixedPlain,
+      { { 0, D3DTSS_RESULTARG, D3DTA_TEMP }, { 1, D3DTSS_COLOROP, D3DTOP_SELECTARG1 },
+        { 1, D3DTSS_COLORARG1, D3DTA_DIFFUSE }, { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 },
+        { 2, D3DTSS_COLOROP, D3DTOP_ADD }, { 2, D3DTSS_COLORARG1, D3DTA_TEMP }, { 2, D3DTSS_ALPHAOP, D3DTOP_MODULATE },
+        { 2, D3DTSS_ALPHAARG1, D3DTA_TEMP } } },
+    { "temp unwritten", TrFixedPlain,
+      { { 0, D3DTSS_COLORARG2, D3DTA_TEMP }, { 0, D3DTSS_ALPHAOP, D3DTOP_MODULATE },
+        { 0, D3DTSS_ALPHAARG2, D3DTA_TEMP } } },
+    { "premodulate", TrFixedPlain,
+      { { 0, D3DTSS_COLOROP, D3DTOP_PREMODULATE }, { 0, D3DTSS_ALPHAOP, D3DTOP_PREMODULATE },
+        { 1, D3DTSS_COLOROP, D3DTOP_SELECTARG2 }, { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2 },
+        { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+    { "premodulate color", TrFixedPlain,
+      { { 0, D3DTSS_COLOROP, D3DTOP_PREMODULATE }, { 1, D3DTSS_COLOROP, D3DTOP_ADD },
+        { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2 } } },
+    { "specular", TrFixedPlain, { { TrFixedRender, D3DRS_SPECULARENABLE, TRUE } } },
+    { "specular no stages", TrFixedPlain,
+      { { TrFixedRender, D3DRS_SPECULARENABLE, TRUE }, { 0, D3DTSS_COLOROP, D3DTOP_DISABLE } } },
+    { "specular dot", TrFixedPlain,
+      { { TrFixedRender, D3DRS_SPECULARENABLE, TRUE }, { 0, D3DTSS_COLOROP, D3DTOP_DOTPRODUCT3 } } },
+    { "bump", TrFixedPlain,
+      { { 0, D3DTSS_COLOROP, D3DTOP_BUMPENVMAP }, { 0, D3DTSS_BUMPENVMAT00, 0x3F000000 },
+        { 0, D3DTSS_BUMPENVMAT11, 0x3E800000 }, { 1, D3DTSS_COLOROP, D3DTOP_MODULATE },
+        { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+    { "bump luminance", TrFixedPlain,
+      { { 0, D3DTSS_COLOROP, D3DTOP_BUMPENVMAPLUMINANCE }, { 0, D3DTSS_BUMPENVLSCALE, 0x3F400000 },
+        { 0, D3DTSS_BUMPENVLOFFSET, 0x3E000000 }, { 1, D3DTSS_COLOROP, D3DTOP_MODULATE },
+        { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 } } },
+    { "bump last", TrFixedPlain,
+      { { 1, D3DTSS_COLOROP, D3DTOP_BUMPENVMAP }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+    { "projected", { D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0), FALSE, FALSE,
+                     { TrFixedFlat, TrFixedNone, TrFixedNone } },
+      { { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_PROJECTED } } },
+    { "projected three", { D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0), FALSE, FALSE,
+                           { TrFixedFlat, TrFixedNone, TrFixedNone } },
+      { { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_PROJECTED } } },
+    { "projected two", { D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1, FALSE, FALSE,
+                         { TrFixedFlat, TrFixedNone, TrFixedNone } },
+      { { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_PROJECTED | D3DTTFF_COUNT3 } } },
+    { "one float", { D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE1(0), FALSE, FALSE,
+                     { TrFixedFlat, TrFixedNone, TrFixedNone } }, {} },
+    { "cube", { TrFixedFvf, FALSE, FALSE, { TrFixedCube, TrFixedNone, TrFixedNone } }, {} },
+    { "volume", { D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0), FALSE, FALSE,
+                  { TrFixedVolume, TrFixedNone, TrFixedNone } }, {} },
+    { "missing set", TrFixedPlain,
+      { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 5 } } },
+    { "generated index", TrFixedPlain,
+      { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACENORMAL | 1 } } },
+    { "declaration", { TrFixedFvf, TRUE, FALSE, { TrFixedFlat, TrFixedSecond, TrFixedFlat } },
+      { { 1, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+    { "points", { TrFixedFvf, FALSE, TRUE, { TrFixedFlat, TrFixedNone, TrFixedNone } }, {} },
+    { "point sprites", { TrFixedFvf, FALSE, TRUE, { TrFixedFlat, TrFixedSecond, TrFixedNone } },
+      { { TrFixedRender, D3DRS_POINTSPRITEENABLE, TRUE }, { TrFixedRender, D3DRS_POINTSIZE, 0x40800000 },
+        { 1, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 1, D3DTSS_TEXCOORDINDEX, 1 } } },
+    { "alpha unset", TrFixedPlain, { { 0, D3DTSS_ALPHAOP, 0x7FFFFFFF } } },
+    { "default again", TrFixedPlain, {} },
+};
+
+/* The states each case starts from: the device defaults on the first three stages */
+static const TrFixedSet TrFixedBaseline[] =
+{
+    { 0, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 0, D3DTSS_COLORARG1, D3DTA_TEXTURE },
+    { 0, D3DTSS_COLORARG2, D3DTA_CURRENT }, { 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 },
+    { 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE }, { 0, D3DTSS_ALPHAARG2, D3DTA_CURRENT },
+    { 0, D3DTSS_COLORARG0, D3DTA_CURRENT }, { 0, D3DTSS_ALPHAARG0, D3DTA_CURRENT },
+    { 0, D3DTSS_RESULTARG, D3DTA_CURRENT }, { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE },
+    { 1, D3DTSS_COLOROP, D3DTOP_DISABLE }, { 1, D3DTSS_COLORARG1, D3DTA_TEXTURE },
+    { 1, D3DTSS_COLORARG2, D3DTA_CURRENT }, { 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE },
+    { 1, D3DTSS_TEXCOORDINDEX, 1 }, { 2, D3DTSS_COLOROP, D3DTOP_DISABLE }, { 2, D3DTSS_COLORARG2, D3DTA_CURRENT },
+    { 2, D3DTSS_ALPHAOP, D3DTOP_DISABLE }, { 2, D3DTSS_TEXCOORDINDEX, 2 },
+    { TrFixedRender, D3DRS_SPECULARENABLE, FALSE }, { TrFixedRender, D3DRS_POINTSPRITEENABLE, FALSE },
+};
+
+static
+VOID
+TrFixedApply(
+    _In_ IDirect3DDevice9* Device,
+    _In_reads_(Count) const TrFixedSet* Sets,
+    _In_ UINT Count)
+{
+    for (UINT Index = 0; Index < Count && Sets[Index].Type != 0; Index++)
+    {
+        const TrFixedSet& Set = Sets[Index];
+
+        if (Set.Stage == TrFixedRender)
+        {
+            TrApi("SetRenderState", Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(Set.Type), Set.Value));
+        }
+        else
+        {
+            TrApi("SetTextureStageState",
+                  Device->SetTextureStageState(Set.Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(Set.Type), Set.Value));
+        }
+    }
+}
+
+/* Fills the corners of a target wide quad in the layout a format names; returns the stride */
+static
+UINT
+TrFixedVertices(
+    _In_ DWORD Fvf,
+    _Out_writes_(256) FLOAT* Vertices)
+{
+    static const FLOAT Corners[4][2] = { { 0.0f, 0.0f }, { 16.0f, 0.0f }, { 0.0f, 8.0f }, { 16.0f, 8.0f } };
+    UINT Sets = (Fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
+    UINT Floats = 0;
+
+    for (UINT Corner = 0; Corner < 4; Corner++)
+    {
+        FLOAT U = Corners[Corner][0] / 16.0f;
+        FLOAT V = Corners[Corner][1] / 8.0f;
+
+        Vertices[Floats] = Corners[Corner][0];
+        Vertices[Floats + 1] = Corners[Corner][1];
+        Vertices[Floats + 2] = 0.5f;
+        Vertices[Floats + 3] = 1.0f;
+        Floats += 4;
+        if ((Fvf & D3DFVF_DIFFUSE) != 0)
+        {
+            CopyMemory(&Vertices[Floats], &TrFixedColors[Corner][0], sizeof(DWORD));
+            Floats += 1;
+        }
+        if ((Fvf & D3DFVF_SPECULAR) != 0)
+        {
+            CopyMemory(&Vertices[Floats], &TrFixedColors[Corner][1], sizeof(DWORD));
+            Floats += 1;
+        }
+        for (UINT Set = 0; Set < Sets; Set++)
+        {
+            static const UINT Sizes[4] = { 2, 3, 4, 1 };
+            const FLOAT Values[4] = { Set == 0 ? U : V, Set == 0 ? V : U, 0.5f, 2.0f };
+            UINT Size = Sizes[(Fvf >> (16 + Set * 2)) & 3];
+
+            CopyMemory(&Vertices[Floats], Values, Size * sizeof(FLOAT));
+            Floats += Size;
+        }
+    }
+    return Floats / 4 * sizeof(FLOAT);
+}
+
+/* Draws one case and reads the target back */
+static
+VOID
+TrFixedRun(
+    _In_ IDirect3DDevice9* Device,
+    _In_z_ PCSTR Name,
+    _In_ const TrFixedDraw& Draw,
+    _In_reads_(SetCount) const TrFixedSet* Sets,
+    _In_ UINT SetCount,
+    _In_reads_(5) IDirect3DBaseTexture9* const* Textures,
+    _In_ IDirect3DSurface9* Target)
+{
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    FLOAT Vertices[256];
+    UINT Stride = TrFixedVertices(Draw.Fvf, Vertices);
+    char Phase[96];
+
+    sprintf_s(Phase, "fixed pixel %s", Name);
+    TrPhase(Phase);
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrFixedApply(Device, TrFixedBaseline, _countof(TrFixedBaseline));
+    for (UINT Stage = 0; Stage < 3; Stage++)
+        TrApi("SetTexture", Device->SetTexture(Stage, Textures[Draw.Textures[Stage]]));
+    if (Draw.Declared)
+    {
+        static const D3DVERTEXELEMENT9 Elements[] =
+        {
+            { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITIONT, 0 },
+            { 0, 16, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+            { 0, 20, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 1 },
+            { 0, 24, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+            { 0, 32, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 1 },
+            D3DDECL_END()
+        };
+
+        TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(Elements, &Declaration));
+        TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    }
+    else
+    {
+        TrApi("SetFVF", Device->SetFVF(Draw.Fvf));
+    }
+    TrFixedApply(Device, Sets, SetCount);
+    TrApi("BeginScene", Device->BeginScene());
+    if (Draw.Points)
+        TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_POINTLIST, 4, Vertices, Stride));
+    else
+        TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Vertices, Stride));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, Name);
+    TrRelease(Declaration);
+    TrSettle(Device);
+}
+
+/* Fills every level face or slice of a texture with a fixed pattern */
+static
+VOID
+TrFixedFill(
+    _In_ IDirect3DBaseTexture9* Texture,
+    _In_ UINT Seed)
+{
+    D3DLOCKED_RECT Rect;
+    D3DLOCKED_BOX Box;
+
+    if (Texture == nullptr)
+        return;
+    if (Texture->GetType() == D3DRTYPE_TEXTURE)
+    {
+        IDirect3DTexture9* Flat = static_cast<IDirect3DTexture9*>(Texture);
+
+        if (SUCCEEDED(Flat->LockRect(0, &Rect, nullptr, 0)))
+        {
+            for (UINT Row = 0; Row < 2; Row++)
+            {
+                DWORD* Line = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Rect.pBits) + Row * Rect.Pitch);
+
+                Line[0] = 0x80FF0000 ^ (Seed * 0x01234567) ^ (Row * 0x00FF00FF);
+                Line[1] = 0x4000FF80 ^ (Seed * 0x00765432) ^ (Row * 0x30003000);
+            }
+            Flat->UnlockRect(0);
+        }
+    }
+    else if (Texture->GetType() == D3DRTYPE_CUBETEXTURE)
+    {
+        IDirect3DCubeTexture9* Cube = static_cast<IDirect3DCubeTexture9*>(Texture);
+
+        for (UINT Face = 0; Face < 6; Face++)
+        {
+            if (FAILED(Cube->LockRect(static_cast<D3DCUBEMAP_FACES>(Face), 0, &Rect, nullptr, 0)))
+                continue;
+            for (UINT Row = 0; Row < 2; Row++)
+            {
+                DWORD* Line = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Rect.pBits) + Row * Rect.Pitch);
+
+                Line[0] = 0xFF102030 + Face * 0x00202020 + Row;
+                Line[1] = 0x80F0E0D0 - Face * 0x00101010 - Row;
+            }
+            Cube->UnlockRect(static_cast<D3DCUBEMAP_FACES>(Face), 0);
+        }
+    }
+    else if (Texture->GetType() == D3DRTYPE_VOLUMETEXTURE)
+    {
+        IDirect3DVolumeTexture9* Volume = static_cast<IDirect3DVolumeTexture9*>(Texture);
+
+        if (SUCCEEDED(Volume->LockBox(0, &Box, nullptr, 0)))
+        {
+            for (UINT Slice = 0; Slice < 2; Slice++)
+            {
+                for (UINT Row = 0; Row < 2; Row++)
+                {
+                    DWORD* Line = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Box.pBits) + Slice * Box.SlicePitch +
+                                                           Row * Box.RowPitch);
+
+                    Line[0] = 0xC0408020 + Slice * 0x00400000 + Row * 0x00004000;
+                    Line[1] = 0x40C02080 - Slice * 0x00200000 - Row * 0x00002000;
+                }
+            }
+            Volume->UnlockBox(0);
+        }
+    }
+}
+
+/* Draws transformed vertices through the fixed function pixel pipeline: every color and alpha op, then stage
+   setups that change the shader's inputs, then the application's pixel shader taking over and handing back */
+static
+VOID
+TrFixedPixelWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DTexture9* Flat = nullptr;
+    IDirect3DTexture9* Second = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DPixelShader9* Color = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    IDirect3DBaseTexture9* Textures[5] = {};
+
+    TrPhase("fixed pixel create");
+    TrApi("CreateTexture", Device->CreateTexture(2, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Flat,
+                                                 nullptr));
+    TrApi("CreateTexture second", Device->CreateTexture(2, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                                        &Second, nullptr));
+    TrApi("CreateCubeTexture", Device->CreateCubeTexture(2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                                         &Cube, nullptr));
+    TrApi("CreateVolumeTexture", Device->CreateVolumeTexture(2, 2, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8,
+                                                             D3DPOOL_DEFAULT, &Volume, nullptr));
+    TrApi("CreatePixelShader", Device->CreatePixelShader(TrDrawColorCode, &Color));
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    Textures[TrFixedFlat] = Flat;
+    Textures[TrFixedSecond] = Second;
+    Textures[TrFixedCube] = Cube;
+    Textures[TrFixedVolume] = Volume;
+    for (UINT Index = 0; Index < TrFixedNone; Index++)
+        TrFixedFill(Textures[Index], Index);
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("SetRenderState lighting", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+    TrApi("SetRenderState factor", Device->SetRenderState(D3DRS_TEXTUREFACTOR, 0x60C08040));
+    TrSettle(Device);
+
+    for (DWORD Op : TrFixedColorOps)
+    {
+        const TrFixedSet Sets[] =
+        {
+            { 0, D3DTSS_COLOROP, Op }, { 0, D3DTSS_COLORARG1, D3DTA_TEXTURE }, { 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE },
+            { 0, D3DTSS_COLORARG0, D3DTA_SPECULAR },
+        };
+        char Name[48];
+
+        sprintf_s(Name, "color op %lu", Op);
+        TrFixedRun(Device, Name, TrFixedPlain, Sets, _countof(Sets), Textures, Target);
+    }
+    for (DWORD Op : TrFixedColorOps)
+    {
+        const TrFixedSet Sets[] =
+        {
+            { 0, D3DTSS_ALPHAOP, Op }, { 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE }, { 0, D3DTSS_ALPHAARG2, D3DTA_TEXTURE },
+            { 0, D3DTSS_ALPHAARG0, D3DTA_TFACTOR },
+        };
+        char Name[48];
+
+        sprintf_s(Name, "alpha op %lu", Op);
+        TrFixedRun(Device, Name, TrFixedPlain, Sets, _countof(Sets), Textures, Target);
+    }
+    for (DWORD Op : TrFixedColorOps)
+    {
+        const TrFixedSet Sets[] =
+        {
+            { 1, D3DTSS_COLOROP, Op }, { 1, D3DTSS_COLORARG1, D3DTA_CURRENT },
+            { 1, D3DTSS_COLORARG2, D3DTA_TFACTOR }, { 1, D3DTSS_COLORARG0, D3DTA_TEXTURE },
+            { 1, D3DTSS_ALPHAOP, Op }, { 1, D3DTSS_ALPHAARG1, D3DTA_SPECULAR }, { 1, D3DTSS_ALPHAARG2, D3DTA_CURRENT },
+        };
+        char Name[48];
+
+        sprintf_s(Name, "second stage op %lu", Op);
+        TrFixedRun(Device, Name, TrFixedPlain, Sets, _countof(Sets), Textures, Target);
+    }
+    for (const TrFixedCase& Case : TrFixedCases)
+        TrFixedRun(Device, Case.Name, Case.Draw, Case.Sets, _countof(Case.Sets), Textures, Target);
+
+    /* The application's shader takes over, then the converter's comes back with its constants */
+    TrApi("SetPixelShader", Device->SetPixelShader(Color));
+    TrFixedRun(Device, "application shader", TrFixedPlain, nullptr, 0, Textures, Target);
+    TrApi("SetPixelShaderConstantF", Device->SetPixelShaderConstantF(2, TrFixedShaderColor, 1));
+    TrApi("SetPixelShader null", Device->SetPixelShader(nullptr));
+    TrFixedRun(Device, "converter again", TrFixedPlain, nullptr, 0, Textures, Target);
+
+    TrPhase("fixed pixel release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    for (UINT Stage = 0; Stage < 3; Stage++)
+        TrApi("SetTexture null", Device->SetTexture(Stage, nullptr));
+    TrRelease(Flat);
+    TrRelease(Second);
+    TrRelease(Cube);
+    TrRelease(Volume);
+    TrRelease(Color);
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
+/* The fixed function pixel pipeline on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioFixedPixel(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("fixed pixel device");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrFixedPixelWork(Device);
+        TrPhase("fixed pixel device release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
+/* The fixed function pixel pipeline on pure and hardware vertex processing devices of the plain object */
+static
+VOID
+TrScenarioFixedPixelPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "fixed pixel plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrFixedPixelWork(Device);
+            TrPhase("fixed pixel plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -5969,6 +6507,8 @@ static const TrScenario TrScenarios[] =
     { "declarations_plain", TrScenarioDeclarationsPlain },
     { "draws", TrScenarioDraws },
     { "draws_plain", TrScenarioDrawsPlain },
+    { "fixed_pixel", TrScenarioFixedPixel },
+    { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
 };
 
 static
@@ -6019,6 +6559,11 @@ wmain(
         if (_wcsicmp(argv[Index], L"-threads") == 0)
         {
             Tr.AllThreads = TRUE;
+            continue;
+        }
+        if (_wcsicmp(argv[Index], L"-tokens") == 0)
+        {
+            Tr.Tokens = TRUE;
             continue;
         }
         if (_wcsicmp(argv[Index], L"-ddi") == 0)
