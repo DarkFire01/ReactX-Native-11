@@ -51,6 +51,7 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTQueryAdapterInfo", Kmt.QueryAdapterInfo);
     RxResolve(Gdi32, "D3DKMTEscape", Kmt.Escape);
     RxResolve(Gdi32, "D3DKMTGetDisplayModeList", Kmt.GetDisplayModeList);
+    RxResolve(Gdi32, "D3DKMTGetMultisampleMethodList", Kmt.GetMultisampleMethodList);
     RxResolve(Gdi32, "D3DKMTWaitForVerticalBlankEvent", Kmt.WaitForVerticalBlankEvent);
     RxResolve(Gdi32, "D3DKMTSetDisplayMode", Kmt.SetDisplayMode);
     RxResolve(Gdi32, "D3DKMTSetVidPnSourceOwner", Kmt.SetVidPnSourceOwner);

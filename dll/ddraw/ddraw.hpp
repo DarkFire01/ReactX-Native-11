@@ -16,6 +16,7 @@
 
 #include "adapteridentity.hpp"
 #include "kmcallbacks.hpp"
+#include "umdversions.hpp"
 #include "trace.hpp"
 
 struct DdDriver;

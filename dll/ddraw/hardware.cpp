@@ -7,25 +7,12 @@
 
 #include "ddraw.hpp"
 
-/* Driver models whose OpenAdapter wants the oldest runtime versions first */
+/* Driver models below this one keep the old display behavior */
 static constexpr UINT DdLegacyModel = 1200;
-static constexpr DWORD DdVendorAmd = 0x1002;
-static constexpr DWORD DdVendorQualcomm = 0x4D4F4351;
 
 /* DirectDraw opens the user mode driver at the DirectX 7 interface */
 static constexpr UINT DdUmdInterface = 7;
 
-/* Runtime versions tried newest first */
-static const UINT DdUmdVersions[] =
-{
-    D3D_UMD_INTERFACE_VERSION_WDDM3_2_2, D3D_UMD_INTERFACE_VERSION_WDDM3_1_1, D3D_UMD_INTERFACE_VERSION_WDDM3_0_1,
-    D3D_UMD_INTERFACE_VERSION_WDDM2_9_1, D3D_UMD_INTERFACE_VERSION_WDDM2_8_1, D3D_UMD_INTERFACE_VERSION_WDDM2_7_2,
-    D3D_UMD_INTERFACE_VERSION_WDDM2_6_4, D3D_UMD_INTERFACE_VERSION_WDDM2_5_3, D3D_UMD_INTERFACE_VERSION_WDDM2_4_2,
-    D3D_UMD_INTERFACE_VERSION_WDDM2_3_2, D3D_UMD_INTERFACE_VERSION_WDDM2_2_2, D3D_UMD_INTERFACE_VERSION_WDDM2_1_4,
-    D3D_UMD_INTERFACE_VERSION_WDDM2_0_M2_2, D3D_UMD_INTERFACE_VERSION_WDDM2_0_M1_3, D3D_UMD_INTERFACE_VERSION_WDDM1_3,
-    D3D_UMD_INTERFACE_VERSION_WIN8, D3D_UMD_INTERFACE_VERSION_WIN7,
-};
-static constexpr UINT DdLegacyFirstVersion = 15;
 
 /* Below this much local memory the runtime borrows from the shared pool */
 static constexpr ULONGLONG DdDefaultMinimumLocal = 0x2000000;
@@ -182,8 +169,7 @@ DdOpenDriverAdapter(
         if (RxReadAdapterIdentity(Hardware->AdapterLuid, Hardware->VidPnSourceId, Identity))
         {
             Model = Identity->DriverModel;
-            if (Model == DdLegacyModel && (Identity->VendorId == DdVendorAmd || Identity->VendorId == DdVendorQualcomm))
-                First = DdLegacyFirstVersion;
+            First = RxFirstD3D9UmdVersion(Model, Identity->VendorId);
         }
         delete Identity;
     }
@@ -192,12 +178,12 @@ DdOpenDriverAdapter(
     Hardware->Callbacks.pfnQueryAdapterInfoCb = DdQueryAdapterInfoCb;
     Hardware->Callbacks.pfnQueryAdapterInfoCb2 = DdQueryAdapterInfoCb2;
 
-    for (Index = First; Index < _countof(DdUmdVersions); Index++)
+    for (Index = First; Index < _countof(RxD3D9UmdVersions); Index++)
     {
         ZeroMemory(&Args, sizeof(Args));
         Args.hAdapter = Hardware;
         Args.Interface = DdUmdInterface;
-        Args.Version = DdUmdVersions[Index];
+        Args.Version = RxD3D9UmdVersions[Index];
         Args.pAdapterCallbacks = &Hardware->Callbacks;
         Args.pAdapterFuncs = &Hardware->Functions;
 
