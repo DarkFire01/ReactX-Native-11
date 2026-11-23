@@ -6,6 +6,7 @@
  */
 
 #include "dxilconv.hpp"
+#include "upstream.hpp"
 
 #include <new>
 
@@ -33,21 +34,19 @@ DxcFingerprint(
     return Hash;
 }
 
+/* Takes over the caller's reference on Inner */
 CDxbcConverter::CDxbcConverter(
-    _In_opt_ IMalloc* Malloc)
+    _In_ IDxbcConverter* Inner)
     : m_References(1),
-      m_Malloc(Malloc),
+      m_Inner(Inner),
       m_SkipDigestCheck(FALSE),
       m_RunCleanup(TRUE)
 {
-    if (m_Malloc != nullptr)
-        m_Malloc->AddRef();
 }
 
 CDxbcConverter::~CDxbcConverter()
 {
-    if (m_Malloc != nullptr)
-        m_Malloc->Release();
+    m_Inner->Release();
 }
 
 STDMETHODIMP
@@ -148,7 +147,7 @@ CDxbcConverter::Convert(
         }
 
         if (SUCCEEDED(hr))
-            hr = ConvertContainer(Source, DxbcSize, Dxil, DxilSize);
+            hr = m_Inner->Convert(Dxbc, DxbcSize, ExtraOptions, Dxil, DxilSize, Diag);
 
         if (SUCCEEDED(hr) && *Dxil != nullptr && Digest != DxcDigestNone)
         {
@@ -200,8 +199,16 @@ CDxbcConverter::ConvertInDriver(
             *Diag = nullptr;
 
         ApplyOptions(ExtraOptions);
-        DxcTrace(L"ConvertInDriver is not implemented yet");
-        hr = E_NOTIMPL;
+        hr = m_Inner->ConvertInDriver(Bytecode,
+                                      InputSignature,
+                                      InputCount,
+                                      OutputSignature,
+                                      OutputCount,
+                                      PatchSignature,
+                                      PatchCount,
+                                      ExtraOptions,
+                                      Blob,
+                                      Diag);
     }
 
     /* The result record fingerprints the token stream by its own length word */
@@ -216,6 +223,38 @@ CDxbcConverter::ConvertInDriver(
     return hr;
 }
 
+/* The upstream converter does the work; this object keeps the checks in front of it */
+static
+HRESULT
+DxcCreateConverter(
+    _In_opt_ IMalloc* Malloc,
+    _In_ REFIID Riid,
+    _Out_ LPVOID* Object)
+{
+    CDxbcConverter* Converter;
+    IDxbcConverter* Inner;
+    HRESULT hr;
+
+    hr = DxcUpstreamCreateConverter(Malloc, __uuidof(IDxbcConverter), reinterpret_cast<void**>(&Inner));
+    if (FAILED(hr))
+    {
+        DxcTrace(L"creating the upstream converter failed 0x%08lX", hr);
+        return hr;
+    }
+
+    Converter = new (std::nothrow) CDxbcConverter(Inner);
+    if (Converter == nullptr)
+    {
+        Inner->Release();
+        DxcTrace(L"no memory for a converter");
+        return E_OUTOFMEMORY;
+    }
+
+    hr = Converter->QueryInterface(Riid, Object);
+    Converter->Release();
+    return hr;
+}
+
 extern "C"
 HRESULT
 WINAPI
@@ -224,23 +263,11 @@ DxcCreateInstance(
     _In_ REFIID Riid,
     _Out_ LPVOID* Object)
 {
-    CDxbcConverter* Converter;
-    HRESULT hr;
-
     *Object = nullptr;
     if (!IsEqualCLSID(Clsid, DxcClassConverter))
         return REGDB_E_CLASSNOTREG;
 
-    Converter = new (std::nothrow) CDxbcConverter(nullptr);
-    if (Converter == nullptr)
-    {
-        DxcTrace(L"no memory for a converter");
-        return E_OUTOFMEMORY;
-    }
-
-    hr = Converter->QueryInterface(Riid, Object);
-    Converter->Release();
-    return hr;
+    return DxcCreateConverter(nullptr, Riid, Object);
 }
 
 extern "C"
@@ -252,9 +279,6 @@ DxcCreateInstance2(
     _In_ REFIID Riid,
     _Out_ LPVOID* Object)
 {
-    CDxbcConverter* Converter;
-    HRESULT hr;
-
     if (Object == nullptr)
         return E_POINTER;
 
@@ -262,16 +286,7 @@ DxcCreateInstance2(
     if (!IsEqualCLSID(Clsid, DxcClassConverter))
         return REGDB_E_CLASSNOTREG;
 
-    Converter = new (std::nothrow) CDxbcConverter(Malloc);
-    if (Converter == nullptr)
-    {
-        DxcTrace(L"no memory for a converter");
-        return E_OUTOFMEMORY;
-    }
-
-    hr = Converter->QueryInterface(Riid, Object);
-    Converter->Release();
-    return hr;
+    return DxcCreateConverter(Malloc, Riid, Object);
 }
 
 BOOL
@@ -282,7 +297,18 @@ DllMain(
     _In_opt_ LPVOID Reserved)
 {
     if (Reason == DLL_PROCESS_ATTACH)
+    {
         DisableThreadLibraryCalls(Instance);
+        if (!DxcUpstreamAttach())
+        {
+            DxcTrace(L"converter runtime setup failed");
+            return FALSE;
+        }
+    }
+    else if (Reason == DLL_PROCESS_DETACH)
+    {
+        DxcUpstreamDetach();
+    }
 
     return TRUE;
 }
