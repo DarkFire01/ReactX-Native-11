@@ -750,6 +750,8 @@ D9Device::Initialize(
     if (FAILED(hr))
         return hr;
     ComputeCaps();
+    StartShaderSwitch();
+    MarkSceneState();
     hr = CreateConstants();
     if (FAILED(hr))
         return hr;
@@ -993,7 +995,6 @@ D9Device::Clear(
 
     if (NotReset)
         return D3DERR_INVALIDCALL;
-    const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
     D3DDDIARG_CLEAR Args = {};
     RECT Viewport;
     RECT* Clipped = nullptr;
@@ -2375,6 +2376,7 @@ D9Device::BeginScene()
     Capture.Value = TRUE;
     DdiRenderState(&Capture);
     InScene = TRUE;
+    MarkSceneState();
     return S_OK;
 }
 
@@ -2431,55 +2433,6 @@ D9Device::SetCurrentTexturePalette(
 STDMETHODIMP
 D9Device::GetCurrentTexturePalette(
     _Out_ UINT* PaletteNumber)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::DrawPrimitive(
-    _In_ D3DPRIMITIVETYPE PrimitiveType,
-    _In_ UINT StartVertex,
-    _In_ UINT PrimitiveCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::DrawIndexedPrimitive(
-    _In_ D3DPRIMITIVETYPE PrimitiveType,
-    _In_ INT BaseVertexIndex,
-    _In_ UINT MinVertexIndex,
-    _In_ UINT NumVertices,
-    _In_ UINT StartIndex,
-    _In_ UINT PrimCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::DrawPrimitiveUP(
-    _In_ D3DPRIMITIVETYPE PrimitiveType,
-    _In_ UINT PrimitiveCount,
-    _In_opt_ const VOID* VertexStreamZeroData,
-    _In_ UINT VertexStreamZeroStride)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::DrawIndexedPrimitiveUP(
-    _In_ D3DPRIMITIVETYPE PrimitiveType,
-    _In_ UINT MinVertexIndex,
-    _In_ UINT NumVertices,
-    _In_ UINT PrimitiveCount,
-    _In_opt_ const VOID* IndexData,
-    _In_ D3DFORMAT IndexDataFormat,
-    _In_opt_ const VOID* VertexStreamZeroData,
-    _In_ UINT VertexStreamZeroStride)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

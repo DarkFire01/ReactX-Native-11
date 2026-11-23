@@ -1987,6 +1987,83 @@ D9Device::DdiShaderConstants(
 }
 
 VOID
+D9Device::DdiTexture(
+    _In_ UINT Stage,
+    _In_opt_ HANDLE Resource)
+{
+    D9TextureRecord Record = { Stage, Resource };
+
+    if (Batch != nullptr)
+        Batch->Reference(Resource);
+    if (!D9RecordCall(Batch, D9BatchCall::Texture, &Record, sizeof(Record)))
+        DeviceFunctions.pfnSetTexture(DriverDevice, Stage, Resource);
+}
+
+VOID
+D9Device::DdiStreamSource(
+    _In_ const D3DDDIARG_SETSTREAMSOURCE* Args)
+{
+    if (Batch != nullptr)
+        Batch->Reference(Args->hVertexBuffer);
+    if (!D9RecordCall(Batch, D9BatchCall::StreamSource, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetStreamSource(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiIndices(
+    _In_ const D3DDDIARG_SETINDICES* Args)
+{
+    if (Batch != nullptr)
+        Batch->Reference(Args->hIndexBuffer);
+    if (!D9RecordCall(Batch, D9BatchCall::Indices, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetIndices(DriverDevice, Args);
+}
+
+VOID
+D9Device::DdiVertexShaderDecl(
+    _In_ HANDLE Handle)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::VertexShaderDecl, &Handle, sizeof(Handle)))
+        DeviceFunctions.pfnSetVertexShaderDecl(DriverDevice, Handle);
+}
+
+VOID
+D9Device::DdiPixelShader(
+    _In_opt_ HANDLE Handle)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::PixelShader, &Handle, sizeof(Handle)))
+        DeviceFunctions.pfnSetPixelShader(DriverDevice, Handle);
+}
+
+HRESULT
+D9Device::DdiDrawPrimitive(
+    _In_ const D3DDDIARG_DRAWPRIMITIVE* Args)
+{
+    HRESULT hr;
+
+    if (D9RecordCall(Batch, D9BatchCall::DrawPrimitive, Args, sizeof(*Args)))
+        return S_OK;
+    hr = DeviceFunctions.pfnDrawPrimitive(DriverDevice, Args, nullptr);
+    if (FAILED(hr))
+        D9_TRACE_ONCE(L"the driver failed a draw (0x%08lX)", hr);
+    return hr;
+}
+
+HRESULT
+D9Device::DdiDrawIndexedPrimitive(
+    _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Args)
+{
+    HRESULT hr;
+
+    if (D9RecordCall(Batch, D9BatchCall::DrawIndexedPrimitive, Args, sizeof(*Args)))
+        return S_OK;
+    hr = DeviceFunctions.pfnDrawIndexedPrimitive(DriverDevice, Args);
+    if (FAILED(hr))
+        D9_TRACE_ONCE(L"the driver failed an indexed draw (0x%08lX)", hr);
+    return hr;
+}
+
+VOID
 D9Device::DdiViewport(
     _In_ const D3DDDIARG_VIEWPORTINFO* Args)
 {

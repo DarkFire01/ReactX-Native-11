@@ -173,11 +173,15 @@ D9Device::SendAroundDefs(
             continue;
         if (Defined >= End)
             break;
-        if (Defined > Piece)
+        if (Defined > Piece && Call == D9BatchCall::PixelShaderConst)
+            SendPixelFloats(Piece, Defined - Piece, reinterpret_cast<const FLOAT*>(Bytes + (Piece - Start) * Stride));
+        else if (Defined > Piece)
             DdiShaderConstants(Call, Piece, Defined - Piece, Bytes + (Piece - Start) * Stride, (Defined - Piece) * Stride);
         Piece = Defined + 1;
     }
-    if (Piece < End)
+    if (Piece < End && Call == D9BatchCall::PixelShaderConst)
+        SendPixelFloats(Piece, End - Piece, reinterpret_cast<const FLOAT*>(Bytes + (Piece - Start) * Stride));
+    else if (Piece < End)
         DdiShaderConstants(Call, Piece, End - Piece, Bytes + (Piece - Start) * Stride, (End - Piece) * Stride);
 }
 
@@ -191,10 +195,13 @@ D9Device::SendPixelConstants(
     _In_reads_bytes_opt_(Count * Stride) const VOID* Data,
     _In_ UINT Stride)
 {
-    if (Call == D9BatchCall::PixelShaderConst)
-        return;
-    if (PixelShader == nullptr)
+    if (PixelShader == nullptr && Call == D9BatchCall::PixelShaderConst)
+        SendPixelFloats(Start, Count, static_cast<const FLOAT*>(Data));
+    else if (PixelShader == nullptr)
         DdiShaderConstants(Call, Start, Count, Data, Count * Stride);
+    else if (Call == D9BatchCall::PixelShaderConst)
+        SendAroundDefs(Call, Start, Count, Data, Stride, PixelShader->Shape()->FloatDefs,
+                       PixelShader->Shape()->FloatDefCount);
     else if (Call == D9BatchCall::PixelShaderConstI)
         SendAroundDefs(Call, Start, Count, Data, Stride, PixelShader->Shape()->IntDefs,
                        PixelShader->Shape()->IntDefCount);
@@ -635,37 +642,18 @@ D9Device::SetVertexShader(
         Next->Bind();
     VertexShader = nullptr;
     if (Previous != nullptr)
-    {
-        const D9ShaderLayout* Shape = Previous->Shape();
-
-        for (UINT Index = 0; Index < Shape->FloatDefCount; Index++)
-        {
-            UINT Defined = Shape->FloatDefs[Index];
-
-            if (Defined < Limits.VertexFloats)
-                SendVertexConstants(D9BatchCall::VertexShaderConst, Defined, 1, VertexFloats[Defined],
-                                    sizeof(*VertexFloats));
-        }
-        for (UINT Index = 0; Index < Shape->IntDefCount; Index++)
-        {
-            UINT Defined = Shape->IntDefs[Index];
-
-            if (Defined < Limits.VertexInts)
-                SendVertexConstants(D9BatchCall::VertexShaderConstI, Defined, 1, VertexInts[Defined],
-                                    sizeof(*VertexInts));
-        }
-        for (UINT Index = 0; Index < Shape->BoolDefCount; Index++)
-        {
-            UINT Defined = Shape->BoolDefs[Index];
-
-            if (Defined < Limits.VertexBools)
-                SendVertexConstants(D9BatchCall::VertexShaderConstB, Defined, 1, &VertexBools[Defined],
-                                    sizeof(*VertexBools));
-        }
-    }
+        RestoreShaderDefs(FALSE, Previous->Shape(), Next != nullptr ? Next->Shape() : nullptr);
     VertexShader = Next;
+
+    /* Without a driver copy the shader runs in the runtime's pipeline, which picks it up at the next draw */
     if (Next != nullptr && Next->DriverHandle != NULL)
-        DdiShaderConstants(D9BatchCall::VertexShaderFunc, 0, 0, &Next->DriverHandle, sizeof(Next->DriverHandle));
+        SwitchVertexShader(Next->DriverHandle, 0);
+    else if (Next != nullptr)
+        DrawDirty |= D9DrawVertexInput;
+    else if (DriverHasVertexShaders())
+        SwitchVertexShader(NULL, 0);
+    else
+        DrawDirty |= D9DrawVertexInput;
     if (Previous != nullptr)
         Previous->Unbind();
     return S_OK;
@@ -685,7 +673,8 @@ D9Device::GetVertexShader(
     return S_OK;
 }
 
-/* The pixel shader reaches the driver when something draws with it */
+/* The constants the old shader defined go back to the application's values; the driver gets the new shader
+   unless the fixed function one stands in */
 STDMETHODIMP
 D9Device::SetPixelShader(
     _In_opt_ IDirect3DPixelShader9* Shader)
@@ -700,7 +689,11 @@ D9Device::SetPixelShader(
         return S_OK;
     if (Next != nullptr)
         Next->Bind();
+    PixelShader = nullptr;
+    if (Previous != nullptr)
+        RestoreShaderDefs(TRUE, Previous->Shape(), Next != nullptr ? Next->Shape() : nullptr);
     PixelShader = Next;
+    SwitchPixelShader(Next != nullptr ? Next->DriverHandle : NULL, 0);
     if (Previous != nullptr)
         Previous->Unbind();
     return S_OK;

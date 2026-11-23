@@ -166,6 +166,20 @@ enum class D9BatchCall : UINT
     VertexShaderConstB,
     PixelShaderConstI,
     PixelShaderConstB,
+    Texture,
+    StreamSource,
+    Indices,
+    VertexShaderDecl,
+    PixelShader,
+    DrawPrimitive,
+    DrawIndexedPrimitive,
+};
+
+/* A recorded texture binding */
+struct D9TextureRecord
+{
+    UINT Stage;
+    HANDLE Resource;
 };
 
 /* How many registers of each constant kind the application may set, and how many of the vertex ones the
@@ -797,6 +811,11 @@ public:
     VOID
     Upload(VOID);
 
+    /* The resource a draw binds; a managed texture makes or refreshes its video copy first */
+    D9Resource*
+    DrawResource(
+        _Out_ BOOLEAN* Made);
+
 protected:
     HRESULT
     GetLevelSurface(
@@ -1180,6 +1199,18 @@ public:
     VOID
     Unbind(VOID);
 
+    /* The resource a draw binds; a managed buffer makes or refreshes its video copy first */
+    D9Resource*
+    DrawResource(
+        _Out_ BOOLEAN* Made);
+
+    /* Bytes per index of an index buffer */
+    UINT
+    IndexSize() const
+    {
+        return Format == D3DFMT_INDEX32 ? 4 : 2;
+    }
+
 private:
     BOOLEAN
     IsManaged() const
@@ -1373,6 +1404,9 @@ public:
     DWORD Fvf = 0;
     HANDLE DriverHandle = NULL;
 
+    /* The vertices hold transformed positions, which no vertex shader processes */
+    BOOLEAN Transformed = FALSE;
+
     /* Declarations the device made for formats are kept in a list and live until the device goes */
     D9Declaration* NextKept = nullptr;
     BOOLEAN Orphaned = FALSE;
@@ -1466,6 +1500,11 @@ private:
 BOOLEAN
 D9IsRetiredState(
     _In_ DWORD State);
+
+/* texture.cpp */
+D9TextureCore*
+D9CoreOf(
+    _In_ IDirect3DBaseTexture9* Texture);
 
 VOID
 D9HoldTexture(
@@ -1590,6 +1629,71 @@ DWORD
 D9DriverStageValue(
     _In_ UINT Type,
     _In_ DWORD Value);
+
+/* Changes the shader switch acts on at the next draw: the vertex input became transformed or not, the
+   fixed function or the application's vertex shader is wanted, the converters' inputs changed, and the
+   fixed function or the application's pixel shader is wanted */
+static constexpr UINT D9SwitchTransformedInput = 0x0004;
+static constexpr UINT D9SwitchShaderInput = 0x0008;
+static constexpr UINT D9SwitchWantVertexConverter = 0x0010;
+static constexpr UINT D9SwitchWantApiVertexShader = 0x0020;
+static constexpr UINT D9SwitchPixelInput = 0x0040;
+static constexpr UINT D9SwitchVertexInput = 0x0080;
+static constexpr UINT D9SwitchClipPlanes = 0x0100;
+static constexpr UINT D9SwitchWantPixelConverter = 0x0200;
+static constexpr UINT D9SwitchWantApiPixelShader = 0x0400;
+static constexpr UINT D9SwitchPixelShaderUse = 0x0800;
+static constexpr UINT D9SwitchPointSize = 0x1000;
+static constexpr UINT D9SwitchPointList = 0x2000;
+
+/* Decides at each draw whether the application's shaders or the shaders the runtime makes for the fixed
+   function pipeline reach the driver, and what each side still has to hear */
+struct D9ShaderSwitch
+{
+    /* Changes waiting, and the ones the current modes act on */
+    UINT Pending;
+    UINT Allowed;
+
+    /* The fixed function vertex shader is bound; the fixed function pixel shader is bound when the mode is not 0 */
+    BOOLEAN VertexConverting;
+    UINT PixelMode;
+
+    /* Which converters the driver's shader versions allow */
+    BOOLEAN HasVertexConverter;
+    BOOLEAN HasPixelConverter;
+
+    /* The vertex converter reads untransformed vertices of a declaration */
+    BOOLEAN ShaderInput;
+
+    /* The last draw drew points */
+    BOOLEAN DrewPoints;
+
+    /* The application's shaders and the inputs they read */
+    HANDLE ApiVertexShader;
+    UINT ApiVertexInputs;
+    HANDLE ApiPixelShader;
+    INT ApiPixelInputs;
+
+    /* Pixel constants the application set while the fixed function pixel shader was bound, restored when its
+       own shader comes back, and the vertex constants the vertex converter wrote over */
+    UINT PixelConstantMark;
+    UINT VertexFloatsUsed;
+    UINT VertexIntsUsed;
+
+    /* What draws read their vertices as: a format, or a declaration */
+    DWORD InputFvf;
+    HANDLE InputDeclaration;
+    DWORD PixelFvf;
+    HANDLE PixelDeclaration;
+};
+
+/* Draw state that changed since the last draw and reaches the driver before the next one */
+static constexpr UINT D9DrawTextures = 0x0002;
+static constexpr UINT D9DrawVertexInput = 0x0200;
+static constexpr UINT D9DrawStreams = 0x0800;
+
+/* The stream dirty bit of the index binding */
+static constexpr UINT D9IndexStreamBit = 0x10000;
 
 /* The IDirect3DDevice9Ex object CreateDevice and CreateDeviceEx hand out */
 class D9Device final : public IDirect3DDevice9Ex, public RxKernelDevice
@@ -2935,6 +3039,96 @@ private:
     VOID
     DestroyStagingBuffers(VOID);
 
+    /* draw.cpp */
+    VOID
+    StartShaderSwitch(VOID);
+
+    VOID
+    UpdateSwitch(
+        _In_ UINT Set,
+        _In_ UINT Cleared);
+
+    VOID
+    SwitchVertexShader(
+        _In_opt_ HANDLE Shader,
+        _In_ UINT Inputs);
+
+    VOID
+    SwitchPixelShader(
+        _In_opt_ HANDLE Shader,
+        _In_ INT Inputs);
+
+    VOID
+    SwitchDeclaration(
+        _In_ HANDLE Handle,
+        _In_ BOOLEAN Transformed);
+
+    VOID
+    SettleSwitch(
+        _In_ D3DPRIMITIVETYPE PrimitiveType,
+        _In_ BOOLEAN Indexed);
+
+    VOID
+    ApplySwitch(VOID);
+
+    VOID
+    MarkSceneState(VOID);
+
+    HRESULT
+    CheckFirstDraw(
+        _In_ BOOLEAN Indexed,
+        _In_ BOOLEAN FromMemory);
+
+    HRESULT
+    FlushVertexInput(VOID);
+
+    VOID
+    FlushTextures(VOID);
+
+    VOID
+    FlushStreams(VOID);
+
+    VOID
+    SendPixelFloats(
+        _In_ UINT Start,
+        _In_ UINT Count,
+        _In_reads_(Count * 4) const FLOAT* Data);
+
+    VOID
+    RestoreShaderDefs(
+        _In_ BOOLEAN Pixel,
+        _In_ const D9ShaderLayout* Old,
+        _In_opt_ const D9ShaderLayout* New);
+
+    VOID
+    DdiTexture(
+        _In_ UINT Stage,
+        _In_opt_ HANDLE Resource);
+
+    VOID
+    DdiStreamSource(
+        _In_ const D3DDDIARG_SETSTREAMSOURCE* Args);
+
+    VOID
+    DdiIndices(
+        _In_ const D3DDDIARG_SETINDICES* Args);
+
+    VOID
+    DdiVertexShaderDecl(
+        _In_ HANDLE Handle);
+
+    VOID
+    DdiPixelShader(
+        _In_opt_ HANDLE Handle);
+
+    HRESULT
+    DdiDrawPrimitive(
+        _In_ const D3DDDIARG_DRAWPRIMITIVE* Args);
+
+    HRESULT
+    DdiDrawIndexedPrimitive(
+        _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Args);
+
     HRESULT
     ResetCommon(
         _Inout_ D3DPRESENT_PARAMETERS* Parameters,
@@ -3082,6 +3276,23 @@ private:
     /* The bound declaration, and those made for formats */
     D9Declaration* Declaration = nullptr;
     D9Declaration* FvfDeclarations = nullptr;
+
+    /* What changed since the last draw, the samplers and streams among it, and whether a draw got through the
+       checks the first one makes */
+    UINT DrawDirty = 0;
+    UINT TextureDirty = 0;
+    UINT StreamDirty = 0;
+    BOOLEAN DrawChecked = FALSE;
+
+    /* The format SetFVF set, which a declaration clears, and the last one set, which it keeps */
+    DWORD ApiFvf = 0;
+    DWORD LastFvf = 0;
+
+    /* Bytes per index of the bound index buffer, as the driver last needs to hear them */
+    UINT IndexStride = 0;
+
+    /* The application's shaders or the fixed function converters' */
+    D9ShaderSwitch Switch = {};
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;

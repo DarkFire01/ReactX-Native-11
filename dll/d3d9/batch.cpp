@@ -457,6 +457,31 @@ D9Batch::Run(
         case D9BatchCall::PixelShaderConstB:
             D9RunShaderConstants(Funcs, Driver, Header->Call, Args);
             break;
+        case D9BatchCall::Texture:
+        {
+            D9TextureRecord* Record = reinterpret_cast<D9TextureRecord*>(Args);
+
+            Funcs->pfnSetTexture(Driver, Record->Stage, Record->Resource);
+            break;
+        }
+        case D9BatchCall::StreamSource:
+            Funcs->pfnSetStreamSource(Driver, reinterpret_cast<D3DDDIARG_SETSTREAMSOURCE*>(Args));
+            break;
+        case D9BatchCall::Indices:
+            Funcs->pfnSetIndices(Driver, reinterpret_cast<D3DDDIARG_SETINDICES*>(Args));
+            break;
+        case D9BatchCall::VertexShaderDecl:
+            Funcs->pfnSetVertexShaderDecl(Driver, *reinterpret_cast<HANDLE*>(Args));
+            break;
+        case D9BatchCall::PixelShader:
+            Funcs->pfnSetPixelShader(Driver, *reinterpret_cast<HANDLE*>(Args));
+            break;
+        case D9BatchCall::DrawPrimitive:
+            Funcs->pfnDrawPrimitive(Driver, reinterpret_cast<D3DDDIARG_DRAWPRIMITIVE*>(Args), nullptr);
+            break;
+        case D9BatchCall::DrawIndexedPrimitive:
+            Funcs->pfnDrawIndexedPrimitive(Driver, reinterpret_cast<D3DDDIARG_DRAWINDEXEDPRIMITIVE*>(Args));
+            break;
         }
         Offset += Header->Size;
     }

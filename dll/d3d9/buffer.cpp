@@ -266,6 +266,21 @@ D9Buffer<Interface, Description>::Upload(VOID)
 }
 
 template <class Interface, class Description>
+D9Resource*
+D9Buffer<Interface, Description>::DrawResource(
+    _Out_ BOOLEAN* Made)
+{
+    BOOLEAN Missing = VideoResource == nullptr;
+
+    *Made = FALSE;
+    if (!IsManaged())
+        return Resource;
+    Upload();
+    *Made = Missing && VideoResource != nullptr;
+    return VideoResource;
+}
+
+template <class Interface, class Description>
 VOID
 D9Buffer<Interface, Description>::Evict(VOID)
 {

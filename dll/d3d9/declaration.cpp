@@ -331,6 +331,11 @@ D9Declaration::Initialize(
     ElementCount = Count;
     CopyMemory(Elements, Source, (Count + 1) * sizeof(*Elements));
     Fvf = Format;
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        if (Elements[Index].Usage == D3DDECLUSAGE_POSITIONT)
+            Transformed = TRUE;
+    }
     return S_OK;
 }
 
@@ -489,6 +494,8 @@ D9Device::SetVertexDeclaration(
         Next->Bind();
     Declaration = Next;
     CurrentFvf = Next != nullptr ? Next->Fvf : 0;
+    ApiFvf = 0;
+    DrawDirty |= D9DrawVertexInput;
     if (Previous != nullptr)
         Previous->Unbind();
     return S_OK;

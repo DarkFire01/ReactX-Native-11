@@ -899,10 +899,6 @@ D9TextureCore::GenerateMipsCore(VOID)
         Device->DriverGenerateMips(Resource, Filter);
 }
 
-static
-D9TextureCore*
-D9CoreOf(
-    _In_ IDirect3DBaseTexture9* Texture);
 
 BOOLEAN
 D9TextureCore::IsAnySubresourceLocked() const
@@ -1063,6 +1059,20 @@ D9TextureCore::Upload(VOID)
         }
         DirtyCount[Face] = 0;
     }
+}
+
+D9Resource*
+D9TextureCore::DrawResource(
+    _Out_ BOOLEAN* Made)
+{
+    BOOLEAN Missing = VideoResource == nullptr;
+
+    *Made = FALSE;
+    if (!IsManaged())
+        return Resource;
+    Upload();
+    *Made = Missing && VideoResource != nullptr;
+    return VideoResource;
 }
 
 /* What the three texture interfaces share: identity, reference counts, priority, LOD and mip generation */
@@ -1853,7 +1863,6 @@ D9Device::CreateVolumeTexture(
 }
 
 /* The texture object behind an interface this runtime handed out */
-static
 D9TextureCore*
 D9CoreOf(
     _In_ IDirect3DBaseTexture9* Texture)
@@ -1902,6 +1911,13 @@ D9Device::SetTexture(
     if (Texture != nullptr)
         D9CoreOf(Texture)->Bind();
     Textures[Slot] = Texture;
+
+    /* A scratch texture never reaches the driver, so binding one changes nothing it sees */
+    if (Texture == nullptr || D9CoreOf(Texture)->PoolOf() != D3DPOOL_SCRATCH)
+    {
+        TextureDirty |= 1u << Slot;
+        DrawDirty |= D9DrawTextures;
+    }
     if (Previous != nullptr)
         D9CoreOf(Previous)->Unbind();
     return S_OK;

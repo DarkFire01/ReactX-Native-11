@@ -10,6 +10,7 @@ nt_add_usermode_dll(d3d9
         cursor.cpp
         declaration.cpp
         device.cpp
+        draw.cpp
         enum.cpp
         formats.cpp
         hardware.cpp

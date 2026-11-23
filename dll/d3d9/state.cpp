@@ -837,6 +837,11 @@ D9Device::SetFVF(
     if (Recording != nullptr)
         return Recording->Add(D9BlockOp::Fvf, 0, 0, &FVF, sizeof(FVF));
     CurrentFvf = FVF;
+    if (FVF == ApiFvf)
+        return S_OK;
+    ApiFvf = FVF;
+    LastFvf = FVF;
+    DrawDirty |= D9DrawVertexInput;
     return BindFvfDeclaration(FVF);
 }
 
@@ -876,12 +881,14 @@ D9Device::SetStreamSource(
     if (Stream->Buffer == StreamData && Stream->Offset == OffsetInBytes && Stream->Stride == Stride)
         return S_OK;
 
-    /* Taking a buffer away leaves the offset and stride it had */
+    /* Taking a buffer away leaves the offset and stride it had, and the driver keeps what it was given */
     if (StreamData != nullptr)
     {
         static_cast<D9VertexBuffer*>(StreamData)->Bind();
         Stream->Offset = OffsetInBytes;
         Stream->Stride = Stride;
+        StreamDirty |= 1u << StreamNumber;
+        DrawDirty |= D9DrawStreams;
     }
     if (Stream->Buffer != nullptr)
         static_cast<D9VertexBuffer*>(Stream->Buffer)->Unbind();
@@ -970,8 +977,15 @@ D9Device::SetIndices(
         return Recording->Add(D9BlockOp::Indices, 0, 0, &IndexData, sizeof(IndexData));
     if (Indices == IndexData)
         return S_OK;
+
+    /* As with streams, the driver keeps an index buffer taken away */
     if (IndexData != nullptr)
+    {
         static_cast<D9IndexBuffer*>(IndexData)->Bind();
+        IndexStride = static_cast<D9IndexBuffer*>(IndexData)->IndexSize();
+        StreamDirty |= D9IndexStreamBit;
+        DrawDirty |= D9DrawStreams;
+    }
     if (Indices != nullptr)
         static_cast<D9IndexBuffer*>(Indices)->Unbind();
     Indices = IndexData;
