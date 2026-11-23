@@ -194,6 +194,54 @@ enum class D9BatchCall : UINT
     PixelShader,
     DrawPrimitive,
     DrawIndexedPrimitive,
+    StreamSourceUm,
+    IndicesUm,
+    DrawFill,
+    DrawIndexedFill,
+    BufBlt,
+    TexBlt,
+    VolBlt,
+    GenerateMips,
+};
+
+/* The copies a batch records, made through the newer driver call where the driver has it */
+HRESULT
+D9RunBufBlt(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ const D3DDDIARG_BUFFERBLT1* Blt);
+
+HRESULT
+D9RunTexBlt(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ const D3DDDIARG_TEXBLT1* Blt);
+
+HRESULT
+D9RunVolBlt(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ const D3DDDIARG_VOLUMEBLT1* Blt);
+
+/* A draw the worker makes from what a batch copied into its fills */
+struct D9FillDrawRecord
+{
+    D3DDDIARG_SETSTREAMSOURCE Stream;
+    D3DDDIARG_DRAWPRIMITIVE2 Draw;
+};
+
+struct D9FillIndexedRecord
+{
+    D3DDDIARG_SETSTREAMSOURCE Stream;
+    D3DDDIARG_SETINDICES Indices;
+    D3DDDIARG_DRAWINDEXEDPRIMITIVE Draw;
+};
+
+/* Application memory a large draw reads where it lies */
+struct D9MemoryRecord
+{
+    UINT Stride;
+    const VOID* Data;
 };
 
 /* A recorded texture binding */
@@ -220,16 +268,29 @@ struct D9ConstantLimits
 /* Slots of the table that remembers which batch last used a driver resource */
 static constexpr UINT D9BatchReferenceSlots = 0x1FFF;
 
-/* One recording buffer, with the system memory vertex and index buffers drawing from application memory fills */
+/* A dynamic buffer draws from application memory are copied into, locked while its batch records */
+struct D9BatchFill
+{
+    D9Resource Resource;
+    VOID* Memory;
+    BYTE* Data;
+    UINT Used;
+    UINT Size;
+};
+
+/* The fills of a recording buffer: vertices, then 16 and 32 bit indices */
+static constexpr UINT D9FillVertices = 0;
+static constexpr UINT D9FillIndices16 = 1;
+static constexpr UINT D9FillIndices32 = 2;
+static constexpr UINT D9FillCount = 3;
+
+/* One recording buffer with the fills its draws from application memory use */
 struct D9BatchBuffer
 {
     BYTE* Data;
     UINT Used;
     UINT Calls;
-    D9Resource Vertices;
-    D9Resource Indices16;
-    D9Resource Indices32;
-    VOID* Memory[3];
+    D9BatchFill Fills[D9FillCount];
 };
 
 /* Records state calls and runs them on a worker thread for drivers that lock asynchronously, as the system does
@@ -281,6 +342,20 @@ public:
     VOID
     WaitForWorker(VOID);
 
+    VOID
+    DrawMemory(
+        _In_ const D3DDDIARG_DRAWPRIMITIVE* Draw,
+        _In_ UINT Stride,
+        _In_ const VOID* Vertices);
+
+    VOID
+    DrawIndexedMemory(
+        _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Draw,
+        _In_ UINT Stride,
+        _In_ const VOID* Vertices,
+        _In_ UINT IndexStride,
+        _In_ const VOID* IndexData);
+
 private:
     VOID
     Advance(VOID);
@@ -304,6 +379,16 @@ private:
         _Inout_ D9BatchBuffer* Buffer);
 
     VOID
+    UnlockFills(
+        _Inout_ D9BatchBuffer* Buffer);
+
+    VOID
+    RecordMemory(
+        _In_ D9BatchCall Call,
+        _In_ UINT Stride,
+        _In_ const VOID* Data);
+
+    VOID
     DestroyFills(
         _Inout_ D9BatchBuffer* Buffer);
 
@@ -311,7 +396,7 @@ private:
     const D3DDDI_DEVICEFUNCS* Funcs;
     HANDLE Driver;
     D9BatchBuffer Buffers[2] = {};
-    UINT Current = 0;
+    UINT Current = 1;
     HANDLE Thread = NULL;
     HANDLE Wake = NULL;
     HANDLE Done = NULL;

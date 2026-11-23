@@ -81,6 +81,60 @@ D9RunShaderConstants(
     }
 }
 
+HRESULT
+D9RunBufBlt(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ const D3DDDIARG_BUFFERBLT1* Blt)
+{
+    D3DDDIARG_BUFFERBLT Old = {};
+
+    if (Funcs->pfnBufBlt1 != nullptr)
+        return Funcs->pfnBufBlt1(Driver, Blt);
+    Old.hDstResource = Blt->hDstResource;
+    Old.hSrcResource = Blt->hSrcResource;
+    Old.Offset = Blt->Offset;
+    Old.SrcRange = Blt->SrcRange;
+    return Funcs->pfnBufBlt(Driver, &Old);
+}
+
+HRESULT
+D9RunTexBlt(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ const D3DDDIARG_TEXBLT1* Blt)
+{
+    D3DDDIARG_TEXBLT Old = {};
+
+    if (Funcs->pfnTexBlt1 != nullptr)
+        return Funcs->pfnTexBlt1(Driver, Blt);
+    Old.hDstResource = Blt->hDstResource;
+    Old.hSrcResource = Blt->hSrcResource;
+    Old.CubeMapFace = Blt->CubeMapFace;
+    Old.DstPoint = Blt->DstPoint;
+    Old.SrcRect = Blt->SrcRect;
+    return Funcs->pfnTexBlt(Driver, &Old);
+}
+
+HRESULT
+D9RunVolBlt(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ const D3DDDIARG_VOLUMEBLT1* Blt)
+{
+    D3DDDIARG_VOLUMEBLT Old = {};
+
+    if (Funcs->pfnVolBlt1 != nullptr)
+        return Funcs->pfnVolBlt1(Driver, Blt);
+    Old.hDstResource = Blt->hDstResource;
+    Old.hSrcResource = Blt->hSrcResource;
+    Old.DstX = Blt->DstX;
+    Old.DstY = Blt->DstY;
+    Old.DstZ = Blt->DstZ;
+    Old.SrcBox = Blt->SrcBox;
+    return Funcs->pfnVolBlt(Driver, &Old);
+}
+
 D9Batch::D9Batch(
     _In_ D9Device* Owner,
     _In_ const D3DDDI_DEVICEFUNCS* Functions,
@@ -112,51 +166,77 @@ D9Batch::CreateFills(
         { D3DDDIFMT_INDEX16, D9FillIndexBytes, D9FillIndexFlags },
         { D3DDDIFMT_INDEX32, D9FillIndexBytes, D9FillIndexFlags },
     };
-    D9Resource* Targets[3] = { &Buffer->Vertices, &Buffer->Indices16, &Buffer->Indices32 };
     HRESULT hr;
 
     for (UINT Index = 0; Index < _countof(Fills); Index++)
     {
+        D9BatchFill* Fill = &Buffer->Fills[Index];
         D3DDDI_POOL Placement = Device->BufferPlacement(Index == 0, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0,
                                                         D3DPOOL_DEFAULT);
 
+        Fill->Size = Fills[Index].Size;
         if (Placement != D3DDDIPOOL_SYSTEMMEM)
         {
             hr = Device->CreateBufferResource(static_cast<D3DFORMAT>(Fills[Index].Format), Fills[Index].Size,
-                                              Fills[Index].Flags, 0, Placement, nullptr, nullptr, Targets[Index]);
+                                              Fills[Index].Flags, 0, Placement, nullptr, nullptr, &Fill->Resource);
             if (FAILED(hr))
                 return hr;
             continue;
         }
 
-        Buffer->Memory[Index] = VirtualAlloc(nullptr, Fills[Index].Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (Buffer->Memory[Index] == nullptr)
+        Fill->Memory = VirtualAlloc(nullptr, Fills[Index].Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (Fill->Memory == nullptr)
             return E_OUTOFMEMORY;
 
-        hr = Device->CreateSystemBuffer(Fills[Index].Format, Fills[Index].Size, Fills[Index].Flags,
-                                        Buffer->Memory[Index], Targets[Index]);
+        hr = Device->CreateSystemBuffer(Fills[Index].Format, Fills[Index].Size, Fills[Index].Flags, Fill->Memory,
+                                        &Fill->Resource);
         if (FAILED(hr))
             return hr;
     }
     return S_OK;
 }
 
-/* The fills stay locked while the main thread records into their buffer; system memory ones only tell the driver */
+/* The fills stay locked while the main thread records into their buffer; one still locked keeps what it holds,
+   and system memory ones only tell the driver */
 VOID
 D9Batch::LockFills(
     _Inout_ D9BatchBuffer* Buffer)
 {
-    D9Resource* Targets[3] = { &Buffer->Vertices, &Buffer->Indices16, &Buffer->Indices32 };
-
-    for (D9Resource* Fill : Targets)
+    for (D9BatchFill& Fill : Buffer->Fills)
     {
         D3DDDIARG_LOCK Lock = {};
 
-        Lock.hResource = Fill->DriverResource;
+        if (Fill.Data != nullptr || Fill.Resource.DriverResource == NULL)
+            continue;
+        Fill.Used = 0;
+        Lock.hResource = Fill.Resource.DriverResource;
         Lock.Flags.Discard = TRUE;
-        Lock.Flags.NotifyOnly = Fill->Pool == D3DDDIPOOL_SYSTEMMEM;
+        Lock.Flags.NotifyOnly = Fill.Resource.Pool == D3DDDIPOOL_SYSTEMMEM;
         if (FAILED(Funcs->pfnLock(Driver, &Lock)))
+        {
             D9_TRACE_ONCE(L"the driver would not lock a batch fill");
+            return;
+        }
+        Fill.Data = static_cast<BYTE*>(Fill.Memory != nullptr ? Fill.Memory : Lock.pSurfData);
+    }
+}
+
+/* Fills that took a draw's data are unlocked before the driver reads them */
+VOID
+D9Batch::UnlockFills(
+    _Inout_ D9BatchBuffer* Buffer)
+{
+    for (D9BatchFill& Fill : Buffer->Fills)
+    {
+        D3DDDIARG_UNLOCK Unlock = {};
+
+        if (Fill.Used == 0 || Fill.Resource.DriverResource == NULL)
+            continue;
+        Fill.Used = 0;
+        Fill.Data = nullptr;
+        Unlock.hResource = Fill.Resource.DriverResource;
+        Unlock.Flags.NotifyOnly = Fill.Resource.Pool == D3DDDIPOOL_SYSTEMMEM;
+        Funcs->pfnUnlock(Driver, &Unlock);
     }
 }
 
@@ -164,24 +244,27 @@ VOID
 D9Batch::DestroyFills(
     _Inout_ D9BatchBuffer* Buffer)
 {
-    D9Resource* Targets[3] = { &Buffer->Vertices, &Buffer->Indices16, &Buffer->Indices32 };
-
-    /* Index fills in video memory are unlocked before they go; the vertex fill goes still locked */
-    for (UINT Index = 0; Index < _countof(Targets); Index++)
+    /* Locked index fills in video memory are unlocked before they go; the vertex fill goes still locked */
+    for (UINT Index = 0; Index < D9FillCount; Index++)
     {
-        if (Index != 0 && Targets[Index]->DriverResource != NULL && Targets[Index]->Pool != D3DDDIPOOL_SYSTEMMEM)
+        D9BatchFill* Fill = &Buffer->Fills[Index];
+
+        if (Index != D9FillVertices && Fill->Resource.DriverResource != NULL && Fill->Data != nullptr &&
+            Fill->Resource.Pool != D3DDDIPOOL_SYSTEMMEM)
         {
             D3DDDIARG_UNLOCK Unlock = {};
 
-            Unlock.hResource = Targets[Index]->DriverResource;
+            Unlock.hResource = Fill->Resource.DriverResource;
             Funcs->pfnUnlock(Driver, &Unlock);
         }
-        if (Targets[Index]->DriverResource != NULL)
-            Funcs->pfnDestroyResource(Driver, Targets[Index]->DriverResource);
-        Targets[Index]->DriverResource = NULL;
-        if (Buffer->Memory[Index] != nullptr)
-            VirtualFree(Buffer->Memory[Index], 0, MEM_RELEASE);
-        Buffer->Memory[Index] = nullptr;
+        if (Fill->Resource.DriverResource != NULL)
+            Funcs->pfnDestroyResource(Driver, Fill->Resource.DriverResource);
+        Fill->Resource.DriverResource = NULL;
+        Fill->Data = nullptr;
+        Fill->Used = 0;
+        if (Fill->Memory != nullptr)
+            VirtualFree(Fill->Memory, 0, MEM_RELEASE);
+        Fill->Memory = nullptr;
     }
 }
 
@@ -204,7 +287,7 @@ D9Batch::Start(VOID)
             return hr;
     }
 
-    /* The idle buffer is locked first, then the one the main thread records into */
+    /* The main thread records into the second buffer first, locked before the idle one */
     LockFills(&Buffers[1]);
     LockFills(&Buffers[0]);
 
@@ -311,12 +394,14 @@ D9Batch::Record(
     return Header + 1;
 }
 
-/* Hands the recording buffer to the worker and records into the other one */
+/* Hands the recording buffer to the worker and records into the other one, whose fills lock again */
 VOID
 D9Batch::Submit(VOID)
 {
     WaitForWorker();
+    UnlockFills(&Buffers[Current]);
     Current ^= 1;
+    LockFills(&Buffers[Current]);
     Buffers[Current].Used = 0;
     Buffers[Current].Calls = 0;
     InterlockedExchange(&Busy, 1);
@@ -325,13 +410,173 @@ D9Batch::Submit(VOID)
     Advance();
 }
 
-/* Waits for the worker, then runs what is recorded on the calling thread */
+/* Waits for the worker, then runs what is recorded on the calling thread with the fills it used unlocked */
 VOID
 D9Batch::Drain(VOID)
 {
     WaitForWorker();
+    UnlockFills(&Buffers[Current]);
     Run(&Buffers[Current]);
+    LockFills(&Buffers[Current]);
     Advance();
+}
+
+/* The vertices a primitive count of a type reads; an unknown type reads none */
+static
+UINT
+D9PrimitiveVertices(
+    _In_ D3DPRIMITIVETYPE Type,
+    _In_ UINT Count)
+{
+    switch (Type)
+    {
+    case D3DPT_POINTLIST:
+        return Count;
+    case D3DPT_LINELIST:
+        return Count * 2;
+    case D3DPT_LINESTRIP:
+        return Count + 1;
+    case D3DPT_TRIANGLELIST:
+        return Count * 3;
+    case D3DPT_TRIANGLESTRIP:
+    case D3DPT_TRIANGLEFAN:
+        return Count + 2;
+    default:
+        return 0;
+    }
+}
+
+/* Draws reading more than this many vertices or indices read application memory where it lies */
+static constexpr UINT D9FillDrawLimit = 0x100;
+
+VOID
+D9Batch::RecordMemory(
+    _In_ D9BatchCall Call,
+    _In_ UINT Stride,
+    _In_ const VOID* Data)
+{
+    D9MemoryRecord* Record = static_cast<D9MemoryRecord*>(this->Record(Call, sizeof(*Record)));
+
+    if (Record == nullptr)
+        return;
+    Record->Stride = Stride;
+    Record->Data = Data;
+}
+
+/* A small draw from application memory copies its vertices into the vertex fill; a large one runs at once */
+VOID
+D9Batch::DrawMemory(
+    _In_ const D3DDDIARG_DRAWPRIMITIVE* Draw,
+    _In_ UINT Stride,
+    _In_ const VOID* Vertices)
+{
+    UINT Count = D9PrimitiveVertices(Draw->PrimitiveType, Draw->PrimitiveCount);
+    UINT Size = Count * Stride;
+    D9FillDrawRecord* Record;
+    D9BatchFill* Fill;
+    VOID* Slot;
+
+    if (Count > D9FillDrawLimit)
+    {
+        RecordMemory(D9BatchCall::StreamSourceUm, Stride, Vertices);
+        Slot = this->Record(D9BatchCall::DrawPrimitive, sizeof(*Draw));
+        if (Slot != nullptr)
+            CopyMemory(Slot, Draw, sizeof(*Draw));
+        Drain();
+        return;
+    }
+
+    if (Buffers[Current].Fills[D9FillVertices].Used + Size > Buffers[Current].Fills[D9FillVertices].Size)
+        Submit();
+    Record = static_cast<D9FillDrawRecord*>(this->Record(D9BatchCall::DrawFill, sizeof(*Record)));
+    Fill = &Buffers[Current].Fills[D9FillVertices];
+    if (Record == nullptr || Fill->Data == nullptr)
+        return;
+
+    ZeroMemory(Record, sizeof(*Record));
+    Record->Stream.hVertexBuffer = Fill->Resource.DriverResource;
+    Record->Stream.Stride = Stride;
+    Record->Draw.PrimitiveType = Draw->PrimitiveType;
+    Record->Draw.FirstVertexOffset = Fill->Used;
+    Record->Draw.PrimitiveCount = Draw->PrimitiveCount;
+    CopyMemory(Fill->Data + Fill->Used, Vertices, Size);
+    Fill->Used += Size;
+}
+
+/* A small indexed draw copies the vertices it names into the vertex fill, starting at a whole vertex, and its
+   indices, moved down to the first of them, into the index fill of their size */
+VOID
+D9Batch::DrawIndexedMemory(
+    _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Draw,
+    _In_ UINT Stride,
+    _In_ const VOID* Vertices,
+    _In_ UINT IndexStride,
+    _In_ const VOID* IndexData)
+{
+    UINT Indices = D9PrimitiveVertices(Draw->PrimitiveType, Draw->PrimitiveCount);
+    UINT IndexBytes = Indices * IndexStride;
+    UINT VertexBytes = Draw->NumVertices * Stride;
+    UINT Which = IndexStride == 2 ? D9FillIndices16 : D9FillIndices32;
+    D9BatchFill* Fill = &Buffers[Current].Fills[D9FillVertices];
+    D9BatchFill* IndexFill;
+    D9FillIndexedRecord* Record;
+    BYTE* Target;
+    VOID* Slot;
+
+    if (Draw->NumVertices > D9FillDrawLimit || Indices > D9FillDrawLimit)
+    {
+        RecordMemory(D9BatchCall::StreamSourceUm, Stride, Vertices);
+        RecordMemory(D9BatchCall::IndicesUm, IndexStride, IndexData);
+        Slot = this->Record(D9BatchCall::DrawIndexedPrimitive, sizeof(*Draw));
+        if (Slot != nullptr)
+            CopyMemory(Slot, Draw, sizeof(*Draw));
+        Drain();
+        return;
+    }
+
+    if (Fill->Used % Stride != 0)
+        Fill->Used = (Fill->Used / Stride + 1) * Stride;
+    IndexFill = &Buffers[Current].Fills[Which];
+    if (Fill->Used + VertexBytes > Fill->Size || IndexFill->Used + IndexBytes > IndexFill->Size)
+        Submit();
+    Record = static_cast<D9FillIndexedRecord*>(this->Record(D9BatchCall::DrawIndexedFill, sizeof(*Record)));
+    Fill = &Buffers[Current].Fills[D9FillVertices];
+    IndexFill = &Buffers[Current].Fills[Which];
+    if (Record == nullptr || Fill->Data == nullptr || IndexFill->Data == nullptr)
+        return;
+
+    ZeroMemory(Record, sizeof(*Record));
+    Record->Stream.hVertexBuffer = Fill->Resource.DriverResource;
+    Record->Stream.Stride = Stride;
+    Record->Indices.hIndexBuffer = IndexFill->Resource.DriverResource;
+    Record->Indices.Stride = IndexStride;
+    Record->Draw.PrimitiveType = Draw->PrimitiveType;
+    Record->Draw.BaseVertexIndex = static_cast<INT>(Fill->Used / Stride);
+    Record->Draw.NumVertices = Draw->NumVertices;
+    Record->Draw.StartIndex = IndexFill->Used / IndexStride;
+    Record->Draw.PrimitiveCount = Draw->PrimitiveCount;
+    CopyMemory(Fill->Data + Fill->Used, static_cast<const BYTE*>(Vertices) + Stride * Draw->MinIndex, VertexBytes);
+    Fill->Used += VertexBytes;
+
+    Target = IndexFill->Data + IndexFill->Used;
+    if (Draw->MinIndex == 0)
+    {
+        CopyMemory(Target, IndexData, IndexBytes);
+    }
+    else if (IndexStride == 2)
+    {
+        for (UINT Index = 0; Index < Indices; Index++)
+        {
+            reinterpret_cast<WORD*>(Target)[Index] =
+                static_cast<WORD>(static_cast<const WORD*>(IndexData)[Index] - Draw->MinIndex);
+        }
+    }
+    else
+    {
+        for (UINT Index = 0; Index < Indices; Index++)
+            reinterpret_cast<DWORD*>(Target)[Index] = static_cast<const DWORD*>(IndexData)[Index] - Draw->MinIndex;
+    }
+    IndexFill->Used += IndexBytes;
 }
 
 /* A new generation starts with the bound targets already in use */
@@ -482,6 +727,53 @@ D9Batch::Run(
         case D9BatchCall::DrawIndexedPrimitive:
             Funcs->pfnDrawIndexedPrimitive(Driver, reinterpret_cast<D3DDDIARG_DRAWINDEXEDPRIMITIVE*>(Args));
             break;
+        case D9BatchCall::StreamSourceUm:
+        {
+            D9MemoryRecord* Record = reinterpret_cast<D9MemoryRecord*>(Args);
+            D3DDDIARG_SETSTREAMSOURCEUM Stream = {};
+
+            Stream.Stride = Record->Stride;
+            Funcs->pfnSetStreamSourceUm(Driver, &Stream, Record->Data);
+            break;
+        }
+        case D9BatchCall::IndicesUm:
+        {
+            D9MemoryRecord* Record = reinterpret_cast<D9MemoryRecord*>(Args);
+
+            Funcs->pfnSetIndicesUm(Driver, Record->Stride, Record->Data);
+            break;
+        }
+        case D9BatchCall::BufBlt:
+            D9RunBufBlt(Funcs, Driver, reinterpret_cast<D3DDDIARG_BUFFERBLT1*>(Args));
+            break;
+        case D9BatchCall::TexBlt:
+            D9RunTexBlt(Funcs, Driver, reinterpret_cast<D3DDDIARG_TEXBLT1*>(Args));
+            break;
+        case D9BatchCall::VolBlt:
+            D9RunVolBlt(Funcs, Driver, reinterpret_cast<D3DDDIARG_VOLUMEBLT1*>(Args));
+            break;
+        case D9BatchCall::GenerateMips:
+            Funcs->pfnGenerateMipSubLevels(Driver, reinterpret_cast<D3DDDIARG_GENERATEMIPSUBLEVELS*>(Args));
+            break;
+        case D9BatchCall::DrawFill:
+        {
+            D9FillDrawRecord* Record = reinterpret_cast<D9FillDrawRecord*>(Args);
+
+            if (SUCCEEDED(Funcs->pfnSetStreamSource(Driver, &Record->Stream)))
+                Funcs->pfnDrawPrimitive2(Driver, &Record->Draw);
+            break;
+        }
+        case D9BatchCall::DrawIndexedFill:
+        {
+            D9FillIndexedRecord* Record = reinterpret_cast<D9FillIndexedRecord*>(Args);
+
+            if (SUCCEEDED(Funcs->pfnSetStreamSource(Driver, &Record->Stream)) &&
+                SUCCEEDED(Funcs->pfnSetIndices(Driver, &Record->Indices)))
+            {
+                Funcs->pfnDrawIndexedPrimitive(Driver, &Record->Draw);
+            }
+            break;
+        }
         }
         Offset += Header->Size;
     }

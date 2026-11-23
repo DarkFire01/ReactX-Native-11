@@ -1682,7 +1682,7 @@ D9Device::UnlockDriverSubresource(
     return UnlockDriverResource(Resource, Resource->Pool == D3DDDIPOOL_SYSTEMMEM ? 0 : Index, Asynchronous);
 }
 
-/* Copies a region of one face's top level, which the driver repeats down the levels */
+/* Copies a region of one face's top level, which the driver repeats down the levels; a batch records the copy */
 VOID
 D9Device::DriverTexBlt(
     _In_ D9Resource* Destination,
@@ -1703,22 +1703,13 @@ D9Device::DriverTexBlt(
     Blt.SrcRect.right = static_cast<LONG>(Box->Right);
     Blt.SrcRect.bottom = static_cast<LONG>(Box->Bottom);
 
-    DrainBatch();
-    if (DeviceFunctions.pfnTexBlt1 != nullptr)
+    if (D9RecordCall(Batch, D9BatchCall::TexBlt, &Blt, sizeof(Blt)))
     {
-        hr = DeviceFunctions.pfnTexBlt1(DriverDevice, &Blt);
+        Batch->Reference(Blt.hSrcResource);
+        Batch->Reference(Blt.hDstResource);
+        return;
     }
-    else
-    {
-        D3DDDIARG_TEXBLT Old = {};
-
-        Old.hDstResource = Blt.hDstResource;
-        Old.hSrcResource = Blt.hSrcResource;
-        Old.CubeMapFace = Blt.CubeMapFace;
-        Old.DstPoint = Blt.DstPoint;
-        Old.SrcRect = Blt.SrcRect;
-        hr = DeviceFunctions.pfnTexBlt(DriverDevice, &Old);
-    }
+    hr = D9RunTexBlt(&DeviceFunctions, DriverDevice, &Blt);
     if (FAILED(hr))
         D9Trace(L"UMD TexBlt failed 0x%08lX", hr);
 }
@@ -1744,23 +1735,13 @@ D9Device::DriverVolBlt(
     Blt.SrcBox.Front = Box->Front;
     Blt.SrcBox.Back = Box->Back;
 
-    DrainBatch();
-    if (DeviceFunctions.pfnVolBlt1 != nullptr)
+    if (D9RecordCall(Batch, D9BatchCall::VolBlt, &Blt, sizeof(Blt)))
     {
-        hr = DeviceFunctions.pfnVolBlt1(DriverDevice, &Blt);
+        Batch->Reference(Blt.hSrcResource);
+        Batch->Reference(Blt.hDstResource);
+        return;
     }
-    else
-    {
-        D3DDDIARG_VOLUMEBLT Old = {};
-
-        Old.hDstResource = Blt.hDstResource;
-        Old.hSrcResource = Blt.hSrcResource;
-        Old.DstX = Blt.DstX;
-        Old.DstY = Blt.DstY;
-        Old.DstZ = Blt.DstZ;
-        Old.SrcBox = Blt.SrcBox;
-        hr = DeviceFunctions.pfnVolBlt(DriverDevice, &Old);
-    }
+    hr = D9RunVolBlt(&DeviceFunctions, DriverDevice, &Blt);
     if (FAILED(hr))
         D9Trace(L"UMD VolBlt failed 0x%08lX", hr);
 }
@@ -1782,21 +1763,13 @@ D9Device::DriverBufBlt(
     Blt.SrcRange.Offset = Offset;
     Blt.SrcRange.Size = Size;
 
-    DrainBatch();
-    if (DeviceFunctions.pfnBufBlt1 != nullptr)
+    if (D9RecordCall(Batch, D9BatchCall::BufBlt, &Blt, sizeof(Blt)))
     {
-        hr = DeviceFunctions.pfnBufBlt1(DriverDevice, &Blt);
+        Batch->Reference(Blt.hSrcResource);
+        Batch->Reference(Blt.hDstResource);
+        return;
     }
-    else
-    {
-        D3DDDIARG_BUFFERBLT Old = {};
-
-        Old.hDstResource = Blt.hDstResource;
-        Old.hSrcResource = Blt.hSrcResource;
-        Old.Offset = Blt.Offset;
-        Old.SrcRange = Blt.SrcRange;
-        hr = DeviceFunctions.pfnBufBlt(DriverDevice, &Old);
-    }
+    hr = D9RunBufBlt(&DeviceFunctions, DriverDevice, &Blt);
     if (FAILED(hr))
         D9Trace(L"UMD BufBlt failed 0x%08lX", hr);
 }
@@ -1810,7 +1783,11 @@ D9Device::DriverGenerateMips(
 
     Args.hResource = Resource->DriverResource;
     Args.Filter = static_cast<D3DDDITEXTUREFILTERTYPE>(Filter);
-    DrainBatch();
+    if (D9RecordCall(Batch, D9BatchCall::GenerateMips, &Args, sizeof(Args)))
+    {
+        Batch->Reference(Args.hResource);
+        return;
+    }
     DeviceFunctions.pfnGenerateMipSubLevels(DriverDevice, &Args);
 }
 
@@ -2335,11 +2312,13 @@ D9Device::CreateDriverShader(
     return hr;
 }
 
+/* A batch may still bind the shader, so it runs first */
 VOID
 D9Device::DestroyDriverShader(
     _In_ BOOLEAN Pixel,
     _In_ HANDLE Handle)
 {
+    DrainBatch();
     if (Pixel)
         DeviceFunctions.pfnDeletePixelShader(DriverDevice, Handle);
     else

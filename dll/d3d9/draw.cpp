@@ -1005,14 +1005,18 @@ D9Device::DrawPrimitiveUP(
     SendTargets();
     SettleSwitch(PrimitiveType, FALSE);
 
-    DrainBatch();
+    Args.PrimitiveType = static_cast<D3DPRIMITIVETYPE>(PrimitiveType);
+    Args.PrimitiveCount = PrimitiveCount;
+    Zero->Stride = 0;
+    if (Batch != nullptr)
+    {
+        Batch->DrawMemory(&Args, VertexStreamZeroStride, VertexStreamZeroData);
+        return S_OK;
+    }
     Memory.Stream = 0;
     Memory.Stride = VertexStreamZeroStride;
     DeviceFunctions.pfnSetStreamSourceUm(DriverDevice, &Memory, VertexStreamZeroData);
-    Args.PrimitiveType = static_cast<D3DPRIMITIVETYPE>(PrimitiveType);
-    Args.PrimitiveCount = PrimitiveCount;
     DeviceFunctions.pfnDrawPrimitive(DriverDevice, &Args, nullptr);
-    Zero->Stride = 0;
     return S_OK;
 }
 
@@ -1066,16 +1070,22 @@ D9Device::DrawIndexedPrimitiveUP(
     SendTargets();
     SettleSwitch(PrimitiveType, TRUE);
 
-    DrainBatch();
-    Memory.Stream = 0;
-    Memory.Stride = VertexStreamZeroStride;
-    DeviceFunctions.pfnSetStreamSourceUm(DriverDevice, &Memory, VertexStreamZeroData);
-    DeviceFunctions.pfnSetIndicesUm(DriverDevice, IndexStride, IndexData);
     Args.PrimitiveType = static_cast<D3DPRIMITIVETYPE>(PrimitiveType);
     Args.MinIndex = MinVertexIndex;
     Args.NumVertices = NumVertices;
     Args.PrimitiveCount = PrimitiveCount;
-    DeviceFunctions.pfnDrawIndexedPrimitive(DriverDevice, &Args);
+    if (Batch != nullptr)
+    {
+        Batch->DrawIndexedMemory(&Args, VertexStreamZeroStride, VertexStreamZeroData, IndexStride, IndexData);
+    }
+    else
+    {
+        Memory.Stream = 0;
+        Memory.Stride = VertexStreamZeroStride;
+        DeviceFunctions.pfnSetStreamSourceUm(DriverDevice, &Memory, VertexStreamZeroData);
+        DeviceFunctions.pfnSetIndicesUm(DriverDevice, IndexStride, IndexData);
+        DeviceFunctions.pfnDrawIndexedPrimitive(DriverDevice, &Args);
+    }
     Zero->Stride = 0;
     IndexStride = 0;
     return S_OK;

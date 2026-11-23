@@ -440,6 +440,7 @@ VOID
 D9Device::DestroyDriverDeclaration(
     _In_ HANDLE Handle)
 {
+    DrainBatch();
     DeviceFunctions.pfnDeleteVertexShaderDecl(DriverDevice, Handle);
 }
 
