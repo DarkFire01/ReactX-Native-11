@@ -131,6 +131,23 @@ struct NineScArgs
 
 static_assert(sizeof(NineScArgs) == 208, "arguments keep the converter's layout");
 
+/* The vertex shader for pretransformed vertices: built from the vertex declaration alone */
+struct NineScTlArgs
+{
+    UINT Version;
+    UINT Flags;
+    const NineScInputs* Inputs;
+    PVOID Tokens;
+    SIZE_T TokenSize;
+    NineScOutputs* Outputs;
+    UINT64 Reserved;
+    UINT Reserved2;
+    UINT Emitted;
+    UINT Patched;
+};
+
+static_assert(sizeof(NineScTlArgs) == 64, "arguments keep the converter's layout");
+
 class NineScTranslator;
 
 /* Converts one shader; Translator is created on first use and kept by the caller */
@@ -138,6 +155,12 @@ HRESULT
 NineScConvertShader(
     _Inout_ NineScTranslator** Translator,
     _Inout_ NineScArgs* Args);
+
+/* Builds the vertex shader that passes pretransformed vertices through */
+HRESULT
+NineScConvertTlShader(
+    _Inout_ NineScTranslator** Translator,
+    _Inout_ NineScTlArgs* Args);
 
 /* Frees a translator made by NineScConvertShader */
 VOID

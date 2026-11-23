@@ -153,6 +153,38 @@ private:
 /* Option: multiplicands that are zero win over infinities, as Direct3D 9 hardware does */
 static constexpr UINT ScOptionPatchMultiply = 1;
 
+class NineScTranslator
+{
+public:
+    LONG References;
+    UINT RuntimeVersion;
+    ScAsm* Asm;
+};
+
+NineScTranslator*
+ScCreateTranslator(
+    _In_ UINT RuntimeVersion);
+
+/* Adds a vertex input; more than the limit is fatal */
+VOID
+ScAddInput(
+    _Inout_ NineScInputs* Inputs,
+    _In_ UINT Usage,
+    _In_ UINT Index,
+    _In_ UINT Register,
+    _In_ UINT Flag,
+    _In_ UINT Conversion);
+
+/* Adds an output or widens the mask of the one already there; the mask is in bits 16 to 19 */
+VOID
+ScAddOutput(
+    _Inout_ NineScOutputs* Outputs,
+    _In_ UINT Usage,
+    _In_ UINT Index,
+    _In_ UINT Register,
+    _In_ UINT Mask,
+    _In_ BOOL Indexed);
+
 /* One Direct3D 9 instruction as the translation reads it */
 struct ScToken
 {

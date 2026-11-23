@@ -27,14 +27,6 @@ static constexpr UINT ScUsageClip = 16;
 /* Output register position, fog and point size share; fog is x and point size y */
 static constexpr UINT ScFogRegister = 11;
 
-class NineScTranslator
-{
-public:
-    LONG References;
-    UINT RuntimeVersion;
-    ScAsm* Asm;
-};
-
 ScRegisterMap::ScRegisterMap()
 {
     memset(SamplerKinds, ScNoRegister, sizeof(SamplerKinds));
@@ -256,7 +248,6 @@ ScFindInput(
     return NULL;
 }
 
-static
 VOID
 ScAddInput(
     _Inout_ NineScInputs* Inputs,
@@ -275,7 +266,6 @@ ScAddInput(
 }
 
 /* Adds an output or widens the mask of the one already there */
-static
 VOID
 ScAddOutput(
     _Inout_ NineScOutputs* Outputs,
@@ -1532,17 +1522,9 @@ NineScConvertShader(
 
     if (!Owner)
     {
-        Owner = new (std::nothrow) NineScTranslator();
+        Owner = ScCreateTranslator(Args->Version);
         if (!Owner)
             return E_OUTOFMEMORY;
-        Owner->References = 1;
-        Owner->RuntimeVersion = Args->Version;
-        Owner->Asm = new (std::nothrow) ScAsm();
-        if (!Owner->Asm)
-        {
-            delete Owner;
-            return E_OUTOFMEMORY;
-        }
         *Translator = Owner;
     }
     if (FAILED(hr))
@@ -1615,6 +1597,25 @@ NineScConvertShader(
     memcpy(Args->Tokens, Tokens.data(), Tokens.size() * sizeof(DWORD));
     Args->TokenSize = Tokens.size() * sizeof(DWORD);
     return S_OK;
+}
+
+NineScTranslator*
+ScCreateTranslator(
+    _In_ UINT RuntimeVersion)
+{
+    NineScTranslator* Translator = new (std::nothrow) NineScTranslator();
+
+    if (!Translator)
+        return NULL;
+    Translator->References = 1;
+    Translator->RuntimeVersion = RuntimeVersion;
+    Translator->Asm = new (std::nothrow) ScAsm();
+    if (!Translator->Asm)
+    {
+        delete Translator;
+        return NULL;
+    }
+    return Translator;
 }
 
 VOID

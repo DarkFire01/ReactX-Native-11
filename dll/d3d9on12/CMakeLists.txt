@@ -4,6 +4,7 @@ nt_add_usermode_lib(d3d9on12sc
     scops.cpp
     scpixel.cpp
     sctexture.cpp
+    sctl.cpp
     shaderconv.cpp)
 set_target_properties(d3d9on12sc PROPERTIES NT_CXX_EXCEPTIONS ON)
 target_link_libraries(d3d9on12sc PUBLIC d3d12translationlayer)
