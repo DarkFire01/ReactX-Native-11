@@ -875,6 +875,15 @@ DdCreateSurfaceObject(
         if (FAILED(hr))
             return hr;
         Format = Desc->ddpfPixelFormat;
+
+        /* Palette formats keep no channel masks */
+        if ((Format.dwFlags & (DDPF_PALETTEINDEXED1 | DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4 | DDPF_PALETTEINDEXED8)) != 0)
+        {
+            Format.dwRBitMask = 0;
+            Format.dwGBitMask = 0;
+            Format.dwBBitMask = 0;
+            Format.dwRGBAlphaBitMask = 0;
+        }
     }
     else
     {
