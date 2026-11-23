@@ -563,3 +563,71 @@ SceneOpsRead(
 {
     return TcOpsRun(Device, Result, TcOpsReadSource, "reads", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
 }
+
+/*
+ * Atomics on group shared memory, raw, structured, typed buffers and a typed texture, and the
+ * structured buffer's counter. Returned values are only kept where they cannot depend on the
+ * order threads run in.
+ */
+static const char TcOpsAtomSource[] =
+    "groupshared uint Pool[16];\n"
+    "[numthreads(64, 1, 1)] void atoms(uint t : SV_DispatchThreadID, uint g : SV_GroupIndex)\n"
+    "{\n"
+    "    uint Old;\n"
+    "    if (g < 16)\n"
+    "        Pool[g] = g * 3;\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    InterlockedAdd(Pool[t % 16], t);\n"
+    "    InterlockedMax(Pool[(t * 5) % 16], t * 7);\n"
+    "    InterlockedXor(Pool[(t * 3) % 16], 1u << (t % 13));\n"
+    "    InterlockedMin(Pool[15], 100 - t);\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    if (g < 16)\n"
+    "        Out.Store(g * 4, Pool[g]);\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    if (g < 8)\n"
+    "        Pool[g] = 1000 + g;\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    if (g < 8)\n"
+    "    {\n"
+    "        InterlockedExchange(Pool[g], g * 11, Old);\n"
+    "        Out.Store(64 + g * 4, Old);\n"
+    "        InterlockedCompareExchange(Pool[g], (g & 1) ? g * 11 : 5, 0xABC0 + g, Old);\n"
+    "        Out.Store(96 + g * 4, Old);\n"
+    "        InterlockedCompareStore(Pool[(g + 1) % 8], 0xABC0 + ((g + 1) % 8), g);\n"
+    "    }\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    if (g < 8)\n"
+    "        Out.Store(128 + g * 4, Pool[g]);\n"
+    "    Out.InterlockedAdd(256 + (t % 8) * 4, t + 1);\n"
+    "    Out.InterlockedOr(288 + (t % 4) * 4, 1u << (t % 29));\n"
+    "    Out.InterlockedAnd(304, ~(1u << (t % 31)));\n"
+    "    Out.InterlockedMax(320 + (t % 2) * 4, t * 13 % 41);\n"
+    "    Out.InterlockedMin(328, 1000 - t * 3);\n"
+    "    InterlockedMin(Typed[t % 16], 0x5A5A0000u + t * 977);\n"
+    "    InterlockedMax(Typed[16 + t % 8], t * 131);\n"
+    "    InterlockedAdd(Typed[24], 3);\n"
+    "    Out.InterlockedExchange(1024 + t * 4, t * 3, Old);\n"
+    "    Out.Store(2048 + t * 4, Old);\n"
+    "    Out.InterlockedCompareExchange(1024 + t * 4, (t & 1) ? t * 3 : 9, 77 + t, Old);\n"
+    "    Out.Store(2304 + t * 4, Old);\n"
+    "    Out.InterlockedCompareStore(2560 + t * 4, 0, t ^ 0x33);\n"
+    "    InterlockedOr(Grid[uint2(t % 8, t / 8)], 1u << (t % 32), Old);\n"
+    "    Out.Store(3072 + t * 4, Old);\n"
+    "    InterlockedAdd(Counted[t], t * 5, Old);\n"
+    "    Out.Store(3328 + t * 4, Old);\n"
+    "    if ((t & 1) == 0)\n"
+    "        Out.InterlockedAdd(4096 + (Counted.IncrementCounter() % 128) * 4, 1);\n"
+    "    AllMemoryBarrierWithGroupSync();\n"
+    "    if (t % 3 == 0)\n"
+    "        Out.InterlockedAdd(4608 + (Counted.IncrementCounter() % 128) * 4, 1);\n"
+    "}\n";
+
+static
+HRESULT
+SceneOpsAtom(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsAtomSource, "atoms", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+}
