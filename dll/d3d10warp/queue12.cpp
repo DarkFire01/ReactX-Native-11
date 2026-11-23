@@ -9,6 +9,8 @@
 #include "adapter.hpp"
 #include "device12.hpp"
 
+static constexpr UINT RxWarp12ContextPageSize = 4096;
+
 static
 RxWarp12CommandQueue *
 RxWarp12GetQueue(
@@ -47,15 +49,7 @@ RxWarp12AllocateContextBuffer(
     _Out_ VOID **Memory)
 {
     RX_WARP_ALLOCATION_DATA Data = {};
-    D3DDDI_ALLOCATIONINFO Info = {};
-    D3DDDICB_ALLOCATE Allocate = {};
-    D3DDDICB_LOCK Lock = {};
-    HRESULT hr;
 
-    *Allocation = 0;
-    *Memory = nullptr;
-    if (Device->KernelCallbacks->pfnAllocateCb == nullptr || Device->KernelCallbacks->pfnLockCb == nullptr)
-        return E_NOTIMPL;
     Data.Dimension = D3D10DDIRESOURCE_BUFFER;
     Data.Width = Size;
     Data.Height = 1;
@@ -65,27 +59,10 @@ RxWarp12AllocateContextBuffer(
     Data.ArraySize = 1;
     Data.MipLevels = 1;
     Data.Flags = RX_WARP_ALLOCATION_LINEAR;
-    Info.pPrivateDriverData = &Data;
-    Info.PrivateDriverDataSize = sizeof(Data);
-    Allocate.NumAllocations = 1;
-    Allocate.pAllocationInfo = &Info;
-    hr = Device->KernelCallbacks->pfnAllocateCb(Device->RuntimeDevice.handle, &Allocate);
-    if (FAILED(hr))
-        return hr;
-    *Allocation = Info.hAllocation;
-    Lock.hAllocation = Info.hAllocation;
-    Lock.Flags.DonotWait = 1;
-    Lock.Flags.IgnoreSync = 1;
-    hr = Device->KernelCallbacks->pfnLockCb(Device->RuntimeDevice.handle, &Lock);
-    if (SUCCEEDED(hr))
-        *Memory = Lock.pData;
-    return hr;
+    return RxWarp12AllocateKernel(Device, &Data, nullptr, FALSE, Allocation, Memory);
 }
 
-/*
- * Each queue gets a kernel context on the engine node the kernel driver reports, a page the
- * kernel driver knows beside it and a buffer that page sizes. The device registers once.
- */
+/* Each queue gets a kernel context on the engine node the kernel driver reports and a page beside it */
 static
 HRESULT
 RxWarp12CreateKernelContext(
@@ -122,20 +99,10 @@ RxWarp12CreateKernelContext(
     }
     Queue->KernelContext = Create.hContext;
 
-    Queue->ContextPage = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (Queue->ContextPage != nullptr)
-    {
-        UINT64 ContextData[6] = { 7, (UINT64)Queue, (UINT64)Queue->ContextPage, 4096, 0, 0 };
-        UINT64 DeviceData[7] = { 0, (UINT64)Device, (UINT64)Queue->ContextPage, 4096, 0, 0, 0 };
-
-        /* The buffer size comes back in the last field */
-        if (SUCCEEDED(RxWarp12Escape(Device, ContextData, sizeof(ContextData), Create.hContext)) &&
-            SUCCEEDED(RxWarp12AllocateContextBuffer(Device, (UINT)ContextData[5], &Queue->ContextAllocation, &Queue->ContextBuffer)) &&
-            !Device->Registered)
-        {
-            RxWarp12Escape(Device, DeviceData, sizeof(DeviceData), nullptr);
-        }
-    }
+    /* Each context keeps a page of kernel memory beside it */
+    hr = RxWarp12AllocateContextBuffer(Device, RxWarp12ContextPageSize, &Queue->ContextAllocation, &Queue->ContextBuffer);
+    if (FAILED(hr))
+        return hr;
     Device->Registered = TRUE;
     return S_OK;
 }
@@ -183,17 +150,7 @@ RxWarp12DestroyCommandQueue(
     if (Object == nullptr)
         return;
     if (Object->ContextAllocation != 0)
-    {
-        D3DDDICB_UNLOCK Unlock = {};
-        D3DDDICB_DEALLOCATE Deallocate = {};
-
-        Unlock.NumAllocations = 1;
-        Unlock.phAllocations = &Object->ContextAllocation;
-        This->KernelCallbacks->pfnUnlockCb(This->RuntimeDevice.handle, &Unlock);
-        Deallocate.NumAllocations = 1;
-        Deallocate.HandleList = &Object->ContextAllocation;
-        This->KernelCallbacks->pfnDeallocateCb(This->RuntimeDevice.handle, &Deallocate);
-    }
+        RxWarp12FreeKernel(This, nullptr, Object->ContextAllocation, Object->ContextBuffer != nullptr);
     if (Object->KernelContext != nullptr && This->Callbacks->pfnDestroyContextCb != nullptr)
     {
         D3DDDICB_DESTROYCONTEXT Destroy = {};
@@ -201,8 +158,6 @@ RxWarp12DestroyCommandQueue(
         Destroy.hContext = Object->KernelContext;
         This->Callbacks->pfnDestroyContextCb(Object->RuntimeQueue, &Destroy);
     }
-    if (Object->ContextPage != nullptr)
-        VirtualFree(Object->ContextPage, 0, MEM_RELEASE);
     delete Object;
 }
 
@@ -292,6 +247,78 @@ RxWarp12DestroyFence(
     delete RxWarpObject<RxWarp12Fence>(Fence);
 }
 
+/* The kernel driver presents eight bit BGR; other back buffers, multisampled ones and array slices go through a copy */
+static
+BOOLEAN
+RxWarp12NeedsShadow(
+    _In_ const RxWarp12Resource *Source,
+    _In_ UINT Subresource)
+{
+    return (Source->Storage.Format != DXGI_FORMAT_B8G8R8A8_UNORM && Source->Storage.Format != DXGI_FORMAT_B8G8R8X8_UNORM) ||
+           Source->Storage.SampleCount > 1 || Subresource != 0;
+}
+
+/* Converts the presented subresource into the resource's B8G8R8X8 shadow, making the shadow on first use */
+static
+HRESULT
+RxWarp12FillShadow(
+    _In_ RxWarp12Device *Device,
+    _Inout_ RxWarp12Resource *Source,
+    _In_ UINT Subresource)
+{
+    const RX_WARP_SUBRESOURCE *From = Source->Storage.Subresource(Subresource);
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(Source->Storage.Format);
+    BOOLEAN Encode;
+    HRESULT hr;
+
+    if (From == nullptr || Info == nullptr || Source->Storage.Memory == nullptr)
+        return E_INVALIDARG;
+    if (Source->ShadowAllocation == 0)
+    {
+        RX_WARP_ALLOCATION_DATA Data = {};
+
+        Data.Dimension = D3D10DDIRESOURCE_TEXTURE2D;
+        Data.Width = From->Width;
+        Data.Height = From->Height;
+        Data.Depth = 1;
+        Data.Format = DXGI_FORMAT_B8G8R8X8_UNORM;
+        Data.RowPitch = From->Width * 4;
+        Data.Size = From->Width * From->Height * 4;
+        Data.ArraySize = 1;
+        Data.MipLevels = 1;
+        Data.Usage = D3D10_DDI_USAGE_STAGING;
+        Data.BindFlags = D3D10_DDI_BIND_RENDER_TARGET;
+        Data.SampleCount = 1;
+        Data.Flags = RX_WARP_ALLOCATION_SYSTEM | RX_WARP_ALLOCATION_LINEAR;
+        hr = RxWarp12AllocateKernel(Device, &Data, nullptr, FALSE, &Source->ShadowAllocation, reinterpret_cast<VOID **>(&Source->ShadowMemory));
+        if (FAILED(hr))
+            return hr;
+    }
+
+    /* Float back buffers are linear light and go out sRGB encoded */
+    Encode = Info->Kind == RxKindPlain && Info->Channels[0].Type == RxChannelFloat;
+    for (UINT Y = 0; Y < From->Height; Y++)
+    {
+        const BYTE *Row = Source->Storage.Data(Subresource) + (SIZE_T)Y * From->RowPitch;
+
+        for (UINT X = 0; X < From->Width; X++)
+        {
+            UINT Raw[4];
+            FLOAT Color[4];
+            BYTE Element[16];
+
+            if (!RxWarpDecodeTexel(Source->Storage.Format, Row + (SIZE_T)X * Info->Bytes * Source->Storage.SampleCount, Raw))
+                return E_INVALIDARG;
+            memcpy(Color, Raw, sizeof(Color));
+            for (UINT Component = 0; Component < 3 && Encode; Component++)
+                Color[Component] = (FLOAT)RxWarpLinearToSrgbByte(Color[Component]) * (1.0f / 255.0f);
+            RxWarpEncodeColor(DXGI_FORMAT_B8G8R8X8_UNORM, Color, Element);
+            memcpy(Source->ShadowMemory + ((SIZE_T)Y * From->Width + X) * 4, Element, 4);
+        }
+    }
+    return S_OK;
+}
+
 /*
  * Blt presents hand the runtime the back buffer's kernel allocation and the queue's context;
  * the runtime submits the present itself.
@@ -340,6 +367,14 @@ RxWarp12Present(
                 break;
             }
             Present->BroadcastSrcAllocation[0] = Source->Heap->Allocation;
+            if (RxWarp12NeedsShadow(Source, Args->phSurfacesToPresent[Index].SubResourceIndex))
+            {
+                hr = RxWarp12FillShadow(Object->Device, Source, Args->phSurfacesToPresent[Index].SubResourceIndex);
+                if (FAILED(hr))
+                    break;
+                Present->BroadcastSrcAllocation[0] = Source->ShadowAllocation;
+                Present->AddedGpuWork = TRUE;
+            }
         }
     }
     if (FAILED(hr))

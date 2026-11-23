@@ -14,6 +14,7 @@
 
 class RxWarpAdapter;
 class RxWarp12Resource;
+class RxWarp12CommandRecorder;
 
 class RxWarp12Device
 {
@@ -52,6 +53,15 @@ public:
     /* Buffers by GPU address: address bits 40 and up are the index */
     std::vector<RxWarp12Resource *> Buffers;
     BOOLEAN Registered = FALSE;     /* the protocol revision went to the kernel driver */
+    D3DKMT_HANDLE PageAllocation = 0;
+    VOID *Page = nullptr;
+
+    /* Every runtime that reaches us passes callbacks of at least this revision */
+    const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *
+    Callbacks0022() const
+    {
+        return reinterpret_cast<const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *>(Callbacks);
+    }
 };
 
 /* Memory the runtime pages: one kernel allocation, or our own pages when there is no kernel driver */
@@ -62,6 +72,7 @@ public:
     UINT64 Size = 0;
     BYTE *Memory = nullptr;
     D3DKMT_HANDLE Allocation = 0;
+    HANDLE RuntimeResource = nullptr;
     UINT AllocationFlags = 0;
     D3D12DDI_CPU_PAGE_PROPERTY CpuPage = D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
     D3D12DDI_HEAP_FLAGS Flags = D3D12DDI_HEAP_FLAG_NONE;
@@ -81,12 +92,16 @@ public:
     D3D12DDI_RESOURCE_FLAGS_0003 Flags = D3D12DDI_RESOURCE_FLAG_0003_NONE;
     D3D12DDI_TEXTURE_LAYOUT Layout = D3D12DDI_TL_UNDEFINED;
     UINT Index = 0;                 /* slot in the device's buffer table, 0 for none */
+    D3DKMT_HANDLE ShadowAllocation = 0; /* eight bit copy presented in place of other formats */
+    BYTE *ShadowMemory = nullptr;
 };
 
 /* Descriptor heaps: CBV_SRV_UAV and sampler heaps hold descriptors in place, the others a pointer to a view */
 class RxWarp12DescriptorHeap
 {
 public:
+    RxWarp12Device *Device = nullptr;
+    D3DKMT_HANDLE Allocation = 0;
     D3D12DDI_DESCRIPTOR_HEAP_TYPE Type = D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     UINT Count = 0;
     UINT Stride = 0;
@@ -136,7 +151,6 @@ public:
     D3D12DDI_HRTCOMMANDQUEUE RuntimeQueue = {};
     D3D12DDI_COMMAND_QUEUE_FLAGS Flags = D3D12DDI_COMMAND_QUEUE_FLAG_NONE;
     HANDLE KernelContext = nullptr;
-    VOID *ContextPage = nullptr;
     D3DKMT_HANDLE ContextAllocation = 0;
     VOID *ContextBuffer = nullptr;
 };
@@ -148,12 +162,30 @@ public:
     RxWarp12Device *Device = nullptr;
     D3D12DDI_HRTCOMMANDLIST RuntimeList = {};
     D3D12DDI_COMMAND_LIST_TYPE Type = D3D12DDI_COMMAND_LIST_TYPE_DIRECT;
+    RxWarp12CommandRecorder *Recorder = nullptr;
     std::vector<std::function<VOID()>> Commands;
 };
 
 RxWarp12Resource *
 RxWarp12GetResource(
     _In_ D3D12DDI_HRESOURCE Resource);
+
+/* A kernel allocation described by Data, locked for the CPU */
+HRESULT
+RxWarp12AllocateKernel(
+    _In_ RxWarp12Device *Device,
+    _In_ RX_WARP_ALLOCATION_DATA *Data,
+    _In_opt_ HANDLE RuntimeResource,
+    _In_ BOOLEAN Primary,
+    _Out_ D3DKMT_HANDLE *Allocation,
+    _Out_ VOID **Memory);
+
+VOID
+RxWarp12FreeKernel(
+    _In_ RxWarp12Device *Device,
+    _In_opt_ HANDLE RuntimeResource,
+    _In_ D3DKMT_HANDLE Allocation,
+    _In_ BOOLEAN Locked);
 
 /* The resource and byte offset a GPU address falls in */
 RxWarp12Resource *
@@ -201,6 +233,15 @@ class RxWarp12CommandPool
 {
 public:
     RxWarp12Device *Device = nullptr;
+    D3DKMT_HANDLE Allocation = 0;   /* kernel memory taken on the first recorded command */
+    VOID *Memory = nullptr;
+};
+
+/* Points command lists at the pool their commands come from */
+class RxWarp12CommandRecorder
+{
+public:
+    RxWarp12CommandPool *Pool = nullptr;
 };
 
 /* Root signatures: the layout is read when command lists bind them */

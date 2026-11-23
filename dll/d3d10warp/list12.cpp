@@ -17,6 +17,8 @@ RxWarp12GetList(
     return RxWarpObject<RxWarp12CommandList>(List);
 }
 
+static constexpr UINT RxWarp12PoolSize = 16384;
+
 /* Records a command; the queue runs them in order */
 template <typename Work>
 static
@@ -26,6 +28,24 @@ RxWarp12Record(
     _In_ Work &&Command)
 {
     RxWarp12CommandList *Object = RxWarp12GetList(List);
+    RxWarp12CommandPool *Pool = Object->Recorder ? Object->Recorder->Pool : nullptr;
+
+    /* Pools take their kernel memory when the first command lands in them */
+    if (Pool != nullptr && Pool->Allocation == 0)
+    {
+        RX_WARP_ALLOCATION_DATA Data = {};
+
+        Data.Dimension = D3D10DDIRESOURCE_BUFFER;
+        Data.Width = RxWarp12PoolSize;
+        Data.Height = 1;
+        Data.Depth = 1;
+        Data.RowPitch = RxWarp12PoolSize;
+        Data.Size = RxWarp12PoolSize;
+        Data.ArraySize = 1;
+        Data.MipLevels = 1;
+        Data.Flags = RX_WARP_ALLOCATION_LINEAR;
+        RxWarp12AllocateKernel(Object->Device, &Data, nullptr, FALSE, &Pool->Allocation, &Pool->Memory);
+    }
 
     try
     {
@@ -36,6 +56,54 @@ RxWarp12Record(
         RX_WARP_TRACE("D3D12 command list out of memory\n");
         Object->Device->Callbacks->pfnSetCommandListErrorCb(Object->RuntimeList, E_OUTOFMEMORY);
     }
+}
+
+/* Newer tables pass the application's object; its bypass header leads to ours */
+static
+D3D12DDI_HCOMMANDLIST
+RxWarp12DriverList(
+    _In_ D3D12DDI_HCOMMANDLIST List)
+{
+    return List;
+}
+
+static
+D3D12DDI_HCOMMANDLIST
+RxWarp12DriverList(
+    _In_ D3D12DDI_API_HCOMMANDLIST List)
+{
+    return GetDriverCommandListHandle(List);
+}
+
+/* State the executor does not read yet; recording it still lands in the pool */
+template <typename Function>
+struct RxWarp12StateOf;
+
+template <typename Handle, typename... Arguments>
+struct RxWarp12StateOf<VOID (APIENTRY *)(Handle, Arguments...)>
+{
+    static
+    VOID
+    APIENTRY
+    Run(
+        _In_ Handle List,
+        _In_ Arguments...)
+    {
+        RxWarpLock Lock;
+
+        RxWarp12Record(RxWarp12DriverList(List), []()
+        {
+        });
+    }
+};
+
+template <typename Function>
+static
+VOID
+RxWarp12State(
+    _Out_ Function *Slot)
+{
+    *Slot = &RxWarp12StateOf<Function>::Run;
 }
 
 static
@@ -101,11 +169,13 @@ RxWarp12ResetCommandList(
 {
     RxWarpLock Lock;
 
-    UNREFERENCED_PARAMETER(Args);
-    RxWarp12GetList(List)->Commands.clear();
+    RxWarp12CommandList *Object = RxWarp12GetList(List);
+
+    Object->Commands.clear();
+    Object->Recorder = Args->hDrvCommandRecorder.pDrvPrivate ? RxWarpObject<RxWarp12CommandRecorder>(Args->hDrvCommandRecorder) : nullptr;
 }
 
-/* Recorders and pools carry no state: commands live in the list until it is reset */
+/* Commands live in the list until it is reset; the recorder names the pool that backs them */
 static
 HRESULT
 APIENTRY
@@ -114,10 +184,13 @@ RxWarp12CreateCommandRecorder(
     _In_ const D3D12DDIARG_CREATE_COMMAND_RECORDER_0040 *Args,
     _In_ D3D12DDI_HCOMMANDRECORDER_0040 Recorder)
 {
+    RxWarpLock Lock;
+    RxWarp12CommandRecorder *Object = new (std::nothrow) RxWarp12CommandRecorder();
+
     UNREFERENCED_PARAMETER(Device);
     UNREFERENCED_PARAMETER(Args);
-    RxWarpBind(Recorder, static_cast<VOID *>(nullptr));
-    return S_OK;
+    RxWarpBind(Recorder, Object);
+    return Object ? S_OK : E_OUTOFMEMORY;
 }
 
 static
@@ -127,8 +200,10 @@ RxWarp12DestroyCommandRecorder(
     _In_ D3D12DDI_HDEVICE Device,
     _In_ D3D12DDI_HCOMMANDRECORDER_0040 Recorder)
 {
+    RxWarpLock Lock;
+
     UNREFERENCED_PARAMETER(Device);
-    UNREFERENCED_PARAMETER(Recorder);
+    delete RxWarpObject<RxWarp12CommandRecorder>(Recorder);
 }
 
 static
@@ -139,9 +214,10 @@ RxWarp12CommandRecorderSetCommandPoolAsTarget(
     _In_ D3D12DDI_HCOMMANDRECORDER_0040 Recorder,
     _In_ D3D12DDI_HCOMMANDPOOL_0040 Pool)
 {
+    RxWarpLock Lock;
+
     UNREFERENCED_PARAMETER(Device);
-    UNREFERENCED_PARAMETER(Recorder);
-    UNREFERENCED_PARAMETER(Pool);
+    RxWarpObject<RxWarp12CommandRecorder>(Recorder)->Pool = RxWarpObject<RxWarp12CommandPool>(Pool);
 }
 
 /* A run of texel rows: a subresource of a texture or a footprint in a buffer */
@@ -594,6 +670,28 @@ RxWarp12FillListTable(
     }
     if (List == nullptr)
         return;
+    RxWarp12State(&List->pfnIaSetTopology);
+    RxWarp12State(&List->pfnRsSetViewports);
+    RxWarp12State(&List->pfnRsSetScissorRects);
+    RxWarp12State(&List->pfnOmSetBlendFactor);
+    RxWarp12State(&List->pfnOmSetStencilRef);
+    RxWarp12State(&List->pfnSetPipelineState);
+    RxWarp12State(&List->pfnSetDescriptorHeaps);
+    RxWarp12State(&List->pfnSetComputeRootSignature);
+    RxWarp12State(&List->pfnSetGraphicsRootSignature);
+    RxWarp12State(&List->pfnIASetIndexBuffer);
+    RxWarp12State(&List->pfnIASetVertexBuffers);
+    RxWarp12State(&List->pfnSOSetTargets);
+    RxWarp12State(&List->pfnOMSetRenderTargets);
+    RxWarp12State(&List->pfnOMSetDepthBounds);
+    RxWarp12State(&List->pfnSetPredication);
+    RxWarp12State(&List->pfnRSSetShadingRate);
+    RxWarp12State(&List->pfnRSSetShadingRateImage);
+    RxWarp12State(&List->pfnSetViewInstanceMask);
+    RxWarp12State(&List->pfnSetSamplePositions);
+    RxWarp12State(&List->pfnIASetIndexBufferStripCutValue);
+    RxWarp12State(&List->pfnRSSetDepthBias);
+    RxWarp12State(&List->pfnOmSetFrontAndBackStencilRef);
     List->pfnCloseCommandList = RxWarp12CloseCommandList;
     List->pfnResetCommandList = RxWarp12ResetCommandList;
     List->pfnCopyTextureRegion = RxWarp12CopyTextureRegion;

@@ -33,7 +33,33 @@ RxWarp12GetResource(
     return RxWarpObject<RxWarp12Resource>(Resource);
 }
 
-/* Lays out the resource the way the D3D11 executor reads it, with memory of its own for now */
+/* Planar video formats: chroma rows below the luma rows, at half height */
+static
+UINT
+RxWarp12ChromaRows(
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Height)
+{
+    switch (Format)
+    {
+        case DXGI_FORMAT_NV12:
+        case DXGI_FORMAT_P010:
+        case DXGI_FORMAT_P016:
+        case DXGI_FORMAT_420_OPAQUE:
+            return (Height + 1) / 2;
+        case DXGI_FORMAT_NV11:
+        case DXGI_FORMAT_P208:
+            return Height;
+        default:
+            return 0;
+    }
+}
+
+/*
+ * Lays out the resource the way the D3D11 executor reads it, with memory of its own for now.
+ * Render targets and depth buffers keep every mip level an even number of texels wide and
+ * high, the way the reference rasterizer's quads cover them; one dimensional ones too.
+ */
 static
 HRESULT
 RxWarp12LayOut(
@@ -43,6 +69,9 @@ RxWarp12LayOut(
     D3D10DDI_MIPINFO Mips[16] = {};
     D3D11DDIARG_CREATERESOURCE Create = {};
     UINT MipCount = Args->MipLevels ? Args->MipLevels : 1;
+    BOOLEAN Padded = (Args->Flags & (D3D12DDI_RESOURCE_FLAG_0003_RENDER_TARGET | D3D12DDI_RESOURCE_FLAG_0003_DEPTH_STENCIL)) != 0 &&
+                     Args->ResourceType != D3D12DDI_RT_BUFFER;
+    HRESULT hr;
 
     if (MipCount > ARRAYSIZE(Mips))
         return E_INVALIDARG;
@@ -53,18 +82,20 @@ RxWarp12LayOut(
         UINT Height = Args->Height >> Mip;
         UINT Depth = (Args->ResourceType == D3D12DDI_RT_TEXTURE3D) ? (UINT)(Args->DepthOrArraySize >> Mip) : 1;
 
-        Mips[Mip].TexelWidth = Width ? Width : 1;
-        Mips[Mip].TexelHeight = Height ? Height : 1;
-        Mips[Mip].TexelDepth = Depth ? Depth : 1;
-        Mips[Mip].PhysicalWidth = Mips[Mip].TexelWidth;
-        Mips[Mip].PhysicalHeight = Mips[Mip].TexelHeight;
-        Mips[Mip].PhysicalDepth = Mips[Mip].TexelDepth;
+        Mips[Mip].PhysicalWidth = Width ? Width : 1;
+        Mips[Mip].PhysicalHeight = Height ? Height : 1;
+        Mips[Mip].PhysicalDepth = Depth ? Depth : 1;
+        Mips[Mip].TexelWidth = Padded ? (Mips[Mip].PhysicalWidth + 1) & ~1u : Mips[Mip].PhysicalWidth;
+        Mips[Mip].TexelHeight = Padded ? (Mips[Mip].PhysicalHeight + 1) & ~1u : Mips[Mip].PhysicalHeight;
+        Mips[Mip].TexelDepth = Mips[Mip].PhysicalDepth;
     }
     if (Args->ResourceType == D3D12DDI_RT_BUFFER)
         Mips[0].TexelWidth = (UINT)Args->Width;
 
     Create.pMipInfoList = Mips;
     Create.ResourceDimension = (D3D10DDIRESOURCE_TYPE)Args->ResourceType;
+    if (Padded && Args->ResourceType == D3D12DDI_RT_TEXTURE1D)
+        Create.ResourceDimension = D3D10DDIRESOURCE_TEXTURE2D;
     Create.Format = Args->Format;
     Create.SampleDesc = Args->SampleDesc;
     Create.MipLevels = MipCount;
@@ -77,7 +108,31 @@ RxWarp12LayOut(
         Create.BindFlags |= D3D11_DDI_BIND_UNORDERED_ACCESS;
     if (!(Args->Flags & D3D12DDI_RESOURCE_FLAG_0003_DEPTH_STENCIL) || (Args->Flags & D3D12DDI_RESOURCE_FLAG_0003_SHADER_RESOURCE))
         Create.BindFlags |= D3D10_DDI_BIND_SHADER_RESOURCE;
-    return Resource->Storage.Initialize(&Create);
+    hr = Resource->Storage.Initialize(&Create);
+    if (FAILED(hr))
+        return hr;
+
+    /* Subresources report their real size; the padding only takes space */
+    Resource->Storage.Dimension = (D3D10DDIRESOURCE_TYPE)Args->ResourceType;
+    for (UINT Index = 0; Index < Resource->Storage.SubresourceCount && Args->ResourceType != D3D12DDI_RT_BUFFER; Index++)
+    {
+        RX_WARP_SUBRESOURCE *Sub = &Resource->Storage.Subresources[Index];
+        const D3D10DDI_MIPINFO &Mip = Mips[Index % MipCount];
+
+        Sub->Width = Mip.PhysicalWidth;
+        Sub->Height = (Args->ResourceType == D3D12DDI_RT_TEXTURE1D) ? 1 : Mip.PhysicalHeight;
+    }
+
+    /* The chroma plane follows the luma plane of a single subresource */
+    if (RxWarp12ChromaRows(Args->Format, Args->Height) != 0 && Resource->Storage.SubresourceCount == 1)
+    {
+        RX_WARP_SUBRESOURCE *Sub = &Resource->Storage.Subresources[0];
+        SIZE_T Bytes = (SIZE_T)Sub->RowPitch * (Sub->Height + RxWarp12ChromaRows(Args->Format, Sub->Height));
+
+        Sub->Size = Bytes;
+        Resource->Storage.MemorySize = (Bytes + 15) & ~(SIZE_T)15;
+    }
+    return S_OK;
 }
 
 /* Points the resource at memory it does not own */
@@ -130,6 +185,109 @@ RxWarp12ResolveAddress(
     return Device->Buffers[(SIZE_T)Index];
 }
 
+/* Display adapters with a WDDM 2 kernel driver lock through the newer callback */
+static
+BOOLEAN
+RxWarp12LocksWithLock2(
+    _In_ const RxWarp12Device *Device)
+{
+    return (Device->Adapter->Kernel.Flags & 0x8) != 0 && Device->Adapter->Kernel.DdiVersion >= RxWarpKernelWddm2 &&
+           Device->KernelCallbacks->pfnLock2Cb != nullptr;
+}
+
+/* Allocations go through the Direct3D 12 callbacks and stay locked for their lifetime */
+HRESULT
+RxWarp12AllocateKernel(
+    _In_ RxWarp12Device *Device,
+    _In_ RX_WARP_ALLOCATION_DATA *Data,
+    _In_opt_ HANDLE RuntimeResource,
+    _In_ BOOLEAN Primary,
+    _Out_ D3DKMT_HANDLE *Allocation,
+    _Out_ VOID **Memory)
+{
+    const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *Core = Device->Callbacks0022();
+    D3D12DDI_ALLOCATION_INFO_0022 Info = {};
+    D3D12DDICB_ALLOCATE_0022 Allocate = {};
+    HRESULT hr;
+
+    *Allocation = 0;
+    *Memory = nullptr;
+    if (Core->pfnAllocateCb == nullptr)
+        return E_NOTIMPL;
+    Info.pPrivateDriverData = Data;
+    Info.PrivateDriverDataSize = sizeof(*Data);
+    if (Primary)
+    {
+        Info.VidPnSourceId = Data->VidPnSourceId;
+        Info.Flags = D3D12DDI_ALLOCATION_INFO_FLAGS_0022_PRIMARY;
+    }
+    Allocate.hResource = RuntimeResource;
+    Allocate.NumAllocations = 1;
+    Allocate.pAllocationInfo = &Info;
+    hr = Core->pfnAllocateCb(Device->RuntimeDevice, &Allocate);
+    if (FAILED(hr))
+    {
+        RX_WARP_TRACE("D3D12 kernel allocation of %u bytes failed: %08lx\n", Data->Size, hr);
+        return hr;
+    }
+    *Allocation = Info.hAllocation;
+
+    if (RxWarp12LocksWithLock2(Device))
+    {
+        D3DDDICB_LOCK2 Lock = {};
+
+        Lock.hAllocation = Info.hAllocation;
+        hr = Device->KernelCallbacks->pfnLock2Cb(Device->RuntimeDevice.handle, &Lock);
+        *Memory = Lock.pData;
+    }
+    else
+    {
+        D3DDDICB_LOCK Lock = {};
+
+        Lock.hAllocation = Info.hAllocation;
+        Lock.Flags.DonotWait = 1;
+        Lock.Flags.IgnoreSync = 1;
+        hr = Device->KernelCallbacks->pfnLockCb(Device->RuntimeDevice.handle, &Lock);
+        *Memory = Lock.pData;
+    }
+    if (FAILED(hr))
+        RX_WARP_TRACE("D3D12 kernel allocation lock failed: %08lx\n", hr);
+    return hr;
+}
+
+VOID
+RxWarp12FreeKernel(
+    _In_ RxWarp12Device *Device,
+    _In_opt_ HANDLE RuntimeResource,
+    _In_ D3DKMT_HANDLE Allocation,
+    _In_ BOOLEAN Locked)
+{
+    const D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *Core = Device->Callbacks0022();
+    D3D12DDICB_DEALLOCATE_0022 Deallocate = {};
+
+    if (Locked && RxWarp12LocksWithLock2(Device))
+    {
+        D3DDDICB_UNLOCK2 Unlock = {};
+
+        Unlock.hAllocation = Allocation;
+        Device->KernelCallbacks->pfnUnlock2Cb(Device->RuntimeDevice.handle, &Unlock);
+    }
+    else if (Locked && Device->KernelCallbacks->pfnUnlockCb != nullptr)
+    {
+        D3DDDICB_UNLOCK Unlock = {};
+
+        Unlock.NumAllocations = 1;
+        Unlock.phAllocations = &Allocation;
+        Device->KernelCallbacks->pfnUnlockCb(Device->RuntimeDevice.handle, &Unlock);
+    }
+    if (Core->pfnDeallocateCb == nullptr)
+        return;
+    Deallocate.hResource = RuntimeResource;
+    Deallocate.NumAllocations = 1;
+    Deallocate.HandleList = &Allocation;
+    Core->pfnDeallocateCb(Device->RuntimeDevice, &Deallocate);
+}
+
 /* One kernel allocation for the whole heap, described the way the kernel driver places it */
 static
 HRESULT
@@ -140,13 +298,8 @@ RxWarp12AllocateHeap(
     _In_opt_ const RxWarp12Resource *Resource)
 {
     RxWarp12Device *Device = Heap->Device;
-    const D3DDDI_DEVICECALLBACKS *Kernel = Device->KernelCallbacks;
     RX_WARP_ALLOCATION_DATA Data = {};
-    D3DDDI_ALLOCATIONINFO Info = {};
-    D3DDDICB_ALLOCATE Allocate = {};
-    D3DDDICB_LOCK Lock = {};
     UINT Flags;
-    HRESULT hr;
 
     if (Resource != nullptr)
     {
@@ -160,7 +313,9 @@ RxWarp12AllocateHeap(
         Data.RowPitch = First->RowPitch;
         Data.ArraySize = Resource->Storage.ArraySize;
         Data.MipLevels = Resource->Storage.MipLevels;
-        Data.BindFlags = Resource->Storage.BindFlags;
+        /* Only texture output bindings reach the kernel driver */
+        if (Resource->Type != D3D12DDI_RT_BUFFER)
+            Data.BindFlags = Resource->Storage.BindFlags & (D3D10_DDI_BIND_RENDER_TARGET | D3D10_DDI_BIND_DEPTH_STENCIL);
         Data.SampleCount = Resource->Storage.SampleCount;
         Flags = (Resource->Flags & D3D12DDI_RESOURCE_FLAG_0003_CROSS_ADAPTER) ? RX_WARP_ALLOCATION_CROSS_ADAPTER : 0;
         if (Args->Flags & D3D12DDI_HEAP_FLAG_PRIMARY)
@@ -191,36 +346,14 @@ RxWarp12AllocateHeap(
     Data.Flags = Flags;
     Heap->AllocationFlags = Flags;
 
-    if (Args->ByteSize > RxWarp12KernelHeapLimit || Kernel == nullptr || Kernel->pfnAllocateCb == nullptr || Kernel->pfnLockCb == nullptr)
+    if (Args->ByteSize > RxWarp12KernelHeapLimit)
     {
         Heap->Memory = static_cast<BYTE *>(VirtualAlloc(nullptr, (SIZE_T)Args->ByteSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         return Heap->Memory ? S_OK : E_OUTOFMEMORY;
     }
-
-    Info.pPrivateDriverData = &Data;
-    Info.PrivateDriverDataSize = sizeof(Data);
-    Allocate.hResource = RuntimeResource.handle;
-    Allocate.NumAllocations = 1;
-    Allocate.pAllocationInfo = &Info;
-    hr = Kernel->pfnAllocateCb(Device->RuntimeDevice.handle, &Allocate);
-    if (FAILED(hr))
-    {
-        RX_WARP_TRACE("D3D12 heap allocation of %llu bytes failed: %08lx\n", Args->ByteSize, hr);
-        return hr;
-    }
-    Heap->Allocation = Info.hAllocation;
-
-    Lock.hAllocation = Info.hAllocation;
-    Lock.Flags.DonotWait = 1;
-    Lock.Flags.IgnoreSync = 1;
-    hr = Kernel->pfnLockCb(Device->RuntimeDevice.handle, &Lock);
-    if (FAILED(hr))
-    {
-        RX_WARP_TRACE("D3D12 heap lock failed: %08lx\n", hr);
-        return hr;
-    }
-    Heap->Memory = static_cast<BYTE *>(Lock.pData);
-    return S_OK;
+    Heap->RuntimeResource = RuntimeResource.handle;
+    return RxWarp12AllocateKernel(Device, &Data, RuntimeResource.handle, (Flags & RX_WARP_ALLOCATION_PRIMARY) != 0,
+                                  &Heap->Allocation, reinterpret_cast<VOID **>(&Heap->Memory));
 }
 
 static
@@ -228,29 +361,10 @@ VOID
 RxWarp12FreeHeap(
     _In_ RxWarp12Heap *Heap)
 {
-    const D3DDDI_DEVICECALLBACKS *Kernel = Heap->Device->KernelCallbacks;
-    D3DDDICB_UNLOCK Unlock = {};
-    D3DDDICB_DEALLOCATE Deallocate = {};
-
-    if (Heap->Allocation == 0)
-    {
-        if (Heap->Memory != nullptr)
-            VirtualFree(Heap->Memory, 0, MEM_RELEASE);
-        delete Heap;
-        return;
-    }
-    if (Heap->Memory != nullptr && Kernel->pfnUnlockCb != nullptr)
-    {
-        Unlock.NumAllocations = 1;
-        Unlock.phAllocations = &Heap->Allocation;
-        Kernel->pfnUnlockCb(Heap->Device->RuntimeDevice.handle, &Unlock);
-    }
-    if (Kernel->pfnDeallocateCb != nullptr)
-    {
-        Deallocate.NumAllocations = 1;
-        Deallocate.HandleList = &Heap->Allocation;
-        Kernel->pfnDeallocateCb(Heap->Device->RuntimeDevice.handle, &Deallocate);
-    }
+    if (Heap->Allocation != 0)
+        RxWarp12FreeKernel(Heap->Device, Heap->RuntimeResource, Heap->Allocation, Heap->Memory != nullptr);
+    else if (Heap->Memory != nullptr)
+        VirtualFree(Heap->Memory, 0, MEM_RELEASE);
     delete Heap;
 }
 
@@ -386,6 +500,8 @@ RxWarp12DestroyHeapAndResource(
     {
         if (Object->Index != 0)
             Object->Device->Buffers[Object->Index] = nullptr;
+        if (Object->ShadowAllocation != 0)
+            RxWarp12FreeKernel(Object->Device, nullptr, Object->ShadowAllocation, Object->ShadowMemory != nullptr);
         delete Object;
     }
     if (HeapObject != nullptr)
@@ -422,27 +538,43 @@ RxWarp12UnmapHeap(
 /*
  * Sizes come from the executor's layout. Buffers align to 64 KB unless they ask for tight
  * alignment; textures to 16 bytes, or 64 KB for tiled layouts and cross adapter resources.
+ * Textures report row major, multisampled ones no layout, tiled ones the swizzle of their element size.
  */
 static
 VOID
 RxWarp12DescribeAllocation(
     _In_ D3D12DDI_RESOURCE_TYPE Type,
     _In_ D3D12DDI_TEXTURE_LAYOUT Layout,
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Samples,
     _In_ D3D12DDI_RESOURCE_FLAGS_0003 Flags,
     _In_ UINT32 AlignmentRestriction,
     _In_ UINT64 Size,
     _Out_ D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 *Info)
 {
+    const RX_WARP_FORMAT_INFO *Element = RxWarpFormatInfo(Format);
+    UINT ElementShift = 0;
     UINT32 Alignment = 16;
+
+    /* Tiled layouts swizzle by element size */
+    while (Element != nullptr && (2u << ElementShift) <= Element->Bytes)
+        ElementShift += 1;
 
     if (Layout == D3D12DDI_TL_64KB_TILE_UNDEFINED_SWIZZLE || Layout == D3D12DDI_TL_64KB_TILE_STANDARD_SWIZZLE)
         Alignment = RxWarp12Alignment;
     memset(Info, 0, sizeof(*Info));
     Info->AdditionalDataHeaderAlignment = 1;
     Info->AdditionalDataAlignment = 1;
-    Info->Layout = D3D12DDI_TL_DEVICE_DEPENDENT_SWIZZLE_0;
     memset(Info->MipLevelSwizzleTransition, 0xFF, sizeof(Info->MipLevelSwizzleTransition));
     memset(Info->PlaneSliceSwizzleTransition, 0xFF, sizeof(Info->PlaneSliceSwizzleTransition));
+    if (Layout == D3D12DDI_TL_64KB_TILE_UNDEFINED_SWIZZLE)
+        Info->Layout = (D3D12DDI_TEXTURE_LAYOUT)(D3D12DDI_TL_DEVICE_DEPENDENT_SWIZZLE_0 + ElementShift);
+    else if (Layout == D3D12DDI_TL_64KB_TILE_STANDARD_SWIZZLE)
+        Info->Layout = D3D12DDI_TL_64KB_TILE_STANDARD_SWIZZLE;
+    else if (Samples > 1)
+        Info->Layout = D3D12DDI_TL_UNDEFINED;
+    else
+        Info->Layout = D3D12DDI_TL_ROW_MAJOR;
     if (Type == D3D12DDI_RT_BUFFER)
     {
         Info->Layout = D3D12DDI_TL_ROW_MAJOR;
@@ -479,7 +611,7 @@ RxWarp12CheckResourceAllocationInfo(
         Size = Args->Width;
     else if (SUCCEEDED(RxWarp12LayOut(&Probe, Args)))
         Size = Probe.Storage.MemorySize;
-    RxWarp12DescribeAllocation(Args->ResourceType, Args->Layout, Args->Flags, AlignmentRestriction, Size, Info);
+    RxWarp12DescribeAllocation(Args->ResourceType, Args->Layout, Args->Format, Args->SampleDesc.Count, Args->Flags, AlignmentRestriction, Size, Info);
 }
 
 static
@@ -495,7 +627,7 @@ RxWarp12CheckExistingResourceAllocationInfo(
     UINT64 Size = (Object->Type == D3D12DDI_RT_BUFFER) ? Object->Width : Object->Storage.MemorySize;
 
     UNREFERENCED_PARAMETER(Device);
-    RxWarp12DescribeAllocation(Object->Type, Object->Layout, Object->Flags, 0, Size, Info);
+    RxWarp12DescribeAllocation(Object->Type, Object->Layout, Object->Storage.Format, Object->Storage.SampleCount, Object->Flags, 0, Size, Info);
 }
 
 /* Offsets and pitches of one subresource inside the resource's storage */
@@ -586,7 +718,7 @@ RxWarp12MakeResident(
     hr = This->Callbacks->pfnMakeResidentCb(This->RuntimeDevice, Args->pRTPagingQueue[0], &Resident);
     if (SUCCEEDED(hr) || hr == E_PENDING)
         *Args->pPagingFenceValue = Resident.PagingFenceValue;
-    if (FAILED(hr))
+    if (FAILED(hr) && hr != E_PENDING)
         RX_WARP_TRACE("D3D12 MakeResident of %u allocations: %08lx\n", Resident.NumAllocations, hr);
     return hr;
 }

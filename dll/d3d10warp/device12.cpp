@@ -11,6 +11,8 @@
 #include "format.hpp"
 #include <type_traits>
 
+static constexpr UINT RxWarp12DevicePageSize = 4096;
+
 /* Size of every driver object the runtime keeps a handle to: one pointer */
 static constexpr SIZE_T RxWarp12ObjectSize = 8;
 
@@ -122,6 +124,23 @@ RxWarp12Device::Create(
     Device->KernelCallbacks = Args->pKTCallbacks;
     Device->Callbacks = Args->p12UMCallbacks;
     RxWarpBind(Args->hDrvDevice, Device);
+
+    /* A page of kernel memory the device keeps for its own bookkeeping */
+    if (Args->p12UMCallbacks != nullptr)
+    {
+        RX_WARP_ALLOCATION_DATA Data = {};
+
+        Data.Dimension = D3D10DDIRESOURCE_BUFFER;
+        Data.Width = RxWarp12DevicePageSize;
+        Data.Height = 1;
+        Data.Depth = 1;
+        Data.RowPitch = RxWarp12DevicePageSize;
+        Data.Size = RxWarp12DevicePageSize;
+        Data.ArraySize = 1;
+        Data.MipLevels = 1;
+        Data.Flags = RX_WARP_ALLOCATION_LINEAR;
+        RxWarp12AllocateKernel(Device, &Data, nullptr, FALSE, &Device->PageAllocation, &Device->Page);
+    }
     RX_WARP_TRACE("D3D12 device %p, interface %x version %x\n", Device, Args->Interface, Args->Version);
     return S_OK;
 }
@@ -133,7 +152,11 @@ RxWarp12Device::Destroy(
 {
     RxWarpLock Lock;
 
-    delete RxWarp12GetDevice(Device);
+    RxWarp12Device *This = RxWarp12GetDevice(Device);
+
+    if (This->PageAllocation != 0)
+        RxWarp12FreeKernel(This, nullptr, This->PageAllocation, This->Page != nullptr);
+    delete This;
 }
 
 static
@@ -193,8 +216,12 @@ RxWarp12DestroyCommandPool(
 {
     RxWarpLock Lock;
 
+    RxWarp12CommandPool *Object = RxWarpObject<RxWarp12CommandPool>(Pool);
+
     UNREFERENCED_PARAMETER(Device);
-    delete RxWarpObject<RxWarp12CommandPool>(Pool);
+    if (Object != nullptr && Object->Allocation != 0)
+        RxWarp12FreeKernel(Object->Device, nullptr, Object->Allocation, Object->Memory != nullptr);
+    delete Object;
 }
 
 static

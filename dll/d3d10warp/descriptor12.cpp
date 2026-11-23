@@ -44,7 +44,6 @@ RxWarp12CreateDescriptorHeap(
     RxWarp12DescriptorHeap *Object;
     UINT Count = Args->NumDescriptors ? Args->NumDescriptors : 1;
 
-    UNREFERENCED_PARAMETER(Device);
     Object = new (std::nothrow) RxWarp12DescriptorHeap();
     RxWarpBind(Heap, Object);
     if (Object == nullptr)
@@ -53,7 +52,30 @@ RxWarp12CreateDescriptorHeap(
     Object->Type = Args->Type;
     Object->Count = Args->NumDescriptors;
     Object->Stride = RxWarp12HoldsTargets(Args->Type) ? RxWarp12TargetDescriptor : RxWarp12FullDescriptor;
-    Object->Memory = static_cast<BYTE *>(VirtualAlloc(nullptr, (SIZE_T)Count * Object->Stride, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    /* Shader visible heaps live in kernel memory, whole pages of it */
+    if (Args->Flags & D3D12DDI_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
+    {
+        RX_WARP_ALLOCATION_DATA Data = {};
+        UINT Bytes = (UINT)(((SIZE_T)Count * Object->Stride + 4095) & ~(SIZE_T)4095);
+
+        Data.Dimension = D3D10DDIRESOURCE_BUFFER;
+        Data.Width = Bytes;
+        Data.Height = 1;
+        Data.Depth = 1;
+        Data.RowPitch = Bytes;
+        Data.Size = Bytes;
+        Data.ArraySize = 1;
+        Data.MipLevels = 1;
+        Data.Flags = RX_WARP_ALLOCATION_LINEAR;
+        Object->Device = RxWarpObject<RxWarp12Device>(Device);
+        if (FAILED(RxWarp12AllocateKernel(Object->Device, &Data, nullptr, FALSE, &Object->Allocation, reinterpret_cast<VOID **>(&Object->Memory))))
+            return E_OUTOFMEMORY;
+        memset(Object->Memory, 0, Bytes);
+    }
+    else
+    {
+        Object->Memory = static_cast<BYTE *>(VirtualAlloc(nullptr, (SIZE_T)Count * Object->Stride, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    }
     if (Object->Memory == nullptr)
     {
         RX_WARP_TRACE("D3D12 descriptor heap of %u descriptors failed\n", Count);
@@ -85,7 +107,9 @@ RxWarp12DestroyDescriptorHeap(
     UNREFERENCED_PARAMETER(Device);
     if (Object == nullptr)
         return;
-    if (Object->Memory != nullptr)
+    if (Object->Allocation != 0)
+        RxWarp12FreeKernel(Object->Device, nullptr, Object->Allocation, Object->Memory != nullptr);
+    else if (Object->Memory != nullptr)
         VirtualFree(Object->Memory, 0, MEM_RELEASE);
     delete[] Object->Views;
     delete Object;
