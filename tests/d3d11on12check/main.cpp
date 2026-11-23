@@ -11,65 +11,11 @@
  * system's. The trace checks print the D3D12 calls the layer makes, hooked on the device and queue.
  */
 
-#include <windows.h>
-#include <d3d12.h>
-#include <d3d11_4.h>
-#include <d3d11on12.h>
-#include <dxgi1_6.h>
-#include <wrl/client.h>
-
-#include <cstdarg>
-#include <cstdio>
-#include <string>
-#include <vector>
-
+#include "check.hpp"
 #include "trace12.hpp"
 
-using Microsoft::WRL::ComPtr;
-
-struct OnCheck
-{
-    PFN_D3D11ON12_CREATE_DEVICE CreateDevice = nullptr;
-    ComPtr<ID3D12Device> Device;
-    ComPtr<ID3D12CommandQueue> Queue;
-    PCSTR CheckName = "";
-
-    VOID
-    Report(
-        _In_z_ PCSTR Key,
-        _In_z_ _Printf_format_string_ PCSTR Format,
-        ...)
-    {
-        va_list Arguments;
-
-        printf("%s.%s = ", CheckName, Key);
-        va_start(Arguments, Format);
-        vprintf(Format, Arguments);
-        va_end(Arguments);
-        printf("\n");
-    }
-
-    HRESULT
-    Make(
-        _In_ UINT Flags,
-        _Outptr_ ID3D11Device** Out,
-        _Out_opt_ D3D_FEATURE_LEVEL* Level = nullptr)
-    {
-        IUnknown* Queues[] = { Queue.Get() };
-
-        return CreateDevice(Device.Get(), Flags, nullptr, 0, Queues, 1, 0, Out, nullptr, Level);
-    }
-
-    /* The reference count an object has right now */
-    static
-    ULONG
-    Count(
-        _In_ IUnknown* Object)
-    {
-        Object->AddRef();
-        return Object->Release();
-    }
-};
+#include <cctype>
+#include <map>
 
 /* create: argument checks of D3D11On12CreateDevice */
 static
@@ -307,21 +253,112 @@ OcCheckDevice(
                  OnCheck::Count(Check.Queue.Get()) - QueueCount);
 }
 
+/* Replaces the hex number at Start with its distance from Base, as "map+0x..." */
 static
+VOID
+OcRebaseNumber(
+    _Inout_ std::string& Line,
+    _In_ SIZE_T Start,
+    _In_ ULONGLONG Base)
+{
+    SIZE_T End = Start + 2;
+    ULONGLONG Value;
+    char Text[32];
+
+    if (Line.compare(Start, 2, "0x") != 0)
+        return;
+
+    while (End < Line.size() && isxdigit(static_cast<unsigned char>(Line[End])))
+        End += 1;
+
+    Value = strtoull(Line.c_str() + Start + 2, nullptr, 16);
+    if (Value < Base)
+        return;
+
+    sprintf_s(Text, "map+0x%llX", Value - Base);
+    Line.replace(Start, End - Start, Text);
+}
+
+/*
+ * Where a layer suballocates upload space depends on how far the GPU got, so offsets inside a range
+ * the trace saw unmapped print relative to the start of that range.
+ */
+static
+std::string
+OcRebaseUploads(
+    _In_ const std::string& Source,
+    _Inout_ std::map<std::string, ULONGLONG>& Bases)
+{
+    static const char Unmap[] = ".Unmap(0x0, range{";
+    std::string Line = Source;
+    SIZE_T Found;
+
+    Found = Line.find(Unmap);
+    if (Found != std::string::npos)
+    {
+        std::string Object = Line.substr(0, Found);
+        SIZE_T Start = Found + sizeof(Unmap) - 1;
+        SIZE_T Space = Line.find(' ', Start);
+        ULONGLONG Base;
+
+        if (Object.find(' ') != std::string::npos)
+            Object = Object.substr(Object.rfind(' ') + 1);
+
+        if (Space != std::string::npos)
+        {
+            Base = strtoull(Line.c_str() + Start + 2, nullptr, 16);
+            Bases[Object] = Base;
+            OcRebaseNumber(Line, Space + 1, Base);
+            OcRebaseNumber(Line, Start, Base);
+        }
+        return Line;
+    }
+
+    for (const auto& Each : Bases)
+    {
+        const std::string Patterns[] = { "loc{" + Each.first + " off ", Each.first + ", ", "{" + Each.first + "+" };
+
+        for (const std::string& Pattern : Patterns)
+        {
+            SIZE_T At = 0;
+
+            while ((At = Line.find(Pattern, At)) != std::string::npos)
+            {
+                BOOLEAN Whole = At == 0 || !isalnum(static_cast<unsigned char>(Line[At - 1]));
+
+                At += Pattern.size();
+                if (Whole)
+                    OcRebaseNumber(Line, At, Each.second);
+            }
+        }
+    }
+
+    return Line;
+}
+
 VOID
 OcPrintTrace(
     _In_ OnCheck& Check,
     _In_z_ PCSTR Key,
     _In_ const std::vector<std::string>& Lines)
 {
+    /* A command list recorded in one trace can use upload space mapped in an earlier one */
+    static std::map<std::string, ULONGLONG> Bases;
+    static PCSTR BasesCheck;
     UINT Index = 0;
     char Name[64];
+
+    if (BasesCheck != Check.CheckName)
+    {
+        Bases.clear();
+        BasesCheck = Check.CheckName;
+    }
 
     Check.Report(Key, "%u calls", static_cast<UINT>(Lines.size()));
     for (const std::string& Line : Lines)
     {
         sprintf_s(Name, "%s.%03u", Key, Index);
-        Check.Report(Name, "%s", Line.c_str());
+        Check.Report(Name, "%s", OcRebaseUploads(Line, Bases).c_str());
         Index += 1;
     }
 }
@@ -477,6 +514,15 @@ static const CheckInfo Checks[] =
     { "device", OcCheckDevice },
     { "trace_create", OcCheckTraceCreate },
     { "wrap", OcCheckWrap },
+    { "resources", OcCheckResources },
+    { "views", OcCheckViews },
+    { "shaders", OcCheckShaders },
+    { "draw", OcCheckDraw },
+    { "copies", OcCheckCopies },
+    { "map", OcCheckMap },
+    { "queries", OcCheckQueries },
+    { "deferred", OcCheckDeferred },
+    { "present", OcCheckPresent },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
