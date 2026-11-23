@@ -126,10 +126,12 @@ struct CkHookState
     std::unordered_map<const VOID*, std::string> Ids;
     std::map<std::string, UINT> StateCalls;
     UINT NextId;
+    UINT Printed;
+    BOOLEAN Polling;
     SRWLOCK Lock;
 };
 
-static CkHookState CkHooks = { {}, {}, {}, 0, SRWLOCK_INIT };
+static CkHookState CkHooks = { {}, {}, {}, 0, 0, FALSE, SRWLOCK_INIT };
 
 /* How deep in wrapped calls the current thread is, for indenting the calls a call makes */
 static thread_local UINT CkDepth;
@@ -400,6 +402,11 @@ enum CkDdiSlot
     CkDdiLock = 35,
     CkDdiUnlock = 36,
     CkDdiDestroyResource = 38,
+    CkDdiCreateQuery = 58,
+    CkDdiDestroyQuery = 59,
+    CkDdiIssueQuery = 60,
+    CkDdiGetQueryData = 61,
+    CkDdiFlush1 = 132,
     CkDdiLockAsync = 96,
     CkDdiUnlockAsync = 97,
     CkDdiRename = 98,
@@ -453,6 +460,22 @@ CkDescribeDdiCall(
         }
         case CkDdiDestroyResource:
             CkAppend(Text, " resource %s", CkName(reinterpret_cast<VOID*>(A[1])).c_str());
+            break;
+        case CkDdiCreateQuery:
+            CkAppend(Text, " type %u", reinterpret_cast<const D3DDDIARG_CREATEQUERY*>(A[1])->QueryType);
+            break;
+        case CkDdiDestroyQuery:
+            CkAppend(Text, " query %s", CkName(reinterpret_cast<VOID*>(A[1])).c_str());
+            break;
+        case CkDdiIssueQuery:
+        {
+            const D3DDDIARG_ISSUEQUERY* Args = reinterpret_cast<const D3DDDIARG_ISSUEQUERY*>(A[1]);
+
+            CkAppend(Text, " query %s flags %X", CkName(Args->hQuery).c_str(), Args->Flags.Value);
+            break;
+        }
+        case CkDdiGetQueryData:
+            CkAppend(Text, " query %s", CkName(reinterpret_cast<const D3DDDIARG_GETQUERYDATA*>(A[1])->hQuery).c_str());
             break;
         case CkDdiLockAsync:
         {
@@ -517,6 +540,16 @@ CkDescribeDdiResult(
 
             CkAppend(Text, " -> data %s pitch %u slice %u", Args->pSurfData != nullptr ? "set" : "none", Args->Pitch,
                      Args->SlicePitch);
+            break;
+        }
+        case CkDdiCreateQuery:
+        {
+            const D3DDDIARG_CREATEQUERY* Args = reinterpret_cast<const D3DDDIARG_CREATEQUERY*>(A[1]);
+
+            AcquireSRWLockExclusive(&CkHooks.Lock);
+            CkHooks.Ids.erase(Args->hQuery);
+            ReleaseSRWLockExclusive(&CkHooks.Lock);
+            CkAppend(Text, " -> %s", CkName(Args->hQuery).c_str());
             break;
         }
         case CkDdiLockAsync:
@@ -621,6 +654,7 @@ CkDispatch(
     std::string Line;
     UINT_PTR Result;
     UINT Depth = CkDepth;
+    UINT PrintedBefore = CkHooks.Printed;
 
     if (Family == CkFamilyDdi)
     {
@@ -677,6 +711,12 @@ CkDispatch(
      * The runtime hands state calls to a worker thread at varying points, so they are counted
      * instead of printed in order.
      */
+    /* How often a query answers not ready yet depends on the GPU, so only its final answer prints */
+    if (Family == CkFamilyDdi && Slot == CkDdiGetQueryData && Result == S_FALSE)
+        return Result;
+    if (CkHooks.Polling && Family == CkFamilyDdi && Slot == CkDdiFlush1 && CkHooks.Printed == PrintedBefore)
+        return Result;
+
     if (Family == CkFamilyDdi && Depth == 0 && CkIsStateSlot(Slot))
     {
         AcquireSRWLockExclusive(&CkHooks.Lock);
@@ -687,8 +727,18 @@ CkDispatch(
 
     AcquireSRWLockExclusive(&CkHooks.Lock);
     printf("%s\n", Line.c_str());
+    CkHooks.Printed += 1;
     ReleaseSRWLockExclusive(&CkHooks.Lock);
     return Result;
+}
+
+VOID
+CkSetPolling(
+    _In_ BOOLEAN Polling)
+{
+    AcquireSRWLockExclusive(&CkHooks.Lock);
+    CkHooks.Polling = Polling;
+    ReleaseSRWLockExclusive(&CkHooks.Lock);
 }
 
 template <UINT Family, UINT Slot>

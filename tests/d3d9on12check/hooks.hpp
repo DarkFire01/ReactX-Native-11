@@ -22,6 +22,14 @@ CkWrapPrivateTable(
 BOOLEAN
 CkHookD3D12(VOID);
 
+/*
+ * While polling, flushes that submit nothing are left out, since how often the runtime flushes
+ * before an answer is ready depends on the GPU.
+ */
+VOID
+CkSetPolling(
+    _In_ BOOLEAN Polling);
+
 /* Prints how often each state only DDI entry was called since the last time, with its result */
 VOID
 CkFlushState(VOID);

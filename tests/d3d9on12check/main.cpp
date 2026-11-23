@@ -647,6 +647,76 @@ CkInterop(
     On12->Release();
 }
 
+/* Issues each query type and waits for its answer; timestamps only print whether they were filled */
+static
+VOID
+CkQueries(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DQUERYTYPE Types[] =
+    {
+        D3DQUERYTYPE_VCACHE, D3DQUERYTYPE_EVENT, D3DQUERYTYPE_OCCLUSION, D3DQUERYTYPE_TIMESTAMP,
+        D3DQUERYTYPE_TIMESTAMPDISJOINT, D3DQUERYTYPE_TIMESTAMPFREQ, D3DQUERYTYPE_PIPELINETIMINGS,
+    };
+    HRESULT hr;
+
+    printf("== queries\n");
+    for (const D3DQUERYTYPE Type : Types)
+    {
+        IDirect3DQuery9* Query = nullptr;
+        BYTE Data[16] = {};
+        DWORD Size;
+        UINT Polls;
+
+        hr = Device->CreateQuery(Type, &Query);
+        printf("CreateQuery type %u hr %08lX\n", Type, hr);
+        if (FAILED(hr))
+            continue;
+
+        Size = Query->GetDataSize();
+        if (Type == D3DQUERYTYPE_OCCLUSION || Type == D3DQUERYTYPE_TIMESTAMPDISJOINT)
+        {
+            hr = Query->Issue(D3DISSUE_BEGIN);
+            printf("Issue begin hr %08lX\n", hr);
+            hr = Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0);
+            printf("Clear hr %08lX\n", hr);
+        }
+        hr = Query->Issue(D3DISSUE_END);
+        printf("Issue end hr %08lX\n", hr);
+
+        CkSetPolling(TRUE);
+        for (Polls = 0; Polls < 100000; Polls++)
+        {
+            hr = Query->GetData(Data, Size, D3DGETDATA_FLUSH);
+            if (hr != S_FALSE)
+                break;
+            Sleep(0);
+        }
+        CkSetPolling(FALSE);
+
+        printf("GetData size %lu hr %08lX", Size, hr);
+        if (Type == D3DQUERYTYPE_TIMESTAMP)
+        {
+            UINT64 Value = 0;
+
+            CopyMemory(&Value, Data, sizeof(Value));
+            printf(" filled %s", static_cast<DWORD>(Value) != 0 ? "yes" : "no");
+        }
+        else
+        {
+            for (DWORD Index = 0; Index < Size && Index < sizeof(Data); Index += 4)
+            {
+                DWORD Value = 0;
+
+                CopyMemory(&Value, Data + Index, Size - Index < 4 ? Size - Index : 4);
+                printf(" %08lX", Value);
+            }
+        }
+        printf("\n");
+        Query->Release();
+    }
+}
+
 /* Clears, fills, copies and presents the back buffer, reading the results back */
 static
 VOID
@@ -699,6 +769,8 @@ CkScene(
 
     hr = Device->Present(nullptr, nullptr, nullptr, nullptr);
     printf("Present hr %08lX\n", hr);
+
+    CkQueries(Device);
 
     if (Target != nullptr)
     {
