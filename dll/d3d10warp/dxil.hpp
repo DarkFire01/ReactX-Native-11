@@ -18,6 +18,13 @@ static constexpr UINT RxWarpDxilMagic = 0x4C495844;     /* "DXIL" */
 static constexpr UINT RxWarpOpcodeWave = 0x400;
 static constexpr UINT RxWarpWaveLanes = 4;
 
+/*
+ * Descriptor heap prefix: heap index, class and slot pairs. The instruction after it runs once
+ * per set of lanes with equal indices, with each class (resource class) and slot (low 16 bits)
+ * bound to that heap entry.
+ */
+static constexpr UINT RxWarpOpcodeHeap = 0x401;
+
 typedef enum _RX_WARP_WAVE_KIND
 {
     RxWarpWaveLaneIndex,

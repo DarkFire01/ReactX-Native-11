@@ -202,6 +202,15 @@ typedef struct _RX_WARP_STAGE_BINDINGS
     RxWarpView *Views[128];
     const RX_WARP_SAMPLER *Samplers[16];
     RxWarpView *Uavs[64];
+
+    /* Binds descriptor heap entry Index of resource class Class to Slot, for heap prefixes */
+    VOID (*BindHeap)(
+        _In_ const VOID *Context,
+        _In_ UINT Class,
+        _In_ UINT Slot,
+        _In_ UINT Index,
+        _Inout_ struct _RX_WARP_STAGE_BINDINGS *Bindings);
+    const VOID *HeapContext;
 } RX_WARP_STAGE_BINDINGS;
 
 /* One run of a program over four lanes */

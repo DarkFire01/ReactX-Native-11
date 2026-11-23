@@ -259,6 +259,44 @@ RxWarp12BindRange(
     }
 }
 
+/* A descriptor heap handle's entry onto its slot; indices past the heap leave the slot empty */
+static
+VOID
+RxWarp12BindHeap(
+    _In_ const VOID *Context,
+    _In_ UINT Class,
+    _In_ UINT Slot,
+    _In_ UINT Index,
+    _Inout_ RX_WARP_STAGE_BINDINGS *Bindings)
+{
+    const RxWarp12Replay *State = static_cast<const RxWarp12Replay *>(Context);
+    BOOLEAN Sampler = (Class == D3D12DDI_DESCRIPTOR_RANGE_TYPE_SAMPLER);
+    BYTE *Heap = Sampler ? State->SamplerHeap : State->ViewHeap;
+    UINT Count = Sampler ? State->SamplerHeapCount : State->ViewHeapCount;
+
+    if (Heap == nullptr || Index >= Count)
+    {
+        switch (Class)
+        {
+            case D3D12DDI_DESCRIPTOR_RANGE_TYPE_SRV:
+                Bindings->Views[Slot] = nullptr;
+                break;
+            case D3D12DDI_DESCRIPTOR_RANGE_TYPE_UAV:
+                Bindings->Uavs[Slot] = nullptr;
+                break;
+            case D3D12DDI_DESCRIPTOR_RANGE_TYPE_CBV:
+                Bindings->ConstantBuffer[Slot] = nullptr;
+                Bindings->ConstantCount[Slot] = 0;
+                break;
+            default:
+                Bindings->Samplers[Slot] = nullptr;
+                break;
+        }
+        return;
+    }
+    RxWarp12BindSlot(Class, Slot, RxWarp12Descriptor((SIZE_T)(Heap + (SIZE_T)Index * RxWarp12DescriptorStride)), Bindings);
+}
+
 /* Root views read a buffer from its GPU address on; the shader's declaration decides the element size */
 static
 RxWarpView *
@@ -291,6 +329,8 @@ RxWarp12BindStage(
     RX_WARP12_STAGE_USE Use = {};
 
     ZeroMemory(Bindings, sizeof(*Bindings));
+    Bindings->BindHeap = RxWarp12BindHeap;
+    Bindings->HeapContext = State;
     if (Signature == nullptr)
         return;
     RxWarp12Gather(Shader, &Use);
@@ -705,7 +745,7 @@ RxWarp12SetPipelineState(
     });
 }
 
-/* Descriptor handles are addresses, so the bound heaps change nothing */
+/* Tables hold descriptor addresses; only shaders that index the heaps themselves need the heaps */
 static
 VOID
 APIENTRY
@@ -714,9 +754,36 @@ RxWarp12SetDescriptorHeaps(
     _In_ UINT Count,
     _In_reads_(Count) D3D12DDI_HDESCRIPTORHEAP *Heaps)
 {
-    UNREFERENCED_PARAMETER(List);
-    UNREFERENCED_PARAMETER(Count);
-    UNREFERENCED_PARAMETER(Heaps);
+    RxWarpLock Lock;
+    BYTE *Views = nullptr;
+    BYTE *Samplers = nullptr;
+    UINT ViewCount = 0;
+    UINT SamplerCount = 0;
+
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        const RxWarp12DescriptorHeap *Heap = Heaps[Index].pDrvPrivate ? RxWarpObject<RxWarp12DescriptorHeap>(Heaps[Index]) : nullptr;
+
+        if (Heap == nullptr)
+            continue;
+        if (Heap->Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_SAMPLER)
+        {
+            Samplers = Heap->Memory;
+            SamplerCount = Heap->Count;
+        }
+        else if (Heap->Type == D3D12DDI_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        {
+            Views = Heap->Memory;
+            ViewCount = Heap->Count;
+        }
+    }
+    RxWarp12Note(List, [=](RxWarp12Replay *State)
+    {
+        State->ViewHeap = Views;
+        State->ViewHeapCount = ViewCount;
+        State->SamplerHeap = Samplers;
+        State->SamplerHeapCount = SamplerCount;
+    });
 }
 
 static

@@ -398,6 +398,10 @@ public:
     RX_WARP12_STREAM_TARGET Streams[4] = {};
     RxWarpResource *PredicateBuffer = nullptr;
     UINT64 PredicateOffset = 0;
+    BYTE *ViewHeap = nullptr;               /* shader visible heaps for descriptor heap handles */
+    UINT ViewHeapCount = 0;
+    BYTE *SamplerHeap = nullptr;
+    UINT SamplerHeapCount = 0;
     D3D12DDI_PREDICATION_OP PredicateOp = D3D12DDI_PREDICATION_OP_EQUAL_ZERO;
 
     /* What a draw or dispatch hands the executor, rebuilt for each one */

@@ -31,6 +31,7 @@
 #include "dxc/DXIL/DxilSignatureElement.h"
 #include "dxc/DXIL/DxilCBuffer.h"
 #include "dxc/DXIL/DxilSampler.h"
+#include "dxc/DXIL/DxilResourceProperties.h"
 
 #include <d3d11TokenizedProgramFormat.hpp>
 #include <algorithm>
@@ -49,6 +50,24 @@ typedef std::vector<UINT> RxTokens;
 constexpr UINT RxMaskMode = D3D10_SB_OPERAND_4_COMPONENT_MASK_MODE;
 constexpr UINT RxSwizzleMode = D3D10_SB_OPERAND_4_COMPONENT_SWIZZLE_MODE;
 constexpr UINT RxSelectMode = D3D10_SB_OPERAND_4_COMPONENT_SELECT_1_MODE;
+constexpr UINT RxWarpMaxHeapBinds = 4;
+
+UINT
+RxHeapOperandType(
+    _In_ UINT Class)
+{
+    switch ((hlsl::DXIL::ResourceClass)Class)
+    {
+        case hlsl::DXIL::ResourceClass::SRV:
+            return D3D10_SB_OPERAND_TYPE_RESOURCE;
+        case hlsl::DXIL::ResourceClass::UAV:
+            return D3D11_SB_OPERAND_TYPE_UNORDERED_ACCESS_VIEW;
+        case hlsl::DXIL::ResourceClass::CBuffer:
+            return D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER;
+        default:
+            return D3D10_SB_OPERAND_TYPE_SAMPLER;
+    }
+}
 
 UINT
 RxOperandHead(
@@ -137,7 +156,17 @@ typedef struct _RX_HANDLE
     llvm::Value *Index;     /* a register index the program computes, or null */
     UINT Lower;             /* the range's first register */
     UINT Count;             /* registers in the range */
+    llvm::Value *Heap;      /* the descriptor heap index of a heap handle, or null */
 } RX_HANDLE;
+
+/* A slot a descriptor heap handle borrows, bound from the heap before each use */
+typedef struct _RX_HEAP_SLOT
+{
+    UINT Class;
+    UINT Slot;
+    UINT Kind;
+    llvm::Value *Index;
+} RX_HEAP_SLOT;
 
 /* A pointer as the object it points into, a constant byte offset and scaled dynamic terms */
 typedef struct _RX_POINTER
@@ -242,6 +271,9 @@ private:
 
     BOOLEAN
     Resources(VOID);
+
+    BOOLEAN
+    HeapResources(VOID);
 
     BOOLEAN
     Lower(
@@ -395,6 +427,8 @@ private:
     std::unordered_map<const llvm::Value *, UINT> Arrays;
     std::unordered_map<UINT64, UINT> Bases;
     std::unordered_map<const llvm::Value *, UINT> Overrides;
+    std::unordered_map<const llvm::Value *, RX_HEAP_SLOT> HeapSlots;
+    std::vector<RX_HEAP_SLOT> PendingHeap;
     UINT HighSlot[4] = { 128, 64, 14, 16 };
     std::unordered_map<const llvm::Value *, std::pair<UINT, UINT>> Inputs;
     UINT NextSlot = 0;
@@ -455,9 +489,36 @@ RxLowering::Emit(
     _In_opt_ const RxTokens *Extended)
 {
     UINT Length = 1 + (Extended ? (UINT)Extended->size() : 0);
+    BOOLEAN Named = FALSE;
 
     for (const RxTokens &Operand : Operands)
+    {
+        UINT Type = DECODE_D3D10_SB_OPERAND_TYPE(Operand[0]);
+        UINT First = DECODE_IS_D3D10_SB_OPERAND_EXTENDED(Operand[0]) ? 2 : 1;
+
         Length += (UINT)Operand.size();
+        for (const RX_HEAP_SLOT &Heap : PendingHeap)
+        {
+            if (Operand.size() > First && Operand[First] == Heap.Slot && Type == RxHeapOperandType(Heap.Class))
+                Named = TRUE;
+        }
+    }
+    if (Named)
+    {
+        UINT Prefix = 1;
+
+        for (const RX_HEAP_SLOT &Heap : PendingHeap)
+            Prefix += (UINT)Source(Heap.Index).size() + 2;
+        Body.push_back(ENCODE_D3D10_SB_OPCODE_TYPE(RxWarpOpcodeHeap) | ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(Prefix));
+        for (const RX_HEAP_SLOT &Heap : PendingHeap)
+        {
+            RxTokens Index = Source(Heap.Index);
+            RxTokens Target = RxImmediate(Heap.Class << 16 | Heap.Slot);
+
+            Body.insert(Body.end(), Index.begin(), Index.end());
+            Body.insert(Body.end(), Target.begin(), Target.end());
+        }
+    }
     Body.push_back(ENCODE_D3D10_SB_OPCODE_TYPE(Opcode) | ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(Length) | Flags |
                    (Extended ? ENCODE_D3D10_SB_OPCODE_EXTENDED(1) : 0));
     if (Extended)
@@ -741,6 +802,75 @@ RxLowering::Resources(VOID)
             }
         }
     }
+    return HeapResources();
+}
+
+/* Each annotated descriptor heap handle takes a slot from the top, declared from its properties */
+BOOLEAN
+RxLowering::HeapResources(VOID)
+{
+    for (llvm::BasicBlock &Block : *Dxil.GetEntryFunction())
+    {
+        for (llvm::Instruction &Instruction : Block)
+        {
+            llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(&Instruction);
+            llvm::CallInst *Created;
+            hlsl::DxilResourceProperties Properties;
+            RX_HEAP_SLOT Heap;
+            RxTokens Register;
+
+            if (Call == nullptr || !hlsl::OP::IsDxilOpFuncCallInst(Call) || hlsl::OP::getOpCode(Call) != OpCode::AnnotateHandle)
+                continue;
+            Created = llvm::dyn_cast<llvm::CallInst>(Call->getArgOperand(1));
+            if (Created == nullptr || !hlsl::OP::IsDxilOpFuncCallInst(Created) || hlsl::OP::getOpCode(Created) != OpCode::CreateHandleFromHeap)
+                continue;
+            Properties = hlsl::resource_helper::loadPropsFromConstant(*llvm::cast<llvm::Constant>(Call->getArgOperand(2)));
+            Heap.Class = (UINT)Properties.getResourceClass();
+            Heap.Kind = (UINT)Properties.getResourceKind();
+            Heap.Index = Created->getArgOperand(1);
+            if (HighSlot[Heap.Class] == 0)
+                return FALSE;
+            HighSlot[Heap.Class] -= 1;
+            Heap.Slot = HighSlot[Heap.Class];
+            HeapSlots[Call] = Heap;
+
+            switch ((hlsl::DXIL::ResourceClass)Heap.Class)
+            {
+                case hlsl::DXIL::ResourceClass::CBuffer:
+                    Declare(D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER, { RxRegister(D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER, RxSwizzleMode, RxXyzw,
+                                                                              { Heap.Slot, (Properties.CBufferSizeInBytes + 15) / 16 }) });
+                    break;
+                case hlsl::DXIL::ResourceClass::Sampler:
+                    Declare(D3D10_SB_OPCODE_DCL_SAMPLER, { RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Heap.Slot }) },
+                            ENCODE_D3D10_SB_SAMPLER_MODE(Properties.Basic.SamplerCmpOrHasCounter ? D3D10_SB_SAMPLER_MODE_COMPARISON :
+                                                                                                    D3D10_SB_SAMPLER_MODE_DEFAULT));
+                    break;
+                default:
+                {
+                    BOOLEAN Access = (Heap.Class == (UINT)hlsl::DXIL::ResourceClass::UAV);
+                    hlsl::DXIL::ResourceKind Kind = (hlsl::DXIL::ResourceKind)Heap.Kind;
+                    UINT Return = (Kind == hlsl::DXIL::ResourceKind::RawBuffer || Kind == hlsl::DXIL::ResourceKind::StructuredBuffer) ? 0 :
+                                  RxReturnType(hlsl::CompType(Properties.getCompType()));
+                    RxTokens Returns = { ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 0) | ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 1) |
+                                         ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 2) | ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 3) };
+
+                    Register = RxBare(Access ? D3D11_SB_OPERAND_TYPE_UNORDERED_ACCESS_VIEW : D3D10_SB_OPERAND_TYPE_RESOURCE, { Heap.Slot });
+                    if (Kind == hlsl::DXIL::ResourceKind::RawBuffer)
+                        Declare(Access ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW : D3D11_SB_OPCODE_DCL_RESOURCE_RAW, { Register });
+                    else if (Kind == hlsl::DXIL::ResourceKind::StructuredBuffer)
+                        Declare(Access ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_STRUCTURED : D3D11_SB_OPCODE_DCL_RESOURCE_STRUCTURED,
+                                { Register, { Properties.getElementStride() } });
+                    else if (RxDimension(Kind) == D3D10_SB_RESOURCE_DIMENSION_UNKNOWN)
+                        return FALSE;
+                    else
+                        Declare(Access ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_TYPED : D3D10_SB_OPCODE_DCL_RESOURCE, { Register, Returns },
+                                ENCODE_D3D10_SB_RESOURCE_DIMENSION(RxDimension(Kind)) |
+                                ENCODE_D3D10_SB_RESOURCE_SAMPLE_COUNT(Properties.Typed.SampleCount));
+                    break;
+                }
+            }
+        }
+    }
     return TRUE;
 }
 
@@ -789,6 +919,18 @@ RxLowering::HandleOf(
     const hlsl::DxilResourceBase *Base;
 
     ZeroMemory(Handle, sizeof(*Handle));
+
+    auto Heap = HeapSlots.find(Value);
+
+    if (Heap != HeapSlots.end())
+    {
+        Handle->Class = Heap->second.Class;
+        Handle->Slot = Heap->second.Slot;
+        Handle->Kind = Heap->second.Kind;
+        Handle->Count = 1;
+        Handle->Heap = Heap->second.Index;
+        return TRUE;
+    }
 
     /* Shader model 6.6 handles carry their properties in an annotation around the binding */
     while (Call != nullptr && hlsl::OP::IsDxilOpFuncCallInst(Call) && hlsl::OP::getOpCode(Call) == OpCode::AnnotateHandle)
@@ -1401,6 +1543,28 @@ RxLowering::LowerCall(
     }
     Code = hlsl::OP::getOpCode(Call);
 
+    /* Instructions reading a heap handle get a prefix that binds it for each set of lanes */
+    if (Code != OpCode::AnnotateHandle && Code != OpCode::CreateHandleFromHeap && PendingHeap.empty())
+    {
+        BOOLEAN Lowered;
+
+        for (UINT Argument = 1; Argument < Call->getNumArgOperands(); Argument++)
+        {
+            auto Heap = HeapSlots.find(Call->getArgOperand(Argument));
+
+            if (Heap != HeapSlots.end() && PendingHeap.size() < RxWarpMaxHeapBinds)
+                PendingHeap.push_back(Heap->second);
+            else if (Heap != HeapSlots.end())
+                return FALSE;
+        }
+        if (!PendingHeap.empty())
+        {
+            Lowered = LowerCall(Call);
+            PendingHeap.clear();
+            return Lowered;
+        }
+    }
+
     /* Operations on a resource picked at run time run once per register it may name */
     if (Code != OpCode::CreateHandle && Code != OpCode::AnnotateHandle && Code != OpCode::CreateHandleFromBinding)
     {
@@ -1474,6 +1638,7 @@ RxLowering::LowerCall(
         }
         case OpCode::CreateHandle:
         case OpCode::CreateHandleFromBinding:
+        case OpCode::CreateHandleFromHeap:
         case OpCode::AnnotateHandle:
             return TRUE;
         case OpCode::CBufferLoadLegacy:

@@ -234,6 +234,15 @@ private:
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
+    Operate(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
+    Grouped(
+        _In_ const RX_WARP_INSTRUCTION &Prefix,
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
     Access(
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
@@ -718,26 +727,6 @@ RxWarpMachine::Execute(VOID)
             case D3D10_SB_OPCODE_CALL:
             case D3D10_SB_OPCODE_CALLC:
                 break;
-            case D3D10_SB_OPCODE_SAMPLE:
-            case D3D10_SB_OPCODE_SAMPLE_L:
-            case D3D10_SB_OPCODE_SAMPLE_B:
-            case D3D10_SB_OPCODE_SAMPLE_D:
-            case D3D10_SB_OPCODE_SAMPLE_C:
-            case D3D10_SB_OPCODE_SAMPLE_C_LZ:
-            case D3D10_SB_OPCODE_LD:
-            case D3D10_SB_OPCODE_RESINFO:
-            case D3D10_1_SB_OPCODE_LOD:
-            case D3D10_1_SB_OPCODE_GATHER4:
-            case D3D11_SB_OPCODE_GATHER4_C:
-            case D3D11_SB_OPCODE_GATHER4_PO:
-            case D3D11_SB_OPCODE_GATHER4_PO_C:
-            case D3D11_SB_OPCODE_BUFINFO:
-            case D3D10_SB_OPCODE_LD_MS:
-            case D3D10_1_SB_OPCODE_SAMPLE_INFO:
-            case D3D10_1_SB_OPCODE_SAMPLE_POS:
-                if (Active != 0)
-                    Texture(Instruction);
-                break;
             case D3D11_SB_OPCODE_ABORT:
             case D3D11_SB_OPCODE_DEBUG_BREAK:
                 break;
@@ -765,98 +754,180 @@ RxWarpMachine::Execute(VOID)
                 if (DECODE_D3D11_SB_SYNC_FLAGS(Instruction.Control) & D3D11_SB_SYNC_THREADS_IN_GROUP)
                     return TRUE;
                 break;
-            case D3D11_SB_OPCODE_LD_RAW:
-            case D3D11_SB_OPCODE_LD_STRUCTURED:
-            case D3D11_SB_OPCODE_STORE_RAW:
-            case D3D11_SB_OPCODE_STORE_STRUCTURED:
-            case D3D11_SB_OPCODE_LD_UAV_TYPED:
-            case D3D11_SB_OPCODE_STORE_UAV_TYPED:
-            case D3D11_SB_OPCODE_ATOMIC_AND:
-            case D3D11_SB_OPCODE_ATOMIC_OR:
-            case D3D11_SB_OPCODE_ATOMIC_XOR:
-            case D3D11_SB_OPCODE_ATOMIC_CMP_STORE:
-            case D3D11_SB_OPCODE_ATOMIC_IADD:
-            case D3D11_SB_OPCODE_ATOMIC_IMAX:
-            case D3D11_SB_OPCODE_ATOMIC_IMIN:
-            case D3D11_SB_OPCODE_ATOMIC_UMAX:
-            case D3D11_SB_OPCODE_ATOMIC_UMIN:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_CONSUME:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_IADD:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_AND:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_OR:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_XOR:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_EXCH:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_IMAX:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_IMIN:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_UMAX:
-            case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:
-                if (Active != 0)
-                    Access(Instruction);
-                break;
-            case D3D11_SB_OPCODE_DADD:
-            case D3D11_SB_OPCODE_DMUL:
-            case D3D11_SB_OPCODE_DMAX:
-            case D3D11_SB_OPCODE_DMIN:
-            case D3D11_SB_OPCODE_DMOV:
-            case D3D11_SB_OPCODE_DMOVC:
-            case D3D11_SB_OPCODE_DEQ:
-            case D3D11_SB_OPCODE_DNE:
-            case D3D11_SB_OPCODE_DLT:
-            case D3D11_SB_OPCODE_DGE:
-            case D3D11_SB_OPCODE_DTOF:
-            case D3D11_SB_OPCODE_FTOD:
-            case D3D11_1_SB_OPCODE_DDIV:
-            case D3D11_1_SB_OPCODE_DFMA:
-            case D3D11_1_SB_OPCODE_DRCP:
-            case D3D11_1_SB_OPCODE_DTOI:
-            case D3D11_1_SB_OPCODE_DTOU:
-            case D3D11_1_SB_OPCODE_ITOD:
-            case D3D11_1_SB_OPCODE_UTOD:
-                if (Active != 0)
-                    Doubles(Instruction);
-                break;
-            case D3D11_1_SB_OPCODE_MSAD:
-                if (Active != 0)
-                    MaskedDifference(Instruction);
-                break;
-            case D3D11_SB_OPCODE_EVAL_SNAPPED:
-            case D3D11_SB_OPCODE_EVAL_SAMPLE_INDEX:
-            case D3D11_SB_OPCODE_EVAL_CENTROID:
-                if (Active != 0)
-                    Evaluate(Instruction);
-                break;
-            case D3DWDDM1_3_SB_OPCODE_SAMPLE_CLAMP_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_SAMPLE_B_CLAMP_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_SAMPLE_C_CLAMP_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_SAMPLE_D_CLAMP_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_SAMPLE_L_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_SAMPLE_C_LZ_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_LD_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_LD_MS_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_GATHER4_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_GATHER4_C_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_GATHER4_PO_FEEDBACK:
-            case D3DWDDM1_3_SB_OPCODE_GATHER4_PO_C_FEEDBACK:
-                if (Active != 0)
-                    TextureFeedback(Instruction);
-                break;
-            case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
-                if (Active != 0)
-                    FullyMapped(Instruction);
-                break;
-            case RxWarpOpcodeWave:
-                if (Active != 0)
-                    Wave(Instruction);
+            case RxWarpOpcodeHeap:
+                if (Active != 0 && Next < Program.size())
+                    Grouped(Instruction, Program[Next]);
+                Next++;
                 break;
             default:
                 if (Active != 0)
-                    Arithmetic(Instruction);
+                    Operate(Instruction);
                 break;
         }
     }
     return FALSE;
+}
+
+/* Everything but flow control, emits and barriers, for the running lanes */
+VOID
+RxWarpMachine::Operate(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    switch (Instruction.Opcode)
+    {
+        case D3D10_SB_OPCODE_SAMPLE:
+        case D3D10_SB_OPCODE_SAMPLE_L:
+        case D3D10_SB_OPCODE_SAMPLE_B:
+        case D3D10_SB_OPCODE_SAMPLE_D:
+        case D3D10_SB_OPCODE_SAMPLE_C:
+        case D3D10_SB_OPCODE_SAMPLE_C_LZ:
+        case D3D10_SB_OPCODE_LD:
+        case D3D10_SB_OPCODE_RESINFO:
+        case D3D10_1_SB_OPCODE_LOD:
+        case D3D10_1_SB_OPCODE_GATHER4:
+        case D3D11_SB_OPCODE_GATHER4_C:
+        case D3D11_SB_OPCODE_GATHER4_PO:
+        case D3D11_SB_OPCODE_GATHER4_PO_C:
+        case D3D11_SB_OPCODE_BUFINFO:
+        case D3D10_SB_OPCODE_LD_MS:
+        case D3D10_1_SB_OPCODE_SAMPLE_INFO:
+        case D3D10_1_SB_OPCODE_SAMPLE_POS:
+            Texture(Instruction);
+            break;
+        case D3D11_SB_OPCODE_LD_RAW:
+        case D3D11_SB_OPCODE_LD_STRUCTURED:
+        case D3D11_SB_OPCODE_STORE_RAW:
+        case D3D11_SB_OPCODE_STORE_STRUCTURED:
+        case D3D11_SB_OPCODE_LD_UAV_TYPED:
+        case D3D11_SB_OPCODE_STORE_UAV_TYPED:
+        case D3D11_SB_OPCODE_ATOMIC_AND:
+        case D3D11_SB_OPCODE_ATOMIC_OR:
+        case D3D11_SB_OPCODE_ATOMIC_XOR:
+        case D3D11_SB_OPCODE_ATOMIC_CMP_STORE:
+        case D3D11_SB_OPCODE_ATOMIC_IADD:
+        case D3D11_SB_OPCODE_ATOMIC_IMAX:
+        case D3D11_SB_OPCODE_ATOMIC_IMIN:
+        case D3D11_SB_OPCODE_ATOMIC_UMAX:
+        case D3D11_SB_OPCODE_ATOMIC_UMIN:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_CONSUME:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_IADD:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_AND:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_OR:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_XOR:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_EXCH:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_CMP_EXCH:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_IMAX:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_IMIN:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_UMAX:
+        case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:
+            Access(Instruction);
+            break;
+        case D3D11_SB_OPCODE_DADD:
+        case D3D11_SB_OPCODE_DMUL:
+        case D3D11_SB_OPCODE_DMAX:
+        case D3D11_SB_OPCODE_DMIN:
+        case D3D11_SB_OPCODE_DMOV:
+        case D3D11_SB_OPCODE_DMOVC:
+        case D3D11_SB_OPCODE_DEQ:
+        case D3D11_SB_OPCODE_DNE:
+        case D3D11_SB_OPCODE_DLT:
+        case D3D11_SB_OPCODE_DGE:
+        case D3D11_SB_OPCODE_DTOF:
+        case D3D11_SB_OPCODE_FTOD:
+        case D3D11_1_SB_OPCODE_DDIV:
+        case D3D11_1_SB_OPCODE_DFMA:
+        case D3D11_1_SB_OPCODE_DRCP:
+        case D3D11_1_SB_OPCODE_DTOI:
+        case D3D11_1_SB_OPCODE_DTOU:
+        case D3D11_1_SB_OPCODE_ITOD:
+        case D3D11_1_SB_OPCODE_UTOD:
+            Doubles(Instruction);
+            break;
+        case D3D11_1_SB_OPCODE_MSAD:
+            MaskedDifference(Instruction);
+            break;
+        case D3D11_SB_OPCODE_EVAL_SNAPPED:
+        case D3D11_SB_OPCODE_EVAL_SAMPLE_INDEX:
+        case D3D11_SB_OPCODE_EVAL_CENTROID:
+            Evaluate(Instruction);
+            break;
+        case D3DWDDM1_3_SB_OPCODE_SAMPLE_CLAMP_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_SAMPLE_B_CLAMP_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_SAMPLE_C_CLAMP_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_SAMPLE_D_CLAMP_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_SAMPLE_L_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_SAMPLE_C_LZ_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_LD_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_LD_MS_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_GATHER4_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_GATHER4_C_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_GATHER4_PO_FEEDBACK:
+        case D3DWDDM1_3_SB_OPCODE_GATHER4_PO_C_FEEDBACK:
+            TextureFeedback(Instruction);
+            break;
+        case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
+            FullyMapped(Instruction);
+            break;
+        case RxWarpOpcodeWave:
+            Wave(Instruction);
+            break;
+        default:
+            Arithmetic(Instruction);
+            break;
+    }
+}
+
+/*
+ * Runs the instruction after a heap prefix once for each set of lanes that name the same
+ * descriptors, with those descriptors bound to the slots the prefix lists.
+ */
+VOID
+RxWarpMachine::Grouped(
+    _In_ const RX_WARP_INSTRUCTION &Prefix,
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    const RX_WARP_STAGE_BINDINGS *Original = Bindings;
+    RX_WARP_LANE_VALUES Indices[RxWarpMaxOperands / 2] = {};
+    UINT Binds = Prefix.OperandCount / 2;
+    UINT Saved = Active;
+    UINT Remaining = Active;
+
+    for (UINT Bind = 0; Bind < Binds; Bind++)
+        FetchAll(Prefix.Operands[Bind * 2], TRUE, Indices[Bind]);
+    while (Remaining != 0)
+    {
+        RX_WARP_STAGE_BINDINGS Local = *Original;
+        UINT Lead = 0;
+        UINT Lanes = 0;
+
+        while (!(Remaining & (1u << Lead)))
+            Lead++;
+        for (UINT Lane = Lead; Lane < RxWarpLanes; Lane++)
+        {
+            BOOLEAN Same = (Remaining & (1u << Lane)) != 0;
+
+            for (UINT Bind = 0; Bind < Binds && Same; Bind++)
+                Same = (Indices[Bind][Lane][0] == Indices[Bind][Lead][0]);
+            if (Same)
+                Lanes |= 1u << Lane;
+        }
+        if (Original->BindHeap != nullptr)
+        {
+            for (UINT Bind = 0; Bind < Binds; Bind++)
+            {
+                UINT Target = Prefix.Operands[Bind * 2 + 1].Immediate[0];
+
+                Original->BindHeap(Original->HeapContext, Target >> 16, Target & 0xFFFF, Indices[Bind][Lead][0], &Local);
+            }
+        }
+        Bindings = &Local;
+        Active = Lanes;
+        Operate(Instruction);
+        Remaining &= ~Lanes;
+    }
+    Bindings = Original;
+    Active = Saved & ~Dead;
 }
 
 /* Per component float operation over the masked components of every running lane */
