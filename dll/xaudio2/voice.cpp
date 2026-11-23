@@ -566,6 +566,8 @@ XaVoice::EnableEffectCommon(
         XA_TRACE_ONCE(L"EnableEffect: invalid operation set");
     else
         hr = XaEffectsEnable(Effects, Index, Enable, OperationSet);
+    if (SUCCEEDED(hr) && OperationSet == XA_OPSET_NOW && Engine->RunsChangesNow())
+        XaEffectsApplyReady(Effects);
     Engine->Unlock();
     return hr;
 }
@@ -601,6 +603,8 @@ XaVoice::SetEffectParametersCommon(
         XA_TRACE_ONCE(L"SetEffectParameters: invalid operation set");
     else
         hr = XaEffectsSetParameters(Effects, Index, Parameters, Size, OperationSet);
+    if (SUCCEEDED(hr) && OperationSet == XA_OPSET_NOW && Engine->RunsChangesNow())
+        XaEffectsApplyReady(Effects);
     Engine->Unlock();
     return hr;
 }

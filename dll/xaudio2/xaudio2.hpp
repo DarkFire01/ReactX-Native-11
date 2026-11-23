@@ -319,6 +319,10 @@ XaEffectsCommit(
     _Inout_ XaEffectChain* Chain,
     _In_ UINT32 OperationSet);
 
+VOID
+XaEffectsApplyReady(
+    _Inout_ XaEffectChain* Chain);
+
 HRESULT
 XaEffectsEnable(
     _Inout_ XaEffectChain* Chain,
@@ -1194,6 +1198,16 @@ public:
     {
         return RenderThreadId != 0 && GetCurrentThreadId() == RenderThreadId;
     }
+
+    /* Immediate changes skip the pass queue when no pass can run or the caller is the pass */
+    BOOLEAN
+    RunsChangesNow(VOID) const
+    {
+        return Thread == nullptr || InCallback();
+    }
+
+    VOID
+    ApplyReadyEffects(VOID);
 
     XaVoice*
     FindVoice(

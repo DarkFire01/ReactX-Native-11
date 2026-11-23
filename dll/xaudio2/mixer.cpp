@@ -687,6 +687,8 @@ XaEngine::RunPass(
             XaParameterPromote(&Send->Mix);
         if (Voice->Kind == XaKindSource)
             XaParameterPromote(&static_cast<XaSourceVoice*>(Voice)->Ratio);
+        if (Voice->Effects != nullptr)
+            XaEffectsApplyReady(Voice->Effects);
     }
 
     for (XaVoice* Voice = Voices; Voice != nullptr; Voice = Voice->NextVoice)

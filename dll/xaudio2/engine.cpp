@@ -596,6 +596,8 @@ XaEngine::CommitChanges(
     }
     for (XaVoice* Voice = Voices; Voice != nullptr; Voice = Voice->NextVoice)
         Voice->CommitParameters(OperationSet);
+    if (Thread == nullptr)
+        ApplyReadyEffects();
     Unlock();
     return S_OK;
 }
@@ -681,7 +683,18 @@ XaEngine::StopRendering(VOID)
     RenderThreadId = 0;
     if (Master != nullptr && Master->Endpoint != nullptr)
         Master->Endpoint->Stop();
+    ApplyReadyEffects();
     Unlock();
+}
+
+VOID
+XaEngine::ApplyReadyEffects(VOID)
+{
+    for (XaVoice* Voice = Voices; Voice != nullptr; Voice = Voice->NextVoice)
+    {
+        if (Voice->Effects != nullptr)
+            XaEffectsApplyReady(Voice->Effects);
+    }
 }
 
 DWORD

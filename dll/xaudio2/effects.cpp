@@ -323,6 +323,28 @@ XaEffectsGetParameters(
     return S_OK;
 }
 
+/* Hands the effects the changes that are due, on the processing thread or with the engine idle */
+VOID
+XaEffectsApplyReady(
+    _Inout_ XaEffectChain* Chain)
+{
+    for (UINT32 Index = 0; Index < Chain->Count; Index++)
+    {
+        XaEffect* Entry = &Chain->Entries[Index];
+
+        if (Entry->ParameterState == XaSlotReady)
+        {
+            Entry->ParameterState = XaSlotIdle;
+            Entry->Parameters->SetParameters(Entry->PendingParameters, Entry->PendingSize);
+        }
+        if (Entry->EnableState == XaSlotReady)
+        {
+            Entry->EnableState = XaSlotIdle;
+            Entry->Enabled = Entry->PendingEnabled;
+        }
+    }
+}
+
 /* Runs the chain over one quantum and returns the buffer the last effect wrote */
 float*
 XaEffectsProcess(
@@ -340,16 +362,6 @@ XaEffectsProcess(
         XAPO_PROCESS_BUFFER_PARAMETERS Input;
         XAPO_PROCESS_BUFFER_PARAMETERS Output;
 
-        if (Entry->ParameterState == XaSlotReady)
-        {
-            Entry->ParameterState = XaSlotIdle;
-            Entry->Parameters->SetParameters(Entry->PendingParameters, Entry->PendingSize);
-        }
-        if (Entry->EnableState == XaSlotReady)
-        {
-            Entry->EnableState = XaSlotIdle;
-            Entry->Enabled = Entry->PendingEnabled;
-        }
         Input.pBuffer = Current;
         Input.BufferFlags = Flags;
         Input.ValidFrameCount = Frames;
