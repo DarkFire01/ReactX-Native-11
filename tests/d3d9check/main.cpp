@@ -1842,6 +1842,456 @@ NcCheckBuffers(
     Plain->Release();
 }
 
+/* Describes a texture creation: level count, the first and last level and what a lock of the top level gives */
+static
+VOID
+NcPrintTextureMade(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_opt_ IDirect3DTexture9* Texture)
+{
+    D3DSURFACE_DESC First = {};
+    D3DSURFACE_DESC Last = {};
+    D3DLOCKED_RECT Locked = {};
+    DWORD Levels;
+    HRESULT Lock;
+
+    if (Texture == nullptr)
+    {
+        printf("%s = %08lX null\n", Name, Result);
+        return;
+    }
+    Levels = Texture->GetLevelCount();
+    Texture->GetLevelDesc(0, &First);
+    Texture->GetLevelDesc(Levels - 1, &Last);
+    Lock = Texture->LockRect(0, &Locked, nullptr, D3DLOCK_READONLY);
+    if (SUCCEEDED(Lock))
+        Texture->UnlockRect(0);
+    printf("%s = %08lX levels %lu fmt %u type %u usage %08lX pool %u size %ux%u last %ux%u lock %08lX pitch %d "
+           "lod %lu filter %u\n", Name, Result, Levels, First.Format, First.Type, First.Usage, First.Pool, First.Width,
+           First.Height, Last.Width, Last.Height, Lock, Locked.Pitch, Texture->GetLOD(),
+           Texture->GetAutoGenFilterType());
+    printf("%s_release = %lu\n", Name, Texture->Release());
+}
+
+/* Reference counts, containers and descriptions of the surfaces a texture hands out */
+static
+VOID
+NcCheckTextureLevels(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DTexture9* Texture)
+{
+    IDirect3DSurface9* Level = nullptr;
+    IDirect3DSurface9* Again = nullptr;
+    IDirect3DTexture9* Container = nullptr;
+    IDirect3DDevice9* Owner = nullptr;
+    IUnknown* Unknown = nullptr;
+    D3DSURFACE_DESC Desc = {};
+    HRESULT hr;
+
+    printf("%s_addref = %lu\n", Name, Texture->AddRef());
+    printf("%s_release = %lu\n", Name, Texture->Release());
+    hr = Texture->GetSurfaceLevel(1, &Level);
+    printf("%s_level = %08lX\n", Name, hr);
+    if (Level == nullptr)
+        return;
+    printf("%s_level_texture_addref = %lu\n", Name, Texture->AddRef());
+    printf("%s_level_texture_release = %lu\n", Name, Texture->Release());
+    printf("%s_level_addref = %lu\n", Name, Level->AddRef());
+    printf("%s_level_release = %lu\n", Name, Level->Release());
+    hr = Texture->GetSurfaceLevel(1, &Again);
+    printf("%s_level_again = %08lX same %d\n", Name, hr, Again == Level);
+    if (Again != nullptr)
+        printf("%s_level_again_release = %lu\n", Name, Again->Release());
+    Level->GetDesc(&Desc);
+    printf("%s_level_desc = fmt %u type %u usage %08lX pool %u ms %u:%lu size %ux%u rtype %u\n", Name, Desc.Format,
+           Desc.Type, Desc.Usage, Desc.Pool, Desc.MultiSampleType, Desc.MultiSampleQuality, Desc.Width, Desc.Height,
+           Level->GetType());
+    hr = Level->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<VOID**>(&Container));
+    printf("%s_level_container = %08lX same %d\n", Name, hr, Container == Texture);
+    if (Container != nullptr)
+        Container->Release();
+    hr = Level->GetContainer(__uuidof(IDirect3DDevice9), reinterpret_cast<VOID**>(&Unknown));
+    printf("%s_level_container_device = %08lX\n", Name, hr);
+    if (Unknown != nullptr)
+        Unknown->Release();
+    hr = Level->GetDevice(&Owner);
+    printf("%s_level_device = %08lX same %d\n", Name, hr, Owner == Device);
+    if (Owner != nullptr)
+        Owner->Release();
+    printf("%s_level_priority = %lu %lu\n", Name, Level->SetPriority(3), Level->GetPriority());
+    printf("%s_level_final_release = %lu\n", Name, Level->Release());
+    printf("%s_level_bad = %08lX\n", Name, Texture->GetSurfaceLevel(Texture->GetLevelCount(), &Level));
+    printf("%s_desc_bad = %08lX\n", Name, Texture->GetLevelDesc(Texture->GetLevelCount(), &Desc));
+}
+
+/* Bytes written through a texture lock and read through its level surface */
+static
+VOID
+NcCheckTextureBytes(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DTexture9* Texture)
+{
+    static const RECT Rects[] = { { 0, 0, 1, 1 }, { 2, 1, 6, 3 }, { 0, 0, 9, 4 }, { 3, 3, 3, 4 }, { -1, 0, 2, 2 } };
+    IDirect3DSurface9* Level = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    D3DLOCKED_RECT Whole = {};
+    HRESULT hr;
+
+    hr = Texture->LockRect(1, &Locked, nullptr, 0);
+    printf("%s_lock = %08lX pitch %d\n", Name, hr, Locked.Pitch);
+    if (FAILED(hr))
+        return;
+    static_cast<BYTE*>(Locked.pBits)[0] = 0x3C;
+    static_cast<BYTE*>(Locked.pBits)[Locked.Pitch + 4] = 0xC3;
+    printf("%s_lock_again = %08lX\n", Name, Texture->LockRect(1, &Whole, nullptr, 0));
+    printf("%s_unlock = %08lX\n", Name, Texture->UnlockRect(1));
+    printf("%s_unlock_again = %08lX\n", Name, Texture->UnlockRect(1));
+    printf("%s_unlock_other = %08lX\n", Name, Texture->UnlockRect(0));
+    printf("%s_unlock_bad = %08lX\n", Name, Texture->UnlockRect(30));
+    printf("%s_lock_bad = %08lX\n", Name, Texture->LockRect(30, &Whole, nullptr, 0));
+
+    Texture->GetSurfaceLevel(1, &Level);
+    if (Level != nullptr)
+    {
+        hr = Level->LockRect(&Whole, nullptr, D3DLOCK_READONLY);
+        printf("%s_level_read = %08lX %02X %02X\n", Name, hr, static_cast<BYTE*>(Whole.pBits)[0],
+               static_cast<BYTE*>(Whole.pBits)[Whole.Pitch + 4]);
+        printf("%s_texture_unlock_while_level = %08lX\n", Name, Texture->UnlockRect(1));
+        printf("%s_level_unlock = %08lX\n", Name, Level->UnlockRect());
+        Level->Release();
+    }
+    for (const RECT& Rect : Rects)
+    {
+        BYTE* Base = nullptr;
+
+        if (SUCCEEDED(Texture->LockRect(1, &Whole, nullptr, D3DLOCK_READONLY)))
+        {
+            Base = static_cast<BYTE*>(Whole.pBits);
+            Texture->UnlockRect(1);
+        }
+        hr = Texture->LockRect(1, &Locked, &Rect, D3DLOCK_READONLY);
+        printf("%s_rect(%ld,%ld,%ld,%ld) = %08lX offset %lld\n", Name, Rect.left, Rect.top, Rect.right, Rect.bottom,
+               hr, SUCCEEDED(hr) && Base != nullptr ? static_cast<long long>(static_cast<BYTE*>(Locked.pBits) - Base)
+                                                    : -1LL);
+        if (SUCCEEDED(hr))
+            Texture->UnlockRect(1);
+        printf("%s_dirty(%ld,%ld,%ld,%ld) = %08lX\n", Name, Rect.left, Rect.top, Rect.right, Rect.bottom,
+               Texture->AddDirtyRect(&Rect));
+    }
+    printf("%s_lod = %lu %lu %lu %lu\n", Name, Texture->SetLOD(2), Texture->GetLOD(), Texture->SetLOD(40),
+           Texture->GetLOD());
+    printf("%s_filter = %u %08lX %08lX %08lX %u\n", Name, Texture->GetAutoGenFilterType(),
+           Texture->SetAutoGenFilterType(D3DTEXF_NONE), Texture->SetAutoGenFilterType(D3DTEXF_ANISOTROPIC),
+           Texture->SetAutoGenFilterType(D3DTEXF_LINEAR), Texture->GetAutoGenFilterType());
+    printf("%s_priority = %lu %lu %lu\n", Name, Texture->SetPriority(7), Texture->SetPriority(9),
+           Texture->GetPriority());
+}
+
+/* Every texture creation call across formats, pools, usages, sizes and level counts */
+static
+VOID
+NcCheckTexturesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DPOOL Pools[] = { D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH,
+                                     static_cast<D3DPOOL>(4), static_cast<D3DPOOL>(6) };
+    static const DWORD Usages[] =
+    {
+        0, D3DUSAGE_RENDERTARGET, D3DUSAGE_DEPTHSTENCIL, D3DUSAGE_DYNAMIC, D3DUSAGE_AUTOGENMIPMAP, D3DUSAGE_DMAP,
+        D3DUSAGE_WRITEONLY, D3DUSAGE_SOFTWAREPROCESSING, D3DUSAGE_DONOTCLIP, D3DUSAGE_RESTRICTED_CONTENT,
+        D3DUSAGE_RESTRICT_SHARED_RESOURCE, D3DUSAGE_NONSECURE, D3DUSAGE_TEXTAPI, 0x00400000, 0x04000000,
+        D3DUSAGE_AUTOGENMIPMAP | D3DUSAGE_RENDERTARGET, D3DUSAGE_DYNAMIC | D3DUSAGE_RENDERTARGET,
+        D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL,
+    };
+    static const struct
+    {
+        UINT Width;
+        UINT Height;
+        UINT Levels;
+    } Shapes[] =
+    {
+        { 16, 8, 0 }, { 16, 8, 1 }, { 16, 8, 5 }, { 16, 8, 6 }, { 10, 6, 0 }, { 10, 6, 4 }, { 10, 6, 5 }, { 1, 1, 0 },
+        { 1, 1, 2 }, { 0, 4, 1 }, { 4, 0, 1 }, { 4096, 4, 0 }, { 16384, 16, 1 }, { 32768, 1, 1 }, { 8, 8, 33 },
+    };
+    static const D3DFORMAT ShapeFormats[] = { D3DFMT_A8R8G8B8, D3DFMT_DXT1, D3DFMT_A1, D3DFMT_YUY2 };
+    IDirect3DTexture9* Texture;
+    HANDLE Shared;
+    char Name[96];
+    HRESULT hr;
+
+    printf("%s_available = %u\n", Prefix, Device->GetAvailableTextureMem());
+    for (D3DFORMAT Format : NcFormats)
+    {
+        for (D3DPOOL Pool : Pools)
+        {
+            Texture = nullptr;
+            hr = Device->CreateTexture(16, 16, 0, 0, Format, Pool, &Texture, nullptr);
+            sprintf_s(Name, "%s_format[%u,%u]", Prefix, Format, Pool);
+            NcPrintTextureMade(Name, hr, Texture);
+        }
+        Texture = nullptr;
+        hr = Device->CreateTexture(16, 16, 1, D3DUSAGE_RENDERTARGET, Format, D3DPOOL_DEFAULT, &Texture, nullptr);
+        sprintf_s(Name, "%s_format_target[%u]", Prefix, Format);
+        NcPrintTextureMade(Name, hr, Texture);
+        Texture = nullptr;
+        hr = Device->CreateTexture(16, 16, 1, D3DUSAGE_DEPTHSTENCIL, Format, D3DPOOL_DEFAULT, &Texture, nullptr);
+        sprintf_s(Name, "%s_format_depth[%u]", Prefix, Format);
+        NcPrintTextureMade(Name, hr, Texture);
+        Texture = nullptr;
+        hr = Device->CreateTexture(16, 16, 0, D3DUSAGE_AUTOGENMIPMAP, Format, D3DPOOL_DEFAULT, &Texture, nullptr);
+        sprintf_s(Name, "%s_format_autogen[%u]", Prefix, Format);
+        NcPrintTextureMade(Name, hr, Texture);
+    }
+    for (DWORD Usage : Usages)
+    {
+        for (D3DPOOL Pool : Pools)
+        {
+            Texture = nullptr;
+            hr = Device->CreateTexture(16, 8, 0, Usage, D3DFMT_A8R8G8B8, Pool, &Texture, nullptr);
+            sprintf_s(Name, "%s_usage[%08lX,%u]", Prefix, Usage, Pool);
+            NcPrintTextureMade(Name, hr, Texture);
+        }
+    }
+    for (D3DFORMAT Format : ShapeFormats)
+    {
+        for (const auto& Shape : Shapes)
+        {
+            Texture = nullptr;
+            hr = Device->CreateTexture(Shape.Width, Shape.Height, Shape.Levels, 0, Format, D3DPOOL_SYSTEMMEM, &Texture,
+                                       nullptr);
+            sprintf_s(Name, "%s_shape_sysmem[%u,%ux%u,%u]", Prefix, Format, Shape.Width, Shape.Height, Shape.Levels);
+            NcPrintTextureMade(Name, hr, Texture);
+            Texture = nullptr;
+            hr = Device->CreateTexture(Shape.Width, Shape.Height, Shape.Levels, 0, Format, D3DPOOL_DEFAULT, &Texture,
+                                       nullptr);
+            sprintf_s(Name, "%s_shape_default[%u,%ux%u,%u]", Prefix, Format, Shape.Width, Shape.Height, Shape.Levels);
+            NcPrintTextureMade(Name, hr, Texture);
+        }
+    }
+
+    Texture = reinterpret_cast<IDirect3DTexture9*>(1);
+    hr = Device->CreateTexture(16, 8, 1, 0, D3DFMT_UNKNOWN, D3DPOOL_DEFAULT, &Texture, nullptr);
+    printf("%s_unknown_out = %08lX %s\n", Prefix, hr, Texture == nullptr ? "null" : "kept");
+    Texture = reinterpret_cast<IDirect3DTexture9*>(1);
+    hr = Device->CreateTexture(16, 8, 1, D3DUSAGE_WRITEONLY, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    printf("%s_usage_out = %08lX %s\n", Prefix, hr, Texture == nullptr ? "null" : "kept");
+    Texture = reinterpret_cast<IDirect3DTexture9*>(1);
+    hr = Device->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, nullptr);
+    if (Texture == reinterpret_cast<IDirect3DTexture9*>(1))
+    {
+        printf("%s_managed_out = %08lX kept\n", Prefix, hr);
+    }
+    else
+    {
+        sprintf_s(Name, "%s_managed_out", Prefix);
+        NcPrintTextureMade(Name, hr, Texture);
+    }
+    Shared = nullptr;
+    Texture = nullptr;
+    hr = Device->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, &Shared);
+    sprintf_s(Name, "%s_shared", Prefix);
+    NcPrintTextureMade(Name, hr, Texture);
+
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Usage;
+        D3DPOOL Pool;
+    } Kinds[] =
+    {
+        { "default", 0, D3DPOOL_DEFAULT },
+        { "dynamic", D3DUSAGE_DYNAMIC, D3DPOOL_DEFAULT },
+        { "sysmem", 0, D3DPOOL_SYSTEMMEM },
+        { "scratch", 0, D3DPOOL_SCRATCH },
+        { "managed", 0, D3DPOOL_MANAGED },
+        { "target", D3DUSAGE_RENDERTARGET, D3DPOOL_DEFAULT },
+    };
+    for (const auto& Kind : Kinds)
+    {
+        Texture = nullptr;
+        hr = Device->CreateTexture(16, 8, 0, Kind.Usage, D3DFMT_A8R8G8B8, Kind.Pool, &Texture, nullptr);
+        if (Texture == nullptr)
+            continue;
+        sprintf_s(Name, "%s_%s", Prefix, Kind.Name);
+        NcCheckTextureLevels(Name, Device, Texture);
+        NcCheckTextureBytes(Name, Texture);
+        printf("%s_final_release = %lu\n", Name, Texture->Release());
+    }
+}
+
+/* Cube faces and volume levels: creation, descriptions, locks and bytes */
+static
+VOID
+NcCheckCubesAndVolumesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DPOOL Pools[] = { D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH };
+    static const DWORD Usages[] = { 0, D3DUSAGE_RENDERTARGET, D3DUSAGE_DEPTHSTENCIL, D3DUSAGE_DYNAMIC,
+                                    D3DUSAGE_AUTOGENMIPMAP, D3DUSAGE_WRITEONLY };
+    static const UINT Edges[][2] = { { 8, 0 }, { 8, 4 }, { 8, 5 }, { 6, 0 }, { 0, 1 }, { 1, 0 } };
+    static const UINT Boxes[][4] = { { 8, 8, 4, 0 }, { 8, 4, 2, 2 }, { 8, 8, 8, 5 }, { 6, 4, 2, 0 }, { 4, 4, 0, 1 },
+                                     { 8, 8, 4, 6 } };
+    IDirect3DCubeTexture9* Cube;
+    IDirect3DVolumeTexture9* Volume;
+    IDirect3DSurface9* Face;
+    IDirect3DVolume9* Level;
+    D3DSURFACE_DESC Desc;
+    D3DVOLUME_DESC VolumeDesc;
+    D3DLOCKED_RECT Locked;
+    D3DLOCKED_BOX Box;
+    char Name[96];
+    HRESULT hr;
+
+    for (D3DPOOL Pool : Pools)
+    {
+        for (DWORD Usage : Usages)
+        {
+            for (const auto& Edge : Edges)
+            {
+                Cube = nullptr;
+                hr = Device->CreateCubeTexture(Edge[0], Edge[1], Usage, D3DFMT_A8R8G8B8, Pool, &Cube, nullptr);
+                sprintf_s(Name, "%s_cube[%u,%08lX,%u,%u]", Prefix, Pool, Usage, Edge[0], Edge[1]);
+                if (Cube == nullptr)
+                {
+                    printf("%s = %08lX null\n", Name, hr);
+                    continue;
+                }
+                Desc = {};
+                Cube->GetLevelDesc(Cube->GetLevelCount() - 1, &Desc);
+                Locked = {};
+                hr = Cube->LockRect(D3DCUBEMAP_FACE_NEGATIVE_X, 0, &Locked, nullptr, 0);
+                printf("%s = levels %lu type %u usage %08lX pool %u last %ux%u lock %08lX pitch %d rtype %u\n", Name,
+                       Cube->GetLevelCount(), Desc.Type, Desc.Usage, Desc.Pool, Desc.Width, Desc.Height, hr,
+                       Locked.Pitch, Cube->GetType());
+                if (SUCCEEDED(hr))
+                {
+                    static_cast<BYTE*>(Locked.pBits)[1] = 0x99;
+                    Cube->UnlockRect(D3DCUBEMAP_FACE_NEGATIVE_X, 0);
+                }
+                Face = nullptr;
+                hr = Cube->GetCubeMapSurface(D3DCUBEMAP_FACE_NEGATIVE_X, 0, &Face);
+                if (Face != nullptr)
+                {
+                    Locked = {};
+                    hr = Face->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+                    printf("%s_face = %08lX byte %02X\n", Name, hr,
+                           SUCCEEDED(hr) ? static_cast<BYTE*>(Locked.pBits)[1] : 0);
+                    if (SUCCEEDED(hr))
+                        Face->UnlockRect();
+                    printf("%s_face_release = %lu\n", Name, Face->Release());
+                }
+                printf("%s_face_bad = %08lX %08lX\n", Name,
+                       Cube->GetCubeMapSurface(static_cast<D3DCUBEMAP_FACES>(6), 0, &Face),
+                       Cube->GetCubeMapSurface(D3DCUBEMAP_FACE_POSITIVE_X, 9, &Face));
+                printf("%s_release = %lu\n", Name, Cube->Release());
+            }
+            for (const auto& Shape : Boxes)
+            {
+                Volume = nullptr;
+                hr = Device->CreateVolumeTexture(Shape[0], Shape[1], Shape[2], Shape[3], Usage, D3DFMT_A8R8G8B8,
+                                                 Pool, &Volume, nullptr);
+                sprintf_s(Name, "%s_volume[%u,%08lX,%ux%ux%u,%u]", Prefix, Pool, Usage, Shape[0], Shape[1],
+                          Shape[2], Shape[3]);
+                if (Volume == nullptr)
+                {
+                    printf("%s = %08lX null\n", Name, hr);
+                    continue;
+                }
+                VolumeDesc = {};
+                Volume->GetLevelDesc(Volume->GetLevelCount() - 1, &VolumeDesc);
+                Box = {};
+                hr = Volume->LockBox(0, &Box, nullptr, 0);
+                printf("%s = levels %lu type %u usage %08lX pool %u last %ux%ux%u lock %08lX pitch %d %d rtype %u\n",
+                       Name, Volume->GetLevelCount(), VolumeDesc.Type, VolumeDesc.Usage, VolumeDesc.Pool,
+                       VolumeDesc.Width, VolumeDesc.Height, VolumeDesc.Depth, hr, Box.RowPitch, Box.SlicePitch,
+                       Volume->GetType());
+                if (SUCCEEDED(hr))
+                {
+                    static_cast<BYTE*>(Box.pBits)[Box.SlicePitch + 2] = 0x66;
+                    Volume->UnlockBox(0);
+                }
+                Level = nullptr;
+                hr = Volume->GetVolumeLevel(0, &Level);
+                if (Level != nullptr)
+                {
+                    D3DBOX Part = { 1, 0, 3, 2, 1, 2 };
+                    BYTE* Base = static_cast<BYTE*>(Box.pBits);
+                    IDirect3DVolumeTexture9* Container = nullptr;
+
+                    Box = {};
+                    hr = Level->LockBox(&Box, nullptr, D3DLOCK_READONLY);
+                    printf("%s_level = %08lX byte %02X\n", Name, hr,
+                           SUCCEEDED(hr) ? static_cast<BYTE*>(Box.pBits)[Box.SlicePitch + 2] : 0);
+                    if (SUCCEEDED(hr))
+                    {
+                        Base = static_cast<BYTE*>(Box.pBits);
+                        Level->UnlockBox();
+                    }
+                    hr = Level->LockBox(&Box, &Part, D3DLOCK_READONLY);
+                    printf("%s_level_part = %08lX offset %lld\n", Name, hr,
+                           SUCCEEDED(hr) && Base != nullptr ? static_cast<long long>(static_cast<BYTE*>(Box.pBits) -
+                                                                                     Base) : -1LL);
+                    if (SUCCEEDED(hr))
+                        Level->UnlockBox();
+                    printf("%s_level_unlock_again = %08lX\n", Name, Level->UnlockBox());
+                    Level->GetDesc(&VolumeDesc);
+                    hr = Level->GetContainer(__uuidof(IDirect3DVolumeTexture9), reinterpret_cast<VOID**>(&Container));
+                    printf("%s_level_desc = fmt %u type %u usage %08lX pool %u size %ux%ux%u container %08lX %d\n",
+                           Name, VolumeDesc.Format, VolumeDesc.Type, VolumeDesc.Usage, VolumeDesc.Pool,
+                           VolumeDesc.Width, VolumeDesc.Height, VolumeDesc.Depth, hr, Container == Volume);
+                    if (Container != nullptr)
+                        Container->Release();
+                    printf("%s_level_release = %lu\n", Name, Level->Release());
+                }
+                printf("%s_dirty = %08lX\n", Name, Volume->AddDirtyBox(nullptr));
+                printf("%s_release = %lu\n", Name, Volume->Release());
+            }
+        }
+    }
+}
+
+/* Textures on a windowed extended device and on devices of the plain object */
+static
+VOID
+NcCheckTextures(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                   nullptr, &DeviceEx);
+    printf("textures_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckTexturesOn("textures_ex", DeviceEx);
+        NcCheckCubesAndVolumesOn("textures_ex", DeviceEx);
+        printf("textures_ex_release = %lu\n", DeviceEx->Release());
+    }
+
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    printf("textures_create_plain = %08lX\n", hr);
+    if (Device != nullptr)
+    {
+        NcCheckTexturesOn("textures_plain", Device);
+        NcCheckCubesAndVolumesOn("textures_plain", Device);
+        printf("textures_plain_release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -1861,6 +2311,7 @@ static const NineCheckInfo NcChecks[] =
     { "device_plain", NcCheckDevicePlain },
     { "surfaces", NcCheckSurfaces },
     { "buffers", NcCheckBuffers },
+    { "textures", NcCheckTextures },
 };
 
 static
