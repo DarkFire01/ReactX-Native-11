@@ -80,9 +80,6 @@ DsMax(
 /* The send effect DirectMusic buffers use */
 static const GUID DsSendEffect = { 0xEF602176, 0xBCBB, 0x49E0, { 0x8C, 0xCA, 0xE0, 0x9A, 0x5A, 0x15, 0x2B, 0x33 } };
 
-/* Property sets that are not supported answer with this */
-#define DS_PROPERTY_UNSUPPORTED HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
-
 class DsObject;
 class DsSound;
 class DsBuffer;
@@ -1001,7 +998,54 @@ public:
         _In_reads_(Count) LPCDSBPOSITIONNOTIFY Positions) override;
 };
 
-/* IKsPropertySet on buffers; no property sets are supported */
+/* One property of a set: the handlers take the owning object, and Get updates the length to what it wrote or needs */
+struct DsPropertyItem
+{
+    ULONG Id;
+    HRESULT (*Get)(PVOID Owner, PVOID Data, ULONG* Length);
+    HRESULT (*Set)(PVOID Owner, PVOID Data, ULONG Length);
+    ULONG Minimum;
+};
+
+struct DsPropertyTable
+{
+    const GUID* Set;
+    ULONG Count;
+    const DsPropertyItem* Items;
+};
+
+/* property.cpp */
+
+HRESULT
+DsPropertyQuery(
+    _In_reads_(TableCount) const DsPropertyTable* Tables,
+    _In_ ULONG TableCount,
+    _In_ const GUID* Set,
+    _In_ ULONG Id,
+    _Out_ ULONG* Support);
+
+HRESULT
+DsPropertyGet(
+    _In_reads_(TableCount) const DsPropertyTable* Tables,
+    _In_ ULONG TableCount,
+    _In_opt_ PVOID Owner,
+    _In_ const GUID* Set,
+    _In_ ULONG Id,
+    _Out_writes_bytes_(Length) PVOID Data,
+    _In_ ULONG Length,
+    _Out_opt_ ULONG* Returned);
+
+HRESULT
+DsPropertySet(
+    _In_reads_(TableCount) const DsPropertyTable* Tables,
+    _In_ ULONG TableCount,
+    _In_opt_ PVOID Owner,
+    _In_ const GUID* Set,
+    _In_ ULONG Id,
+    _In_reads_bytes_opt_(Length) PVOID Data,
+    _In_ ULONG Length);
+
+/* IKsPropertySet on buffers, which carry no property sets */
 class DsPropertyFace final : public IKsPropertySet
 {
 public:

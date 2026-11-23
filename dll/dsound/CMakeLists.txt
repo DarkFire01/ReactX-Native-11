@@ -11,6 +11,7 @@ nt_add_usermode_dll(dsound
         matrix.cpp
         object.cpp
         primary.cpp
+        property.cpp
         resample.cpp
         sound.cpp
         sound3d.cpp

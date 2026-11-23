@@ -361,63 +361,6 @@ DsNotifyFace::SetNotificationPositions(
     return DsCaptureNotify(Capture, Count, Positions);
 }
 
-HRESULT
-STDMETHODCALLTYPE
-DsPropertyFace::Get(
-    _In_ REFGUID Set,
-    ULONG Id,
-    _In_reads_bytes_opt_(InstanceLength) LPVOID Instance,
-    ULONG InstanceLength,
-    _Out_writes_bytes_(DataLength) LPVOID Data,
-    ULONG DataLength,
-    _Out_opt_ PULONG Returned)
-{
-    UNREFERENCED_PARAMETER(Set);
-    UNREFERENCED_PARAMETER(Id);
-    UNREFERENCED_PARAMETER(Instance);
-    UNREFERENCED_PARAMETER(InstanceLength);
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(DataLength);
-
-    if (Returned != nullptr)
-        *Returned = 0;
-    return DS_PROPERTY_UNSUPPORTED;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-DsPropertyFace::Set(
-    _In_ REFGUID Set,
-    ULONG Id,
-    _In_reads_bytes_opt_(InstanceLength) LPVOID Instance,
-    ULONG InstanceLength,
-    _In_reads_bytes_(DataLength) LPVOID Data,
-    ULONG DataLength)
-{
-    UNREFERENCED_PARAMETER(Set);
-    UNREFERENCED_PARAMETER(Id);
-    UNREFERENCED_PARAMETER(Instance);
-    UNREFERENCED_PARAMETER(InstanceLength);
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(DataLength);
-    return DS_PROPERTY_UNSUPPORTED;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-DsPropertyFace::QuerySupport(
-    _In_ REFGUID Set,
-    ULONG Id,
-    _Out_ PULONG Support)
-{
-    UNREFERENCED_PARAMETER(Set);
-    UNREFERENCED_PARAMETER(Id);
-
-    if (Support != nullptr)
-        *Support = 0;
-    return DS_PROPERTY_UNSUPPORTED;
-}
-
 DsSecondary::DsSecondary(
     _In_ DsSound* NewOwner) : DsBuffer(NewOwner)
 {
