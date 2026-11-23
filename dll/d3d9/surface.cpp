@@ -31,11 +31,13 @@ D9Surface::D9Surface(
     _In_ D9Device* Owner,
     _In_opt_ IUnknown* Container,
     _In_ const D3DSURFACE_DESC* Desc,
-    _In_ BOOLEAN Lockable)
+    _In_ BOOLEAN Lockable,
+    _In_ BOOLEAN Discard)
     : D9Child(Owner),
       Container(Container),
       Desc(*Desc),
-      Lockable(Lockable)
+      Lockable(Lockable),
+      Discard(Discard)
 {
 }
 
@@ -47,7 +49,7 @@ D9Surface::~D9Surface()
 HRESULT
 D9Surface::Create(VOID)
 {
-    return Device->CreateDriverSurface(&Desc, Lockable, &Resource);
+    return Device->CreateDriverSurface(&Desc, Lockable, Discard, &Resource);
 }
 
 STDMETHODIMP

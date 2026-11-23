@@ -71,6 +71,7 @@ D9SwapChain::Reset(
     }
 
     ReleaseBuffers();
+    Device->FlushDriver();
     Desc.Format = Requested->BackBufferFormat;
     Desc.Type = D3DRTYPE_SURFACE;
     Desc.Usage = D3DUSAGE_RENDERTARGET;
@@ -84,7 +85,8 @@ D9SwapChain::Reset(
     for (UINT Buffer = 0; Buffer < Count; Buffer++)
     {
         D9Surface* Surface = new (std::nothrow) D9Surface(Device, static_cast<IDirect3DSwapChain9*>(this), &Desc,
-                                                          (Requested->Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) != 0);
+                                                          (Requested->Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) != 0,
+                                                          Requested->SwapEffect == D3DSWAPEFFECT_DISCARD);
 
         if (Surface == nullptr)
             return E_OUTOFMEMORY;

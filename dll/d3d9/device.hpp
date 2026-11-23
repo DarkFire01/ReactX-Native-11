@@ -22,6 +22,9 @@ static constexpr UINT D9RenderStateCount = 256;
 /* Kernel contexts a device tracks for its driver */
 static constexpr UINT D9MaxKernelContexts = 16;
 
+/* The vertex and index buffers a device keeps for drawing from application memory */
+static constexpr UINT D9StagingBufferCount = 4;
+
 /* A resource the driver made; its address is the runtime handle the driver passes back */
 struct D9Resource
 {
@@ -70,7 +73,8 @@ public:
         _In_ D9Device* Owner,
         _In_opt_ IUnknown* Container,
         _In_ const D3DSURFACE_DESC* Desc,
-        _In_ BOOLEAN Lockable);
+        _In_ BOOLEAN Lockable,
+        _In_ BOOLEAN Discard = FALSE);
 
     ~D9Surface();
 
@@ -154,6 +158,7 @@ private:
     D3DSURFACE_DESC Desc;
     D9Resource Resource = {};
     BOOLEAN Lockable;
+    BOOLEAN Discard;
     BOOLEAN IsLocked = FALSE;
     DWORD ResourcePriority = 0;
 };
@@ -316,6 +321,14 @@ public:
     CreateDriverSurface(
         _In_ const D3DSURFACE_DESC* Desc,
         _In_ BOOLEAN Lockable,
+        _In_ BOOLEAN Discard,
+        _Out_ D9Resource* Resource);
+
+    HRESULT
+    CreateDriverBuffer(
+        _In_ D3DDDIFORMAT Format,
+        _In_ UINT Size,
+        _In_ UINT Flags,
         _Out_ D9Resource* Resource);
 
     VOID
@@ -342,6 +355,9 @@ public:
 
     VOID
     ReleaseWindowSurface(VOID);
+
+    VOID
+    FlushDriver(VOID);
 
     HRESULT
     PresentCallback(
@@ -1026,6 +1042,34 @@ private:
     SetDefaultState(
         _In_ const D3DPRESENT_PARAMETERS* Parameters);
 
+    DWORD
+    InitialStateValue(
+        _In_ UINT State) const;
+
+    VOID
+    SendRenderState(
+        _In_ UINT State);
+
+    VOID
+    SendTextureStageState(
+        _In_ UINT Stage,
+        _In_ UINT State,
+        _In_ UINT Value);
+
+    VOID
+    SendPixelConstant(
+        _In_ UINT Register,
+        _In_ FLOAT X,
+        _In_ FLOAT Y,
+        _In_ FLOAT Z,
+        _In_ FLOAT W);
+
+    VOID
+    SendClipPlanes(VOID);
+
+    VOID
+    SendInitialState(VOID);
+
     HRESULT
     CreateAutoDepthStencil(
         _In_ const D3DPRESENT_PARAMETERS* Parameters);
@@ -1033,13 +1077,30 @@ private:
     VOID
     BindRenderTargets(VOID);
 
+    VOID
+    SendTargets(VOID);
+
+    VOID
+    SendViewport(
+        _In_ BOOLEAN Twice);
+
+    HRESULT
+    CreateDriverResource(
+        _Inout_ D9Resource* Resource,
+        _In_ const D3DDDI_SURFACEINFO* Surface,
+        _In_ D3DDDIMULTISAMPLE_TYPE MultisampleType,
+        _In_ UINT MultisampleQuality);
+
+    HRESULT
+    CreateStagingBuffers(VOID);
+
+    VOID
+    DestroyStagingBuffers(VOID);
+
     HRESULT
     ResetCommon(
         _Inout_ D3DPRESENT_PARAMETERS* Parameters,
         _In_opt_ const D3DDISPLAYMODEEX* FullscreenMode);
-
-    VOID
-    FlushDriver(VOID);
 
     HRESULT
     DriverPresent(
@@ -1088,6 +1149,10 @@ private:
     DWORD RenderStates[D9RenderStateCount];
     INT GpuPriority = 0;
     UINT FrameLatency = 3;
+
+    /* The bound targets reach the driver before the first operation that writes them */
+    BOOLEAN TargetsDirty = FALSE;
+    D9Resource StagingBuffers[D9StagingBufferCount] = {};
 
     /* The driver's contexts in creation order; the kernel is told about them newest first */
     D3DKMT_HANDLE KernelContexts[D9MaxKernelContexts] = {};

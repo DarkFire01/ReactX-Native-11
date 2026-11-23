@@ -63,6 +63,58 @@ static const struct
     { D3DRS_DESTBLENDALPHA, D3DBLEND_ZERO }, { D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD },
 };
 
+/* Retired render states the runtime still hands the driver once, with the values it gives them */
+static const struct
+{
+    BYTE State;
+    DWORD Value;
+} D9RetiredInitialValues[] =
+{
+    { 10, 0 }, { 30, 0 }, { 164, 0 }, { 196, 0xFFFFFFFF }, { 197, 0xFFFFFFFF },
+};
+
+/* The order a new device first hands its render states to the driver: pixel states before the
+   texture stages, the rest after the clip planes */
+static const BYTE D9InitialPixelStates[] =
+{
+    7, 8, 9, 10, 14, 15, 16, 19, 20, 22, 23, 24, 25, 26, 27, 28, 30, 34, 35, 36, 37, 38, 40, 48, 52, 53, 54, 55,
+    56, 57, 58, 59, 185, 186, 187, 188, 189, 193, 194, 206, 207, 208, 209, 128, 129, 130, 131, 132, 133, 134,
+    135, 198, 199, 200, 201, 202, 203, 204, 205,
+};
+
+static const BYTE D9InitialLaterStates[] =
+{
+    166, 154, 155, 156, 162, 161, 163, 164, 168, 171, 172, 173, 174, 195, 175, 176, 196, 197, 178, 179, 180,
+    181, 182, 183, 184, 190, 191, 192,
+};
+
+/* Sampler states in the order the driver first sees them, with their defaults */
+static const struct
+{
+    BYTE State;
+    BYTE Value;
+} D9InitialSamplerStates[] =
+{
+    { D3DDDITSS_ADDRESSU, D3DTADDRESS_WRAP }, { D3DDDITSS_ADDRESSV, D3DTADDRESS_WRAP },
+    { D3DDDITSS_ADDRESSW, D3DTADDRESS_WRAP }, { D3DDDITSS_BORDERCOLOR, 0 }, { D3DDDITSS_MAGFILTER, D3DTEXF_POINT },
+    { D3DDDITSS_MINFILTER, D3DTEXF_POINT }, { D3DDDITSS_MIPFILTER, D3DTEXF_NONE },
+    { D3DDDITSS_MIPMAPLODBIAS, 0 }, { D3DDDITSS_MAXMIPLEVEL, 0 }, { D3DDDITSS_MAXANISOTROPY, 1 },
+    { D3DDDITSS_SRGBTEXTURE, 0 }, { D3DDDITSS_DMAPOFFSET, 0 }, { D3DDDITSS_ELEMENTINDEX, 0 },
+};
+
+/* Texture stages the fixed function pixel constants cover */
+static constexpr UINT D9PixelStages = 8;
+
+/* Where the runtime keeps fixed function pixel values in pixel shader constants */
+static constexpr UINT D9ConstTextureFactor = 2;
+static constexpr UINT D9ConstStageConstant = 3;
+static constexpr UINT D9ConstLuminance = 11;
+static constexpr UINT D9ConstBumpMatrix = 15;
+
+/* Samplers: the sixteen pixel samplers, the displacement map sampler and the four vertex samplers */
+static constexpr UINT D9PixelSamplers = 16;
+static constexpr UINT D9VertexSamplers = 4;
+
 /* Vertex processing caps the runtime's own vertex pipelines report, with their light and blend limits */
 static constexpr DWORD D9PipelineVertexCaps = 0x0000017B;
 static constexpr DWORD D9ShaderPipelineLights = 10;
@@ -160,6 +212,8 @@ D9Device::~D9Device()
 {
     delete AutoDepthStencil;
     delete ImplicitChain;
+    if (DriverDevice != NULL)
+        DestroyStagingBuffers();
     DestroyHardware();
     DeleteCriticalSection(&Lock);
     Enum->Release();
@@ -236,36 +290,61 @@ D9Device::CreateAutoDepthStencil(
     return hr;
 }
 
-/* Points the driver at the first back buffer, the automatic depth buffer and a viewport covering them */
+/* Binds the first back buffer and the automatic depth buffer; the driver learns of them before they are next written */
 VOID
 D9Device::BindRenderTargets(VOID)
 {
-    const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
-    D3DDDIARG_SETRENDERTARGET Target = {};
-    D3DDDIARG_SETDEPTHSTENCIL Depth = {};
-    D3DDDIARG_VIEWPORTINFO Viewport = {};
-    D3DDDIARG_ZRANGE Range = {};
-
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     RenderTargets[0] = ImplicitChain->BackBuffer(0);
     DepthStencil = AutoDepthStencil;
+    TargetsDirty = TRUE;
+}
+
+VOID
+D9Device::SendTargets(VOID)
+{
+    D3DDDIARG_SETRENDERTARGET Target = {};
+    D3DDDIARG_SETDEPTHSTENCIL Depth = {};
+
+    if (!TargetsDirty)
+        return;
 
     Target.RenderTargetIndex = 0;
     Target.hRenderTarget = RenderTargets[0]->DriverResource()->DriverResource;
     DeviceFunctions.pfnSetRenderTarget(DriverDevice, &Target);
     Depth.hZBuffer = DepthStencil != nullptr ? DepthStencil->DriverResource()->DriverResource : NULL;
     DeviceFunctions.pfnSetDepthStencil(DriverDevice, &Depth);
+    TargetsDirty = FALSE;
+}
+
+/* The viewport covering the back buffer and its scissor rectangle; a new device sends the viewport twice */
+VOID
+D9Device::SendViewport(
+    _In_ BOOLEAN Twice)
+{
+    const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
+    D3DDDIARG_VIEWPORTINFO Viewport = {};
+    D3DDDIARG_ZRANGE Range = {};
+    RECT Scissor;
 
     Viewport.Width = Parameters.BackBufferWidth;
     Viewport.Height = Parameters.BackBufferHeight;
-    DeviceFunctions.pfnSetViewport(DriverDevice, &Viewport);
     Range.MinZ = 0.0f;
     Range.MaxZ = 1.0f;
+    SetRect(&Scissor, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
+
+    DeviceFunctions.pfnSetViewport(DriverDevice, &Viewport);
     DeviceFunctions.pfnSetZRange(DriverDevice, &Range);
+    DeviceFunctions.pfnSetScissorRect(DriverDevice, &Scissor);
+    if (Twice)
+    {
+        DeviceFunctions.pfnSetViewport(DriverDevice, &Viewport);
+        DeviceFunctions.pfnSetZRange(DriverDevice, &Range);
+    }
 }
 
-/* Fills the render state table with its defaults and hands each one to the driver */
+/* Fills the render state table with its defaults; the driver keeps what it was last sent */
 VOID
 D9Device::SetDefaultState(
     _In_ const D3DPRESENT_PARAMETERS* Parameters)
@@ -277,18 +356,200 @@ D9Device::SetDefaultState(
 
     for (const auto& Default : D9DefaultStates)
     {
-        D3DDDIARG_RENDERSTATE State = {};
+        DWORD Value = Default.Value;
 
-        State.State = static_cast<D3DDDIRENDERSTATETYPE>(Default.State);
-        State.Value = Default.Value;
         if (Default.State == D3DRS_ZENABLE)
-            State.Value = Parameters->EnableAutoDepthStencil ? D3DZB_TRUE : D3DZB_FALSE;
+            Value = Parameters->EnableAutoDepthStencil ? D3DZB_TRUE : D3DZB_FALSE;
         else if (Default.State == D3DRS_POINTSIZE_MAX)
-            CopyMemory(&State.Value, &PointSizeMax, sizeof(State.Value));
-
-        RenderStates[Default.State] = State.Value;
-        DeviceFunctions.pfnSetRenderState(DriverDevice, &State);
+            CopyMemory(&Value, &PointSizeMax, sizeof(Value));
+        RenderStates[Default.State] = Value;
     }
+}
+
+DWORD
+D9Device::InitialStateValue(
+    _In_ UINT State) const
+{
+    for (const auto& Retired : D9RetiredInitialValues)
+    {
+        if (Retired.State == State)
+            return Retired.Value;
+    }
+    return RenderStates[State];
+}
+
+VOID
+D9Device::SendRenderState(
+    _In_ UINT State)
+{
+    D3DDDIARG_RENDERSTATE Args = {};
+
+    Args.State = static_cast<D3DDDIRENDERSTATETYPE>(State);
+    Args.Value = InitialStateValue(State);
+    DeviceFunctions.pfnSetRenderState(DriverDevice, &Args);
+}
+
+VOID
+D9Device::SendTextureStageState(
+    _In_ UINT Stage,
+    _In_ UINT State,
+    _In_ UINT Value)
+{
+    D3DDDIARG_TEXTURESTAGESTATE Args = {};
+
+    Args.Stage = Stage;
+    Args.State = static_cast<D3DDDITEXTURESTAGESTATETYPE>(State);
+    Args.Value = Value;
+    DeviceFunctions.pfnSetTextureStageState(DriverDevice, &Args);
+}
+
+VOID
+D9Device::SendPixelConstant(
+    _In_ UINT Register,
+    _In_ FLOAT X,
+    _In_ FLOAT Y,
+    _In_ FLOAT Z,
+    _In_ FLOAT W)
+{
+    D3DDDIARG_SETPIXELSHADERCONST Args = {};
+    const FLOAT Values[4] = { X, Y, Z, W };
+
+    Args.Register = Register;
+    Args.Count = 1;
+    DeviceFunctions.pfnSetPixelShaderConst(DriverDevice, &Args, Values);
+}
+
+/* Every user clip plane cleared, each sent twice */
+VOID
+D9Device::SendClipPlanes(VOID)
+{
+    for (UINT Plane = 0; Plane < Caps.MaxUserClipPlanes; Plane++)
+    {
+        D3DDDIARG_SETCLIPPLANE Args = {};
+
+        Args.Index = Plane;
+        DeviceFunctions.pfnSetClipPlane(DriverDevice, &Args);
+        DeviceFunctions.pfnSetClipPlane(DriverDevice, &Args);
+    }
+}
+
+/* What a new device tells its driver before the application draws: the fixed function pixel constants,
+   viewport, render states, texture stages, samplers and clip planes, in the order the system sends them */
+VOID
+D9Device::SendInitialState(VOID)
+{
+    static const FLOAT Scales[8] = { 0.5f, 2.0f, 4.0f, 1.0f / 255.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+    D3DDDIARG_SETPIXELSHADERCONST Scale = {};
+    D3DDDIARG_WINFO WInfo = {};
+    DWORD Factor = RenderStates[D3DRS_TEXTUREFACTOR];
+    UINT Samplers[D9PixelSamplers + 1 + D9VertexSamplers];
+    UINT SamplerCount = 0;
+
+    Scale.Register = 0;
+    Scale.Count = 2;
+    DeviceFunctions.pfnSetPixelShaderConst(DriverDevice, &Scale, Scales);
+    SendViewport(TRUE);
+
+    for (BYTE State : D9InitialPixelStates)
+        SendRenderState(State);
+
+    SendPixelConstant(D9ConstTextureFactor, ((Factor >> 16) & 0xFF) / 255.0f, ((Factor >> 8) & 0xFF) / 255.0f,
+                      (Factor & 0xFF) / 255.0f, (Factor >> 24) / 255.0f);
+    for (UINT Stage = 0; Stage < D9PixelStages; Stage++)
+    {
+        UINT Matrix = D9ConstBumpMatrix + Stage * 2;
+        UINT Luminance = D9ConstLuminance + Stage / 2;
+
+        /* Each bump matrix entry and luminance value refreshes the constant that holds it */
+        SendPixelConstant(Matrix, 0.0f, 0.0f, 0.0f, 0.0f);
+        SendTextureStageState(Stage, D3DDDITSS_BUMPENVMAT00, 0);
+        SendPixelConstant(Matrix + 1, 0.0f, 0.0f, 0.0f, 0.0f);
+        SendTextureStageState(Stage, D3DDDITSS_BUMPENVMAT01, 0);
+        SendPixelConstant(Matrix, 0.0f, 0.0f, 0.0f, 0.0f);
+        SendTextureStageState(Stage, D3DDDITSS_BUMPENVMAT10, 0);
+        SendPixelConstant(Matrix + 1, 0.0f, 0.0f, 0.0f, 0.0f);
+        SendTextureStageState(Stage, D3DDDITSS_BUMPENVMAT11, 0);
+        SendTextureStageState(Stage, D3DDDITSS_TEXCOORDINDEX, Stage);
+        SendPixelConstant(Luminance, 0.0f, 0.0f, 0.0f, 0.0f);
+        SendTextureStageState(Stage, D3DDDITSS_BUMPENVLSCALE, 0);
+        SendPixelConstant(Luminance, 0.0f, 0.0f, 0.0f, 0.0f);
+        SendTextureStageState(Stage, D3DDDITSS_BUMPENVLOFFSET, 0);
+        SendTextureStageState(Stage, D3DDDITSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        SendPixelConstant(D9ConstStageConstant + Stage, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    for (UINT Sampler = 0; Sampler < D9PixelSamplers; Sampler++)
+    {
+        Samplers[SamplerCount] = Sampler;
+        SamplerCount += 1;
+    }
+    if ((Caps.DevCaps2 & (D3DDEVCAPS2_DMAPNPATCH | D3DDEVCAPS2_PRESAMPLEDDMAPNPATCH)) != 0)
+    {
+        Samplers[SamplerCount] = D3DDMAPSAMPLER;
+        SamplerCount += 1;
+    }
+    for (UINT Sampler = 0; Sampler < D9VertexSamplers; Sampler++)
+    {
+        Samplers[SamplerCount] = D3DVERTEXTEXTURESAMPLER0 + Sampler;
+        SamplerCount += 1;
+    }
+    for (UINT Index = 0; Index < SamplerCount; Index++)
+    {
+        for (const auto& State : D9InitialSamplerStates)
+            SendTextureStageState(Samplers[Index], State.State, State.Value);
+    }
+
+    SendRenderState(D3DRS_CLIPPING);
+    SendRenderState(D3DRS_CLIPPLANEENABLE);
+    SendClipPlanes();
+    for (BYTE State : D9InitialLaterStates)
+        SendRenderState(State);
+
+    WInfo.WNear = 1.0f;
+    WInfo.WFar = 1.0f;
+    DeviceFunctions.pfnUpdateWInfo(DriverDevice, &WInfo);
+    SendRenderState(D3DRS_RANGEFOGENABLE);
+    SendRenderState(D3DRS_CLIPPLANEENABLE);
+    SendClipPlanes();
+}
+
+/* The runtime's buffers for drawing from application memory: a vertex buffer that may be read back, two
+   write only ones and an index buffer */
+HRESULT
+D9Device::CreateStagingBuffers(VOID)
+{
+    static const struct
+    {
+        D3DDDIFORMAT Format;
+        UINT Size;
+        UINT Flags;
+    } Buffers[D9StagingBufferCount] =
+    {
+        { D3DDDIFMT_VERTEXDATA, 0x10000, 0x02080004 },
+        { D3DDDIFMT_VERTEXDATA, 0x10000, 0x02080044 },
+        { D3DDDIFMT_VERTEXDATA, 0x10000, 0x02080044 },
+        { D3DDDIFMT_INDEX16, 0x1000, 0x02100044 },
+    };
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < D9StagingBufferCount; Index++)
+    {
+        hr = CreateDriverBuffer(Buffers[Index].Format, Buffers[Index].Size, Buffers[Index].Flags,
+                                &StagingBuffers[Index]);
+        if (FAILED(hr))
+            return hr;
+    }
+    return S_OK;
+}
+
+/* The system frees these in this order */
+VOID
+D9Device::DestroyStagingBuffers(VOID)
+{
+    static const BYTE Order[D9StagingBufferCount] = { 1, 0, 3, 2 };
+
+    for (BYTE Index : Order)
+        DestroyDriverSurface(&StagingBuffers[Index]);
 }
 
 HRESULT
@@ -317,9 +578,13 @@ D9Device::Initialize(
     hr = CreateAutoDepthStencil(Parameters);
     if (FAILED(hr))
         return hr;
+    hr = CreateStagingBuffers();
+    if (FAILED(hr))
+        return hr;
 
     BindRenderTargets();
     SetDefaultState(Parameters);
+    SendInitialState();
     return S_OK;
 }
 
@@ -596,6 +861,7 @@ D9Device::Clear(
     Args.FillColor = Color;
     Args.FillDepth = Z;
     Args.FillStencil = Stencil;
+    SendTargets();
     hr = DeviceFunctions.pfnClear(DriverDevice, &Args, Kept, Clipped);
     delete[] Clipped;
     if (FAILED(hr))
@@ -689,9 +955,12 @@ D9Device::ResetCommon(
         return D3DERR_NOTAVAILABLE;
     }
 
+    /* The depth buffer goes before the back buffers; the swap chain flushes the driver before making new ones */
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     DepthStencil = nullptr;
+    delete AutoDepthStencil;
+    AutoDepthStencil = nullptr;
 
     hr = ImplicitChain->Reset(Parameters);
     if (SUCCEEDED(hr))
@@ -703,6 +972,7 @@ D9Device::ResetCommon(
     }
 
     BindRenderTargets();
+    SendViewport(FALSE);
     SetDefaultState(Parameters);
     return S_OK;
 }

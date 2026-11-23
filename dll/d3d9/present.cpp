@@ -266,6 +266,7 @@ D9Device::DriverPresent(
         Present1.hDstResource = TargetResource;
         Present1.Flags.Value = PendingPresent.Flags.Value & 7;
         Present1.FlipInterval = static_cast<D3DDDI_FLIPINTERVAL_TYPE>(Interval);
+        Present1.BackBufferMultiplicity = 1;
         hr = DeviceFunctions.pfnPresent1(DriverDevice, &Present1);
     }
     else
@@ -468,7 +469,9 @@ D9Device::PresentToWindow(
     Present->PresentHistoryToken.Token.Blt.hPhysicalSurface = reinterpret_cast<ULONG_PTR>(Share);
     Present->PresentHistoryToken.Token.Blt.EventId = UpdateId;
 
+    /* The driver is flushed on both sides of the present */
     hr = DriverPresent(Source->DriverResource, WindowSurface != nullptr ? WindowSurface->DriverResource : NULL);
+    FlushDriver();
     if (Lost)
         return D3DERR_DEVICELOST;
     return hr;

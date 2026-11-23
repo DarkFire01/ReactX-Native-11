@@ -578,6 +578,7 @@ VOID
 D9SurfaceFlags(
     _In_ const D3DSURFACE_DESC* Desc,
     _In_ BOOLEAN Lockable,
+    _In_ BOOLEAN Discard,
     _Out_ D3DDDI_RESOURCEFLAGS* Flags)
 {
     Flags->Value = 0;
@@ -587,39 +588,30 @@ D9SurfaceFlags(
         Flags->ZBuffer = TRUE;
     if (!Lockable)
         Flags->NotLockable = TRUE;
+    if (Discard)
+        Flags->DiscardRenderTarget = TRUE;
 }
 
+/* Hands the driver one resource of a single subresource and keeps what it returns */
 HRESULT
-D9Device::CreateDriverSurface(
-    _In_ const D3DSURFACE_DESC* Desc,
-    _In_ BOOLEAN Lockable,
-    _Out_ D9Resource* Resource)
+D9Device::CreateDriverResource(
+    _Inout_ D9Resource* Resource,
+    _In_ const D3DDDI_SURFACEINFO* Surface,
+    _In_ D3DDDIMULTISAMPLE_TYPE MultisampleType,
+    _In_ UINT MultisampleQuality)
 {
-    D3DDDI_SURFACEINFO Surface = {};
     D3DDDIARG_CREATERESOURCE2 Create2 = {};
     D3DDDIARG_CREATERESOURCE Create = {};
     HRESULT hr;
-
-    ZeroMemory(Resource, sizeof(*Resource));
-    Resource->Format = static_cast<D3DDDIFORMAT>(Desc->Format);
-    Resource->Pool = D3DDDIPOOL_LOCALVIDMEM;
-    Resource->Width = Desc->Width;
-    Resource->Height = Desc->Height;
-    D9SurfaceFlags(Desc, Lockable, &Resource->Flags);
-
-    Surface.Width = Desc->Width;
-    Surface.Height = Desc->Height;
-    Surface.Depth = 1;
 
     if (DeviceFunctions.pfnCreateResource2 != nullptr)
     {
         Create2.Format = Resource->Format;
         Create2.Pool = Resource->Pool;
-        Create2.MultisampleType = static_cast<D3DDDIMULTISAMPLE_TYPE>(Desc->MultiSampleType);
-        Create2.MultisampleQuality = Desc->MultiSampleQuality;
-        Create2.pSurfList = &Surface;
+        Create2.MultisampleType = MultisampleType;
+        Create2.MultisampleQuality = MultisampleQuality;
+        Create2.pSurfList = Surface;
         Create2.SurfCount = 1;
-        Create2.MipLevels = 1;
         Create2.VidPnSourceId = Adapter->SourceId;
         Create2.hResource = Resource;
         Create2.Flags = Resource->Flags;
@@ -631,11 +623,10 @@ D9Device::CreateDriverSurface(
     {
         Create.Format = Resource->Format;
         Create.Pool = Resource->Pool;
-        Create.MultisampleType = static_cast<D3DDDIMULTISAMPLE_TYPE>(Desc->MultiSampleType);
-        Create.MultisampleQuality = Desc->MultiSampleQuality;
-        Create.pSurfList = &Surface;
+        Create.MultisampleType = MultisampleType;
+        Create.MultisampleQuality = MultisampleQuality;
+        Create.pSurfList = Surface;
         Create.SurfCount = 1;
-        Create.MipLevels = 1;
         Create.VidPnSourceId = Adapter->SourceId;
         Create.hResource = Resource;
         Create.Flags = Resource->Flags;
@@ -646,11 +637,55 @@ D9Device::CreateDriverSurface(
 
     if (FAILED(hr))
     {
-        D9Trace(L"UMD CreateResource failed 0x%08lX for a %ux%u surface", hr, Desc->Width, Desc->Height);
+        D9Trace(L"UMD CreateResource failed 0x%08lX for format %u", hr, Resource->Format);
         Resource->DriverResource = NULL;
-        return hr;
     }
-    return S_OK;
+    return hr;
+}
+
+/* A linear vertex or index buffer of the runtime's own */
+HRESULT
+D9Device::CreateDriverBuffer(
+    _In_ D3DDDIFORMAT Format,
+    _In_ UINT Size,
+    _In_ UINT Flags,
+    _Out_ D9Resource* Resource)
+{
+    D3DDDI_SURFACEINFO Surface = {};
+
+    ZeroMemory(Resource, sizeof(*Resource));
+    Resource->Format = Format;
+    Resource->Pool = D3DDDIPOOL_VIDEOMEMORY;
+    Resource->Flags.Value = Flags;
+    Resource->Width = Size;
+    Resource->Height = 1;
+
+    Surface.Width = Size;
+    Surface.Height = 1;
+    return CreateDriverResource(Resource, &Surface, D3DDDIMULTISAMPLE_NONE, 0);
+}
+
+HRESULT
+D9Device::CreateDriverSurface(
+    _In_ const D3DSURFACE_DESC* Desc,
+    _In_ BOOLEAN Lockable,
+    _In_ BOOLEAN Discard,
+    _Out_ D9Resource* Resource)
+{
+    D3DDDI_SURFACEINFO Surface = {};
+
+    /* Depth buffers may live in any video memory; render targets stay local */
+    ZeroMemory(Resource, sizeof(*Resource));
+    Resource->Format = static_cast<D3DDDIFORMAT>(Desc->Format);
+    Resource->Pool = (Desc->Usage & D3DUSAGE_DEPTHSTENCIL) != 0 ? D3DDDIPOOL_VIDEOMEMORY : D3DDDIPOOL_LOCALVIDMEM;
+    Resource->Width = Desc->Width;
+    Resource->Height = Desc->Height;
+    D9SurfaceFlags(Desc, Lockable, Discard, &Resource->Flags);
+
+    Surface.Width = Desc->Width;
+    Surface.Height = Desc->Height;
+    return CreateDriverResource(Resource, &Surface, static_cast<D3DDDIMULTISAMPLE_TYPE>(Desc->MultiSampleType),
+                                Desc->MultiSampleQuality);
 }
 
 VOID
