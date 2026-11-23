@@ -897,6 +897,9 @@ VOID
 DsUpdateFocus(
     _In_ BOOLEAN Force);
 
+VOID
+DsLevelsChanged(VOID);
+
 ULONG
 DsBufferFocus(
     _In_ DsBuffer* Buffer);

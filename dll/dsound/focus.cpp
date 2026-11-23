@@ -13,15 +13,186 @@
 /* Window placement showCmd of a minimized window */
 #define DS_SHOW_MINIMIZED   2
 
+/* Every process shares the levels its DirectSound objects hold, so focus can follow a window of another process */
+#define DS_SHARED_NAME          L"DirectSound Administrator shared thread array"
+#define DS_SHARED_LOCK_NAME     L"DirectSound Administrator shared thread array (lock)"
+#define DS_SHARED_MAX_THREADS   1024
+
+/* One DirectSound object of some process: the thread it took a level for and that level */
+struct DsSharedThread
+{
+    DWORD Process;
+    DWORD Thread;
+    DWORD Level;
+};
+
+/* The mapping starts with the byte size of the entries that follow it */
+struct DsSharedList
+{
+    DWORD Bytes;
+    DsSharedThread Threads[DS_SHARED_MAX_THREADS];
+};
+
 static DsSound* DsSounds;
 static DWORD DsFocusThread;
 static DWORD DsFocusLevel;
 static HANDLE DsFocusWorker;
 static HANDLE DsFocusQuit;
+static HANDLE DsSharedMapping;
+static HANDLE DsSharedLock;
 
 static
 VOID
 DsStopFocus(VOID);
+
+/* Opens the list other processes made, or makes an empty one; called with the API lock held */
+static
+VOID
+DsOpenShared(VOID)
+{
+    if (DsSharedLock == nullptr)
+    {
+        DsSharedLock = CreateMutexW(nullptr, FALSE, DS_SHARED_LOCK_NAME);
+        if (DsSharedLock == nullptr)
+        {
+            DsTrace(L"cannot open the shared thread list lock (%lu)", GetLastError());
+            return;
+        }
+    }
+    if (DsSharedMapping != nullptr)
+        return;
+
+    WaitForSingleObject(DsSharedLock, INFINITE);
+    DsSharedMapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, DS_SHARED_NAME);
+    if (DsSharedMapping == nullptr)
+    {
+        DsSharedMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(DsSharedList), DS_SHARED_NAME);
+        if (DsSharedMapping != nullptr)
+        {
+            DWORD* Bytes = static_cast<DWORD*>(MapViewOfFile(DsSharedMapping, FILE_MAP_WRITE, 0, 0, sizeof(*Bytes)));
+
+            if (Bytes != nullptr)
+            {
+                *Bytes = 0;
+                UnmapViewOfFile(Bytes);
+            }
+        }
+        else
+        {
+            DsTrace(L"cannot make the shared thread list (%lu)", GetLastError());
+        }
+    }
+    ReleaseMutex(DsSharedLock);
+}
+
+/* Copies the shared entries out; called with the shared lock held */
+static
+ULONG
+DsReadShared(
+    _Out_writes_(DS_SHARED_MAX_THREADS) DsSharedThread* Threads)
+{
+    const DsSharedList* List;
+    ULONG Count;
+
+    if (DsSharedMapping == nullptr)
+        return 0;
+    List = static_cast<const DsSharedList*>(MapViewOfFile(DsSharedMapping, FILE_MAP_READ, 0, 0, sizeof(*List)));
+    if (List == nullptr)
+        return 0;
+    Count = DsMin<ULONG>(List->Bytes / sizeof(DsSharedThread), DS_SHARED_MAX_THREADS);
+    memcpy(Threads, List->Threads, Count * sizeof(*Threads));
+    UnmapViewOfFile(List);
+    return Count;
+}
+
+/* Replaces this process's entries with the thread and level of each of its objects; called with the API lock held */
+static
+VOID
+DsPublishLevels(VOID)
+{
+    DsSharedThread* Threads;
+    DWORD Self = GetCurrentProcessId();
+    ULONG Count;
+    ULONG Kept = 0;
+
+    DsOpenShared();
+    if (DsSharedMapping == nullptr)
+        return;
+    Threads = static_cast<DsSharedThread*>(HeapAlloc(GetProcessHeap(), 0, DS_SHARED_MAX_THREADS * sizeof(*Threads)));
+    if (Threads == nullptr)
+        return;
+
+    WaitForSingleObject(DsSharedLock, INFINITE);
+    Count = DsReadShared(Threads);
+    for (ULONG Index = 0; Index < Count; Index++)
+    {
+        if (Threads[Index].Process != Self)
+            Threads[Kept++] = Threads[Index];
+    }
+    for (DsSound* Sound = DsSounds; Sound != nullptr && Kept < DS_SHARED_MAX_THREADS; Sound = Sound->NextSound)
+    {
+        Threads[Kept].Process = Self;
+        Threads[Kept].Thread = Sound->LevelThread;
+        Threads[Kept].Level = Sound->Level != 0 ? Sound->Level : DSSCL_NORMAL;
+        Kept += 1;
+    }
+
+    /* An empty list is never written, so the last entries stay behind once every object is gone */
+    if (Kept != 0)
+    {
+        DsSharedList* List = static_cast<DsSharedList*>(MapViewOfFile(DsSharedMapping, FILE_MAP_WRITE, 0, 0, sizeof(*List)));
+
+        if (List != nullptr)
+        {
+            List->Bytes = Kept * sizeof(*Threads);
+            memcpy(List->Threads, Threads, Kept * sizeof(*Threads));
+            UnmapViewOfFile(List);
+        }
+    }
+    ReleaseMutex(DsSharedLock);
+    HeapFree(GetProcessHeap(), 0, Threads);
+}
+
+/* The highest level any process holds on a thread */
+static
+DWORD
+DsSharedLevel(
+    _In_ DWORD Thread)
+{
+    DsSharedThread* Threads;
+    DWORD Level = 0;
+    ULONG Count;
+
+    if (DsSharedMapping == nullptr)
+    {
+        for (DsSound* Sound = DsSounds; Sound != nullptr; Sound = Sound->NextSound)
+        {
+            if (Sound->LevelThread == Thread && Sound->Level > Level)
+                Level = Sound->Level;
+        }
+        return Level;
+    }
+    Threads = static_cast<DsSharedThread*>(HeapAlloc(GetProcessHeap(), 0, DS_SHARED_MAX_THREADS * sizeof(*Threads)));
+    if (Threads == nullptr)
+        return 0;
+    WaitForSingleObject(DsSharedLock, INFINITE);
+    Count = DsReadShared(Threads);
+    ReleaseMutex(DsSharedLock);
+    for (ULONG Index = 0; Index < Count; Index++)
+    {
+        if (Threads[Index].Thread == Thread && Threads[Index].Level > Level)
+            Level = Threads[Index].Level;
+    }
+    HeapFree(GetProcessHeap(), 0, Threads);
+    return Level;
+}
+
+/* Called with the API lock held, after an object's thread or level changed */
+VOID
+DsLevelsChanged(VOID)
+{
+    DsPublishLevels();
+}
 
 VOID
 DsRegisterSound(
@@ -35,6 +206,7 @@ DsRegisterSound(
         Link = &(*Link)->NextSound;
     Sound->NextSound = nullptr;
     *Link = Sound;
+    DsPublishLevels();
 }
 
 /* Called with the API lock held */
@@ -82,6 +254,7 @@ DsUnregisterSound(
             break;
         }
     }
+    DsPublishLevels();
     if (DsSounds == nullptr)
         DsStopFocus();
 }
@@ -167,13 +340,7 @@ DsReadFocus(VOID)
             Thread = GetWindowThreadProcessId(Foreground, nullptr);
     }
     if (Thread != 0)
-    {
-        for (DsSound* Sound = DsSounds; Sound != nullptr; Sound = Sound->NextSound)
-        {
-            if (Sound->LevelThread == Thread && Sound->Level > Level)
-                Level = Sound->Level;
-        }
-    }
+        Level = DsSharedLevel(Thread);
 
     Changed = Thread != DsFocusThread || Level != DsFocusLevel;
     DsFocusThread = Thread;

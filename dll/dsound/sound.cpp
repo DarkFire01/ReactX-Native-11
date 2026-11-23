@@ -123,6 +123,7 @@ DsSound::SetLevel(
         Level = OldLevel;
         return hr;
     }
+    DsLevelsChanged();
     DsUpdateFocus(TRUE);
     return S_OK;
 }
