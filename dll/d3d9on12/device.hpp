@@ -381,6 +381,67 @@ VOID
 NineUnbindOutputs(
     _Inout_ NineResource* Resource);
 
+/* interop.cpp */
+VOID
+APIENTRY
+NineAcquireResource(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SYNCTOKEN* Args);
+
+VOID
+APIENTRY
+NineReleaseResource(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SYNCTOKEN* Args);
+
+HRESULT
+APIENTRY
+NineGetD3D12Device(
+    _In_ HANDLE hDevice,
+    _In_ REFIID Riid,
+    _COM_Outptr_ VOID** Object);
+
+HRESULT
+APIENTRY
+NineGetD3D12Resource(
+    _In_ HANDLE hResource,
+    _In_ REFIID Riid,
+    _COM_Outptr_ VOID** Object);
+
+VOID
+APIENTRY
+NineTransitionResource(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource,
+    _In_ D3D12_RESOURCE_STATES State);
+
+VOID
+APIENTRY
+NineSetResourceState(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource,
+    _In_ D3D12_RESOURCE_STATES State);
+
+VOID
+APIENTRY
+NineSetMaximumFrameLatency(
+    _In_ HANDLE hDevice,
+    _In_ UINT MaxFrameLatency);
+
+HRESULT
+APIENTRY
+NineAddResourceWaitsToQueue(
+    _In_ HANDLE hResource,
+    _In_ ID3D12CommandQueue* Queue);
+
+HRESULT
+APIENTRY
+NineAddDeferredWaitsToResource(
+    _In_ HANDLE hResource,
+    _In_ UINT NumSync,
+    _In_reads_(NumSync) UINT64* SignalValues,
+    _In_reads_(NumSync) ID3D12Fence** Fences);
+
 /* present.cpp */
 HRESULT
 APIENTRY

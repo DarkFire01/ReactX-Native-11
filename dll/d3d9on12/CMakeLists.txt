@@ -7,6 +7,7 @@ nt_add_usermode_dll(d3d9on12
         ddi.cpp
         device.cpp
         formats.cpp
+        interop.cpp
         main.cpp
         output.cpp
         present.cpp

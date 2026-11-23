@@ -235,8 +235,8 @@ NineFillDeviceFuncs(
     Functions->pfnSetMarker = NineAlwaysDone<>;
     Functions->pfnSetMarkerMode = NineAlwaysDone<>;
     Functions->pfnTrimResidencySet = nullptr;
-    Functions->pfnAcquireResource = NineMissingSyncToken<141>;
-    Functions->pfnReleaseResource = NineMissingSyncToken<142>;
+    Functions->pfnAcquireResource = NineAcquireResource;
+    Functions->pfnReleaseResource = NineReleaseResource;
 
     /* A single threaded runtime never renames or locks asynchronously */
     if (NineGetSettings().SingleThread)
