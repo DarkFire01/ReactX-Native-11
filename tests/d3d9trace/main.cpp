@@ -7075,6 +7075,57 @@ TrScenarioFixedVertex(
     DestroyWindow(Window);
 }
 
+/* The fixed function vertex pipeline on pure and hardware vertex processing devices of the plain object, with
+   a reset between two runs on the second */
+static
+VOID
+TrScenarioFixedVertexPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "fixed vertex plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrFixedVertexWork(Device);
+            if ((Behavior & D3DCREATE_PUREDEVICE) == 0)
+            {
+                TrPhase("fixed vertex plain reset");
+                Made = Parameters;
+                TrApi("Reset", Device->Reset(&Made));
+                TrSettle(Device);
+                TrFixedVertexWork(Device);
+            }
+            TrPhase("fixed vertex plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -7117,6 +7168,7 @@ static const TrScenario TrScenarios[] =
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
     { "fixed_vertex", TrScenarioFixedVertex },
+    { "fixed_vertex_plain", TrScenarioFixedVertexPlain },
 };
 
 static
