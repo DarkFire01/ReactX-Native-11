@@ -157,6 +157,111 @@ NcCheckModes(
     }
 }
 
+/* The same mode questions asked of an object from Direct3DCreate9, which walks GDI's mode list */
+static
+VOID
+NcCheckModesPlain(
+    _Inout_ NineCheck* Check)
+{
+    static const D3DFORMAT Formats[] =
+    {
+        D3DFMT_X8R8G8B8, D3DFMT_A8R8G8B8, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_A2R10G10B10, D3DFMT_P8,
+        D3DFMT_R8G8B8, D3DFMT_A16B16G16R16F, D3DFMT_UNKNOWN,
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    UINT Count = Plain->GetAdapterCount();
+
+    for (UINT Adapter = 0; Adapter <= Count; Adapter++)
+    {
+        D3DDISPLAYMODE Mode = {};
+        HRESULT hr = Plain->GetAdapterDisplayMode(Adapter, &Mode);
+
+        printf("plain_display[%u] = %08lX %ux%u@%u fmt %u\n", Adapter, hr, Mode.Width, Mode.Height, Mode.RefreshRate,
+               Mode.Format);
+        for (D3DFORMAT Format : Formats)
+        {
+            UINT Modes = Plain->GetAdapterModeCount(Adapter, Format);
+
+            printf("plain_modes[%u][%u] = %u\n", Adapter, Format, Modes);
+            for (UINT Index = 0; Index <= Modes; Index++)
+            {
+                memset(&Mode, 0xCC, sizeof(Mode));
+                hr = Plain->EnumAdapterModes(Adapter, Format, Index, &Mode);
+                printf("plain_mode[%u][%u][%u] = %08lX %ux%u@%u fmt %u\n", Adapter, Format, Index, hr, Mode.Width,
+                       Mode.Height, Mode.RefreshRate, Mode.Format);
+            }
+        }
+    }
+    Plain->Release();
+}
+
+/* Filters, structure sizes and rotation of the extended mode methods */
+static
+VOID
+NcCheckModesEx(
+    _Inout_ NineCheck* Check)
+{
+    static const D3DFORMAT Formats[] =
+    {
+        D3DFMT_X8R8G8B8, D3DFMT_A2R10G10B10, D3DFMT_A16B16G16R16F, D3DFMT_A2B10G10R10_XR_BIAS, D3DFMT_R5G6B5,
+        D3DFMT_A8R8G8B8, D3DFMT_UNKNOWN,
+    };
+    UINT Count;
+
+    if (Check->Ex == nullptr)
+        return;
+
+    Count = Check->Ex->GetAdapterCount();
+    for (UINT Adapter = 0; Adapter <= Count; Adapter++)
+    {
+        D3DDISPLAYMODEEX Mode = {};
+        D3DDISPLAYROTATION Rotation = static_cast<D3DDISPLAYROTATION>(0xCC);
+        HRESULT hr;
+
+        Mode.Size = sizeof(Mode);
+        hr = Check->Ex->GetAdapterDisplayModeEx(Adapter, &Mode, &Rotation);
+        printf("ex_display[%u] = %08lX %ux%u@%u fmt %u order %u rotation %u\n", Adapter, hr, Mode.Width, Mode.Height,
+               Mode.RefreshRate, Mode.Format, Mode.ScanLineOrdering, Rotation);
+        Mode.Size = 12;
+        hr = Check->Ex->GetAdapterDisplayModeEx(Adapter, &Mode, nullptr);
+        printf("ex_display_size[%u] = %08lX\n", Adapter, hr);
+
+        for (D3DFORMAT Format : Formats)
+        {
+            for (UINT Order = 0; Order <= 3; Order++)
+            {
+                D3DDISPLAYMODEFILTER Filter = { sizeof(Filter), Format, static_cast<D3DSCANLINEORDERING>(Order) };
+                UINT Modes = Check->Ex->GetAdapterModeCountEx(Adapter, &Filter);
+
+                printf("ex_modes[%u][%u][%u] = %u\n", Adapter, Format, Order, Modes);
+                for (UINT Index = 0; Index <= Modes && Index < 4; Index++)
+                {
+                    memset(&Mode, 0xCC, sizeof(Mode));
+                    Mode.Size = sizeof(Mode);
+                    hr = Check->Ex->EnumAdapterModesEx(Adapter, &Filter, Index, &Mode);
+                    printf("ex_mode[%u][%u][%u][%u] = %08lX %ux%u@%u fmt %u order %u\n", Adapter, Format, Order, Index,
+                           hr, Mode.Width, Mode.Height, Mode.RefreshRate, Mode.Format, Mode.ScanLineOrdering);
+                }
+                hr = Check->Ex->EnumAdapterModesEx(Adapter, &Filter, Modes, &Mode);
+                printf("ex_mode_past[%u][%u][%u] = %08lX\n", Adapter, Format, Order, hr);
+            }
+        }
+
+        {
+            D3DDISPLAYMODEFILTER Filter = { 8, D3DFMT_X8R8G8B8, D3DSCANLINEORDERING_UNKNOWN };
+
+            Mode.Size = sizeof(Mode);
+            printf("ex_filter_size[%u] = %u %08lX\n", Adapter, Check->Ex->GetAdapterModeCountEx(Adapter, &Filter),
+                   Check->Ex->EnumAdapterModesEx(Adapter, &Filter, 0, &Mode));
+            printf("ex_filter_null[%u] = %u %08lX\n", Adapter, Check->Ex->GetAdapterModeCountEx(Adapter, nullptr),
+                   Check->Ex->EnumAdapterModesEx(Adapter, nullptr, 0, &Mode));
+            Filter.Size = sizeof(Filter);
+            Mode.Size = 16;
+            printf("ex_mode_size[%u] = %08lX\n", Adapter, Check->Ex->EnumAdapterModesEx(Adapter, &Filter, 0, &Mode));
+        }
+    }
+}
+
 static
 VOID
 NcCheckCaps(
@@ -411,6 +516,8 @@ static const NineCheckInfo NcChecks[] =
     { "interfaces", NcCheckInterfaces },
     { "identifier", NcCheckIdentifier },
     { "modes", NcCheckModes },
+    { "modes_plain", NcCheckModesPlain },
+    { "modes_ex", NcCheckModesEx },
     { "caps", NcCheckCaps },
     { "devtype", NcCheckDeviceType },
     { "formats", NcCheckFormats },
