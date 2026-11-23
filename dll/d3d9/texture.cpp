@@ -1869,20 +1869,16 @@ D9CoreOf(
     }
 }
 
-/* Pixel samplers come first, then the displacement map sampler and the vertex samplers */
+/* Pixel samplers come first, then the displacement map sampler and the vertex samplers; samplers 16 to 20 name
+   the same slots as the displacement map and vertex samplers */
 static
 BOOLEAN
 D9TextureSlot(
     _In_ DWORD Stage,
     _Out_ UINT* Slot)
 {
-    if (Stage < 16)
-        *Slot = Stage;
-    else if (Stage >= D3DDMAPSAMPLER && Stage <= D3DVERTEXTEXTURESAMPLER3)
-        *Slot = 16 + (Stage - D3DDMAPSAMPLER);
-    else
-        return FALSE;
-    return TRUE;
+    *Slot = Stage >= D3DDMAPSAMPLER ? Stage - (D3DDMAPSAMPLER - 16) : Stage;
+    return *Slot < D9TextureSlotCount;
 }
 
 STDMETHODIMP
