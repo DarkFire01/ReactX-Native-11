@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "objects.hpp"
+#include "pipeline.hpp"
 
 /* Direct3D 12 keeps one device per adapter; a second D3D12CreateDevice hands back the first */
 struct RxDeviceSlot
@@ -225,6 +225,10 @@ RxDevice12::Initialize(
     PagingQueue.SyncObject = Paging.hSyncObject;
     PagingQueue.FenceCpuVa = Paging.FenceValueCPUVirtualAddress;
 
+    hr = CreateDefaults();
+    if (FAILED(hr))
+        return hr;
+
     hr = QueryVirtualAddressBits();
     if (FAILED(hr))
         return hr;
@@ -249,6 +253,13 @@ RxDevice12::~RxDevice12()
 
     if (CommandPool.pDrvPrivate != nullptr)
         CoreFunctions.pfnDestroyCommandPool(DriverDevice, CommandPool);
+
+    if (DefaultGraphics != nullptr)
+        DefaultGraphics->Release();
+    if (DefaultCompute != nullptr)
+        DefaultCompute->Release();
+    if (DefaultRoot != nullptr)
+        DefaultRoot->Release();
 
     if (IsDriverDeviceCreated)
         Adapter->GetFunctions().pfnDestroyDevice(DriverDevice);
@@ -312,7 +323,8 @@ RxDevice12::MakePageableResident(
 
     Args.NumAdapters = 1;
     Args.pRTPagingQueue = &Queue;
-    Args.NumObjects = 1;
+    /* Pipeline states have no allocations of their own, so the list stays empty */
+    Args.NumObjects = DriverHandle != nullptr ? 1 : 0;
     Args.pObjects = &Object;
     Args.Flags.CantTrimFurther = TRUE;
     Args.pPagingFenceValue = FenceValues;

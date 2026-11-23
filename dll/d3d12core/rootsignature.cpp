@@ -722,9 +722,10 @@ RxSerializeVersionedRootSignature(
 /* Reading */
 
 BOOLEAN
-RxFindRootPart(
+RxFindContainerPart(
     _In_reads_bytes_(Size) const BYTE* Data,
     _In_ SIZE_T Size,
+    _In_ UINT FourCc,
     _Out_ const BYTE** Part,
     _Out_ UINT* PartSize)
 {
@@ -750,19 +751,19 @@ RxFindRootPart(
     for (Index = 0; Index < Count; Index++)
     {
         UINT Offset;
-        UINT FourCc;
+        UINT Name;
         UINT Length;
 
         CopyMemory(&Offset, Data + RxContainerHeaderSize + Index * sizeof(UINT), sizeof(Offset));
         if (Offset > Size || Size - Offset < RxPartHeaderSize)
             return FALSE;
 
-        CopyMemory(&FourCc, Data + Offset, sizeof(FourCc));
+        CopyMemory(&Name, Data + Offset, sizeof(Name));
         CopyMemory(&Length, Data + Offset + 4, sizeof(Length));
         if (Length > Size - Offset - RxPartHeaderSize)
             return FALSE;
 
-        if (FourCc == RxFourCcRts0)
+        if (Name == FourCc)
         {
             *Part = Data + Offset + RxPartHeaderSize;
             *PartSize = Length;
@@ -771,6 +772,16 @@ RxFindRootPart(
     }
 
     return FALSE;
+}
+
+BOOLEAN
+RxFindRootPart(
+    _In_reads_bytes_(Size) const BYTE* Data,
+    _In_ SIZE_T Size,
+    _Out_ const BYTE** Part,
+    _Out_ UINT* PartSize)
+{
+    return RxFindContainerPart(Data, Size, RxFourCcRts0, Part, PartSize);
 }
 
 RxRootSignatureDesc::~RxRootSignatureDesc()

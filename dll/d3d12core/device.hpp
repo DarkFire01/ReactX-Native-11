@@ -15,6 +15,8 @@
 class RxDevice12;
 class RxSchedulingGroup;
 class RxRootSignature;
+class RxPipelineState;
+class RxPipelinePart;
 struct RxFormatContext12;
 
 /* The one DDI revision this runtime drives: release 8, build 118 */
@@ -521,6 +523,8 @@ public:
         _In_ RxRootSignature* Signature);
 
 private:
+    friend class RxPipelinePart;
+
     RxDevice12() = default;
     ~RxDevice12();
 
@@ -563,6 +567,10 @@ private:
 
     HRESULT
     CreateInternalObjects();
+
+    /* The empty root signature and the graphics and compute pipelines every device keeps */
+    HRESULT
+    CreateDefaults();
 
     HRESULT
     QueryValidationCaps();
@@ -651,6 +659,11 @@ private:
     RxValidationCaps12 ValidationCaps = {};
     SRWLOCK RootCacheLock = SRWLOCK_INIT;
     RxRootSignature* RootCache = nullptr;
+    SRWLOCK PartCacheLock = SRWLOCK_INIT;
+    RxPipelinePart* PartCache = nullptr;
+    RxRootSignature* DefaultRoot = nullptr;
+    RxPipelineState* DefaultGraphics = nullptr;
+    RxPipelineState* DefaultCompute = nullptr;
     RxPrivateDataStore PrivateData;
 };
 

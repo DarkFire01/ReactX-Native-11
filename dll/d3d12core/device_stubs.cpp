@@ -9,28 +9,6 @@
 
 #include "device.hpp"
 
-HRESULT
-STDMETHODCALLTYPE
-RxDevice12::CreateGraphicsPipelineState(
-    _In_ const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pDesc,
-    REFIID riid,
-    _COM_Outptr_ void** ppPipelineState)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxDevice12::CreateComputePipelineState(
-    _In_ const D3D12_COMPUTE_PIPELINE_STATE_DESC* pDesc,
-    REFIID riid,
-    _COM_Outptr_ void** ppPipelineState)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
 VOID
 STDMETHODCALLTYPE
 RxDevice12::CreateConstantBufferView(

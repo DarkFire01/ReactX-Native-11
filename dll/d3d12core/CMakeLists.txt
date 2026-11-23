@@ -26,6 +26,7 @@ nt_add_usermode_dll(d3d12core
         resource.cpp
         resource_stubs.cpp
         resourcevalidate.cpp
+        pipeline.cpp
         rootsignature.cpp
         rootsigobject.cpp
         schedulinggroup.cpp)

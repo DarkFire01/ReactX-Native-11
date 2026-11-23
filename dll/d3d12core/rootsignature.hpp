@@ -69,6 +69,15 @@ private:
     D3D_ROOT_SIGNATURE_VERSION Original = D3D_ROOT_SIGNATURE_VERSION_1_0;
 };
 
+/* A part of a DXBC style container by its four character code */
+BOOLEAN
+RxFindContainerPart(
+    _In_reads_bytes_(Size) const BYTE* Data,
+    _In_ SIZE_T Size,
+    _In_ UINT FourCc,
+    _Out_ const BYTE** Part,
+    _Out_ UINT* PartSize);
+
 /* The RTS0 part inside a container, which may also hold a whole shader */
 BOOLEAN
 RxFindRootPart(
