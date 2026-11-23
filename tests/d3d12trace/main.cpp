@@ -2691,6 +2691,157 @@ TrScenarioPipelines(
     Root.Reset();
 }
 
+static
+VOID
+TrScenarioHeaps(
+    _In_ TrRun& Run)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12Heap> Buffers;
+    ComPtr<ID3D12Heap> Textures;
+    ComPtr<ID3D12Heap> Upload;
+    ComPtr<ID3D12Resource> First;
+    ComPtr<ID3D12Resource> Second;
+    ComPtr<ID3D12Resource> Texture;
+    ComPtr<ID3D12Resource> Mapped;
+    ComPtr<ID3D12QueryHeap> Occlusion;
+    ComPtr<ID3D12QueryHeap> Timestamps;
+    ComPtr<ID3D12CommandSignature> Signature;
+    D3D12_HEAP_DESC HeapDesc = {};
+    D3D12_RESOURCE_DESC Desc = {};
+    D3D12_QUERY_HEAP_DESC QueryDesc = {};
+    D3D12_INDIRECT_ARGUMENT_DESC Argument = {};
+    D3D12_COMMAND_SIGNATURE_DESC SignatureDesc = {};
+    void* Data = nullptr;
+
+    if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))))
+        return;
+
+    TrPhase("CreateHeap default buffers");
+    HeapDesc.SizeInBytes = 4 * 65536;
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+    printf("result %08X\n", (UINT)Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Buffers)));
+
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Desc.Width = 65536;
+    Desc.Height = 1;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    TrPhase("CreatePlacedResource buffer at 0");
+    printf("result %08X\n", (UINT)Device->CreatePlacedResource(Buffers.Get(), 0, &Desc, D3D12_RESOURCE_STATE_COMMON,
+                                                               nullptr, IID_PPV_ARGS(&First)));
+    TrPhase("CreatePlacedResource without output");
+    printf("result %08X\n", (UINT)Device->CreatePlacedResource(Buffers.Get(), 65536, &Desc, D3D12_RESOURCE_STATE_COMMON,
+                                                               nullptr, __uuidof(ID3D12Resource), nullptr));
+    TrPhase("CreatePlacedResource buffer at 128k");
+    Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    printf("result %08X\n", (UINT)Device->CreatePlacedResource(Buffers.Get(), 2 * 65536, &Desc,
+                                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                               IID_PPV_ARGS(&Second)));
+
+    TrPhase("CreateHeap default rt textures");
+    HeapDesc.SizeInBytes = 1024 * 1024;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
+    printf("result %08X\n", (UINT)Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Textures)));
+    Desc = {};
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Desc.Width = 64;
+    Desc.Height = 64;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Desc.SampleDesc.Count = 1;
+    Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    TrPhase("CreatePlacedResource texture");
+    if (Textures != nullptr)
+    {
+        printf("result %08X\n", (UINT)Device->CreatePlacedResource(Textures.Get(), 65536, &Desc,
+                                                                   D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                                                   IID_PPV_ARGS(&Texture)));
+    }
+
+    TrPhase("CreateHeap upload");
+    HeapDesc.SizeInBytes = 65536;
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+    printf("result %08X\n", (UINT)Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Upload)));
+    Desc = {};
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Desc.Width = 4096;
+    Desc.Height = 1;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    TrPhase("CreatePlacedResource upload and map");
+    if (Upload != nullptr)
+    {
+        printf("result %08X\n", (UINT)Device->CreatePlacedResource(Upload.Get(), 0, &Desc,
+                                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                   IID_PPV_ARGS(&Mapped)));
+    }
+    if (Mapped != nullptr)
+    {
+        printf("map %08X\n", (UINT)Mapped->Map(0, nullptr, &Data));
+        Mapped->Unmap(0, nullptr);
+    }
+
+    TrPhase("CreateHeap odd size custom");
+    HeapDesc = {};
+    HeapDesc.SizeInBytes = 100000;
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+    HeapDesc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+    HeapDesc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
+    {
+        ComPtr<ID3D12Heap> Odd;
+
+        printf("result %08X\n", (UINT)Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Odd)));
+    }
+    TrPhase("CreateHeap 4m aligned");
+    HeapDesc = {};
+    HeapDesc.SizeInBytes = 4194304;
+    HeapDesc.Alignment = 4194304;
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+    {
+        ComPtr<ID3D12Heap> Large;
+
+        printf("result %08X\n", (UINT)Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Large)));
+    }
+
+    TrPhase("CreateQueryHeap occlusion");
+    QueryDesc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+    QueryDesc.Count = 16;
+    printf("result %08X\n", (UINT)Device->CreateQueryHeap(&QueryDesc, IID_PPV_ARGS(&Occlusion)));
+    TrPhase("CreateQueryHeap timestamp");
+    QueryDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    QueryDesc.Count = 8;
+    printf("result %08X\n", (UINT)Device->CreateQueryHeap(&QueryDesc, IID_PPV_ARGS(&Timestamps)));
+
+    TrPhase("CreateCommandSignature draw");
+    Argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    SignatureDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
+    SignatureDesc.NumArgumentDescs = 1;
+    SignatureDesc.pArgumentDescs = &Argument;
+    printf("result %08X\n", (UINT)Device->CreateCommandSignature(&SignatureDesc, nullptr, IID_PPV_ARGS(&Signature)));
+
+    TrPhase("Release");
+    Signature.Reset();
+    Timestamps.Reset();
+    Occlusion.Reset();
+    Mapped.Reset();
+    Upload.Reset();
+    Texture.Reset();
+    Textures.Reset();
+    Second.Reset();
+    First.Reset();
+    Buffers.Reset();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -2706,6 +2857,7 @@ static const TrScenario TrScenarios[] =
     { "features", TrScenarioFeatures },
     { "rootsigs", TrScenarioRootSignatures },
     { "pipelines", TrScenarioPipelines },
+    { "heaps", TrScenarioHeaps },
 };
 
 int

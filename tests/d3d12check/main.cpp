@@ -3194,6 +3194,427 @@ TcCheckIdentity(
     }
 }
 
+/* A heap's description and what its second interface answers */
+static
+VOID
+TcReportHeap(
+    _In_ TwelveCheck& Check,
+    _In_z_ PCSTR Name,
+    _In_ ID3D12Heap* Heap)
+{
+    ComPtr<ID3D12Heap1> Heap1;
+    ComPtr<IUnknown> Session;
+    D3D12_HEAP_DESC Desc = Heap->GetDesc();
+    CHAR Key[96];
+    HRESULT hr = E_NOINTERFACE;
+
+    if (SUCCEEDED(Heap->QueryInterface(IID_PPV_ARGS(&Heap1))))
+        hr = Heap1->GetProtectedResourceSession(IID_PPV_ARGS(&Session));
+
+    sprintf_s(Key, "%s_desc", Name);
+    Check.Report(Key, "size %llu type %d page %d pool %d nodes %u:%u align %llu flags 0x%x session 0x%08lX %d",
+                 Desc.SizeInBytes, Desc.Properties.Type, Desc.Properties.CPUPageProperty,
+                 Desc.Properties.MemoryPoolPreference, Desc.Properties.CreationNodeMask,
+                 Desc.Properties.VisibleNodeMask, Desc.Alignment, Desc.Flags, hr, Session == nullptr);
+}
+
+/* What a placed resource says about itself and where it sits */
+static
+VOID
+TcReportPlaced(
+    _In_ TwelveCheck& Check,
+    _In_z_ PCSTR Name,
+    _In_ ID3D12Resource* Resource,
+    _In_ D3D12_GPU_VIRTUAL_ADDRESS Base)
+{
+    D3D12_RESOURCE_DESC Desc = Resource->GetDesc();
+    D3D12_HEAP_PROPERTIES Properties = {};
+    D3D12_HEAP_FLAGS Flags = D3D12_HEAP_FLAG_NONE;
+    D3D12_GPU_VIRTUAL_ADDRESS Address = Resource->GetGPUVirtualAddress();
+    CHAR Key[96];
+    HRESULT hr;
+
+    hr = Resource->GetHeapProperties(&Properties, &Flags);
+    sprintf_s(Key, "%s_desc", Name);
+    Check.Report(Key, "align %llu mips %u heap 0x%08lX type %d page %d pool %d nodes %u:%u flags 0x%x va %s %lld",
+                 Desc.Alignment, Desc.MipLevels, hr, Properties.Type, Properties.CPUPageProperty,
+                 Properties.MemoryPoolPreference, Properties.CreationNodeMask, Properties.VisibleNodeMask, Flags,
+                 Address == 0 ? "0" : "set", Address == 0 || Base == 0 ? 0ll : (LONGLONG)(Address - Base));
+}
+
+/* placed: heaps, their checks and resources placed in them */
+static
+VOID
+TcCheckPlaced(
+    _In_ TwelveCheck& Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT64 Size;
+        D3D12_HEAP_TYPE Type;
+        D3D12_CPU_PAGE_PROPERTY Page;
+        D3D12_MEMORY_POOL Pool;
+        UINT Creation;
+        UINT Visible;
+        UINT64 Alignment;
+        UINT Flags;
+    } Heaps[] =
+    {
+        { "default", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "odd_size", 100000, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "tiny", 1, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "zero", 0, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "huge", 0xFFFFFFFFFFC00000ull, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "huge_upload", 0x100000000ull, D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "align_4k", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 4096, 0 },
+        { "align_64k", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 65536, 0 },
+        { "align_4m", 4194304, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 4194304, 0 },
+        { "align_both", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 4194304 | 65536, 0 },
+        { "buffers_only", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS },
+        { "rt_ds_only", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES },
+        { "non_rt_ds_only", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES },
+        { "deny_buffers", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_DENY_BUFFERS },
+        { "deny_all", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES | D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES },
+        { "display", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_DISPLAY },
+        { "shared", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_SHARED },
+        { "shared_upload", 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_SHARED },
+        { "cross_adapter", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER },
+        { "cross_adapter_deny", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER | D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS },
+        { "write_watch_default", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_WRITE_WATCH },
+        { "write_watch_upload", 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_WRITE_WATCH },
+        { "atomics_default", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_SHADER_ATOMICS },
+        { "atomics_upload", 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_ALLOW_SHADER_ATOMICS },
+        { "unknown_flag", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0x10 },
+        { "create_not_zeroed", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, D3D12_HEAP_FLAG_CREATE_NOT_ZEROED },
+        { "upload", 65536, D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "readback", 65536, D3D12_HEAP_TYPE_READBACK, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "gpu_upload", 65536, D3D12_HEAP_TYPE_GPU_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "type_zero", 65536, (D3D12_HEAP_TYPE)0, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "type_bogus", 65536, (D3D12_HEAP_TYPE)9, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "default_with_page", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_WRITE_BACK, D3D12_MEMORY_POOL_UNKNOWN, 0, 0, 0, 0 },
+        { "custom_wb_l0", 65536, D3D12_HEAP_TYPE_CUSTOM, D3D12_CPU_PAGE_PROPERTY_WRITE_BACK, D3D12_MEMORY_POOL_L0, 0, 0, 0, 0 },
+        { "custom_na_l1", 65536, D3D12_HEAP_TYPE_CUSTOM, D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE, D3D12_MEMORY_POOL_L1, 0, 0, 0, 0 },
+        { "custom_wc_l1", 65536, D3D12_HEAP_TYPE_CUSTOM, D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE, D3D12_MEMORY_POOL_L1, 0, 0, 0, 0 },
+        { "custom_unknown", 65536, D3D12_HEAP_TYPE_CUSTOM, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_L0, 0, 0, 0, 0 },
+        { "nodes_1_1", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 1, 0, 0 },
+        { "nodes_2_2", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 2, 2, 0, 0 },
+        { "nodes_1_0", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 0, 0, 0 },
+        { "nodes_1_3", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 3, 0, 0 },
+        { "nodes_3_3", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 3, 3, 0, 0 },
+        { "nodes_0_2", 65536, D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 2, 0, 0 },
+    };
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12Device4> Device4;
+    ComPtr<ID3D12Device8> Device8;
+    ComPtr<ID3D12Device10> Device10;
+    ComPtr<ID3D12Heap> Buffers;
+    ComPtr<ID3D12Heap> Upload;
+    ComPtr<ID3D12Heap> Targets;
+    ComPtr<ID3D12Heap> Textures;
+    ComPtr<ID3D12Resource> First;
+    ComPtr<ID3D12Resource> Second;
+    ComPtr<ID3D12Resource> Mapped[2];
+    D3D12_HEAP_DESC HeapDesc = {};
+    D3D12_RESOURCE_DESC Buffer = {};
+    D3D12_RESOURCE_DESC Texture = {};
+    D3D12_GPU_VIRTUAL_ADDRESS Base = 0;
+    HRESULT hr;
+
+    if (FAILED(Check.MakeDevice(&Device)))
+    {
+        Check.Report("device", "none");
+        return;
+    }
+
+    /* A NULL heap desc is left out: the system reads its node mask before checking it */
+    for (const auto& Each : Heaps)
+    {
+        ComPtr<ID3D12Heap> Heap;
+        CHAR Key[96];
+
+        HeapDesc = {};
+        HeapDesc.SizeInBytes = Each.Size;
+        HeapDesc.Properties.Type = Each.Type;
+        HeapDesc.Properties.CPUPageProperty = Each.Page;
+        HeapDesc.Properties.MemoryPoolPreference = Each.Pool;
+        HeapDesc.Properties.CreationNodeMask = Each.Creation;
+        HeapDesc.Properties.VisibleNodeMask = Each.Visible;
+        HeapDesc.Alignment = Each.Alignment;
+        HeapDesc.Flags = (D3D12_HEAP_FLAGS)Each.Flags;
+
+        sprintf_s(Key, "%s_check", Each.Name);
+        Check.Report(Key, "0x%08lX", Device->CreateHeap(&HeapDesc, __uuidof(ID3D12Heap), nullptr));
+        hr = Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Heap));
+        Check.Report(Each.Name, "0x%08lX", hr);
+        if (SUCCEEDED(hr))
+            TcReportHeap(Check, Each.Name, Heap.Get());
+    }
+
+    HeapDesc = {};
+    HeapDesc.SizeInBytes = 4 * 65536;
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+    Check.Report("buffers", "0x%08lX", Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Buffers)));
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    Check.Report("upload_heap", "0x%08lX", Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Upload)));
+    HeapDesc.SizeInBytes = 8 * 65536;
+    HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES;
+    Check.Report("targets", "0x%08lX", Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Targets)));
+    HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+    Check.Report("textures", "0x%08lX", Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Textures)));
+    if (Buffers == nullptr || Upload == nullptr || Targets == nullptr || Textures == nullptr)
+        return;
+
+    Buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Buffer.Width = 65536;
+    Buffer.Height = 1;
+    Buffer.DepthOrArraySize = 1;
+    Buffer.MipLevels = 1;
+    Buffer.SampleDesc.Count = 1;
+    Buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Texture.Width = 64;
+    Texture.Height = 64;
+    Texture.DepthOrArraySize = 1;
+    Texture.MipLevels = 1;
+    Texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Texture.SampleDesc.Count = 1;
+
+    Check.Report("placed_null_heap", "0x%08lX", Device->CreatePlacedResource(nullptr, 0, &Buffer,
+                                                                             D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                             IID_PPV_ARGS(&First)));
+    Check.Report("placed_null_desc", "0x%08lX", Device->CreatePlacedResource(Buffers.Get(), 0, nullptr,
+                                                                             D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                             IID_PPV_ARGS(&First)));
+    Check.Report("placed_check", "0x%08lX", Device->CreatePlacedResource(Buffers.Get(), 0, &Buffer,
+                                                                         D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                         __uuidof(ID3D12Resource), nullptr));
+    hr = Device->CreatePlacedResource(Buffers.Get(), 0, &Buffer, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                      IID_PPV_ARGS(&First));
+    Check.Report("placed_first", "0x%08lX", hr);
+    if (First != nullptr)
+    {
+        Base = First->GetGPUVirtualAddress();
+        TcReportPlaced(Check, "placed_first", First.Get(), Base);
+    }
+    Check.Report("heap_refs", "%lu", (Buffers->AddRef(), Buffers->Release()));
+    hr = Device->CreatePlacedResource(Buffers.Get(), 3 * 65536, &Buffer, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                      IID_PPV_ARGS(&Second));
+    Check.Report("placed_last", "0x%08lX", hr);
+    if (Second != nullptr)
+        TcReportPlaced(Check, "placed_last", Second.Get(), Base);
+    First.Reset();
+    Second.Reset();
+    Check.Report("heap_refs_after", "%lu", (Buffers->AddRef(), Buffers->Release()));
+
+    {
+        static const struct
+        {
+            PCSTR Name;
+            UINT64 Offset;
+            UINT64 Width;
+            UINT Flags;
+            D3D12_RESOURCE_STATES State;
+        } Cases[] =
+        {
+            { "overlap", 0, 65536, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "unaligned", 256, 4096, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "past_end", 4 * 65536, 4096, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "straddle", 3 * 65536, 2 * 65536, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "wrap", 0xFFFFFFFFFFFF0000ull, 0x20000, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "small", 65536, 1, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "uav", 65536, 4096, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS },
+            { "copy_dest", 65536, 4096, 0, D3D12_RESOURCE_STATE_COPY_DEST },
+            { "render_target_flag", 65536, 4096, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON },
+        };
+
+        for (const auto& Each : Cases)
+        {
+            ComPtr<ID3D12Resource> Placed;
+            D3D12_RESOURCE_DESC Desc = Buffer;
+            CHAR Key[96];
+
+            Desc.Width = Each.Width;
+            Desc.Flags = (D3D12_RESOURCE_FLAGS)Each.Flags;
+            hr = Device->CreatePlacedResource(Buffers.Get(), Each.Offset, &Desc, Each.State, nullptr,
+                                              IID_PPV_ARGS(&Placed));
+            sprintf_s(Key, "buffer_%s", Each.Name);
+            Check.Report(Key, "0x%08lX", hr);
+            if (Placed != nullptr)
+                TcReportPlaced(Check, Key, Placed.Get(), Base);
+        }
+    }
+
+    for (UINT Index = 0; Index < 2; Index++)
+    {
+        D3D12_RESOURCE_DESC Desc = Buffer;
+        CHAR Key[64];
+
+        Desc.Width = 4096;
+        hr = Device->CreatePlacedResource(Upload.Get(), Index * 65536, &Desc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                          nullptr, IID_PPV_ARGS(&Mapped[Index]));
+        sprintf_s(Key, "upload_%u", Index);
+        Check.Report(Key, "0x%08lX", hr);
+    }
+    Check.Report("upload_common", "0x%08lX", Device->CreatePlacedResource(Upload.Get(), 2 * 65536, &Buffer,
+                                                                          D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                          IID_PPV_ARGS(&First)));
+    First.Reset();
+    Check.Report("upload_texture", "0x%08lX", Device->CreatePlacedResource(Upload.Get(), 2 * 65536, &Texture,
+                                                                           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                           IID_PPV_ARGS(&First)));
+    First.Reset();
+    if (Mapped[0] != nullptr && Mapped[1] != nullptr)
+    {
+        BYTE* Data[2] = {};
+        HRESULT Results[2];
+        D3D12_RANGE None = { 0, 0 };
+
+        TcReportPlaced(Check, "upload_0", Mapped[0].Get(), 0);
+        TcReportPlaced(Check, "upload_1", Mapped[1].Get(), Mapped[0]->GetGPUVirtualAddress());
+        Results[0] = Mapped[0]->Map(0, &None, reinterpret_cast<void**>(&Data[0]));
+        Results[1] = Mapped[1]->Map(0, &None, reinterpret_cast<void**>(&Data[1]));
+        Check.Report("map", "0x%08lX 0x%08lX apart %lld", Results[0], Results[1],
+                     Data[0] != nullptr && Data[1] != nullptr ? (LONGLONG)(Data[1] - Data[0]) : -1ll);
+        if (Data[0] != nullptr)
+        {
+            Data[0][0] = 0x5A;
+            Mapped[0]->Unmap(0, nullptr);
+        }
+        if (Data[1] != nullptr)
+            Mapped[1]->Unmap(0, nullptr);
+        Data[0] = nullptr;
+        Check.Report("map_again", "0x%08lX", Mapped[0]->Map(0, nullptr, reinterpret_cast<void**>(&Data[0])));
+        if (Data[0] != nullptr)
+        {
+            Check.Report("map_kept", "0x%02x", Data[0][0]);
+            Mapped[0]->Unmap(0, nullptr);
+        }
+        Check.Report("map_sub1", "0x%08lX", Mapped[0]->Map(1, nullptr, nullptr));
+    }
+
+    {
+        static const struct
+        {
+            PCSTR Name;
+            BOOLEAN Target;
+            UINT64 Offset;
+            UINT Flags;
+            UINT Samples;
+            UINT64 Alignment;
+            D3D12_RESOURCE_STATES State;
+        } Cases[] =
+        {
+            { "rt_in_targets", TRUE, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 1, 0, D3D12_RESOURCE_STATE_RENDER_TARGET },
+            { "plain_in_targets", TRUE, 0, 0, 1, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "plain_in_textures", FALSE, 0, 0, 1, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "rt_in_textures", FALSE, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 1, 0, D3D12_RESOURCE_STATE_RENDER_TARGET },
+            { "small_align", FALSE, 4096, 0, 1, 4096, D3D12_RESOURCE_STATE_COMMON },
+            { "small_align_bad", FALSE, 256, 0, 1, 4096, D3D12_RESOURCE_STATE_COMMON },
+            { "msaa", TRUE, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 4, 0, D3D12_RESOURCE_STATE_RENDER_TARGET },
+            { "msaa_64k", TRUE, 65536, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 4, 65536, D3D12_RESOURCE_STATE_RENDER_TARGET },
+            { "offset_64k", FALSE, 7 * 65536, 0, 1, 0, D3D12_RESOURCE_STATE_COPY_DEST },
+            { "past_end", FALSE, 8 * 65536, 0, 1, 0, D3D12_RESOURCE_STATE_COMMON },
+        };
+
+        for (const auto& Each : Cases)
+        {
+            ComPtr<ID3D12Resource> Placed;
+            D3D12_RESOURCE_DESC Desc = Texture;
+            CHAR Key[96];
+
+            Desc.Flags = (D3D12_RESOURCE_FLAGS)Each.Flags;
+            Desc.SampleDesc.Count = Each.Samples;
+            Desc.Alignment = Each.Alignment;
+            hr = Device->CreatePlacedResource(Each.Target ? Targets.Get() : Textures.Get(), Each.Offset, &Desc,
+                                              Each.State, nullptr, IID_PPV_ARGS(&Placed));
+            sprintf_s(Key, "texture_%s", Each.Name);
+            Check.Report(Key, "0x%08lX", hr);
+            if (Placed != nullptr)
+                TcReportPlaced(Check, Key, Placed.Get(), 0);
+        }
+    }
+
+    Check.Report("buffer_in_targets", "0x%08lX", Device->CreatePlacedResource(Targets.Get(), 0, &Buffer,
+                                                                              D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                              IID_PPV_ARGS(&First)));
+    First.Reset();
+
+    if (SUCCEEDED(Device.As(&Device8)))
+    {
+        D3D12_RESOURCE_DESC1 Wide = {};
+
+        Wide.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        Wide.Width = 4096;
+        Wide.Height = 1;
+        Wide.DepthOrArraySize = 1;
+        Wide.MipLevels = 1;
+        Wide.SampleDesc.Count = 1;
+        Wide.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        hr = Device8->CreatePlacedResource1(Buffers.Get(), 65536, &Wide, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                            IID_PPV_ARGS(&First));
+        Check.Report("placed1", "0x%08lX", hr);
+        if (First != nullptr)
+            TcReportPlaced(Check, "placed1", First.Get(), Base);
+        First.Reset();
+        Check.Report("placed1_null_desc", "0x%08lX", Device8->CreatePlacedResource1(Buffers.Get(), 0, nullptr,
+                                                                                    D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                                    IID_PPV_ARGS(&First)));
+    }
+
+    if (SUCCEEDED(Device.As(&Device10)))
+    {
+        D3D12_RESOURCE_DESC1 Wide = {};
+
+        Wide.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        Wide.Width = 4096;
+        Wide.Height = 1;
+        Wide.DepthOrArraySize = 1;
+        Wide.MipLevels = 1;
+        Wide.SampleDesc.Count = 1;
+        Wide.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        hr = Device10->CreatePlacedResource2(Buffers.Get(), 65536, &Wide, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 0,
+                                             nullptr, IID_PPV_ARGS(&First));
+        Check.Report("placed2", "0x%08lX", hr);
+        First.Reset();
+        hr = Device10->CreatePlacedResource2(Buffers.Get(), 65536, &Wide, D3D12_BARRIER_LAYOUT_COMMON, nullptr, 0,
+                                             nullptr, IID_PPV_ARGS(&First));
+        Check.Report("placed2_common", "0x%08lX", hr);
+        First.Reset();
+        Wide = {};
+        Wide.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        Wide.Width = 64;
+        Wide.Height = 64;
+        Wide.DepthOrArraySize = 1;
+        Wide.MipLevels = 1;
+        Wide.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        Wide.SampleDesc.Count = 1;
+        Wide.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        hr = Device10->CreatePlacedResource2(Targets.Get(), 0, &Wide, D3D12_BARRIER_LAYOUT_RENDER_TARGET, nullptr, 0,
+                                             nullptr, IID_PPV_ARGS(&First));
+        Check.Report("placed2_rt", "0x%08lX", hr);
+        First.Reset();
+        hr = Device10->CreatePlacedResource2(Targets.Get(), 0, &Wide, D3D12_BARRIER_LAYOUT_COPY_SOURCE, nullptr, 0,
+                                             nullptr, IID_PPV_ARGS(&First));
+        Check.Report("placed2_copy_source", "0x%08lX", hr);
+        First.Reset();
+    }
+
+    if (SUCCEEDED(Device.As(&Device4)))
+    {
+        ComPtr<ID3D12Heap> Heap;
+
+        HeapDesc = {};
+        HeapDesc.SizeInBytes = 65536;
+        HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        Check.Report("heap1", "0x%08lX", Device4->CreateHeap1(&HeapDesc, nullptr, IID_PPV_ARGS(&Heap)));
+        if (Heap != nullptr)
+            TcReportHeap(Check, "heap1", Heap.Get());
+    }
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -3221,6 +3642,7 @@ static const CheckInfo Checks[] =
     { "rootsigs", TcCheckRootSignatures },
     { "pipelines", TcCheckPipelines },
     { "identity", TcCheckIdentity },
+    { "placed", TcCheckPlaced },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
