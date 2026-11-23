@@ -121,10 +121,56 @@ RxWarpFraction(
     return (fabsf(Value) <= 8388600.0f) ? Value - floorf(Value) : 0.0f;
 }
 
+/* Floors to an integer the way the reference's conversion saturates, with not a number as zero */
+static
+INT
+RxWarpFloorFixed(
+    _In_ FLOAT Value)
+{
+    if (Value != Value)
+        return 0;
+    if (Value >= 2147483520.0f)
+        return INT_MAX;
+    if (Value <= -2147483648.0f)
+        return INT_MIN;
+    return (INT)floorf(Value);
+}
+
+/* Power of two sizes address unfolded texel positions through masks, as the reference's fast path does */
+static
+INT
+RxWarpWrapPow2(
+    _In_ INT Texel,
+    _In_ INT Size,
+    _In_ UINT Mode,
+    _Out_ BOOLEAN *Border)
+{
+    INT Mask = Size - 1;
+    INT Clamped;
+
+    *Border = FALSE;
+    switch (Mode)
+    {
+        case D3D10_DDI_TEXTURE_ADDRESS_WRAP:
+            return Texel & Mask;
+        case D3D10_DDI_TEXTURE_ADDRESS_MIRROR:
+            return (Texel & Size) ? ((Texel & Mask) ^ Mask) : (Texel & Mask);
+        case D3D10_DDI_TEXTURE_ADDRESS_BORDER:
+            Clamped = (Texel < 0) ? 0 : ((Texel > Mask) ? Mask : Texel);
+            *Border = (Clamped != Texel);
+            return Clamped;
+        case D3D10_DDI_TEXTURE_ADDRESS_MIRRORONCE:
+            Texel = (Texel < 0) ? ~Texel : Texel;
+            return (Texel > Mask) ? Mask : Texel;
+        default:
+            return (Texel < 0) ? 0 : ((Texel > Mask) ? Mask : Texel);
+    }
+}
+
 /*
  * Texture coordinates become texel positions with eight fraction bits, as the reference
  * computes them: the normalized coordinate is folded into range by the address mode first and
- * only then scaled by the size.
+ * only then scaled by the size. Power of two sizes skip the folding and wrap the texel index instead.
  */
 static
 VOID
@@ -133,6 +179,7 @@ RxWarpAddressPoint(
     _In_ INT Size,
     _In_ UINT Mode,
     _In_ INT Offset,
+    _In_ BOOLEAN Pow2,
     _Out_ INT *Index,
     _Out_ BOOLEAN *Border)
 {
@@ -142,6 +189,12 @@ RxWarpAddressPoint(
 
     *Border = FALSE;
     *Index = 0;
+    if (Pow2)
+    {
+        Texel = (RxWarpFloorFixed((Coordinate * (FLOAT)Size) * 256.0f) >> 8) + Offset;
+        *Index = RxWarpWrapPow2(Texel, Size, Mode, Border);
+        return;
+    }
     if (RxWarpUnaddressable(Coordinate))
         return;
 
@@ -213,6 +266,7 @@ RxWarpAddressLinear(
     _In_ INT Size,
     _In_ UINT Mode,
     _In_ INT Offset,
+    _In_ BOOLEAN Pow2,
     _Out_ RX_WARP_TAPS *Taps)
 {
     FLOAT Scale = (FLOAT)Size * 256.0f;
@@ -220,6 +274,16 @@ RxWarpAddressLinear(
     INT Fixed;
 
     ZeroMemory(Taps, sizeof(*Taps));
+    if (Pow2)
+    {
+        FLOAT Position = Coordinate * (FLOAT)Size + (FLOAT)Offset - 0.5f;
+
+        Fixed = RxWarpFloorFixed(Position * 256.0f);
+        Taps->Weight = (UINT)Fixed & 0xFF;
+        Taps->First = RxWarpWrapPow2(Fixed >> 8, Size, Mode, &Taps->FirstBorder);
+        Taps->Second = RxWarpWrapPow2((Fixed >> 8) + 1, Size, Mode, &Taps->SecondBorder);
+        return;
+    }
     if (RxWarpUnaddressable(Coordinate))
         return;
 
@@ -542,6 +606,54 @@ RxWarpFetch(
     }
 }
 
+static
+BOOLEAN
+RxWarpIsPow2(
+    _In_ UINT Value)
+{
+    return (Value & (Value - 1)) == 0;
+}
+
+/*
+ * Axes whose texel positions take the power of two path: the view's top level must be a power
+ * of two along the axis, and every level's row (for x) or slice (for y) pitch in elements too.
+ */
+static
+UINT
+RxWarpPow2Axes(
+    _In_ RxWarpView *View,
+    _In_ const RX_WARP_VIEW_EXTENT *Extent)
+{
+    const RX_WARP_FORMAT_INFO *Info = RxWarpFormatInfo(View->Format);
+    RX_WARP_SUBRESOURCE *Top = RxWarpExtentLevel(Extent, 0, 0);
+    UINT Axes = 0;
+
+    if (Info == nullptr || Top == nullptr || Info->Kind != RxKindPlain || Info->Bytes == 0)
+        return 0;
+    if (RxWarpIsPow2(Top->Width))
+        Axes |= 1;
+    if (RxWarpIsPow2(Top->Height))
+        Axes |= 2;
+    if (RxWarpIsPow2(Top->Depth))
+        Axes |= 4;
+    for (UINT Mip = 0; Mip < Extent->MipCount; Mip++)
+    {
+        RX_WARP_SUBRESOURCE *Level = RxWarpExtentLevel(Extent, Mip, 0);
+        UINT Row;
+        UINT Slice;
+
+        if (Level == nullptr)
+            continue;
+        Row = Level->RowPitch / (Info->Bytes * Extent->Resource->SampleCount);
+        Slice = Level->DepthPitch / (Info->Bytes * Extent->Resource->SampleCount);
+        if (!RxWarpIsPow2(Row))
+            Axes &= ~1u;
+        if (Slice == 0 || !RxWarpIsPow2(Slice))
+            Axes &= ~2u;
+    }
+    return Axes;
+}
+
 /* One filtered lookup at a single mip level */
 static
 VOID
@@ -561,6 +673,7 @@ RxWarpFilterLevel(
     INT Size[3];
     RX_WARP_TAPS Taps[3] = {};
     UINT Axes = Shape->Axes;
+    UINT Pow2 = 0;
 
     Result[0] = Result[1] = Result[2] = Result[3] = 0.0f;
     if (Level == nullptr)
@@ -571,6 +684,8 @@ RxWarpFilterLevel(
     Size[2] = (INT)Level->Depth;
     if (Shape->Cube)
         Modes[0] = Modes[1] = D3D10_DDI_TEXTURE_ADDRESS_CLAMP;
+    else
+        Pow2 = RxWarpPow2Axes(Request->View, Extent);
 
     if (!Linear && !Request->Gather)
     {
@@ -581,7 +696,7 @@ RxWarpFilterLevel(
         {
             BOOLEAN Outside;
 
-            RxWarpAddressPoint(Coordinate[Axis], Size[Axis], Modes[Axis], Request->Offset[Axis], &At[Axis], &Outside);
+            RxWarpAddressPoint(Coordinate[Axis], Size[Axis], Modes[Axis], Request->Offset[Axis], (Pow2 >> Axis) & 1, &At[Axis], &Outside);
             Border |= Outside;
         }
         RxWarpFetch(Request, Extent, Mip, Slice, At, Border, Result);
@@ -591,7 +706,7 @@ RxWarpFilterLevel(
     for (UINT Axis = 0; Axis < 3; Axis++)
     {
         if (Axis < Axes)
-            RxWarpAddressLinear(Coordinate[Axis], Size[Axis], Modes[Axis], Request->Offset[Axis], &Taps[Axis]);
+            RxWarpAddressLinear(Coordinate[Axis], Size[Axis], Modes[Axis], Request->Offset[Axis], (Pow2 >> Axis) & 1, &Taps[Axis]);
     }
 
     /* Gather: the four texels of the footprint, ordered (0,1), (1,1), (1,0), (0,0) */
