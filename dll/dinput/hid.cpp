@@ -1954,6 +1954,27 @@ public:
         return DiHidUsageKey(Group->UsagePage, Group->UsageMin + Offset);
     }
 
+#if DIRECTINPUT_VERSION >= 0x0800
+    ULONG
+    GetAxisTraits(
+        _In_ ULONG Index) override
+    {
+        const RX_DI_HID_GROUP* Group;
+        ULONG Instance;
+        ULONG Traits = 0;
+
+        if (Index >= ObjectCount || Slots[Index].Group == nullptr)
+            return 0;
+        Group = Slots[Index].Group;
+        Instance = DIDFT_GETINSTANCE(Objects[Index].dwType);
+        if (Instance < AxisKindCount)
+            Traits = AxisKinds[Instance];
+        if (Group->Absolute)
+            Traits |= DI_AXIS_ABSOLUTE;
+        return Traits;
+    }
+#endif
+
     /* Looks objects up through the GUID they were given, so only the first usage of each slot matches */
     HRESULT
     MapUsage(

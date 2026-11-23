@@ -201,6 +201,9 @@ typedef struct _RX_DI_APP_HACKS
     UCHAR Reserved[3];
 } RX_DI_APP_HACKS;
 
+/* Flag GetAxisTraits adds for axes that report absolute positions */
+#define DI_AXIS_ABSOLUTE 0x100
+
 /* The device specific half of a device object */
 class RxDiBackend
 {
@@ -228,6 +231,8 @@ public:
     virtual HRESULT Poll(VOID) { return S_FALSE; }
     virtual ULONG GetUsage(_In_ ULONG Index) { return 0; }
     virtual HRESULT MapUsage(_In_ ULONG Usage, _Out_ PULONG Index) { return E_NOTIMPL; }
+    /* The action map axis kind of an object in the low byte and DI_AXIS_ABSOLUTE for absolute axes */
+    virtual ULONG GetAxisTraits(_In_ ULONG Index) { return 0; }
     virtual HRESULT SetDIData(_In_ DWORD Version, _In_ RX_DI_APP_HACKS* Hacks) { return E_NOTIMPL; }
 };
 
