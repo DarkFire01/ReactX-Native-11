@@ -460,4 +460,41 @@ static const ScCase ScCorpus[] =
         "mov oT3, r6\n",
         { ScInput(0, 0, 0, 0), ScInput(3, 0, 1, 0), ScInput(5, 0, 2, 1) }, 3
     },
+    {
+        "vs30_indexed", FALSE, 0,
+        "vs_3_0\n"
+        "dcl_position v0\n"
+        "dcl_texcoord v1\n"
+        "dcl_texcoord1 v2\n"
+        "dcl_position o0\n"
+        "dcl_texcoord o1\n"
+        "dcl_texcoord1 o2.xy\n"
+        "defi i0, 2, 1, 1, 0\n"
+        "defb b0, true\n"
+        "mov r0, c0\n"
+        "loop aL, i0\n"
+        "add r0, r0, v[aL]\n"
+        "if_gt r0.x, c1.x\n"
+        "break\n"
+        "endif\n"
+        "mova a0.x, r0.w\n"
+        "mov o[aL + 1].xy, c[a0.x + 3]\n"
+        "break\n"
+        "endloop\n"
+        "rep i1\n"
+        "add r0, r0, c2\n"
+        "break\n"
+        "endrep\n"
+        "mov o0, v0\n"
+        "call l0\n"
+        "ret\n"
+        "label l0\n"
+        "if b0\n"
+        "mov o1, r0\n"
+        "else\n"
+        "mov o1, -r0\n"
+        "endif\n"
+        "ret\n",
+        { ScInput(0, 0, 0, 0), ScInput(5, 0, 1, 0), ScInput(5, 1, 2, 0) }, 3
+    },
 };
