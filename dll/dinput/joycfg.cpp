@@ -211,6 +211,13 @@ public:
         if (Type[0] == L'#')
             return GetPredefinedType(Type, Info, Flags);
 #if DIRECTINPUT_VERSION >= 0x0800
+        {
+            GUID Bus;
+
+            /* Types named by GUID are gameport bus devices, and no gameport bus is enumerated */
+            if (DiParseGuid(Type, &Bus))
+                return E_FAIL;
+        }
         return ReadTypeInfo(Type, Info, Flags);
 #else
         HKEY Key;
@@ -334,9 +341,30 @@ public:
         if (Flags & ~((Config->dwSize == sizeof(DIJOYCONFIG)) ? 0x1FUL : 0x0FUL))
             return E_INVALIDARG;
 #if DIRECTINPUT_VERSION >= 0x0800
-        /* DirectInput 8 reads the saved configuration, and none is kept for any id */
-        UNREFERENCED_PARAMETER(Id);
-        return DIERR_NOTFOUND;
+        {
+            GUID Instance;
+            HRESULT Result;
+
+            EnterCriticalSection(&Lock);
+            Result = DiHidFindJoystick(Id, &Instance);
+            if (SUCCEEDED(Result))
+                Result = ReadSavedConfig(Id, Config, Flags | DIJC_REGHWCONFIGTYPE);
+            if (SUCCEEDED(Result))
+            {
+                DWORD Kind = Config->hwc.dwType;
+
+                /* Predefined gameport types are named like the type list names them */
+                if (Kind - DI_JOY_PREDEF_FIRST <= DI_JOY_PREDEF_LAST - DI_JOY_PREDEF_FIRST)
+                {
+                    Config->wszType[0] = L'#';
+                    Config->wszType[1] = static_cast<WCHAR>(L'0' + Kind);
+                    Config->wszType[2] = L'\0';
+                }
+                Result = (Kind == 0) ? S_FALSE : S_OK;
+            }
+            LeaveCriticalSection(&Lock);
+            return Result;
+        }
 #else
         if (Id >= DI_JOY_LIMIT)
             return DIERR_NOMOREITEMS;
@@ -667,6 +695,102 @@ private:
         }
         RegCloseKey(Key);
         return (SUCCEEDED(Result) && Partial) ? S_FALSE : Result;
+    }
+#endif
+
+#if DIRECTINPUT_VERSION >= 0x0800
+    /* Reads one numbered value of the saved joystick settings, a string when Text is set */
+    static
+    HRESULT
+    ReadSavedValue(
+        _In_opt_ HKEY Key,
+        _In_z_ PCWSTR Format,
+        _In_ UINT Id,
+        _Out_writes_bytes_(Size) PVOID Buffer,
+        _In_ ULONG Size,
+        _In_ BOOLEAN Text)
+    {
+        WCHAR Name[39];
+        LONG Error;
+
+        StringCbPrintfW(Name, sizeof(Name), Format, Id + 1);
+        if (!Text)
+            return DiReadValue(Key, Name, Buffer, Size);
+
+        /* A missing name reads as an empty one */
+        Error = ReadTypeString(Key, Name, static_cast<PWSTR>(Buffer), Size / sizeof(WCHAR));
+        if (Error == ERROR_FILE_NOT_FOUND)
+            return S_OK;
+        return HRESULT_FROM_WIN32(Error);
+    }
+
+    /*
+     * The saved configuration of a joystick id. Whatever the saved settings cannot supply is
+     * built from the HID joystick itself.
+     */
+    static
+    HRESULT
+    ReadSavedConfig(
+        _In_ UINT Id,
+        _Inout_ LPDIJOYCONFIG Config,
+        _In_ DWORD Flags)
+    {
+        DIJOYTYPEINFO Type;
+        HRESULT Result = E_FAIL;
+        HKEY Key = nullptr;
+
+        if (Id >= DI_JOY_LIMIT)
+            return DIERR_NOMOREITEMS;
+        DiRefreshHidList(FALSE);
+        if (Flags & DIJC_GUIDINSTANCE)
+        {
+            Result = DiHidFindJoystick(Id, &Config->guidInstance);
+            if (FAILED(Result))
+                return Result;
+        }
+        if ((Flags & (DIJC_REGHWCONFIGTYPE | DIJC_GAIN | DIJC_CALLOUT | DIJC_WDMGAMEPORT)) == 0)
+            return Result;
+
+        Result = HRESULT_FROM_WIN32(RegOpenKeyExW(HKEY_CURRENT_USER, DI_JOY_CONFIG_ROOT L"\\CurrentJoystickSettings", 0,
+                                             KEY_QUERY_VALUE, &Key));
+        if (SUCCEEDED(Result) && (Flags & DIJC_REGHWCONFIGTYPE))
+        {
+            Result = ReadSavedValue(Key, L"Joystick%dConfiguration", Id, &Config->hwc, sizeof(Config->hwc), FALSE);
+            if (SUCCEEDED(Result))
+            {
+                Config->wszType[0] = L'\0';
+                if (Config->hwc.dwUsageSettings & JOY_US_ISOEM)
+                    Result = ReadSavedValue(Key, L"Joystick%dOEMName", Id, Config->wszType, sizeof(Config->wszType), TRUE);
+            }
+        }
+        if (SUCCEEDED(Result) && (Flags & DIJC_GAIN))
+        {
+            Result = ReadSavedValue(Key, L"Joystick%dFFConfiguration", Id, &Config->dwGain, sizeof(Config->dwGain), FALSE);
+            if (FAILED(Result) || (Config->dwGain & 0xFFFF0000) != 0)
+            {
+                Config->dwGain = DI_FFNOMINALMAX;
+                Result = S_FALSE;
+            }
+        }
+
+        /* No gameport bus is enumerated, so no joystick hangs off one */
+        if (SUCCEEDED(Result) && (Flags & DIJC_WDMGAMEPORT))
+        {
+            ZeroMemory(&Config->guidGameport, sizeof(Config->guidGameport));
+            Result = S_FALSE;
+        }
+
+        if (FAILED(Result))
+        {
+            HRESULT Built;
+
+            ZeroMemory(&Type, sizeof(Type));
+            Built = DiHidDescribeJoystick(Id, Config, &Type);
+            Result = SUCCEEDED(Built) ? Built : E_FAIL;
+        }
+        if (Key != nullptr)
+            RegCloseKey(Key);
+        return Result;
     }
 #endif
 

@@ -4506,6 +4506,237 @@ DiCreateHid(
     return S_OK;
 }
 
+#if DIRECTINPUT_VERSION >= 0x0800
+HRESULT
+DiHidFindJoystick(
+    _In_ ULONG Id,
+    _Out_ LPGUID Instance)
+{
+    HRESULT Result = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    ZeroMemory(Instance, sizeof(*Instance));
+    if (Id > DI_JOY_SLOTS)
+        return HRESULT_FROM_WIN32(ERROR_NO_MORE_ITEMS);
+
+    EnterCriticalSection(&DiLock);
+    DiRefreshHidList(FALSE);
+    for (ULONG Index = 0; Index < DiHidCount && DiHidEntries[Index].Present; Index++)
+    {
+        if (DiHidEntries[Index].JoystickId == Id)
+        {
+            *Instance = DiHidEntries[Index].Instance;
+            Result = S_OK;
+            break;
+        }
+    }
+    LeaveCriticalSection(&DiLock);
+    return Result;
+}
+
+/* Axis usages a joystick configuration describes, with the hardware flag and the slot each one fills */
+static const struct
+{
+    ULONG Usage;
+    ULONG Has;
+    ULONG Slot;
+} DiJoyAxisUsages[] =
+{
+    { 0x00010030, 0, 0 },
+    { 0x000200C8, 0, 0 },
+    { 0x00010031, 0, 1 },
+    { 0x000200C4, 0, 1 },
+    { 0x00010032, JOY_HWS_HASZ, 2 },
+    { 0x00010036, JOY_HWS_HASZ, 2 },
+    { 0x000200BB, JOY_HWS_HASZ, 2 },
+    { 0x00020037, JOY_HWS_HASZ, 2 },
+    { 0x00010038, JOY_HWS_HASZ, 2 },
+    { 0x000200BA, JOY_HWS_HASR, 3 },
+    { 0x00010035, JOY_HWS_HASR, 3 },
+    { 0x000200C5, JOY_HWS_HASR, 3 },
+    { 0x00010034, JOY_HWS_HASU, 4 },
+    { 0x000200BB, JOY_HWS_HASU, 4 },
+    { 0x00010036, JOY_HWS_HASU, 4 },
+    { 0x00010033, JOY_HWS_HASV, 5 },
+};
+
+/* A configuration that is rebuilt rather than kept */
+#define DI_JOY_US_VOLATILE      0x00000008
+
+/* The hardware flag of a joystick that is a HID device */
+#define DI_HID_HWS_ISHIDDEV     0x10000000
+
+/* Microsoft gameport adapters name their predefined type by product id */
+#define DI_JOY_PREDEF_TYPE_BASE 0x0100
+#define DI_JOY_OEM_TYPE_BASE    13
+
+HRESULT
+DiHidDescribeJoystick(
+    _In_ ULONG Id,
+    _Inout_opt_ LPDIJOYCONFIG Config,
+    _Inout_ LPDIJOYTYPEINFO Type)
+{
+    RxDiBackend* Device = nullptr;
+    const DIDATAFORMAT* Format = nullptr;
+    DIDEVICEINSTANCEW Info = {};
+    DIDEVCAPS Caps = {};
+    DIPROPSTRING Name = {};
+    ULONG Filled[6] = {};
+    ULONG Has = Type->hws.dwFlags;
+    ULONG Marked;
+    USHORT VendorId = 0;
+    USHORT ProductId = 0;
+    GUID Instance = {};
+    BOOLEAN Found = FALSE;
+    HRESULT Result;
+
+    EnterCriticalSection(&DiLock);
+    for (ULONG Index = 0; Index < DiHidCount && DiHidEntries[Index].Present; Index++)
+    {
+        if (DiHidEntries[Index].JoystickId == Id)
+        {
+            Instance = DiHidEntries[Index].Instance;
+            VendorId = DiHidEntries[Index].VendorId;
+            ProductId = DiHidEntries[Index].ProductId;
+            Found = TRUE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&DiLock);
+    if (!Found)
+        return E_FAIL;
+
+    Result = DiCreateHid(Instance, &Device);
+    if (FAILED(Result))
+        return Result;
+
+    Result = Device->GetCapabilities(&Caps);
+    if (SUCCEEDED(Result))
+    {
+        Info.dwSize = sizeof(Info);
+        Result = Device->GetDeviceInfo(&Info);
+    }
+    if (FAILED(Result))
+    {
+        delete Device;
+        return Result;
+    }
+
+    if (SUCCEEDED(Device->GetDataFormat(&Format)))
+    {
+        RX_DI_PROP_TARGET Target = {};
+        DIPROPDWORD Granularity = { { sizeof(Granularity), sizeof(DIPROPHEADER) } };
+
+        /* A hat with a fine enough step reports the four directions */
+        if (SUCCEEDED(Device->MapUsage(DiHidUsageKey(HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_HATSWITCH), &Target.Index)))
+        {
+            Has |= JOY_HWS_HASPOV;
+            Target.Property = 3;
+            Target.Type = Format->rgodf[Target.Index].dwType;
+            if (SUCCEEDED(Device->GetProperty(&Target, &Granularity.diph)) && Granularity.dwData >= 9000 && Config != nullptr)
+            {
+                Config->hwc.hwv.dwPOVValues[JOY_POVVAL_FORWARD] = 0;
+                Config->hwc.hwv.dwPOVValues[JOY_POVVAL_BACKWARD] = 18000;
+                Config->hwc.hwv.dwPOVValues[JOY_POVVAL_LEFT] = 27000;
+                Config->hwc.hwv.dwPOVValues[JOY_POVVAL_RIGHT] = 9000;
+            }
+        }
+
+        /* Each slot takes the first usage the device has, along with its calibrated range */
+        for (const auto& Axis : DiJoyAxisUsages)
+        {
+            DIPROPCAL Range = { { sizeof(Range), sizeof(DIPROPHEADER) } };
+            BOOLEAN Taken = Filled[Axis.Slot] != 0;
+
+            for (ULONG Slot = 0; !Taken && Slot < Axis.Slot; Slot++)
+                Taken = Filled[Slot] == Axis.Usage;
+            if (Taken || FAILED(Device->MapUsage(Axis.Usage, &Target.Index)))
+                continue;
+
+            Filled[Axis.Slot] = Axis.Usage;
+            Has |= Axis.Has;
+            Target.Property = 11;
+            Target.Type = Format->rgodf[Target.Index].dwType;
+            if (FAILED(Device->GetProperty(&Target, &Range.diph)) || Config == nullptr)
+                continue;
+
+            (&Config->hwc.hwv.jrvHardware.jpMin.dwX)[Axis.Slot] = Range.lMin;
+            (&Config->hwc.hwv.jrvHardware.jpMax.dwX)[Axis.Slot] = Range.lMax;
+            (&Config->hwc.hwv.jrvHardware.jpCenter.dwX)[Axis.Slot] =
+                Range.lMin + (static_cast<ULONG>(Range.lMax - Range.lMin + 1) >> 1);
+        }
+    }
+
+    Marked = DI_HID_HWS_ISHIDDEV;
+    if (Info.wUsage == HID_USAGE_GENERIC_GAMEPAD)
+        Marked |= JOY_HWS_ISGAMEPAD;
+
+    if (Config != nullptr)
+    {
+        RX_DI_PROP_TARGET GainTarget = { 7, MAXULONG, 0 };
+        DIPROPDWORD Gain = { { sizeof(Gain), sizeof(DIPROPHEADER), 0, DIPH_DEVICE } };
+        DWORD Usage;
+
+        Config->guidInstance = Instance;
+        Config->hwc.hws.dwFlags = Marked | Has;
+        Config->hwc.hws.dwNumButtons = Caps.dwButtons;
+        Config->hwc.hwv.dwCalFlags = 0;
+        if (VendorId == DI_HID_MS_VENDOR && ProductId >= DI_HID_MS_GAMEPORT_LOW && ProductId <= DI_HID_MS_GAMEPORT_HIGH)
+        {
+            Config->hwc.dwType = ProductId - DI_JOY_PREDEF_TYPE_BASE;
+            Usage = JOY_US_PRESENT | DI_JOY_US_VOLATILE;
+        }
+        else
+        {
+            Config->hwc.dwType = Id + DI_JOY_OEM_TYPE_BASE;
+            Usage = JOY_US_PRESENT | JOY_US_ISOEM | DI_JOY_US_VOLATILE;
+        }
+        if (Filled[3] != 0)
+            Usage |= JOY_US_HASRUDDER;
+        Config->hwc.dwUsageSettings = Usage;
+        Config->hwc.dwReserved = 0;
+        Config->dwGain = 10000;
+        if (SUCCEEDED(Device->GetProperty(&GainTarget, &Gain.diph)))
+            Config->dwGain = Gain.dwData;
+        if (Config->hwc.dwType < DI_JOY_OEM_TYPE_BASE)
+            ZeroMemory(Config->wszType, sizeof(Config->wszType));
+        else
+            StringCchPrintfW(Config->wszType, _countof(Config->wszType), L"VID_%04X&PID_%04X", VendorId, ProductId);
+        ZeroMemory(Config->wszCallout, sizeof(Config->wszCallout));
+    }
+
+    /* The type half carries the flags, the button count and the product name */
+    {
+        RX_DI_PROP_TARGET Product = { 13, MAXULONG, 0 };
+
+        Type->dwSize = sizeof(*Type);
+        Type->hws.dwFlags = Has | Marked;
+        Type->hws.dwNumButtons = Caps.dwButtons;
+        ZeroMemory(&Type->clsidConfig, sizeof(Type->clsidConfig));
+        Name.diph.dwSize = sizeof(Name);
+        Name.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+        Name.diph.dwHow = DIPH_DEVICE;
+        Result = Device->GetProperty(&Product, &Name.diph);
+        if (Result != S_OK && Type->wszDisplayName[0] != L'\0')
+        {
+            StringCchCopyW(Name.wsz, _countof(Name.wsz), Type->wszDisplayName);
+        }
+        else if (SUCCEEDED(Result))
+        {
+            SIZE_T Length = wcsnlen(Name.wsz, MAX_JOYSTRING);
+
+            if (Length == MAX_JOYSTRING)
+                Length = MAX_JOYSTRING - 1;
+            CopyMemory(Type->wszDisplayName, Name.wsz, Length * sizeof(WCHAR));
+            Type->wszDisplayName[Length] = L'\0';
+            Result = S_OK;
+        }
+    }
+
+    delete Device;
+    return Result;
+}
+#endif
+
 HRESULT
 DiFindHidBackend(
     _In_ REFGUID Instance,

@@ -59,3 +59,18 @@ HRESULT
 DiCreateJoyConfig(
     _In_ IUnknown* OuterUnknown,
     _Outptr_ IUnknown** Inner);
+
+#if DIRECTINPUT_VERSION >= 0x0800
+/* The instance of the HID joystick holding a joystick id */
+HRESULT
+DiHidFindJoystick(
+    _In_ ULONG Id,
+    _Out_ LPGUID Instance);
+
+/* Builds a joystick configuration and type from the HID joystick holding an id */
+HRESULT
+DiHidDescribeJoystick(
+    _In_ ULONG Id,
+    _Inout_opt_ LPDIJOYCONFIG Config,
+    _Inout_ LPDIJOYTYPEINFO Type);
+#endif
