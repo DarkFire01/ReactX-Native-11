@@ -245,6 +245,51 @@ D9Device::FlushDriver(VOID)
         DeviceFunctions.pfnFlush(DriverDevice);
 }
 
+/* Keeps a copy of the present being handed to the driver; the oldest is dropped when the queue is full */
+VOID
+D9Device::QueuePendingPresent(VOID)
+{
+    D3DKMT_PRESENT* Slot;
+
+    AcquireSRWLockExclusive(&PresentQueueLock);
+    if (QueuedPresentCount == D9QueuedPresentLimit)
+    {
+        QueuedPresentFirst = (QueuedPresentFirst + 1) % D9QueuedPresentLimit;
+        QueuedPresentCount -= 1;
+    }
+    Slot = &QueuedPresents[(QueuedPresentFirst + QueuedPresentCount) % D9QueuedPresentLimit];
+    *Slot = PendingPresent;
+    QueuedPresentCount += 1;
+    ReleaseSRWLockExclusive(&PresentQueueLock);
+}
+
+/* The oldest present the driver has not reported yet; its sub rectangle is its own source rectangle */
+BOOLEAN
+D9Device::TakeQueuedPresent(
+    _Out_ D3DKMT_PRESENT* Present)
+{
+    BOOLEAN Found = FALSE;
+
+    AcquireSRWLockExclusive(&PresentQueueLock);
+    if (QueuedPresentCount != 0)
+    {
+        *Present = QueuedPresents[QueuedPresentFirst];
+        QueuedPresentFirst = (QueuedPresentFirst + 1) % D9QueuedPresentLimit;
+        QueuedPresentCount -= 1;
+        Found = TRUE;
+    }
+    ReleaseSRWLockExclusive(&PresentQueueLock);
+
+    if (!Found)
+    {
+        ZeroMemory(Present, sizeof(*Present));
+        return FALSE;
+    }
+    if (Present->SubRectCnt != 0)
+        Present->pSrcSubRects = &Present->SrcRect;
+    return TRUE;
+}
+
 /* Lets the driver present; it calls back into PresentCallback with the allocations it chose */
 HRESULT
 D9Device::DriverPresent(
@@ -257,7 +302,9 @@ D9Device::DriverPresent(
     D3DDDIARG_PRESENT Present = {};
     HRESULT hr;
 
+    /* A driver that threads reports the present from its worker after this call returns */
     PresentResult = S_OK;
+    QueuePendingPresent();
     if (UsesFlush1)
     {
         Surface.hResource = SourceResource;
@@ -335,12 +382,13 @@ HRESULT
 D9Device::PresentCallback(
     _Inout_ D3DDDICB_PRESENT* Args)
 {
-    D3DKMT_PRESENT* Present = &PendingPresent;
+    D3DKMT_PRESENT Queued;
+    D3DKMT_PRESENT* Present = &Queued;
     NTSTATUS Status;
 
     if (Lost)
         return S_OK;
-    if ((Present->Flags.Value & 7) == 0)
+    if (!TakeQueuedPresent(&Queued) || (Present->Flags.Value & 7) == 0)
         return E_INVALIDARG;
 
     Present->hContext = DriverVersion <= 1 ? ContextHandle : D9KernelContext(Args->hContext);
@@ -374,12 +422,13 @@ D9Device::SubmitPresentCallback(
 {
     D3DKMT_HANDLE Queues[D3DDDI_MAX_BROADCAST_CONTEXT + 1];
     D3DKMT_SUBMITPRESENTTOHWQUEUE Submit = {};
-    D3DKMT_PRESENT* Present = &PendingPresent;
+    D3DKMT_PRESENT Queued;
+    D3DKMT_PRESENT* Present = &Queued;
     NTSTATUS Status;
 
     if (Lost)
         return S_OK;
-    if ((Present->Flags.Value & 7) == 0 || Args->BroadcastHwQueueCount == 0 ||
+    if (!TakeQueuedPresent(&Queued) || (Present->Flags.Value & 7) == 0 || Args->BroadcastHwQueueCount == 0 ||
         Args->BroadcastHwQueueCount > D3DDDI_MAX_BROADCAST_CONTEXT + 1)
     {
         return E_INVALIDARG;

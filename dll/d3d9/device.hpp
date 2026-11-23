@@ -22,6 +22,9 @@ static constexpr UINT D9RenderStateCount = 256;
 /* Kernel contexts a device tracks for its driver */
 static constexpr UINT D9MaxKernelContexts = 16;
 
+/* Presents handed to the driver that it has not reported through a callback yet */
+static constexpr UINT D9QueuedPresentLimit = 8;
+
 /* The vertex and index buffers a device keeps for drawing from application memory */
 static constexpr UINT D9StagingBufferCount = 4;
 
@@ -370,6 +373,13 @@ public:
     HRESULT
     SubmitPresentCallback(
         _Inout_ D3DDDICB_SUBMITPRESENTTOHWQUEUE* Args);
+
+    VOID
+    QueuePendingPresent(VOID);
+
+    BOOLEAN
+    TakeQueuedPresent(
+        _Out_ D3DKMT_PRESENT* Present);
 
     HRESULT
     AllocateCallback(
@@ -1149,6 +1159,12 @@ private:
     DWORD RenderStates[D9RenderStateCount];
     INT GpuPriority = 0;
     UINT FrameLatency = 3;
+
+    /* Copies of PendingPresent the driver may report later from its own thread */
+    SRWLOCK PresentQueueLock = SRWLOCK_INIT;
+    D3DKMT_PRESENT QueuedPresents[D9QueuedPresentLimit] = {};
+    UINT QueuedPresentFirst = 0;
+    UINT QueuedPresentCount = 0;
 
     /* The bound targets reach the driver before the first operation that writes them */
     BOOLEAN TargetsDirty = FALSE;
