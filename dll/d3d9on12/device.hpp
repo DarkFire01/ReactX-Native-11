@@ -8,6 +8,7 @@
 #pragma once
 
 #include "d3d9on12.hpp"
+#include "scfinal.hpp"
 
 /* A piece of an upload buffer: where the GPU and the CPU see it */
 struct NineUploadSlice
@@ -67,6 +68,49 @@ struct NineTargetSlot
 
 static constexpr UINT NineTargetCount = 4;
 
+/* A vertex declaration: its elements and the converter inputs they make */
+struct NineVertexDecl
+{
+    std::vector<NineScElement> Elements;
+    NineScInputs Inputs;
+    UINT StreamMask;
+
+    /* A POSITIONT element was turned into POSITION, or the declaration has a point size */
+    BOOLEAN Pretransformed;
+    BOOLEAN PointSize;
+};
+
+/* Pipeline stages a shader object belongs to */
+enum NineShaderStage
+{
+    NineVertexStage,
+    NinePixelStage,
+    NineShaderStageCount
+};
+
+/* A Direct3D 9 shader; identical code shares one object that counts its creates */
+struct NineShader
+{
+    NineShaderStage Stage;
+    UINT References;
+    UINT64 Hash;
+    std::vector<BYTE> Code;
+};
+
+/* One vertex stream: the buffer, where it starts and its stride */
+struct NineStreamSlot
+{
+    NineResource* Buffer;
+    UINT Offset;
+    UINT Stride;
+};
+
+/* State the input assembler and the shader stages changed since the last draw */
+static constexpr UINT NineDirtyVertexBuffers = 0x10;
+static constexpr UINT NineDirtyIndexBuffer = 0x20;
+static constexpr UINT NineDirtyInputLayout = 0x80;
+static constexpr UINT NineDirtyPretransformed = 0x2000;
+
 /* The fixed function and pipeline state the DDI sets between draws */
 struct NineDeviceState
 {
@@ -86,6 +130,18 @@ struct NineDeviceState
     BOOLEAN ViewportDirty;
     RECT Scissor;
     D3DDDIARG_WINFO WInfo;
+
+    /* The input assembler: streams, their frequencies, the index buffer and the declaration */
+    NineStreamSlot Streams[NineScStreamCount];
+    UINT StreamsUsed;
+    UINT Frequencies[NineScStreamCount];
+    NineResource* IndexBuffer;
+    UINT IndexStride;
+    NineVertexDecl* VertexDecl;
+    BOOLEAN Pretransformed;
+    UINT Dirty;
+
+    NineShader* Shaders[NineShaderStageCount];
 };
 
 /* A byte range of a buffer locked with discard, kept to turn adjacent discards into no overwrite locks */
@@ -167,6 +223,9 @@ struct NineDevice
     NineUploadSlice PixelConstants[NineConstantKindCount];
 
     NineDeviceState State;
+
+    /* Shaders by their code, one map for each stage */
+    std::unordered_multimap<UINT64, std::unique_ptr<NineShader>> ShaderCache[NineShaderStageCount];
 
     /* Discarded ranges of each buffer locked since it was created */
     std::mutex LockRangesLock;
@@ -286,6 +345,10 @@ struct NineResource
     std::vector<UINT> TargetSlots;
     BOOLEAN BoundAsDepth;
 
+    /* Vertex streams this buffer is bound to, and whether it is the index buffer */
+    std::vector<UINT> StreamSlots;
+    BOOLEAN BoundAsIndices;
+
     /* The renamed allocation an asynchronous discard lock handed out */
     TL::D3D12ResourceSuballocation Renamed;
 };
@@ -377,6 +440,88 @@ NineBlt(
     _In_ const D3DDDIARG_BLT* Args);
 
 /* Takes a resource out of every render target and depth slot it is bound to */
+/* input.cpp */
+HRESULT
+APIENTRY
+NineCreateVertexShaderDecl(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_CREATEVERTEXSHADERDECL* Args,
+    _In_reads_(Args->NumVertexElements) const D3DDDIVERTEXELEMENT* Elements);
+
+HRESULT
+APIENTRY
+NineSetVertexShaderDecl(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hDecl);
+
+HRESULT
+APIENTRY
+NineDeleteVertexShaderDecl(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hDecl);
+
+HRESULT
+APIENTRY
+NineSetStreamSource(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SETSTREAMSOURCE* Args);
+
+HRESULT
+APIENTRY
+NineSetStreamSourceFreq(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SETSTREAMSOURCEFREQ* Args);
+
+HRESULT
+APIENTRY
+NineSetIndices(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SETINDICES* Args);
+
+/* Takes a buffer that is going away off every stream and the index buffer */
+VOID
+NineUnbindInputs(
+    _Inout_ NineResource* Resource);
+
+/* shader.cpp */
+HRESULT
+APIENTRY
+NineCreateVertexShaderFunc(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_CREATEVERTEXSHADERFUNC* Args,
+    _In_ const UINT* Code);
+
+HRESULT
+APIENTRY
+NineDeleteVertexShaderFunc(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hShader);
+
+HRESULT
+APIENTRY
+NineSetVertexShaderFunc(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hShader);
+
+HRESULT
+APIENTRY
+NineCreatePixelShader(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_CREATEPIXELSHADER* Args,
+    _In_ const UINT* Code);
+
+HRESULT
+APIENTRY
+NineDeletePixelShader(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hShader);
+
+HRESULT
+APIENTRY
+NineSetPixelShader(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hShader);
+
 VOID
 NineUnbindOutputs(
     _Inout_ NineResource* Resource);

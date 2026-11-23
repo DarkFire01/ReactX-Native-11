@@ -770,6 +770,7 @@ NineFreeResource(
         Resource->Underlying->ClearInputBindings();
         Resource->Underlying->ClearOutputBindings();
     }
+    NineUnbindInputs(Resource);
     NineUnbindOutputs(Resource);
     for (std::unique_ptr<TL::TDSV>& View : Resource->Dsvs)
         View.reset();

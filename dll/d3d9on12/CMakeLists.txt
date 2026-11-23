@@ -20,6 +20,7 @@ nt_add_usermode_dll(d3d9on12
         ddi.cpp
         device.cpp
         formats.cpp
+        input.cpp
         interop.cpp
         main.cpp
         output.cpp
@@ -27,6 +28,7 @@ nt_add_usermode_dll(d3d9on12
         query.cpp
         resource.cpp
         settings.cpp
+        shader.cpp
         share.cpp
         state.cpp)
 
