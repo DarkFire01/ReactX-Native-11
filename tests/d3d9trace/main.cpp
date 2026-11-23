@@ -7252,6 +7252,29 @@ TrFixedVertexWork(
         TrRelease(Many);
     }
 
+    /* oFog is a scalar: a vs_2_0 shader must write it with a full mask and a replicated component */
+    {
+        static const DWORD FogMasked[] = { 0xFFFE0200, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000005,
+                                           0x900F0001, 0x02000001, 0xC00F0000, 0x90E40000, 0x02000001, 0xC0010001,
+                                           0x90000001, 0x02000001, 0xE0030000, 0x90E40001, 0x0000FFFF };
+        static const DWORD FogFull[] = { 0xFFFE0200, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000005,
+                                         0x900F0001, 0x02000001, 0xC00F0000, 0x90E40000, 0x02000001, 0xC00F0001,
+                                         0x90000001, 0x02000001, 0xE0030000, 0x90E40001, 0x0000FFFF };
+        static const TrVertexCase Fogged = { "application shader fog", D3DFVF_XYZ | D3DFVF_TEX1, FALSE,
+                                             { { TrFixedRender, D3DRS_FOGENABLE, TRUE },
+                                               { TrFixedRender, D3DRS_FOGCOLOR, 0x0000FF80 } } };
+        IDirect3DVertexShader9* Masked = nullptr;
+        IDirect3DVertexShader9* Full = nullptr;
+
+        TrApi("CreateVertexShader fog masked", Device->CreateVertexShader(FogMasked, &Masked));
+        TrApi("CreateVertexShader fog", Device->CreateVertexShader(FogFull, &Full));
+        TrApi("SetVertexShader fog", Device->SetVertexShader(Full));
+        TrVertexRun(Device, Fogged, Target);
+        TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+        TrRelease(Masked);
+        TrRelease(Full);
+    }
+
     TrPhase("fixed vertex release");
     TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
     TrRelease(Target);
