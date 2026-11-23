@@ -172,34 +172,6 @@ D9IsRetiredState(
     return FALSE;
 }
 
-/* Holds the device lock for applications that asked for a multithreaded device */
-class D9DeviceLock
-{
-public:
-    D9DeviceLock(
-        _In_ CRITICAL_SECTION* Section,
-        _In_ BOOLEAN Needed)
-        : Held(Needed ? Section : nullptr)
-    {
-        if (Held != nullptr)
-            EnterCriticalSection(Held);
-    }
-
-    ~D9DeviceLock()
-    {
-        if (Held != nullptr)
-            LeaveCriticalSection(Held);
-    }
-
-    D9DeviceLock(const D9DeviceLock&) = delete;
-    D9DeviceLock& operator=(const D9DeviceLock&) = delete;
-
-private:
-    CRITICAL_SECTION* Held;
-};
-
-#define D9_DEVICE_LOCK() D9DeviceLock Scope(&Lock, (BehaviorFlags & D3DCREATE_MULTITHREADED) != 0)
-
 D9Device::D9Device(
     _In_ D9Enum* Enum,
     _In_ const D9Adapter* Adapter,
@@ -224,6 +196,7 @@ D9Device::D9Device(
 
 D9Device::~D9Device()
 {
+    UnbindTextures();
     StopBatch();
     delete AutoDepthStencil;
     delete ImplicitChain;
@@ -1313,21 +1286,23 @@ D9Device::GetMaximumFrameLatency(
     return S_OK;
 }
 
-/* Entry points that are not implemented yet */
-
+/* The kernel's segment sizes together, capped at four gigabytes and rounded to whole megabytes */
 STDMETHODIMP_(UINT)
 D9Device::GetAvailableTextureMem()
 {
-    RX_UNIMPLEMENTED();
-    return 0;
+    static constexpr UINT RoundedCeiling = 0xFFF80000;
+    UINT64 Available = Adapter->VideoMemory;
+
+    D9_DEVICE_LOCK();
+
+    if (Available > MAXUINT)
+        Available = MAXUINT;
+    if (Available >= RoundedCeiling)
+        return 0xFFF00000;
+    return (static_cast<UINT>(Available) + 0x80000) & 0xFFF00000;
 }
 
-STDMETHODIMP
-D9Device::EvictManagedResources()
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
+/* Entry points that are not implemented yet */
 
 STDMETHODIMP
 D9Device::SetCursorProperties(
@@ -1390,51 +1365,6 @@ D9Device::GetGammaRamp(
     RX_UNIMPLEMENTED();
 }
 
-STDMETHODIMP
-D9Device::CreateTexture(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_ UINT Levels,
-    _In_ DWORD Usage,
-    _In_ D3DFORMAT Format,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DTexture9** Texture,
-    _Inout_opt_ HANDLE* SharedHandle)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateVolumeTexture(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_ UINT Depth,
-    _In_ UINT Levels,
-    _In_ DWORD Usage,
-    _In_ D3DFORMAT Format,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DVolumeTexture9** VolumeTexture,
-    _Inout_opt_ HANDLE* SharedHandle)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateCubeTexture(
-    _In_ UINT EdgeLength,
-    _In_ UINT Levels,
-    _In_ DWORD Usage,
-    _In_ D3DFORMAT Format,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DCubeTexture9** CubeTexture,
-    _Inout_opt_ HANDLE* SharedHandle)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
 /* Usage bits the extended surface creation calls accept */
 static constexpr DWORD D9SurfaceUsageAllowed = D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE |
                                                D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER | D3DUSAGE_NONSECURE;
@@ -1447,7 +1377,6 @@ static constexpr DWORD D9SurfaceUsageShared = D3DUSAGE_RESTRICT_SHARED_RESOURCE 
 static constexpr UINT64 D9SurfaceMemoryLimit = 0x80000000ULL;
 
 /* Depth formats the application can never lock */
-static
 BOOLEAN
 D9IsHiddenDepth(
     _In_ D3DFORMAT Format)
@@ -1467,7 +1396,6 @@ D9IsHiddenDepth(
     }
 }
 
-static
 BOOLEAN
 D9IsDxtFormat(
     _In_ D3DFORMAT Format)
@@ -2287,24 +2215,6 @@ D9Device::SetClipStatus(
 STDMETHODIMP
 D9Device::GetClipStatus(
     _Out_ D3DCLIPSTATUS9* ClipStatus)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetTexture(
-    _In_ DWORD Stage,
-    _Out_ IDirect3DBaseTexture9** Texture)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetTexture(
-    _In_ DWORD Stage,
-    _In_opt_ IDirect3DBaseTexture9* Texture)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

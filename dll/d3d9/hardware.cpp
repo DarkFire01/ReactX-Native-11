@@ -121,8 +121,8 @@ D9Device::AllocateCallback(
         Record.Flags = Resource->Flags.Value;
         Record.Format = Resource->Format;
         Record.Pool = Resource->Pool;
-        Record.SurfaceCount = 1;
-        Record.MipLevels = 1;
+        Record.SurfaceCount = Resource->SurfaceCount != 0 ? Resource->SurfaceCount : 1;
+        Record.MipLevels = Resource->MipLevels != 0 ? Resource->MipLevels : 1;
         Create.hResource = Resource->KernelResource;
         Create.pPrivateRuntimeData = &Record;
         Create.PrivateRuntimeDataSize = sizeof(Record);
@@ -654,7 +654,7 @@ D9SurfaceFlags(
         Flags->DiscardRenderTarget = TRUE;
 }
 
-/* Hands the driver one resource of a single subresource and keeps what it returns */
+/* Hands the driver one resource and keeps what it returns; textures name their levels and faces */
 HRESULT
 D9Device::CreateDriverResource(
     _Inout_ D9Resource* Resource,
@@ -662,6 +662,8 @@ D9Device::CreateDriverResource(
     _In_ D3DDDIMULTISAMPLE_TYPE MultisampleType,
     _In_ UINT MultisampleQuality)
 {
+    UINT Count = Resource->SurfaceCount != 0 ? Resource->SurfaceCount : 1;
+
     D3DDDIARG_CREATERESOURCE2 Create2 = {};
     D3DDDIARG_CREATERESOURCE Create = {};
     HRESULT hr;
@@ -673,8 +675,9 @@ D9Device::CreateDriverResource(
         Create2.Fvf = Resource->Fvf;
         Create2.MultisampleType = MultisampleType;
         Create2.MultisampleQuality = MultisampleQuality;
+        Create2.MipLevels = Resource->MipLevels;
         Create2.pSurfList = Surface;
-        Create2.SurfCount = 1;
+        Create2.SurfCount = Count;
         Create2.VidPnSourceId = Adapter->SourceId;
         Create2.hResource = Resource;
         Create2.Flags = Resource->Flags;
@@ -689,8 +692,9 @@ D9Device::CreateDriverResource(
         Create.Fvf = Resource->Fvf;
         Create.MultisampleType = MultisampleType;
         Create.MultisampleQuality = MultisampleQuality;
+        Create.MipLevels = Resource->MipLevels;
         Create.pSurfList = Surface;
-        Create.SurfCount = 1;
+        Create.SurfCount = Count;
         Create.VidPnSourceId = Adapter->SourceId;
         Create.hResource = Resource;
         Create.Flags = Resource->Flags;
@@ -988,6 +992,196 @@ D9Device::UnlockDriverSurface(
     Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
     DrainBatch();
     return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
+}
+
+HRESULT
+D9Device::CreateTextureResource(
+    _In_reads_(Count) const D3DDDI_SURFACEINFO* Surfaces,
+    _In_ UINT Count,
+    _In_ UINT MipLevels,
+    _Inout_ D9Resource* Resource)
+{
+    Resource->SurfaceCount = Count;
+    Resource->MipLevels = MipLevels;
+    Resource->Width = Surfaces[0].Width;
+    Resource->Height = Surfaces[0].Height;
+    return CreateDriverResource(Resource, Surfaces, D3DDDIMULTISAMPLE_NONE, 0);
+}
+
+/* System memory locks only tell the driver, and always name the first subresource */
+HRESULT
+D9Device::LockDriverSubresource(
+    _In_ D9Resource* Resource,
+    _In_ UINT Index,
+    _In_opt_ const D3DBOX* Box,
+    _In_ BOOLEAN IsVolume,
+    _In_ DWORD Flags,
+    _Out_ D3DLOCKED_BOX* Locked)
+{
+    D3DDDIARG_LOCK Args = {};
+    HRESULT hr;
+
+    Args.hResource = Resource->DriverResource;
+    D9DriverLockFlags(Resource, Flags, &Args.Flags);
+    if (!Args.Flags.NotifyOnly)
+    {
+        Args.SubResourceIndex = Index;
+        if (Box != nullptr && IsVolume)
+        {
+            Args.Flags.BoxValid = TRUE;
+            Args.Box.Left = Box->Left;
+            Args.Box.Top = Box->Top;
+            Args.Box.Right = Box->Right;
+            Args.Box.Bottom = Box->Bottom;
+            Args.Box.Front = Box->Front;
+            Args.Box.Back = Box->Back;
+        }
+        else if (Box != nullptr)
+        {
+            Args.Flags.AreaValid = TRUE;
+            Args.Area.left = static_cast<LONG>(Box->Left);
+            Args.Area.top = static_cast<LONG>(Box->Top);
+            Args.Area.right = static_cast<LONG>(Box->Right);
+            Args.Area.bottom = static_cast<LONG>(Box->Bottom);
+        }
+    }
+
+    DrainBatch();
+    hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
+    if (FAILED(hr))
+    {
+        if (hr != D3DERR_WASSTILLDRAWING)
+            D9Trace(L"UMD Lock of a texture failed 0x%08lX", hr);
+        return hr;
+    }
+    Locked->pBits = Args.pSurfData;
+    Locked->RowPitch = static_cast<INT>(Args.Pitch);
+    Locked->SlicePitch = static_cast<INT>(Args.SlicePitch);
+    return S_OK;
+}
+
+HRESULT
+D9Device::UnlockDriverSubresource(
+    _In_ D9Resource* Resource,
+    _In_ UINT Index)
+{
+    D3DDDIARG_UNLOCK Unlock = {};
+
+    Unlock.hResource = Resource->DriverResource;
+    Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
+    if (!Unlock.Flags.NotifyOnly)
+        Unlock.SubResourceIndex = Index;
+    DrainBatch();
+    return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
+}
+
+/* Copies a region of one face's top level, which the driver repeats down the levels */
+VOID
+D9Device::DriverTexBlt(
+    _In_ D9Resource* Destination,
+    _In_ D9Resource* Source,
+    _In_ UINT Face,
+    _In_ const D3DBOX* Box)
+{
+    D3DDDIARG_TEXBLT1 Blt = {};
+    HRESULT hr;
+
+    Blt.hDstResource = Destination->DriverResource;
+    Blt.hSrcResource = Source->DriverResource;
+    Blt.CubeMapFace = Face;
+    Blt.DstPoint.x = static_cast<LONG>(Box->Left);
+    Blt.DstPoint.y = static_cast<LONG>(Box->Top);
+    Blt.SrcRect.left = static_cast<LONG>(Box->Left);
+    Blt.SrcRect.top = static_cast<LONG>(Box->Top);
+    Blt.SrcRect.right = static_cast<LONG>(Box->Right);
+    Blt.SrcRect.bottom = static_cast<LONG>(Box->Bottom);
+
+    DrainBatch();
+    if (DeviceFunctions.pfnTexBlt1 != nullptr)
+    {
+        hr = DeviceFunctions.pfnTexBlt1(DriverDevice, &Blt);
+    }
+    else
+    {
+        D3DDDIARG_TEXBLT Old = {};
+
+        Old.hDstResource = Blt.hDstResource;
+        Old.hSrcResource = Blt.hSrcResource;
+        Old.CubeMapFace = Blt.CubeMapFace;
+        Old.DstPoint = Blt.DstPoint;
+        Old.SrcRect = Blt.SrcRect;
+        hr = DeviceFunctions.pfnTexBlt(DriverDevice, &Old);
+    }
+    if (FAILED(hr))
+        D9Trace(L"UMD TexBlt failed 0x%08lX", hr);
+}
+
+VOID
+D9Device::DriverVolBlt(
+    _In_ D9Resource* Destination,
+    _In_ D9Resource* Source,
+    _In_ const D3DBOX* Box)
+{
+    D3DDDIARG_VOLUMEBLT1 Blt = {};
+    HRESULT hr;
+
+    Blt.hDstResource = Destination->DriverResource;
+    Blt.hSrcResource = Source->DriverResource;
+    Blt.DstX = Box->Left;
+    Blt.DstY = Box->Top;
+    Blt.DstZ = Box->Front;
+    Blt.SrcBox.Left = Box->Left;
+    Blt.SrcBox.Top = Box->Top;
+    Blt.SrcBox.Right = Box->Right;
+    Blt.SrcBox.Bottom = Box->Bottom;
+    Blt.SrcBox.Front = Box->Front;
+    Blt.SrcBox.Back = Box->Back;
+
+    DrainBatch();
+    if (DeviceFunctions.pfnVolBlt1 != nullptr)
+    {
+        hr = DeviceFunctions.pfnVolBlt1(DriverDevice, &Blt);
+    }
+    else
+    {
+        D3DDDIARG_VOLUMEBLT Old = {};
+
+        Old.hDstResource = Blt.hDstResource;
+        Old.hSrcResource = Blt.hSrcResource;
+        Old.DstX = Blt.DstX;
+        Old.DstY = Blt.DstY;
+        Old.DstZ = Blt.DstZ;
+        Old.SrcBox = Blt.SrcBox;
+        hr = DeviceFunctions.pfnVolBlt(DriverDevice, &Old);
+    }
+    if (FAILED(hr))
+        D9Trace(L"UMD VolBlt failed 0x%08lX", hr);
+}
+
+VOID
+D9Device::DriverGenerateMips(
+    _In_ D9Resource* Resource,
+    _In_ D3DTEXTUREFILTERTYPE Filter)
+{
+    D3DDDIARG_GENERATEMIPSUBLEVELS Args = {};
+
+    Args.hResource = Resource->DriverResource;
+    Args.Filter = static_cast<D3DDDITEXTUREFILTERTYPE>(Filter);
+    DrainBatch();
+    DeviceFunctions.pfnGenerateMipSubLevels(DriverDevice, &Args);
+}
+
+VOID
+D9Device::DriverSetPriority(
+    _In_ D9Resource* Resource,
+    _In_ DWORD Priority)
+{
+    D3DDDIARG_SETPRIORITY Args = {};
+
+    Args.hResource = Resource->DriverResource;
+    Args.Priority = Priority;
+    DrainBatch();
+    DeviceFunctions.pfnSetPriority(DriverDevice, &Args);
 }
 
 /* A runtime owned system memory buffer the driver reads from */

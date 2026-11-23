@@ -119,7 +119,6 @@ D9OnGrid(
 }
 
 /* A lock rectangle inside the surface that respects the block layout of its format */
-static
 BOOLEAN
 D9IsValidRect(
     _In_ D3DFORMAT Format,
@@ -165,6 +164,32 @@ D9Surface::D9Surface(
       Discard(Discard),
       Standalone(Standalone)
 {
+}
+
+D9Surface::D9Surface(
+    _In_ D9TextureCore* Texture,
+    _In_ UINT Subresource,
+    _In_ const D3DSURFACE_DESC* Desc)
+    : D9Child(Texture->Device9()),
+      Container(Texture->Identity()),
+      Desc(*Desc),
+      Lockable(FALSE),
+      Discard(FALSE),
+      Standalone(FALSE),
+      Texture(Texture),
+      Subresource(Subresource)
+{
+}
+
+/* A lock may discard along with any other flag but read only */
+BOOLEAN
+D9LockFlagsAllowed(
+    _In_ DWORD Flags)
+{
+    static constexpr DWORD AllowedFlags = D3DLOCK_READONLY | D3DLOCK_NOSYSLOCK | D3DLOCK_DONOTWAIT |
+                                          D3DLOCK_NO_DIRTY_UPDATE;
+
+    return (Flags & ~AllowedFlags) == 0 || ((Flags & D3DLOCK_DISCARD) != 0 && (Flags & D3DLOCK_READONLY) == 0);
 }
 
 D9Surface::~D9Surface()
@@ -248,6 +273,8 @@ D9Surface::QueryInterface(
 STDMETHODIMP_(ULONG)
 D9Surface::AddRef()
 {
+    if (Texture != nullptr)
+        return Texture->AddRefTexture();
     return AddRefChild();
 }
 
@@ -257,6 +284,8 @@ D9Surface::Release()
     D9Device* Owner = Device;
     LONG Count;
 
+    if (Texture != nullptr)
+        return Texture->ReleaseTexture();
     if (!Standalone)
         return ReleaseChild();
 
@@ -311,12 +340,15 @@ D9Surface::FreePrivateData(
     return D3DERR_NOTFOUND;
 }
 
+/* Texture levels take no priority of their own */
 STDMETHODIMP_(DWORD)
 D9Surface::SetPriority(
     _In_ DWORD Priority)
 {
     DWORD Previous = ResourcePriority;
 
+    if (Texture != nullptr)
+        return 0;
     ResourcePriority = Priority;
     return Previous;
 }
@@ -406,14 +438,29 @@ D9Surface::LockRect(
     _In_opt_ const RECT* Rect,
     _In_ DWORD Flags)
 {
-    static constexpr DWORD AllowedFlags = D3DLOCK_READONLY | D3DLOCK_NOSYSLOCK | D3DLOCK_DONOTWAIT |
-                                          D3DLOCK_NO_DIRTY_UPDATE;
+    D3DLOCKED_BOX Box = {};
+    D3DBOX Area = {};
     HRESULT hr;
 
     if (Locked == nullptr)
         return D3DERR_INVALIDCALL;
 
     ZeroMemory(Locked, sizeof(*Locked));
+    if (Texture != nullptr)
+    {
+        if (Rect != nullptr)
+        {
+            Area.Left = static_cast<UINT>(Rect->left);
+            Area.Top = static_cast<UINT>(Rect->top);
+            Area.Right = static_cast<UINT>(Rect->right);
+            Area.Bottom = static_cast<UINT>(Rect->bottom);
+            Area.Back = 1;
+        }
+        hr = Texture->LockSubresource(Subresource, Rect != nullptr ? &Area : nullptr, Flags, TRUE, &Box);
+        Locked->pBits = Box.pBits;
+        Locked->Pitch = Box.RowPitch;
+        return hr;
+    }
     if (Memory != nullptr)
         return LockMemory(Locked, Rect, Flags);
 
@@ -423,8 +470,7 @@ D9Surface::LockRect(
         return D3DERR_INVALIDCALL;
     }
 
-    /* A discarding lock may carry any other flag but read only */
-    if ((Flags & ~AllowedFlags) != 0 && ((Flags & D3DLOCK_DISCARD) == 0 || (Flags & D3DLOCK_READONLY) != 0))
+    if (!D9LockFlagsAllowed(Flags))
     {
         D9_TRACE_ONCE(L"LockRect: invalid flags 0x%08lX", Flags);
         return D3DERR_INVALIDCALL;
@@ -451,6 +497,8 @@ D9Surface::UnlockRect()
 {
     HRESULT hr = S_OK;
 
+    if (Texture != nullptr)
+        return Texture->UnlockSubresource(Subresource, TRUE);
     if (!IsLocked)
         return D3DERR_INVALIDCALL;
 

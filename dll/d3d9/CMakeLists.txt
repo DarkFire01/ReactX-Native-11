@@ -17,6 +17,7 @@ nt_add_usermode_dll(d3d9
         psgp.cpp
         surface.cpp
         swapchain.cpp
+        texture.cpp
         umd.cpp
         validate.cpp)
 

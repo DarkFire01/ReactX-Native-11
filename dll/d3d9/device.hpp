@@ -28,6 +28,9 @@ static constexpr UINT D9QueuedPresentLimit = 8;
 /* The vertex and index buffers a device keeps for drawing from application memory */
 static constexpr UINT D9StagingBufferCount = 4;
 
+/* Sixteen pixel samplers, the displacement map sampler and four vertex samplers */
+static constexpr UINT D9TextureSlotCount = 21;
+
 /* A resource the driver made; its address is the runtime handle the driver passes back */
 struct D9Resource
 {
@@ -39,7 +42,13 @@ struct D9Resource
     UINT Width;
     UINT Height;
     UINT Fvf;
+
+    /* Textures hand the driver every level, and cube maps every face, in one resource */
+    UINT SurfaceCount;
+    UINT MipLevels;
 };
+
+class D9TextureCore;
 
 /* Driver calls a batch records instead of making them */
 enum class D9BatchCall : UINT
@@ -209,6 +218,12 @@ public:
         _In_ BOOLEAN Discard = FALSE,
         _In_ BOOLEAN Standalone = FALSE);
 
+    /* A level or a face of a texture, which shares the texture's reference count and driver resource */
+    D9Surface(
+        _In_ D9TextureCore* Texture,
+        _In_ UINT Subresource,
+        _In_ const D3DSURFACE_DESC* Desc);
+
     ~D9Surface();
 
     D9Surface(const D9Surface&) = delete;
@@ -311,6 +326,284 @@ private:
     /* System memory and scratch surfaces keep their pixels in memory of the runtime's own */
     BYTE* Memory = nullptr;
     UINT MemoryPitch = 0;
+
+    /* Set for the levels and faces of a texture */
+    D9TextureCore* Texture = nullptr;
+    UINT Subresource = 0;
+};
+
+/* A level of a volume texture */
+class D9Volume final : public IDirect3DVolume9
+{
+public:
+    D9Volume(
+        _In_ D9TextureCore* Texture,
+        _In_ UINT Subresource,
+        _In_ const D3DVOLUME_DESC* Desc);
+
+    D9Volume(const D9Volume&) = delete;
+    D9Volume& operator=(const D9Volume&) = delete;
+
+    /* IUnknown */
+    STDMETHOD(QueryInterface)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Object) override;
+
+    STDMETHOD_(ULONG, AddRef)() override;
+
+    STDMETHOD_(ULONG, Release)() override;
+
+    /* IDirect3DVolume9 */
+    STDMETHOD(GetDevice)(
+        _Out_ IDirect3DDevice9** Result) override;
+
+    STDMETHOD(SetPrivateData)(
+        _In_ REFGUID Guid,
+        _In_reads_bytes_opt_(Size) const VOID* Data,
+        _In_ DWORD Size,
+        _In_ DWORD Flags) override;
+
+    STDMETHOD(GetPrivateData)(
+        _In_ REFGUID Guid,
+        _Out_writes_bytes_opt_(*Size) VOID* Data,
+        _Inout_ DWORD* Size) override;
+
+    STDMETHOD(FreePrivateData)(
+        _In_ REFGUID Guid) override;
+
+    STDMETHOD(GetContainer)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Result) override;
+
+    STDMETHOD(GetDesc)(
+        _Out_ D3DVOLUME_DESC* Result) override;
+
+    STDMETHOD(LockBox)(
+        _Out_ D3DLOCKED_BOX* Locked,
+        _In_opt_ const D3DBOX* Box,
+        _In_ DWORD Flags) override;
+
+    STDMETHOD(UnlockBox)() override;
+
+private:
+    D9TextureCore* Texture;
+    UINT Subresource;
+    D3DVOLUME_DESC Desc;
+};
+
+/* The shapes of texture Direct3D 9 knows */
+enum class D9TextureKind : UINT
+{
+    Planar,
+    Cube,
+    Volume,
+};
+
+/* What one texture creation asked for once the device checked it */
+struct D9TextureRequest
+{
+    D9TextureKind Kind;
+    UINT Width;
+    UINT Height;
+    UINT Depth;
+    UINT Levels;
+    DWORD Usage;
+    D3DFORMAT Format;
+    D3DFORMAT DriverFormat;
+    D3DPOOL Pool;
+
+    /* The pool the texture reports, which keeps the extended object's spelling of the managed pool */
+    D3DPOOL ReportedPool;
+    BOOLEAN Lockable;
+    BOOLEAN DriverAutogen;
+};
+
+/* Where one level or face of a texture lives */
+struct D9Subresource
+{
+    UINT Width;
+    UINT Height;
+    UINT Depth;
+    UINT Pitch;
+    UINT SlicePitch;
+    SIZE_T Offset;
+    BOOLEAN Locked;
+};
+
+/* Managed textures remember up to this many dirty regions per face before they count as wholly dirty */
+static constexpr UINT D9DirtyRegionLimit = 6;
+
+/* The state and behavior the three texture interfaces share */
+class D9TextureCore : public D9Child
+{
+public:
+    D9TextureCore(
+        _In_ D9Device* Owner,
+        _In_ const D9TextureRequest* Request);
+
+    virtual ~D9TextureCore();
+
+    D9TextureCore(const D9TextureCore&) = delete;
+    D9TextureCore& operator=(const D9TextureCore&) = delete;
+
+    HRESULT
+    Create(VOID);
+
+    /* The texture's own interface, the container its levels report */
+    virtual IUnknown*
+    Identity() = 0;
+
+    ULONG
+    AddRefTexture(VOID);
+
+    ULONG
+    ReleaseTexture(VOID);
+
+    D9Device*
+    Device9() const
+    {
+        return Device;
+    }
+
+    UINT
+    LevelCount() const
+    {
+        return Levels;
+    }
+
+    UINT
+    FaceCount() const
+    {
+        return Faces;
+    }
+
+    BOOLEAN
+    IsManaged() const
+    {
+        return Pool == D3DPOOL_MANAGED;
+    }
+
+    HRESULT
+    LockSubresource(
+        _In_ UINT Index,
+        _In_opt_ const D3DBOX* Box,
+        _In_ DWORD Flags,
+        _In_ BOOLEAN FromLevel,
+        _Out_ D3DLOCKED_BOX* Locked);
+
+    HRESULT
+    UnlockSubresource(
+        _In_ UINT Index,
+        _In_ BOOLEAN FromLevel);
+
+    /* The texture is bound to a stage; a texture the application let go of lives on while it is bound */
+    VOID
+    Bind(VOID);
+
+    VOID
+    Unbind(VOID);
+
+    /* Managed textures drop their video copy, and make it again before use */
+    VOID
+    Evict(VOID);
+
+    VOID
+    Upload(VOID);
+
+    D9TextureCore* NextManaged = nullptr;
+
+protected:
+    HRESULT
+    GetLevelSurface(
+        _In_ UINT Face,
+        _In_ UINT Level,
+        _Outptr_ IUnknown** Result);
+
+    HRESULT
+    DescribeLevel(
+        _In_ UINT Level,
+        _Out_ D3DSURFACE_DESC* Desc) const;
+
+    HRESULT
+    AddDirtyRegion(
+        _In_ UINT Face,
+        _In_opt_ const D3DBOX* Box);
+
+    DWORD
+    SetPriorityCore(
+        _In_ DWORD Priority);
+
+    DWORD
+    GetPriorityCore(VOID) const;
+
+    DWORD
+    SetLodCore(
+        _In_ DWORD Lod);
+
+    DWORD
+    GetLodCore(VOID) const;
+
+    HRESULT
+    SetFilterCore(
+        _In_ D3DTEXTUREFILTERTYPE Filter);
+
+    VOID
+    GenerateMipsCore(VOID);
+
+    UINT
+    SubresourceIndex(
+        _In_ UINT Face,
+        _In_ UINT Level) const
+    {
+        return Face * Levels + Level;
+    }
+
+    D9TextureKind Kind;
+    UINT Width;
+    UINT Height;
+    UINT Depth;
+    UINT Levels;
+    UINT Faces;
+    DWORD Usage;
+    D3DFORMAT Format;
+    D3DFORMAT DriverFormat;
+    D3DPOOL Pool;
+    D3DPOOL ReportedPool;
+    BOOLEAN Lockable;
+    BOOLEAN DriverAutogen;
+    D3DTEXTUREFILTERTYPE Filter;
+    DWORD ResourcePriority = 0;
+    DWORD Lod = 0;
+
+    /* The driver resource: the texture itself, or the system memory copy of a managed texture */
+    D9Resource* Resource = nullptr;
+
+    /* The video memory copy of a managed texture, made when it is first used */
+    D9Resource* VideoResource = nullptr;
+
+    /* Memory textures keep every level and face in one block of runtime memory */
+    BYTE* Memory = nullptr;
+    D9Subresource* Subresources = nullptr;
+    IUnknown** LevelObjects = nullptr;
+
+    /* Dirty regions of each face's top level a managed texture copies on its next upload */
+    UINT DirtyCount[6] = {};
+    D3DBOX DirtyRegions[6][D9DirtyRegionLimit] = {};
+
+    /* Stages the texture is bound to, and whether the application released it while bound */
+    LONG BindCount = 0;
+    BOOLEAN Orphaned = FALSE;
+
+private:
+    HRESULT
+    LockMemorySubresource(
+        _In_ UINT Index,
+        _In_opt_ const D3DBOX* Box,
+        _In_ DWORD Flags,
+        _Out_ D3DLOCKED_BOX* Locked);
+
+    VOID
+    DestroyLevelObjects(VOID);
 };
 
 /* A swap chain: the back buffers of one window and how they reach it */
@@ -527,10 +820,58 @@ D9MemoryRows(
     _In_ D3DFORMAT Format,
     _In_ UINT Height);
 
+BOOLEAN
+D9IsValidRect(
+    _In_ D3DFORMAT Format,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ const RECT* Rect);
+
+BOOLEAN
+D9LockFlagsAllowed(
+    _In_ DWORD Flags);
+
+/* device.cpp */
+BOOLEAN
+D9IsHiddenDepth(
+    _In_ D3DFORMAT Format);
+
+BOOLEAN
+D9IsDxtFormat(
+    _In_ D3DFORMAT Format);
+
 /* present.cpp */
 HRESULT
 D9CheckOcclusion(
     _In_ HWND Window);
+
+/* Holds the device lock for applications that asked for a multithreaded device */
+class D9DeviceLock
+{
+public:
+    D9DeviceLock(
+        _In_ CRITICAL_SECTION* Section,
+        _In_ BOOLEAN Needed)
+        : Held(Needed ? Section : nullptr)
+    {
+        if (Held != nullptr)
+            EnterCriticalSection(Held);
+    }
+
+    ~D9DeviceLock()
+    {
+        if (Held != nullptr)
+            LeaveCriticalSection(Held);
+    }
+
+    D9DeviceLock(const D9DeviceLock&) = delete;
+    D9DeviceLock& operator=(const D9DeviceLock&) = delete;
+
+private:
+    CRITICAL_SECTION* Held;
+};
+
+#define D9_DEVICE_LOCK() D9DeviceLock Scope(&Lock, (BehaviorFlags & D3DCREATE_MULTITHREADED) != 0)
 
 /* The IDirect3DDevice9Ex object CreateDevice and CreateDeviceEx hand out */
 class D9Device final : public IDirect3DDevice9Ex, public RxKernelDevice
@@ -622,6 +963,84 @@ public:
     HRESULT
     UnlockDriverSurface(
         _In_ D9Resource* Resource);
+
+    /* Textures: one driver resource holding every level and face */
+    HRESULT
+    CreateTextureResource(
+        _In_reads_(Count) const D3DDDI_SURFACEINFO* Surfaces,
+        _In_ UINT Count,
+        _In_ UINT MipLevels,
+        _Inout_ D9Resource* Resource);
+
+    HRESULT
+    LockDriverSubresource(
+        _In_ D9Resource* Resource,
+        _In_ UINT Index,
+        _In_opt_ const D3DBOX* Box,
+        _In_ BOOLEAN IsVolume,
+        _In_ DWORD Flags,
+        _Out_ D3DLOCKED_BOX* Locked);
+
+    HRESULT
+    UnlockDriverSubresource(
+        _In_ D9Resource* Resource,
+        _In_ UINT Index);
+
+    VOID
+    DriverTexBlt(
+        _In_ D9Resource* Destination,
+        _In_ D9Resource* Source,
+        _In_ UINT Face,
+        _In_ const D3DBOX* Box);
+
+    VOID
+    DriverVolBlt(
+        _In_ D9Resource* Destination,
+        _In_ D9Resource* Source,
+        _In_ const D3DBOX* Box);
+
+    VOID
+    DriverGenerateMips(
+        _In_ D9Resource* Resource,
+        _In_ D3DTEXTUREFILTERTYPE Filter);
+
+    VOID
+    DriverSetPriority(
+        _In_ D9Resource* Resource,
+        _In_ DWORD Priority);
+
+    const D3DCAPS9&
+    DeviceCaps() const
+    {
+        return Caps;
+    }
+
+    D3DDEVTYPE
+    Type() const
+    {
+        return DeviceType;
+    }
+
+    /* The lock texture methods take, held only for multithreaded devices */
+    CRITICAL_SECTION*
+    LockSection()
+    {
+        return &Lock;
+    }
+
+    BOOLEAN
+    IsMultithreaded() const
+    {
+        return (BehaviorFlags & D3DCREATE_MULTITHREADED) != 0;
+    }
+
+    VOID
+    TrackManaged(
+        _In_ D9TextureCore* Texture);
+
+    VOID
+    ForgetManaged(
+        _In_ D9TextureCore* Texture);
 
     D3DDDI_POOL
     BufferPlacement(
@@ -1552,6 +1971,14 @@ private:
         _Outptr_ Buffer** Made);
 
     HRESULT
+    CheckTextureRequest(
+        _Inout_ D9TextureRequest* Request,
+        _In_opt_ HANDLE* SharedHandle);
+
+    VOID
+    UnbindTextures(VOID);
+
+    HRESULT
     CreateStagingBuffers(VOID);
 
     VOID
@@ -1637,4 +2064,10 @@ private:
     /* The driver's contexts in creation order; the kernel is told about them newest first */
     D3DKMT_HANDLE KernelContexts[D9MaxKernelContexts] = {};
     UINT KernelContextCount = 0;
+
+    /* Textures bound to the pixel samplers, the displacement map sampler and the vertex samplers */
+    IDirect3DBaseTexture9* Textures[D9TextureSlotCount] = {};
+
+    /* Managed textures, which EvictManagedResources walks */
+    D9TextureCore* ManagedTextures = nullptr;
 };
