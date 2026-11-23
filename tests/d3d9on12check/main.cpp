@@ -588,8 +588,17 @@ CkInterop(
     printf("== interop\n");
     if (SUCCEEDED(Device->QueryInterface(IID_PPV_ARGS(&Ex))))
     {
+        IDirect3DSurface9* Shared = nullptr;
+        HANDLE Handle = NULL;
+
         hr = Ex->SetMaximumFrameLatency(2);
         printf("SetMaximumFrameLatency hr %08lX\n", hr);
+
+        /* A shared surface hands out a handle other devices can open */
+        hr = Ex->CreateRenderTarget(32, 32, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Shared, &Handle);
+        printf("shared CreateRenderTarget hr %08lX handle %s\n", hr, Handle != NULL ? "set" : "none");
+        if (Shared != nullptr)
+            Shared->Release();
         Ex->Release();
     }
 
