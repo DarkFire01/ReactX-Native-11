@@ -124,6 +124,10 @@ public:
     BYTE* Code = nullptr;
     D3D12DDIARG_SIGNATURE_ENTRY_0012* Entries = nullptr;
 
+    /* The DXIL dxilconv made from DXBC code, from CoTaskMemAlloc */
+    BYTE* Converted = nullptr;
+    UINT ConvertedSize = 0;
+
     RxPipelinePart* NextCached = nullptr;
 
 private:

@@ -229,6 +229,8 @@ RxPipelinePart::~RxPipelinePart()
     delete[] Key;
     delete[] Code;
     delete[] Entries;
+    if (Converted != nullptr)
+        CoTaskMemFree(Converted);
 }
 
 /* Shaders */
@@ -341,6 +343,77 @@ RxFindSignature(
     }
 }
 
+/* dxilconv's converter interface, as the DirectXShaderCompiler headers publish it */
+struct __declspec(uuid("5F956ED5-78D1-4B15-8247-F7187614A041")) __declspec(novtable) RxDxbcConverter : public IUnknown
+{
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    Convert(
+        _In_reads_bytes_(DxbcSize) LPCVOID Dxbc,
+        _In_ UINT32 DxbcSize,
+        _In_opt_z_ LPCWSTR ExtraOptions,
+        _Outptr_result_bytebuffer_maybenull_(*DxilSize) LPVOID* Dxil,
+        _Out_ UINT32* DxilSize,
+        _Outptr_result_maybenull_z_ LPWSTR* Diagnostics) = 0;
+};
+
+static const CLSID RxDxbcConverterClsid = {0x4900391e, 0xb752, 0x4edd, {0xa8, 0x85, 0x6f, 0xb7, 0x6e, 0x25, 0xad, 0xdb}};
+
+typedef HRESULT (WINAPI* RxDxcCreateInstanceProc)(REFCLSID Clsid, REFIID Riid, LPVOID* Object);
+
+/* DXBC for a driver that takes DXIL, converted by dxilconv.dll the way the system core loads it */
+static
+HRESULT
+RxConvertToDxil(
+    _In_reads_bytes_(Size) const BYTE* Container,
+    _In_ UINT Size,
+    _Outptr_result_bytebuffer_(*DxilSize) BYTE** Dxil,
+    _Out_ UINT* DxilSize)
+{
+    static RxDxcCreateInstanceProc CreateInstance;
+    RxDxbcConverter* Converter = nullptr;
+    LPVOID Output = nullptr;
+    UINT32 OutputSize = 0;
+    LPWSTR Diagnostics = nullptr;
+    HRESULT hr;
+
+    *Dxil = nullptr;
+    *DxilSize = 0;
+
+    if (CreateInstance == nullptr)
+    {
+        HMODULE Module = LoadLibraryW(L"dxilconv.dll");
+
+        if (Module == NULL)
+        {
+            RX_TRACE(L"dxilconv.dll is not available");
+            return E_FAIL;
+        }
+        CreateInstance = reinterpret_cast<RxDxcCreateInstanceProc>(GetProcAddress(Module, "DxcCreateInstance"));
+        if (CreateInstance == nullptr)
+            return E_FAIL;
+    }
+
+    hr = CreateInstance(RxDxbcConverterClsid, __uuidof(RxDxbcConverter), reinterpret_cast<LPVOID*>(&Converter));
+    if (FAILED(hr))
+        return hr;
+
+    hr = Converter->Convert(Container, Size, nullptr, &Output, &OutputSize, &Diagnostics);
+    Converter->Release();
+    if (Diagnostics != nullptr)
+        CoTaskMemFree(Diagnostics);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"dxilconv failed 0x%08lX", hr);
+        return hr;
+    }
+
+    *Dxil = static_cast<BYTE*>(Output);
+    *DxilSize = OutputSize;
+    return S_OK;
+}
+
 struct RxShaderBuild
 {
     RxShaderStage Stage;
@@ -391,6 +464,21 @@ RxBuildShader(
 
         RxFindSignature(Own, FALSE, &Inputs, &InputSize, &InputForm);
         RxFindSignature(Own, TRUE, &Outputs, &OutputSize, &OutputForm);
+    }
+
+    /* Drivers of shader model 6 and up take DXIL only; the signatures and hash stay the original's */
+    if (Device.GetHighestShaderModel() >= D3D_SHADER_MODEL_6_0 &&
+        !RxFindContainerPart(Part->Code, (UINT)Build.Code->BytecodeLength, RxFourCcOf('D', 'X', 'I', 'L'), &Program,
+                             &ProgramSize))
+    {
+        hr = RxConvertToDxil(Part->Code, (UINT)Build.Code->BytecodeLength, &Part->Converted, &Part->ConvertedSize);
+        if (FAILED(hr))
+            return hr;
+        if (!RxFindContainerPart(Part->Converted, Part->ConvertedSize, RxFourCcOf('D', 'X', 'I', 'L'), &Program,
+                                 &ProgramSize))
+        {
+            return E_FAIL;
+        }
     }
 
     InputCount = RxSignatureCount(Inputs, InputSize);
