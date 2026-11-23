@@ -253,6 +253,16 @@ private:
     VOID
     TransformLights(VOID);
 
+    VOID
+    WriteBlendMatrix(
+        _In_ UINT Register,
+        _In_ const D3DMATRIX* Matrix);
+
+    VOID
+    UpdateBlendRegisters(
+        _Inout_ DWORD* Flags,
+        _In_ UINT Last);
+
     D9_VERTEX_RANGE Ranges[3] = {};
     UINT LightLimit = 0;
     UINT MatrixLimit = 0;
@@ -264,8 +274,10 @@ private:
     FLOAT FogEnd = 0.0f;
     D3DMATRIX View = {};
     D3DMATRIX Projection = {};
-    D3DMATRIX World = {};
-    D3DMATRIX WorldView = {};
+    D3DMATRIX Worlds[256] = {};
+    D3DMATRIX WorldViews[4] = {};
+    BOOLEAN WorldStale[256] = {};
+    BOOLEAN InverseStale[256] = {};
     D9_VS_LIGHT* Lights = nullptr;
     UINT LightCount = 0;
     UINT Enabled[D9VertexLightCapacity] = {};

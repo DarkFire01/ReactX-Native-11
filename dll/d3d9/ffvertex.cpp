@@ -57,6 +57,9 @@ static constexpr UINT D9VsConstFogColor = 8;
 static constexpr UINT D9VsConstFog = 9;
 static constexpr UINT D9VsConstWorldView = 10;
 static constexpr UINT D9VsConstNormal = 14;
+static constexpr UINT D9VsConstView = 18;
+static constexpr UINT D9VsConstViewInverse = 22;
+static constexpr UINT D9VsConstProjection = 26;
 static constexpr UINT D9VsConstTexture = 30;
 static constexpr UINT D9VsConstPoint = 98;
 static constexpr UINT D9VsConstPointScale = 99;
@@ -111,6 +114,7 @@ typedef struct _D9_VS_SOURCE
     USHORT Number;
     BOOLEAN Negate;
     BOOLEAN Relative;
+    BOOLEAN Indexed;
 } D9_VS_SOURCE;
 
 typedef struct _D9_VS_TARGET
@@ -127,7 +131,7 @@ D9VsSrc(
     _In_ UINT Number,
     _In_ BYTE Swizzle)
 {
-    D9_VS_SOURCE Source = { File, Swizzle, static_cast<USHORT>(Number), FALSE, FALSE };
+    D9_VS_SOURCE Source = { File, Swizzle, static_cast<USHORT>(Number), FALSE, FALSE, FALSE };
 
     return Source;
 }
@@ -238,9 +242,11 @@ public:
         _In_ const D9_VS_SOURCE& Source)
     {
         Put(Register(Source.File, Source.Number) | (static_cast<DWORD>(Source.Swizzle) << 16) |
-            (Source.Negate ? 0x01000000 : 0) | (Source.Relative ? 0x2000 : 0));
+            (Source.Negate ? 0x01000000 : 0) | (Source.Relative || Source.Indexed ? 0x2000 : 0));
         if (Source.Relative)
             Put(0xF0E40800);
+        else if (Source.Indexed)
+            Put(0xB0000000);
     }
 
     /* An instruction's token counts the tokens after it, relative addresses included */
@@ -744,6 +750,144 @@ D9VsWriteLighting(
     }
 }
 
+/* The register of a blend matrix: the first one's fixed register, then a block for the rest */
+static
+UINT
+D9VsBlendRegister(
+    _In_ UINT Fixed,
+    _In_ UINT Rest,
+    _In_ UINT Index)
+{
+    return Index == 0 ? Fixed : Rest + 4 * (Index - 1);
+}
+
+/* A matrix of four registers read through the address register */
+static
+D9_VS_SOURCE
+D9VsAddressed(
+    _In_ UINT Register)
+{
+    D9_VS_SOURCE Source = D9VsWhole(Register);
+
+    Source.Indexed = TRUE;
+    return Source;
+}
+
+/* Position times a matrix whose registers the address register picks */
+static
+VOID
+D9VsTransformIndexed(
+    _Inout_ D9VsWriter* Out,
+    _In_ const D9_VS_TARGET& Target,
+    _In_ const D9_VS_SOURCE& Position,
+    _In_ UINT Matrix,
+    _In_ BOOLEAN Indexed,
+    _In_ BYTE Scratch)
+{
+    D9_VS_TARGET Work = D9VsDst(D9VsTemp, Scratch, 0xF);
+    D9_VS_SOURCE Partial = D9VsSrc(D9VsTemp, Scratch, D9VsAll);
+    D9_VS_SOURCE Row[4];
+
+    for (UINT Index = 0; Index < 4; Index++)
+        Row[Index] = Indexed ? D9VsAddressed(Matrix + Index) : D9VsWhole(Matrix + Index);
+    Out->Op(D9VsMul, Work, D9VsSwizzled(Position, D9VsX), Row[0]);
+    Out->Op(D9VsMad, Work, D9VsSwizzled(Position, D9VsY), Row[1], Partial);
+    Out->Op(D9VsMad, Work, D9VsSwizzled(Position, D9VsZ), Row[2], Partial);
+    Out->Op(D9VsAdd, Target, Row[3], Partial);
+}
+
+/* Each blend matrix transforms the position, and the eye position and normal the shader needs, summed by
+   weight; the last weight is what the others leave. Indexed blending picks each world matrix by the
+   vertex's index and applies the view and projection after it */
+static
+VOID
+D9VsBlend(
+    _Inout_ D9VsWriter* Out,
+    _In_ const D9_FIXED_VERTEX_KEY* Key,
+    _In_ const D9_VS_SOURCE& Position,
+    _In_ const D9_VS_SOURCE& Normal,
+    _In_ const D9_VS_SOURCE& Weights,
+    _In_ const D9_VS_SOURCE& Indices)
+{
+    static const BYTE Picks[4] = { D9VsX, D9VsY, D9VsZ, D9VsW };
+    UINT Last = (Key->Modes >> 18) & 3;
+    BOOLEAN Indexed = (Key->Inputs & D9VsIndexed) != 0;
+    BOOLEAN NeedsEye = (Key->Needs & D9VertexNeedsPosition) != 0;
+    BOOLEAN NeedsNormal = (Key->Needs & D9VertexNeedsNormal) != 0;
+    BOOLEAN HasNormal = (Key->Inputs & D9VsInNormal) != 0;
+    D9_VS_SOURCE Remaining = D9VsSrc(D9VsTemp, 8, D9VsX);
+    D9_VS_SOURCE Moved = D9VsSrc(D9VsTemp, 9, D9VsAll);
+    D9_VS_SOURCE Eye = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsAll);
+    D9_VS_SOURCE Turned = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll);
+    D9_VS_SOURCE Sum = D9VsSrc(D9VsTemp, 7, D9VsAll);
+
+    Out->Op(D9VsMov, D9VsDst(D9VsTemp, 8, 0x1), D9VsConstant(D9VsConstZero, 3));
+    Out->Op(D9VsMov, D9VsDst(D9VsTemp, 7, 0xF), D9VsConstant(D9VsConstZero, 0));
+    if (NeedsNormal)
+        Out->Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempNormal, 0x7), D9VsConstant(D9VsConstZero, 0));
+    if (NeedsEye)
+        Out->Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempEye, 0xF), D9VsWhole(D9VsConstZero));
+
+    for (UINT Index = 0; Index <= Last; Index++)
+    {
+        D9_VS_SOURCE Weight = Index == Last ? Remaining : D9VsSwizzled(Weights, Picks[Index]);
+
+        if (Index != Last)
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 8, 0x1), Remaining, D9VsNegated(Weight));
+
+        if (Indexed)
+        {
+            D9_VS_TARGET Slot = D9VsDst(D9VsTemp, D9VsTempOut, 0x2);
+            D9_VS_SOURCE Picked = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsY);
+
+            Out->Op(D9VsMov, Slot, D9VsSwizzled(Indices, Picks[Index]));
+            Out->Op(D9VsMul, Slot, Picked, D9VsConstant(D9VsConstNumbers, 1));
+            Out->Op(D9VsAdd, Slot, Picked, D9VsConstant(D9VsConstNumbers, 3));
+            Out->Op(0x2E, D9VsDst(3, 0, 0x1), Picked);
+            D9VsTransformIndexed(Out, D9VsDst(D9VsTemp, 12, 0xF), Position, 0, TRUE, 6);
+            D9VsTransformIndexed(Out, D9VsDst(D9VsTemp, D9VsTempOut, 0xF), D9VsSrc(D9VsTemp, 12, D9VsAll),
+                                 D9VsConstView, FALSE, 6);
+            D9VsTransformIndexed(Out, D9VsDst(D9VsTemp, 9, 0xF), Eye, D9VsConstProjection, FALSE, 6);
+        }
+        else
+        {
+            D9VsTransformIndexed(Out, D9VsDst(D9VsTemp, 9, 0xF), Position,
+                                 D9VsBlendRegister(D9VsConstWorldViewProj, 62, Index), FALSE, 6);
+        }
+        if (Index == Last)
+            Out->Op(D9VsMad, D9VsDst(D9VsRasterOut, 0, 0xF), Moved, Weight, Sum);
+        else
+            Out->Op(D9VsMad, D9VsDst(D9VsTemp, 7, 0xF), Moved, Weight, Sum);
+
+        if (NeedsEye)
+        {
+            if (!Indexed)
+            {
+                D9VsTransformIndexed(Out, D9VsDst(D9VsTemp, D9VsTempOut, 0xF), Position,
+                                     D9VsBlendRegister(D9VsConstWorldView, 74, Index), FALSE, 6);
+            }
+            Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempEye, 0x7), Eye, Weight,
+                    D9VsSrc(D9VsTemp, D9VsTempEye, D9VsAll));
+        }
+        if (NeedsNormal && HasNormal)
+        {
+            if (Indexed)
+            {
+                Out->Op(D9VsM3x3, D9VsDst(D9VsTemp, 6, 0x7), Normal, D9VsWhole(D9VsConstViewInverse));
+                Out->Op(D9VsM3x3, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), D9VsSrc(D9VsTemp, 6, D9VsAll),
+                        D9VsAddressed(4));
+            }
+            else
+            {
+                Out->Op(D9VsM3x3, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), Normal,
+                        D9VsWhole(D9VsBlendRegister(D9VsConstNormal, 86, Index)));
+            }
+            Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempNormal, 0x7), Turned, Weight,
+                    D9VsSrc(D9VsTemp, D9VsTempNormal, D9VsAll));
+        }
+    }
+}
+
 BOOLEAN
 D9BuildFixedVertexShader(
     _Inout_ D9_FIXED_VERTEX_KEY* Key,
@@ -766,6 +910,8 @@ D9BuildFixedVertexShader(
     D9_VS_SOURCE Diffuse = {};
     D9_VS_SOURCE Specular = {};
     D9_VS_SOURCE Size = {};
+    D9_VS_SOURCE Weights = {};
+    D9_VS_SOURCE Indices = {};
     D9_VS_SOURCE Sets[D9VertexStages];
     DWORD Writes = D9VsWritesPosition;
     UINT Stages;
@@ -773,7 +919,7 @@ D9BuildFixedVertexShader(
     *Count = 0;
 
     /* Parts not converted yet */
-    if ((In & D9VsTweening) != 0 || (Needs & D9VertexNeedsBlend) != 0)
+    if ((In & D9VsTweening) != 0)
         return FALSE;
 
     Position = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Position), D9VsAll);
@@ -828,6 +974,30 @@ D9BuildFixedVertexShader(
             Size = D9VsConstant(D9VsConstPoint, 2);
         }
     }
+    if ((Needs & D9VertexNeedsBlend) != 0)
+    {
+        if ((In & D9VsInWeights) != 0)
+        {
+            Out.Declare(D9VsUsageWeight, 0, Inputs.Take(&Inputs.Weights));
+            Weights = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Weights), D9VsAll);
+        }
+        else
+        {
+            Weights = D9VsConstant(D9VsConstZero, 0);
+        }
+        if ((In & D9VsIndexed) != 0)
+        {
+            if ((In & D9VsInIndices) != 0)
+            {
+                Out.Declare(D9VsUsageIndices, 0, Inputs.Take(&Inputs.Indices));
+                Indices = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Indices), D9VsAll);
+            }
+            else
+            {
+                Indices = D9VsWhole(2);
+            }
+        }
+    }
     for (UINT Set = 0; Set < D9VertexStages; Set++)
     {
         if ((In & (0x100u << Set)) != 0)
@@ -842,11 +1012,18 @@ D9BuildFixedVertexShader(
     }
 
     /* The eye space position and normal the later parts read, then the clip space position */
-    if ((Needs & D9VertexNeedsPosition) != 0)
-        D9VsTransform(&Out, D9VsDst(D9VsTemp, D9VsTempEye, 0xF), Position, D9VsConstWorldView, D9VsTempEye);
-    if (HasNormal)
-        Out.Op(D9VsM3x3, D9VsDst(D9VsTemp, D9VsTempNormal, 0x7), Normal, D9VsWhole(D9VsConstNormal));
-    D9VsTransform(&Out, D9VsDst(D9VsRasterOut, 0, 0xF), Position, D9VsConstWorldViewProj, D9VsTempScratch);
+    if ((Needs & D9VertexNeedsBlend) != 0)
+    {
+        D9VsBlend(&Out, Key, Position, Normal, Weights, Indices);
+    }
+    else
+    {
+        if ((Needs & D9VertexNeedsPosition) != 0)
+            D9VsTransform(&Out, D9VsDst(D9VsTemp, D9VsTempEye, 0xF), Position, D9VsConstWorldView, D9VsTempEye);
+        if (HasNormal)
+            Out.Op(D9VsM3x3, D9VsDst(D9VsTemp, D9VsTempNormal, 0x7), Normal, D9VsWhole(D9VsConstNormal));
+        D9VsTransform(&Out, D9VsDst(D9VsRasterOut, 0, 0xF), Position, D9VsConstWorldViewProj, D9VsTempScratch);
+    }
     if (HasNormal && (In & D9VsNormalize) != 0)
     {
         Out.Op(D9VsNrm, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), D9VsSrc(D9VsTemp, D9VsTempNormal, D9VsAll));
@@ -1120,8 +1297,13 @@ D9VertexConverter::Start(
     ZeroMemory(&View, sizeof(View));
     View._11 = View._22 = View._33 = View._44 = 1.0f;
     Projection = View;
-    World = View;
-    ZeroMemory(&WorldView, sizeof(WorldView));
+    for (UINT Index = 0; Index < 256; Index++)
+    {
+        Worlds[Index] = View;
+        WorldStale[Index] = Index != 0 && Index < MatrixLimit;
+        InverseStale[Index] = WorldStale[Index];
+    }
+    ZeroMemory(WorldViews, sizeof(WorldViews));
 
     /* The block of numbers is the first range the driver gets */
     Ranges[0].First = 0;
@@ -1359,7 +1541,19 @@ D9VertexConverter::SetTransform(
     if (Type == D3DTS_WORLDMATRIX(0))
     {
         Stale |= 0xC031111;
-        World = *Matrix;
+        Worlds[0] = *Matrix;
+        return;
+    }
+    if (Type > D3DTS_WORLDMATRIX(0) && Type < D3DTS_WORLDMATRIX(0) + MatrixLimit)
+    {
+        UINT Index = Type - D3DTS_WORLDMATRIX(0);
+
+        Worlds[Index] = *Matrix;
+        WorldStale[Index] = TRUE;
+        InverseStale[Index] = TRUE;
+        Stale |= 0xC000000;
+        if (Index < 4)
+            Stale |= 0x1111u << Index;
         return;
     }
     if (Type == D3DTS_VIEW)
@@ -1990,6 +2184,114 @@ D9VsInverse(
     R[15] = static_cast<FLOAT>((S01 * A2 - Q01 * B2 + P01 * C2) * Scale);
 }
 
+/* Indexed world matrices and their inverses live after the lights, eight registers each */
+VOID
+D9VertexConverter::WriteBlendMatrix(
+    _In_ UINT Register,
+    _In_ const D3DMATRIX* Matrix)
+{
+    if (Mark < Register + 4)
+        Mark = Register + 4;
+    Touch(2, Register, Register + 4);
+    CopyMemory(Registers[Register], Matrix, sizeof(*Matrix));
+}
+
+/* The matrices blending reads: each blend matrix's products for plain blending, or the view, projection and
+   indexed world matrices for indexed blending */
+VOID
+D9VertexConverter::UpdateBlendRegisters(
+    _Inout_ DWORD* Flags,
+    _In_ UINT Last)
+{
+    UINT Base = D9VertexFixedRegisters + 7 * LightLimit;
+    D3DMATRIX Inverse;
+
+    if ((Key.Needs & D9VertexNeedsIndices) != 0)
+    {
+        if ((*Flags & 0x80000) != 0)
+        {
+            WriteMatrix(D9VsConstView, &View);
+            *Flags &= ~0x80000u;
+        }
+        if ((*Flags & 0x100000) != 0 && (Key.Needs & D9VertexNeedsNormal) != 0)
+        {
+            D9VsInverse(&View, &Inverse);
+            WriteMatrix(D9VsConstViewInverse, &Inverse);
+            *Flags &= ~0x100000u;
+        }
+        if ((*Flags & 0x40000) != 0)
+        {
+            WriteMatrix(D9VsConstProjection, &Projection);
+            *Flags &= ~0x40000u;
+        }
+        if ((*Flags & 0x10000) != 0)
+        {
+            WriteBlendMatrix(Base, &Worlds[0]);
+            *Flags &= ~0x10000u;
+        }
+        for (UINT Index = 1; Index < 256; Index++)
+        {
+            if (!WorldStale[Index])
+                continue;
+            if (Index < MatrixLimit)
+                WriteBlendMatrix(Base + 8 * Index, &Worlds[Index]);
+            WorldStale[Index] = FALSE;
+        }
+        *Flags &= ~0x4000000u;
+
+        /* The first world matrix's inverse is written again each time */
+        if ((Key.Needs & D9VertexNeedsNormal) != 0)
+        {
+            if ((*Flags & 0x20000) != 0)
+            {
+                D9VsInverse(&Worlds[0], &Inverse);
+                WriteBlendMatrix(Base + 4, &Inverse);
+            }
+            for (UINT Index = 1; Index < 256; Index++)
+            {
+                if (!InverseStale[Index])
+                    continue;
+                D9VsInverse(&Worlds[Index], &Inverse);
+                if (Index < MatrixLimit)
+                    WriteBlendMatrix(Base + 8 * Index + 4, &Inverse);
+                InverseStale[Index] = FALSE;
+            }
+            *Flags &= ~0x8000000u;
+        }
+        return;
+    }
+
+    for (UINT Index = 0; Index <= Last; Index++)
+    {
+        if ((*Flags & (0x10u << Index)) != 0)
+        {
+            for (UINT Row = 0; Row < 4; Row++)
+                D9VsProductRow(Worlds[Index].m[Row], &View, WorldViews[Index].m[Row]);
+            *Flags &= ~(0x10u << Index);
+        }
+        if ((*Flags & (0x1u << Index)) != 0)
+        {
+            D3DMATRIX Product;
+
+            for (UINT Row = 0; Row < 4; Row++)
+                D9VsProductRow(WorldViews[Index].m[Row], &Projection, Product.m[Row]);
+            WriteMatrix(D9VsBlendRegister(D9VsConstWorldViewProj, 62, Index), &Product);
+            *Flags &= ~(0x1u << Index);
+        }
+        if ((Key.Needs & D9VertexNeedsPosition) != 0 && (*Flags & (0x1000u << Index)) != 0)
+        {
+            WriteMatrix(D9VsBlendRegister(D9VsConstWorldView, 74, Index), &WorldViews[Index]);
+            *Flags &= ~(0x1000u << Index);
+        }
+        if ((Key.Needs & D9VertexNeedsNormal) != 0 && (*Flags & (0x100u << Index)) != 0)
+        {
+            D9VsInverse(&WorldViews[Index], &Inverse);
+            WriteMatrix(D9VsBlendRegister(D9VsConstNormal, 86, Index), &Inverse);
+            *Flags &= ~(0x100u << Index);
+        }
+    }
+}
+
 VOID
 D9VertexConverter::UpdateRegisters(VOID)
 {
@@ -2013,40 +2315,8 @@ D9VertexConverter::UpdateRegisters(VOID)
         Flags &= ~0x200000u;
     }
 
-    if ((Key.Needs & D9VertexNeedsBlend) == 0)
-    {
-        if ((Flags & 0x10) != 0)
-        {
-            for (UINT Row = 0; Row < 4; Row++)
-                D9VsProductRow(World.m[Row], &View, WorldView.m[Row]);
-            Flags &= ~0x10u;
-        }
-        if ((Flags & 0x1) != 0)
-        {
-            D3DMATRIX Product;
-
-            for (UINT Row = 0; Row < 4; Row++)
-                D9VsProductRow(WorldView.m[Row], &Projection, Product.m[Row]);
-            if (Mark < D9VsConstWorldViewProj + 4)
-                Mark = D9VsConstWorldViewProj + 4;
-            Touch(0, D9VsConstWorldViewProj, D9VsConstWorldViewProj + 4);
-            CopyMemory(Registers[D9VsConstWorldViewProj], &Product, sizeof(Product));
-            Flags &= ~0x1u;
-        }
-        if ((Key.Needs & D9VertexNeedsPosition) != 0 && (Flags & 0x1000) != 0)
-        {
-            WriteMatrix(D9VsConstWorldView, &WorldView);
-            Flags &= ~0x1000u;
-        }
-        if ((Key.Needs & D9VertexNeedsNormal) != 0 && (Flags & 0x100) != 0)
-        {
-            D3DMATRIX Inverse;
-
-            D9VsInverse(&WorldView, &Inverse);
-            WriteMatrix(D9VsConstNormal, &Inverse);
-            Flags &= ~0x100u;
-        }
-    }
+    /* Plain draws take the first blend matrix's registers */
+    UpdateBlendRegisters(&Flags, (Key.Needs & D9VertexNeedsBlend) != 0 ? (Key.Modes >> 18) & 3 : 0);
     if ((Flags & 0x800000) != 0)
     {
         TransformLights();
