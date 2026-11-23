@@ -54,7 +54,6 @@ HRESULT
 RxWarpAdapter::Open(
     _Inout_ D3D10DDIARG_OPENADAPTER *Args)
 {
-    D3DDDICB_QUERYADAPTERINFO Query;
     SYSTEM_INFO System;
     RxWarpAdapter *Adapter;
 
@@ -70,19 +69,7 @@ RxWarpAdapter::Open(
 
     GetSystemInfo(&System);
     Adapter->ProcessorCount = System.dwNumberOfProcessors;
-
-    /* Older kernel adapters hand out only the first two DWORDs */
-    if (Adapter->Callbacks.pfnQueryAdapterInfoCb != nullptr)
-    {
-        Query.pPrivateDriverData = &Adapter->Kernel;
-        Query.PrivateDriverDataSize = sizeof(Adapter->Kernel);
-        if (FAILED(Adapter->Callbacks.pfnQueryAdapterInfoCb(Adapter->RuntimeAdapter.handle, &Query)))
-        {
-            Query.PrivateDriverDataSize = 2 * sizeof(UINT);
-            if (FAILED(Adapter->Callbacks.pfnQueryAdapterInfoCb(Adapter->RuntimeAdapter.handle, &Query)))
-                Adapter->Kernel = {};
-        }
-    }
+    Adapter->QueryKernel();
 
     Args->hAdapter.pDrvPrivate = Adapter;
     Args->pAdapterFuncs_2->pfnCalcPrivateDeviceSize = CalcPrivateDeviceSize;
@@ -91,6 +78,25 @@ RxWarpAdapter::Open(
     Args->pAdapterFuncs_2->pfnGetSupportedVersions = GetSupportedVersions;
     Args->pAdapterFuncs_2->pfnGetCaps = GetCaps;
     return S_OK;
+}
+
+/* Older kernel adapters hand out only the first two DWORDs */
+VOID
+RxWarpAdapter::QueryKernel(VOID)
+{
+    D3DDDICB_QUERYADAPTERINFO Query;
+
+    if (Callbacks.pfnQueryAdapterInfoCb == nullptr)
+        return;
+
+    Query.pPrivateDriverData = &Kernel;
+    Query.PrivateDriverDataSize = sizeof(Kernel);
+    if (FAILED(Callbacks.pfnQueryAdapterInfoCb(RuntimeAdapter.handle, &Query)))
+    {
+        Query.PrivateDriverDataSize = 2 * sizeof(UINT);
+        if (FAILED(Callbacks.pfnQueryAdapterInfoCb(RuntimeAdapter.handle, &Query)))
+            Kernel = {};
+    }
 }
 
 SIZE_T

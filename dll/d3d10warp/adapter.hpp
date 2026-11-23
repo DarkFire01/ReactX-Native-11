@@ -26,6 +26,12 @@ public:
     Open(
         _Inout_ D3D10DDIARG_OPENADAPTER *Args);
 
+    /* The Direct3D 12 adapter DDI, in adapter12.cpp */
+    static
+    HRESULT
+    Open12(
+        _Inout_ struct D3D12DDIARG_OPENADAPTER *Args);
+
     BOOLEAN
     HasWddm2Kernel() const
     {
@@ -39,7 +45,14 @@ public:
     UINT ProcessorCount = 1;
     RX_WARP_KERNEL_INFO Kernel = {};
 
+    /* Direct3D 12: set once the runtime asked for batched markers */
+    BOOLEAN BatchedMarkers = FALSE;
+    VOID *CommandListTables[2] = {};
+
 private:
+    VOID
+    QueryKernel(VOID);
+
     static
     SIZE_T
     APIENTRY

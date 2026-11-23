@@ -1,13 +1,14 @@
 /*
  * PROJECT:     ReactX WARP
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     DLL entry and OpenAdapter10_2
+ * PURPOSE:     DLL entry, OpenAdapter10_2 and OpenAdapter12
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
 #include "precomp.hpp"
 #include "adapter.hpp"
 #include "format.hpp"
+#include <d3d12umddi.h>
 
 static CRITICAL_SECTION RxWarpDdiLock;
 VOID *RxWarpLastDevice;
@@ -47,6 +48,17 @@ OpenAdapter10_2(
     RxWarpLock Lock;
 
     return RxWarpAdapter::Open(Args);
+}
+
+extern "C"
+HRESULT
+APIENTRY
+OpenAdapter12(
+    _Inout_ D3D12DDIARG_OPENADAPTER *Args)
+{
+    RxWarpLock Lock;
+
+    return RxWarpAdapter::Open12(Args);
 }
 
 /*

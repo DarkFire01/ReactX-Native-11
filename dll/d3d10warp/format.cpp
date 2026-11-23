@@ -278,6 +278,35 @@ RxWarpFormatSupport(
 }
 
 UINT
+RxWarpFormatSupport12(
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Interface)
+{
+    const RX_WARP_FORMAT_CAPS *Caps;
+    UINT Support;
+
+    if ((UINT)Format >= RX_FORMAT_COUNT || !RxWarpFormatCaps[Format].Valid)
+        return D3D10_DDI_FORMAT_SUPPORT_NOT_SUPPORTED;
+
+    Caps = &RxWarpFormatCaps[Format];
+    Support = Caps->Support;
+    if (Caps->Displayable)
+        Support |= D3DWDDM3_0DDI_FORMAT_SUPPORT_DISPLAYABLE | D3D11_1DDI_FORMAT_SUPPORT_DISPLAY;
+
+    /* Shared exponent scans out only through an overlay plane, and there are none */
+    if (Format == DXGI_FORMAT_R9G9B9E5_SHAREDEXP)
+        Support &= ~(D3DWDDM3_0DDI_FORMAT_SUPPORT_DISPLAYABLE | D3D11_1DDI_FORMAT_SUPPORT_DISPLAY);
+
+    if (Format == DXGI_FORMAT_NV12)
+    {
+        Support |= D3D11_1DDI_FORMAT_SUPPORT_DECODER_OUTPUT;
+        if (Interface >= 0xB0022)
+            Support |= D3D11_1DDI_FORMAT_SUPPORT_CAPTURE | D3D11_1DDI_FORMAT_SUPPORT_VIDEO_ENCODER;
+    }
+    return Support | D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT | D3D11_1DDI_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT;
+}
+
+UINT
 RxWarpMultisampleQuality(
     _In_ DXGI_FORMAT Format,
     _In_ UINT SampleCount,

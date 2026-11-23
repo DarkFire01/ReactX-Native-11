@@ -78,6 +78,12 @@ RxWarpFormatSupport(
     _In_ DXGI_FORMAT Format,
     _In_ UINT Interface);
 
+/* The same for a Direct3D 12 device */
+UINT
+RxWarpFormatSupport12(
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Interface);
+
 UINT
 RxWarpMultisampleQuality(
     _In_ DXGI_FORMAT Format,

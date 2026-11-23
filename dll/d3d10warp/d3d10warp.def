@@ -4,3 +4,4 @@ EXPORTS
     D3D11RefGetLastCreation @200
     OpenAdapter             @202
     OpenAdapter10_2         @203
+    OpenAdapter12           @204
