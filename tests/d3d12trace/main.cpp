@@ -330,6 +330,60 @@ static
 VOID
 TrDescribe(
     _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0100* Args,
+    _In_ SIZE_T Size)
+{
+    const D3D12DDI_ROOT_SIGNATURE_0100* Root = Args->pRootSignature_1_2;
+
+    TrAppend(Text, "{version %u node %u", Args->Version, Args->NodeMask);
+    if (Root == nullptr)
+    {
+        TrAppend(Text, " 0}");
+        return;
+    }
+
+    TrAppend(Text, " flags %08X params %u [", Root->Flags, Root->NumParameters);
+    for (UINT Index = 0; Index < Root->NumParameters; Index++)
+    {
+        const D3D12DDI_ROOT_PARAMETER_0013& Parameter = Root->pRootParameters[Index];
+
+        TrAppend(Text, "%s(t%u v%u", Index != 0 ? " " : "", Parameter.ParameterType, Parameter.ShaderVisibility);
+        switch (Parameter.ParameterType)
+        {
+            case D3D12DDI_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+                for (UINT Range = 0; Range < Parameter.DescriptorTable.NumDescriptorRanges; Range++)
+                {
+                    const D3D12DDI_DESCRIPTOR_RANGE_0013& Each = Parameter.DescriptorTable.pDescriptorRanges[Range];
+
+                    TrAppend(Text, " r%u:%u:%u:%u:%X:%u", Each.RangeType, Each.NumDescriptors, Each.BaseShaderRegister,
+                             Each.RegisterSpace, Each.Flags, Each.OffsetInDescriptorsFromTableStart);
+                }
+                break;
+            case D3D12DDI_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+                TrAppend(Text, " c%u:%u:%u", Parameter.Constants.ShaderRegister, Parameter.Constants.RegisterSpace,
+                         Parameter.Constants.Num32BitValues);
+                break;
+            default:
+                TrAppend(Text, " d%u:%u:%X", Parameter.Descriptor.ShaderRegister, Parameter.Descriptor.RegisterSpace,
+                         Parameter.Descriptor.Flags);
+                break;
+        }
+        TrAppend(Text, ")");
+    }
+
+    TrAppend(Text, "] samplers %u [", Root->NumStaticSamplers);
+    for (UINT Index = 0; Index < Root->NumStaticSamplers; Index++)
+    {
+        TrAppend(Text, "%s", Index != 0 ? " " : "");
+        TrAppendBytes(Text, &Root->pStaticSamplers[Index], sizeof(Root->pStaticSamplers[Index]));
+    }
+    TrAppend(Text, "]}");
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
     _In_ const D3DKMT_QUERYADAPTERINFO* Args,
     _In_ SIZE_T Size)
 {
@@ -1276,6 +1330,7 @@ TrPatchImports(
 struct TrRun
 {
     PFN_D3D12_CREATE_DEVICE CreateDevice;
+    PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE SerializeVersioned;
 };
 
 static
@@ -1563,6 +1618,126 @@ TrScenarioFeatures(
     }
 }
 
+/* Root signatures of each version, as the driver is handed them */
+static
+VOID
+TrScenarioRootSignatures(
+    _In_ TrRun& Run)
+{
+    ComPtr<ID3D12Device> Device;
+    D3D12_DESCRIPTOR_RANGE Ranges10[] = {
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 1, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_CBV, UINT_MAX, 3, 1, 8 },
+    };
+    D3D12_DESCRIPTOR_RANGE SamplerRange10 = { D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 2, 0, 0, 0 };
+    D3D12_ROOT_PARAMETER Parameters10[5] = {};
+    D3D12_STATIC_SAMPLER_DESC Sampler = {};
+    D3D12_DESCRIPTOR_RANGE1 Ranges11[] = {
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 4, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE, 4 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 8 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC, 9 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_CBV, UINT_MAX, 1, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC, 10 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, UINT_MAX, 1, 0,
+          D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS, 11 },
+    };
+    D3D12_DESCRIPTOR_RANGE1 SamplerRange11 = { D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0,
+                                               D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0 };
+    D3D12_ROOT_PARAMETER1 Parameters11[6] = {};
+    D3D12_STATIC_SAMPLER_DESC1 Sampler1 = {};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC Desc = {};
+
+    if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))) ||
+        Run.SerializeVersioned == nullptr)
+    {
+        return;
+    }
+
+    Parameters10[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters10[0].DescriptorTable = { _countof(Ranges10), Ranges10 };
+    Parameters10[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters10[1].DescriptorTable = { 1, &SamplerRange10 };
+    Parameters10[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    Parameters10[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    Parameters10[2].Constants = { 2, 0, 4 };
+    Parameters10[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters10[3].Descriptor = { 5, 0 };
+    Parameters10[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    Parameters10[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    Parameters10[4].Descriptor = { 6, 2 };
+    Sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    Sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    Sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    Sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    Sampler.MaxAnisotropy = 16;
+    Sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS;
+    Sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+    Sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    Sampler.ShaderRegister = 3;
+    Sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    Parameters11[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters11[0].DescriptorTable = { _countof(Ranges11), Ranges11 };
+    Parameters11[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters11[1].DescriptorTable = { 1, &SamplerRange11 };
+    Parameters11[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters11[2].Descriptor = { 0, 1, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+    Parameters11[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    Parameters11[3].Descriptor = { 0, 1, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+    Parameters11[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    Parameters11[4].Descriptor = { 0, 1, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+    Parameters11[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    Parameters11[5].Descriptor = { 1, 1, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC };
+    CopyMemory(&Sampler1, &Sampler, sizeof(Sampler));
+    Sampler1.Flags = D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR;
+    Sampler1.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE_UINT;
+
+    for (UINT Version = D3D_ROOT_SIGNATURE_VERSION_1_0; Version <= D3D_ROOT_SIGNATURE_VERSION_1_2; Version++)
+    {
+        ComPtr<ID3DBlob> Blob;
+        ComPtr<ID3DBlob> Errors;
+        ComPtr<ID3D12RootSignature> First;
+        ComPtr<ID3D12RootSignature> Second;
+        CHAR Phase[64];
+
+        Desc = {};
+        Desc.Version = (D3D_ROOT_SIGNATURE_VERSION)Version;
+        if (Version == D3D_ROOT_SIGNATURE_VERSION_1_0)
+        {
+            Desc.Desc_1_0 = { _countof(Parameters10), Parameters10, 1, &Sampler,
+                              D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT };
+        }
+        else if (Version == D3D_ROOT_SIGNATURE_VERSION_1_1)
+        {
+            Desc.Desc_1_1 = { _countof(Parameters11), Parameters11, 1, &Sampler,
+                              D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS };
+        }
+        else
+        {
+            Desc.Desc_1_2 = { _countof(Parameters11), Parameters11, 1, &Sampler1,
+                              D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED };
+        }
+        if (FAILED(Run.SerializeVersioned(&Desc, &Blob, &Errors)))
+        {
+            printf("serialize 1.%u failed\n", Version - 1);
+            continue;
+        }
+
+        sprintf_s(Phase, "CreateRootSignature 1.%u", Version - 1);
+        TrPhase(Phase);
+        printf("result %08X\n", (UINT)Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(),
+                                                                  IID_PPV_ARGS(&First)));
+        TrPhase("CreateRootSignature same blob");
+        printf("result %08X\n", (UINT)Device->CreateRootSignature(1, Blob->GetBufferPointer(), Blob->GetBufferSize(),
+                                                                  IID_PPV_ARGS(&Second)));
+        printf("same %u\n", First.Get() == Second.Get());
+        TrPhase("Release");
+        First.Reset();
+        Second.Reset();
+    }
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -1576,6 +1751,7 @@ static const TrScenario TrScenarios[] =
     { "resources", TrScenarioResources },
     { "copy", TrScenarioCopy },
     { "features", TrScenarioFeatures },
+    { "rootsigs", TrScenarioRootSignatures },
 };
 
 int
@@ -1659,6 +1835,8 @@ wmain(
     }
 
     Run.CreateDevice = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(D3d12, "D3D12CreateDevice"));
+    Run.SerializeVersioned = reinterpret_cast<PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE>(
+        GetProcAddress(D3d12, "D3D12SerializeVersionedRootSignature"));
     if (Run.CreateDevice == nullptr)
         return 1;
 

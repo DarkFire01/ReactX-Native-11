@@ -2342,6 +2342,266 @@ TcCheckLayouts(
     }
 }
 
+/* A copy of a serialized root signature to patch; offsets are inside the RTS0 part */
+struct TcRootBlob
+{
+    std::vector<BYTE> Bytes;
+
+    BYTE*
+    Part()
+    {
+        UINT Offset;
+
+        memcpy(&Offset, &Bytes[32], sizeof(Offset));
+        return &Bytes[Offset + 8];
+    }
+
+    VOID
+    Put(
+        _In_ UINT Offset,
+        _In_ UINT Value)
+    {
+        memcpy(Part() + Offset, &Value, sizeof(Value));
+    }
+
+    UINT
+    Get(
+        _In_ UINT Offset)
+    {
+        UINT Value;
+
+        memcpy(&Value, Part() + Offset, sizeof(Value));
+        return Value;
+    }
+};
+
+static
+BOOLEAN
+TcSerializeRoot(
+    _In_ TwelveCheck& Check,
+    _In_ const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& Desc,
+    _Out_ TcRootBlob* Out)
+{
+    ComPtr<ID3DBlob> Blob;
+    ComPtr<ID3DBlob> Errors;
+    const BYTE* Bytes;
+
+    Out->Bytes.clear();
+    if (Check.SerializeVersioned == nullptr || FAILED(Check.SerializeVersioned(&Desc, &Blob, &Errors)))
+        return FALSE;
+    Bytes = static_cast<const BYTE*>(Blob->GetBufferPointer());
+    Out->Bytes.assign(Bytes, Bytes + Blob->GetBufferSize());
+    return TRUE;
+}
+
+static
+VOID
+TcReportRoot(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device* Device,
+    _In_z_ PCSTR Key,
+    _In_ TcRootBlob& Blob)
+{
+    ComPtr<ID3D12RootSignature> Signature;
+    HRESULT hr;
+
+    hr = Device->CreateRootSignature(0, Blob.Bytes.data(), Blob.Bytes.size(), IID_PPV_ARGS(&Signature));
+    Check.Report(Key, "0x%08lX %s", hr, Signature != nullptr ? "object" : "null");
+}
+
+static
+ULONG
+TcRefCount(
+    _In_ IUnknown* Object)
+{
+    Object->AddRef();
+    return Object->Release();
+}
+
+/* rootsigs: CreateRootSignature argument checks, what reaches the driver and how objects are shared */
+static
+VOID
+TcCheckRootSignatures(
+    _In_ TwelveCheck& Check)
+{
+    ComPtr<ID3D12Device> Device;
+    D3D12_DESCRIPTOR_RANGE1 Ranges[2] = {};
+    D3D12_ROOT_PARAMETER1 Parameters[3] = {};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC Desc = {};
+    TcRootBlob Base;
+    TcRootBlob Patched;
+    ComPtr<ID3D12RootSignature> First;
+    ComPtr<ID3D12RootSignature> Second;
+    ComPtr<ID3D12RootSignature> Third;
+    ComPtr<IUnknown> Unknown;
+    ComPtr<ID3D12Device> Owner;
+    void* Raw;
+    ULONG DeviceRefs;
+    UINT TableOffset;
+    UINT RangeOffset;
+    HRESULT hr;
+
+    if (FAILED(Check.MakeDevice(&Device)))
+    {
+        Check.Report("device", "none");
+        return;
+    }
+
+    Ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    Ranges[0].NumDescriptors = 4;
+    Ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    Ranges[1].NumDescriptors = 2;
+    Ranges[1].OffsetInDescriptorsFromTableStart = 4;
+    Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters[0].DescriptorTable = { 2, Ranges };
+    Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters[1].Descriptor = { 0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+    Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    Parameters[2].Constants = { 1, 0, 4 };
+    Desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    Desc.Desc_1_1 = { 3, Parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+    if (!TcSerializeRoot(Check, Desc, &Base))
+    {
+        Check.Report("serialize", "failed");
+        return;
+    }
+
+    /* The table's range array sits after the three parameter entries and the table header */
+    TableOffset = Base.Get(24 + 8);
+    RangeOffset = Base.Get(TableOffset + 4);
+
+    DeviceRefs = TcRefCount(Device.Get());
+    hr = Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size(), IID_PPV_ARGS(&First));
+    Check.Report("create", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+    Check.Report("device_refs", "%ld", (LONG)TcRefCount(Device.Get()) - (LONG)DeviceRefs);
+    Check.Report("own_refs", "%lu", TcRefCount(First.Get()));
+
+    hr = Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size(), IID_PPV_ARGS(&Second));
+    Check.Report("same_blob", "0x%08lX same %u refs %lu", hr, First.Get() == Second.Get(), TcRefCount(First.Get()));
+    Second.Reset();
+    hr = Device->CreateRootSignature(1, Base.Bytes.data(), Base.Bytes.size(), IID_PPV_ARGS(&Second));
+    Check.Report("node1", "0x%08lX same %u", hr, First.Get() == Second.Get());
+    Second.Reset();
+    hr = Device->CreateRootSignature(2, Base.Bytes.data(), Base.Bytes.size(), IID_PPV_ARGS(&Second));
+    Check.Report("node2", "0x%08lX %s", hr, Second != nullptr ? "object" : "null");
+    hr = Device->CreateRootSignature(3, Base.Bytes.data(), Base.Bytes.size(), IID_PPV_ARGS(&Second));
+    Check.Report("node3", "0x%08lX %s", hr, Second != nullptr ? "object" : "null");
+
+    Patched = Base;
+    Patched.Bytes[4] ^= 0xFF;
+    hr = Device->CreateRootSignature(0, Patched.Bytes.data(), Patched.Bytes.size(), IID_PPV_ARGS(&Second));
+    Check.Report("bad_hash", "0x%08lX same %u", hr, First.Get() == Second.Get());
+    Second.Reset();
+
+    Check.Report("null_out", "0x%08lX", Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size(),
+                                                                     __uuidof(ID3D12RootSignature), nullptr));
+    Raw = reinterpret_cast<void*>(1);
+    hr = Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size(), __uuidof(ID3D12Fence), &Raw);
+    Check.Report("bad_riid", "0x%08lX %s", hr, Raw == nullptr ? "null" : "set");
+    hr = Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size(), __uuidof(IUnknown), &Raw);
+    Check.Report("unknown_riid", "0x%08lX same %u", hr, Raw == static_cast<void*>(First.Get()));
+    if (SUCCEEDED(hr))
+        static_cast<IUnknown*>(Raw)->Release();
+
+    Check.Report("null_blob", "0x%08lX", Device->CreateRootSignature(0, nullptr, 0, IID_PPV_ARGS(&Second)));
+    Check.Report("short_length", "0x%08lX", Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size() - 1,
+                                                                         IID_PPV_ARGS(&Second)));
+    Check.Report("long_length", "0x%08lX", Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size() + 1,
+                                                                        IID_PPV_ARGS(&Second)));
+
+    Patched = Base;
+    Patched.Bytes[36] = 'X';
+    TcReportRoot(Check, Device.Get(), "no_part", Patched);
+    Patched = Base;
+    Patched.Bytes[0] = 'Q';
+    TcReportRoot(Check, Device.Get(), "bad_magic", Patched);
+    Patched = Base;
+    Patched.Put(0, 4);
+    TcReportRoot(Check, Device.Get(), "version4", Patched);
+    Patched = Base;
+    Patched.Put(0, 0);
+    TcReportRoot(Check, Device.Get(), "version0", Patched);
+    Patched = Base;
+    Patched.Put(24, 7);
+    TcReportRoot(Check, Device.Get(), "param_type7", Patched);
+    Patched = Base;
+    Patched.Put(24 + 4, 9);
+    TcReportRoot(Check, Device.Get(), "visibility9", Patched);
+    Patched = Base;
+    Patched.Put(RangeOffset, 4);
+    TcReportRoot(Check, Device.Get(), "range_type4", Patched);
+    Patched = Base;
+    Patched.Put(RangeOffset + 4, 0);
+    TcReportRoot(Check, Device.Get(), "range_empty", Patched);
+    Patched = Base;
+    Patched.Put(RangeOffset + 24, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+    TcReportRoot(Check, Device.Get(), "range_overlap", Patched);
+
+    for (UINT Bit = 0; Bit < 32; Bit++)
+    {
+        CHAR Key[64];
+
+        Patched = Base;
+        Patched.Put(RangeOffset + 16, 1u << Bit);
+        sprintf_s(Key, "range_flag%u", Bit);
+        TcReportRoot(Check, Device.Get(), Key, Patched);
+
+        Patched = Base;
+        Patched.Put(Base.Get(24 + 12 + 8) + 8, 1u << Bit);
+        sprintf_s(Key, "descriptor_flag%u", Bit);
+        TcReportRoot(Check, Device.Get(), Key, Patched);
+
+        Patched = Base;
+        Patched.Put(20, 1u << Bit);
+        sprintf_s(Key, "root_flag%u", Bit);
+        TcReportRoot(Check, Device.Get(), Key, Patched);
+    }
+
+    /* Root argument space: the table costs 1, the CBV 2 */
+    for (UINT Values : { 61u, 62u })
+    {
+        CHAR Key[32];
+
+        Patched = Base;
+        Patched.Put(Base.Get(24 + 24 + 8) + 8, Values);
+        sprintf_s(Key, "constants%u", Values);
+        TcReportRoot(Check, Device.Get(), Key, Patched);
+    }
+
+    Patched = Base;
+    Patched.Put(Base.Get(24 + 12 + 8), 1);
+    Patched.Put(Base.Get(24 + 24 + 8), 1);
+    TcReportRoot(Check, Device.Get(), "cbv_overlap", Patched);
+
+    Patched = Base;
+    Patched.Put(20, D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE);
+    TcReportRoot(Check, Device.Get(), "local", Patched);
+
+    for (const IID* Iid : { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild),
+                            &__uuidof(ID3D12Pageable), &__uuidof(ID3D12RootSignature),
+                            &__uuidof(ID3D12RootSignatureDeserializer) })
+    {
+        Unknown.Reset();
+        hr = First->QueryInterface(*Iid, &Unknown);
+        Check.Report("qi", "0x%08lX", hr);
+    }
+
+    hr = First->GetDevice(IID_PPV_ARGS(&Owner));
+    Check.Report("get_device", "0x%08lX same %u", hr, Owner.Get() == Device.Get());
+    Owner.Reset();
+
+    /* A released root signature is made again, not found */
+    Second.Reset();
+    Third.Reset();
+    First.Reset();
+    hr = Device->CreateRootSignature(0, Base.Bytes.data(), Base.Bytes.size(), IID_PPV_ARGS(&First));
+    Check.Report("recreate", "0x%08lX refs %lu", hr, First != nullptr ? TcRefCount(First.Get()) : 0);
+    First.Reset();
+    Check.Report("device_refs_after", "%ld", (LONG)TcRefCount(Device.Get()) - (LONG)DeviceRefs);
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -2366,6 +2626,7 @@ static const CheckInfo Checks[] =
     { "queues", TcCheckQueues },
     { "heaps", TcCheckDescriptorHeaps },
     { "layouts", TcCheckLayouts },
+    { "rootsigs", TcCheckRootSignatures },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
