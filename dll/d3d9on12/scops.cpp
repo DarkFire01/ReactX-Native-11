@@ -726,9 +726,11 @@ ScTranslateTexLdl(
     Instr.Destination(&Dst);
     Context->SourceOperand(&Coordinate, Instr, 0, 0, 4);
 
-    /* The comparison path is only taken by pixel shaders, which do not sample here yet */
     if (ScUsesShadowCompare(Context, Sampler))
-        return E_NOTIMPL;
+    {
+        Context->EmitSampleCompare(Instr, Dst, Sampler, Coordinate);
+        return S_OK;
+    }
 
     SB::COperandBase Resource = SB::COperand4(D3D10_SB_OPERAND_TYPE_RESOURCE, Sampler);
     SB::COperand State(D3D10_SB_OPERAND_TYPE_SAMPLER, Sampler);
@@ -1141,7 +1143,7 @@ ScContext::Translate(
             break;
         }
         default:
-            return E_NOTIMPL;
+            return ScTranslatePixelInstruction(this, Instr);
     }
     return S_OK;
 }

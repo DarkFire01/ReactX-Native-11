@@ -1025,6 +1025,30 @@ ScContext::EmitColorKey(
     }
 }
 
+/* sample_c against the depth texture; the reference is the coordinate's z, or zero when an input has no z */
+VOID
+ScContext::EmitSampleCompare(
+    _In_ const ScInstr& Instr,
+    _In_ const SB::COperandBase& Dst,
+    _In_ UINT Sampler,
+    _In_ const SB::COperandBase& Coordinate)
+{
+    SB::COperandBase Reference = SB::COperand4(Coordinate.m_Type, Coordinate.m_Index[0].m_RegIndex,
+                                               D3D10_SB_4_COMPONENT_Z);
+    SB::COperandBase Resource = ScSwizzled(SB::COperand4(D3D10_SB_OPERAND_TYPE_RESOURCE, Sampler), ScSwzXXXX);
+    SB::COperand State(D3D10_SB_OPERAND_TYPE_SAMPLER, Sampler);
+
+    if (Coordinate.m_Type == D3D10_SB_OPERAND_TYPE_INPUT &&
+        !(Map->Inputs[Coordinate.m_Index[0].m_RegIndex].Mask & 4))
+    {
+        Reference = SB::COperand(0.0f);
+    }
+
+    const SB::COperandBase* Sources[4] = { &Coordinate, &Resource, &State, &Reference };
+
+    EmitResult(Instr.Flags, D3D10_SB_OPCODE_SAMPLE_C, Sampler, Dst, 4, Sources);
+}
+
 VOID
 ScContext::EmitResult(
 
