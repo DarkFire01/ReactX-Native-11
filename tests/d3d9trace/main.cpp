@@ -4731,6 +4731,178 @@ TrScenarioStateBlocks(
     Plain->Release();
 }
 
+/* Reads back a range of shader constants and prints their hash */
+static
+VOID
+TrPrintConstants(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ UINT Size)
+{
+    TrCloseLine();
+    printf("api %s = %08lX hash %08X\n", Name, Result, TrHash(Data, Size));
+}
+
+/* Float, integer and boolean constants of both shader kinds, in range, at the end and past it */
+static
+VOID
+TrConstantWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const UINT FloatStarts[] = { 0, 200, 222, 224, 254, 255, 256, 8190, 8192 };
+    static const UINT SmallStarts[] = { 0, 14, 15, 16, 17 };
+    FLOAT Floats[4 * 8];
+    FLOAT Read[4 * 8];
+    INT Ints[4 * 4];
+    INT ReadInts[4 * 4];
+    BOOL Bools[4];
+    BOOL ReadBools[4];
+    char Name[64];
+
+    for (UINT Index = 0; Index < _countof(Floats); Index++)
+        Floats[Index] = static_cast<FLOAT>(Index) * 0.5f + 1.0f;
+    for (UINT Index = 0; Index < _countof(Ints); Index++)
+        Ints[Index] = static_cast<INT>(Index) * 3 - 7;
+    for (UINT Index = 0; Index < _countof(Bools); Index++)
+        Bools[Index] = static_cast<BOOL>(Index * 5 + 1);
+
+    TrPhase("constants float");
+    for (UINT Start : FloatStarts)
+    {
+        sprintf_s(Name, "SetVertexShaderConstantF %u 2", Start);
+        TrApi(Name, Device->SetVertexShaderConstantF(Start, Floats, 2));
+        sprintf_s(Name, "SetPixelShaderConstantF %u 2", Start);
+        TrApi(Name, Device->SetPixelShaderConstantF(Start, Floats + 4, 2));
+    }
+    TrApi("SetVertexShaderConstantF 8 8", Device->SetVertexShaderConstantF(8, Floats, 8));
+    TrApi("SetVertexShaderConstantF zero", Device->SetVertexShaderConstantF(3, Floats, 0));
+    TrApi("SetPixelShaderConstantF zero", Device->SetPixelShaderConstantF(3, Floats, 0));
+    TrApi("SetVertexShaderConstantF null zero", Device->SetVertexShaderConstantF(3, nullptr, 0));
+    TrApi("SetVertexShaderConstantF same", Device->SetVertexShaderConstantF(0, Floats, 2));
+    TrApi("SetPixelShaderConstantF same", Device->SetPixelShaderConstantF(0, Floats + 4, 2));
+    for (UINT Start : FloatStarts)
+    {
+        FillMemory(Read, sizeof(Read), 0xCD);
+        sprintf_s(Name, "GetVertexShaderConstantF %u 2", Start);
+        TrPrintConstants(Name, Device->GetVertexShaderConstantF(Start, Read, 2), Read, sizeof(Read));
+        FillMemory(Read, sizeof(Read), 0xCD);
+        sprintf_s(Name, "GetPixelShaderConstantF %u 2", Start);
+        TrPrintConstants(Name, Device->GetPixelShaderConstantF(Start, Read, 2), Read, sizeof(Read));
+    }
+    FillMemory(Read, sizeof(Read), 0xCD);
+    TrPrintConstants("GetVertexShaderConstantF 8 8", Device->GetVertexShaderConstantF(8, Read, 8), Read, sizeof(Read));
+    TrApi("GetVertexShaderConstantF zero", Device->GetVertexShaderConstantF(0, Read, 0));
+
+    TrPhase("constants int bool");
+    for (UINT Start : SmallStarts)
+    {
+        sprintf_s(Name, "SetVertexShaderConstantI %u 1", Start);
+        TrApi(Name, Device->SetVertexShaderConstantI(Start, Ints, 1));
+        sprintf_s(Name, "SetPixelShaderConstantI %u 1", Start);
+        TrApi(Name, Device->SetPixelShaderConstantI(Start, Ints + 4, 1));
+        sprintf_s(Name, "SetVertexShaderConstantB %u 1", Start);
+        TrApi(Name, Device->SetVertexShaderConstantB(Start, Bools, 1));
+        sprintf_s(Name, "SetPixelShaderConstantB %u 1", Start);
+        TrApi(Name, Device->SetPixelShaderConstantB(Start, Bools + 1, 1));
+    }
+    TrApi("SetVertexShaderConstantI 2 4", Device->SetVertexShaderConstantI(2, Ints, 4));
+    TrApi("SetPixelShaderConstantB 4 4", Device->SetPixelShaderConstantB(4, Bools, 4));
+    TrApi("SetVertexShaderConstantB zero", Device->SetVertexShaderConstantB(0, Bools, 0));
+    TrApi("SetPixelShaderConstantI zero", Device->SetPixelShaderConstantI(0, Ints, 0));
+    for (UINT Start : SmallStarts)
+    {
+        FillMemory(ReadInts, sizeof(ReadInts), 0xCD);
+        sprintf_s(Name, "GetVertexShaderConstantI %u 1", Start);
+        TrPrintConstants(Name, Device->GetVertexShaderConstantI(Start, ReadInts, 1), ReadInts, sizeof(ReadInts));
+        FillMemory(ReadInts, sizeof(ReadInts), 0xCD);
+        sprintf_s(Name, "GetPixelShaderConstantI %u 1", Start);
+        TrPrintConstants(Name, Device->GetPixelShaderConstantI(Start, ReadInts, 1), ReadInts, sizeof(ReadInts));
+        FillMemory(ReadBools, sizeof(ReadBools), 0xCD);
+        sprintf_s(Name, "GetVertexShaderConstantB %u 1", Start);
+        TrPrintConstants(Name, Device->GetVertexShaderConstantB(Start, ReadBools, 1), ReadBools, sizeof(ReadBools));
+        FillMemory(ReadBools, sizeof(ReadBools), 0xCD);
+        sprintf_s(Name, "GetPixelShaderConstantB %u 1", Start);
+        TrPrintConstants(Name, Device->GetPixelShaderConstantB(Start, ReadBools, 1), ReadBools, sizeof(ReadBools));
+    }
+    FillMemory(ReadInts, sizeof(ReadInts), 0xCD);
+    TrPrintConstants("GetVertexShaderConstantI 2 4", Device->GetVertexShaderConstantI(2, ReadInts, 4), ReadInts,
+                     sizeof(ReadInts));
+    FillMemory(ReadBools, sizeof(ReadBools), 0xCD);
+    TrPrintConstants("GetPixelShaderConstantB 4 4", Device->GetPixelShaderConstantB(4, ReadBools, 4), ReadBools,
+                     sizeof(ReadBools));
+    TrSettle(Device);
+}
+
+/* Shader constants on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioConstants(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("constants create");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrConstantWork(Device);
+        TrPhase("constants release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
+/* Shader constants on pure, software and mixed devices of the plain object */
+static
+VOID
+TrScenarioConstantsPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING,
+        D3DCREATE_MIXED_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "constants plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrConstantWork(Device);
+            TrPhase("constants plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -4760,6 +4932,8 @@ static const TrScenario TrScenarios[] =
     { "states_plain", TrScenarioStatesPlain },
     { "states_software", TrScenarioStatesSoftware },
     { "stateblocks", TrScenarioStateBlocks },
+    { "constants", TrScenarioConstants },
+    { "constants_plain", TrScenarioConstantsPlain },
 };
 
 static
