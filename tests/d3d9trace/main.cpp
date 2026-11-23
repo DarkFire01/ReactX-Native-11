@@ -605,6 +605,13 @@ TrDeviceInputs(
         else
         {
             TrAppend(Text, " %08X", TrHash(Values, Constants->Count * 16));
+            if (Tr.Tokens && Values != nullptr)
+            {
+                fprintf(stderr, "constants %u %u:", Constants->Register, Constants->Count);
+                for (UINT Index = 0; Index < Constants->Count * 4; Index++)
+                    fprintf(stderr, "%s%08X", Index % 4 == 0 ? " | " : " ", Values[Index]);
+                fprintf(stderr, "\n");
+            }
         }
         break;
     }
@@ -6532,6 +6539,263 @@ TrScenarioFixedReset(
     Plain->Release();
 }
 
+/* Fills a quad of untransformed vertices in the layout a format names; returns the stride */
+static
+UINT
+TrVertexFill(
+    _In_ DWORD Fvf,
+    _Out_writes_(512) FLOAT* Vertices)
+{
+    static const FLOAT Corners[4][2] = { { -0.75f, -0.5f }, { 0.75f, -0.5f }, { -0.75f, 0.5f }, { 0.75f, 0.5f } };
+    UINT Sets = (Fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
+    UINT Weights = 0;
+    UINT Floats = 0;
+
+    switch (Fvf & D3DFVF_POSITION_MASK)
+    {
+    case D3DFVF_XYZB1: Weights = 1; break;
+    case D3DFVF_XYZB2: Weights = 2; break;
+    case D3DFVF_XYZB3: Weights = 3; break;
+    case D3DFVF_XYZB4: Weights = 4; break;
+    case D3DFVF_XYZB5: Weights = 5; break;
+    default: break;
+    }
+    for (UINT Corner = 0; Corner < 4; Corner++)
+    {
+        Vertices[Floats] = Corners[Corner][0];
+        Vertices[Floats + 1] = Corners[Corner][1];
+        Vertices[Floats + 2] = 0.25f + 0.125f * Corner;
+        Floats += 3;
+        if ((Fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZW)
+        {
+            Vertices[Floats] = 1.0f;
+            Floats += 1;
+        }
+        for (UINT Weight = 0; Weight < Weights; Weight++)
+        {
+            if (Weight == Weights - 1 && (Fvf & (D3DFVF_LASTBETA_UBYTE4 | D3DFVF_LASTBETA_D3DCOLOR)) != 0)
+            {
+                DWORD Packed = 0x00010203 + Corner * 0x01000000;
+
+                CopyMemory(&Vertices[Floats], &Packed, sizeof(Packed));
+            }
+            else
+            {
+                Vertices[Floats] = 0.125f * (Weight + 1) + 0.0625f * Corner;
+            }
+            Floats += 1;
+        }
+        if ((Fvf & D3DFVF_NORMAL) != 0)
+        {
+            Vertices[Floats] = 0.25f * Corner - 0.375f;
+            Vertices[Floats + 1] = 0.5f;
+            Vertices[Floats + 2] = -0.75f;
+            Floats += 3;
+        }
+        if ((Fvf & D3DFVF_PSIZE) != 0)
+        {
+            Vertices[Floats] = 2.0f + Corner;
+            Floats += 1;
+        }
+        if ((Fvf & D3DFVF_DIFFUSE) != 0)
+        {
+            CopyMemory(&Vertices[Floats], &TrFixedColors[Corner][0], sizeof(DWORD));
+            Floats += 1;
+        }
+        if ((Fvf & D3DFVF_SPECULAR) != 0)
+        {
+            CopyMemory(&Vertices[Floats], &TrFixedColors[Corner][1], sizeof(DWORD));
+            Floats += 1;
+        }
+        for (UINT Set = 0; Set < Sets; Set++)
+        {
+            static const UINT Sizes[4] = { 2, 3, 4, 1 };
+            UINT Size = Sizes[(Fvf >> (16 + Set * 2)) & 3];
+
+            for (UINT Part = 0; Part < Size; Part++)
+                Vertices[Floats + Part] = 0.25f * ((Corner + Part + Set) & 3) + 0.125f;
+            Floats += Size;
+        }
+    }
+    return Floats / 4 * sizeof(FLOAT);
+}
+
+/* Matrices the vertex cases set: identity, a world turned and moved, a view backed away and a perspective */
+static const D3DMATRIX TrVertexMatrices[] =
+{
+    { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+    { 0.8f, 0.6f, 0.0f, 0.0f, -0.6f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.125f, -0.25f, 0.5f, 1.0f },
+    { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.96f, 0.28f, 0.0f, 0.0f, -0.28f, 0.96f, 0.0f, 0.0f, 0.0f, 2.0f, 1.0f },
+    { 1.5f, 0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0101f, 1.0f, 0.0f, 0.0f, -0.10101f, 0.0f },
+    { 0.5f, 0.25f, 0.0f, 0.125f, 0.0f, 0.75f, 0.5f, 0.0f, 0.25f, 0.0f, 1.0f, 0.5f, 0.125f, 0.375f, 0.0f, 1.0f },
+};
+
+/* A case's set with this stage number sets a transform from the table */
+static constexpr DWORD TrVertexTransform = 0xFE;
+
+struct TrVertexCase
+{
+    PCSTR Name;
+    DWORD Fvf;
+    BOOLEAN Points;
+    TrFixedSet Sets[12];
+};
+
+/* States each case starts from: no lighting, identity matrices and the stages the device starts with */
+static const TrFixedSet TrVertexBaseline[] =
+{
+    { TrFixedRender, D3DRS_LIGHTING, FALSE }, { TrFixedRender, D3DRS_FOGENABLE, FALSE },
+    { TrFixedRender, D3DRS_SPECULARENABLE, FALSE }, { TrFixedRender, D3DRS_NORMALIZENORMALS, FALSE },
+    { TrFixedRender, D3DRS_WRAP0, 0 }, { TrFixedRender, D3DRS_WRAP1, 0 },
+    { TrVertexTransform, D3DTS_WORLD, 0 }, { TrVertexTransform, D3DTS_VIEW, 0 },
+    { TrVertexTransform, D3DTS_PROJECTION, 0 }, { TrVertexTransform, D3DTS_TEXTURE0, 0 },
+    { TrVertexTransform, D3DTS_TEXTURE1, 0 },
+    { 0, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 0, D3DTSS_TEXCOORDINDEX, 0 },
+    { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE }, { 1, D3DTSS_COLOROP, D3DTOP_DISABLE },
+    { 1, D3DTSS_TEXCOORDINDEX, 1 }, { 1, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE },
+    { 2, D3DTSS_COLOROP, D3DTOP_DISABLE }, { 2, D3DTSS_TEXCOORDINDEX, 2 },
+};
+
+/* Formats and states without lighting */
+static const TrVertexCase TrVertexCases[] =
+{
+    { "unlit diffuse", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE, {} },
+    { "position only", D3DFVF_XYZ, FALSE, {} },
+    { "both colors", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_SPECULAR, FALSE, {} },
+    { "specular only", D3DFVF_XYZ | D3DFVF_SPECULAR, FALSE, {} },
+    { "one set", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, FALSE, {} },
+    { "two sets", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2, FALSE,
+      { { 1, D3DTSS_COLOROP, D3DTOP_ADD } } },
+    { "set sizes", D3DFVF_XYZ | D3DFVF_TEX4 | D3DFVF_TEXCOORDSIZE1(0) | D3DFVF_TEXCOORDSIZE3(1) |
+                   D3DFVF_TEXCOORDSIZE4(2), FALSE,
+      { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 2, D3DTSS_COLOROP, D3DTOP_ADD }, { 3, D3DTSS_COLOROP, D3DTOP_ADD },
+        { 3, D3DTSS_TEXCOORDINDEX, 3 }, { 4, D3DTSS_COLOROP, D3DTOP_DISABLE } } },
+    { "swapped sets", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2 | D3DFVF_TEXCOORDSIZE3(1), FALSE,
+      { { 0, D3DTSS_TEXCOORDINDEX, 1 }, { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 0 } } },
+    { "missing set", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, FALSE,
+      { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 4 } } },
+    { "wrapped sets", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2, FALSE,
+      { { TrFixedRender, D3DRS_WRAP1, D3DWRAP_U }, { 0, D3DTSS_TEXCOORDINDEX, 1 }, { 1, D3DTSS_COLOROP, D3DTOP_ADD },
+        { 1, D3DTSS_TEXCOORDINDEX, 0 } } },
+    { "no stages", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, FALSE, { { 0, D3DTSS_COLOROP, D3DTOP_DISABLE } } },
+    { "world", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE, { { TrVertexTransform, D3DTS_WORLD, 1 } } },
+    { "view", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE,
+      { { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "projection", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, FALSE,
+      { { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 },
+        { TrVertexTransform, D3DTS_PROJECTION, 3 } } },
+    { "normals unlit", D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE, FALSE,
+      { { TrFixedRender, D3DRS_NORMALIZENORMALS, TRUE } } },
+    { "xyzw", D3DFVF_XYZW | D3DFVF_DIFFUSE, FALSE, {} },
+    { "points", D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, TRUE, {} },
+    { "default again", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE, {} },
+};
+
+static
+VOID
+TrVertexApply(
+    _In_ IDirect3DDevice9* Device,
+    _In_reads_(Count) const TrFixedSet* Sets,
+    _In_ UINT Count)
+{
+    for (UINT Index = 0; Index < Count && Sets[Index].Type != 0; Index++)
+    {
+        const TrFixedSet& Set = Sets[Index];
+
+        if (Set.Stage == TrVertexTransform)
+        {
+            TrApi("SetTransform", Device->SetTransform(static_cast<D3DTRANSFORMSTATETYPE>(Set.Type),
+                                                       &TrVertexMatrices[Set.Value]));
+        }
+        else
+        {
+            TrFixedApply(Device, &Set, 1);
+        }
+    }
+}
+
+/* One untransformed fixed function draw and the target read back */
+static
+VOID
+TrVertexRun(
+    _In_ IDirect3DDevice9* Device,
+    _In_ const TrVertexCase& Case,
+    _In_ IDirect3DSurface9* Target)
+{
+    FLOAT Vertices[512];
+    UINT Stride = TrVertexFill(Case.Fvf, Vertices);
+    char Phase[96];
+
+    sprintf_s(Phase, "fixed vertex %s", Case.Name);
+    TrPhase(Phase);
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrVertexApply(Device, TrVertexBaseline, _countof(TrVertexBaseline));
+    TrApi("SetFVF", Device->SetFVF(Case.Fvf));
+    TrVertexApply(Device, Case.Sets, _countof(Case.Sets));
+    TrApi("BeginScene", Device->BeginScene());
+    if (Case.Points)
+        TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_POINTLIST, 4, Vertices, Stride));
+    else
+        TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Vertices, Stride));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, Case.Name);
+    TrSettle(Device);
+}
+
+/* Untransformed vertices through the fixed function vertex pipeline */
+static
+VOID
+TrFixedVertexWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+
+    TrPhase("fixed vertex create");
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("SetRenderState cull", Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
+    TrSettle(Device);
+
+    for (const TrVertexCase& Case : TrVertexCases)
+        TrVertexRun(Device, Case, Target);
+
+    TrPhase("fixed vertex release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
+/* The fixed function vertex pipeline on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioFixedVertex(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("fixed vertex device");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrFixedVertexWork(Device);
+        TrPhase("fixed vertex device release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -6573,6 +6837,7 @@ static const TrScenario TrScenarios[] =
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
+    { "fixed_vertex", TrScenarioFixedVertex },
 };
 
 static
