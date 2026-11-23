@@ -44,12 +44,13 @@ NineIsYuv(
     return CD3D11FormatHelper::YUV(Format) != FALSE;
 }
 
+/* Only an all zero rect stands for the whole subresource; a degenerate one is kept as it is */
 static
 BOOLEAN
 NineRectEmpty(
     _In_ const RECT* Rect)
 {
-    return Rect->right <= Rect->left || Rect->bottom <= Rect->top;
+    return Rect->left == 0 && Rect->top == 0 && Rect->right == 0 && Rect->bottom == 0;
 }
 
 /* Copies keep to whole blocks of block compressed formats and to pixel pairs of packed video formats */
@@ -301,17 +302,17 @@ NineCopySubresources(
     const BOOLEAN DestWide = Dest->Format == D3DDDIFMT_A2R10G10B10;
     BOOLEAN OtherFamily = FALSE;
 
+    if (Source->DxgiFormat != DXGI_FORMAT_UNKNOWN && Dest->DxgiFormat != DXGI_FORMAT_UNKNOWN)
+    {
+        OtherFamily = CD3D11FormatHelper::GetParentFormat(Source->DxgiFormat) !=
+                      CD3D11FormatHelper::GetParentFormat(Dest->DxgiFormat);
+    }
+
     if (SourceSamples > 1 && DestSamples == 1)
     {
         Device->Context->ResourceResolveSubresource(Dest->Underlying.get(), Copy->DestSub, Source->Underlying.get(),
                                                     Copy->SourceSub, Dest->DxgiFormat);
         return S_OK;
-    }
-
-    if (Source->DxgiFormat != DXGI_FORMAT_UNKNOWN && Dest->DxgiFormat != DXGI_FORMAT_UNKNOWN)
-    {
-        OtherFamily = CD3D11FormatHelper::GetParentFormat(Source->DxgiFormat) !=
-                      CD3D11FormatHelper::GetParentFormat(Dest->DxgiFormat);
     }
 
     if (!OtherFamily && !Copy->Stretch && SourceSamples == DestSamples && SourceWide == DestWide)
