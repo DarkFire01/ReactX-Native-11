@@ -1069,6 +1069,135 @@ TcCheckInterfaces(
             }
         }
     }
+
+    /* Device factories: flags, configuration and the devices they hand out */
+    {
+        static const GUID CreatorA = {0x1d5bd3a1, 0x6a4e, 0x4b11, {0x9b, 0x1e, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc}};
+        static const GUID CreatorB = {0x2e6ce4b2, 0x7b5f, 0x4c22, {0xac, 0x2f, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd}};
+        ComPtr<ID3D12DeviceFactory> Factory;
+        ComPtr<ID3D12DeviceConfiguration> Config;
+        ComPtr<ID3D12DeviceConfiguration1> Config1;
+        ComPtr<ID3D12Device> Global;
+        HRESULT hr;
+
+        hr = Check.GetInterface(CLSID_D3D12DeviceFactory, IID_PPV_ARGS(&Factory));
+        Check.Report("factory", "0x%08lX", hr);
+        if (SUCCEEDED(hr))
+        {
+            D3D12_DEVICE_CONFIGURATION_DESC Desc;
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings> Dred;
+            ComPtr<ID3D12Device> First;
+            ComPtr<ID3D12Device> Second;
+            ComPtr<ID3D12Device> Third;
+            GUID Features[2] = {};
+
+            Check.Report("factory_flags", "0x%x", Factory->GetFlags());
+            for (UINT Flags = 0; Flags < 9; Flags++)
+            {
+                sprintf_s(Key, "factory_set_flags_%u", Flags);
+                Check.Report(Key, "0x%08lX 0x%x", Factory->SetFlags((D3D12_DEVICE_FACTORY_FLAGS)Flags),
+                             Factory->GetFlags());
+            }
+            Factory->SetFlags(D3D12_DEVICE_FACTORY_FLAG_NONE);
+
+            Check.Report("factory_qi_config", "0x%08lX", Factory.As(&Config));
+            Check.Report("factory_qi_config1", "0x%08lX", Factory.As(&Config1));
+            if (Config != nullptr)
+            {
+                Desc = Config->GetDesc();
+                Check.Report("config_desc", "0x%x 0x%x %u %u", Desc.Flags, Desc.GpuBasedValidationFlags,
+                             Desc.SDKVersion, Desc.NumEnabledExperimentalFeatures);
+                Check.Report("config_features_none", "0x%08lX", Config->GetEnabledExperimentalFeatures(nullptr, 0));
+                Check.Report("config_features_two", "0x%08lX", Config->GetEnabledExperimentalFeatures(Features, 2));
+            }
+
+            Check.Report("factory_init_global", "0x%08lX", Factory->InitializeFromGlobalState());
+            Check.Report("factory_dred", "0x%08lX",
+                         Factory->GetConfigurationInterface(CLSID_D3D12DeviceRemovedExtendedData, IID_PPV_ARGS(&Dred)));
+            if (Dred != nullptr && Config != nullptr)
+            {
+                Dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                Desc = Config->GetDesc();
+                Check.Report("config_desc_dred", "0x%x", Desc.Flags);
+                Dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED);
+            }
+            Check.Report("factory_experimental_none", "0x%08lX",
+                         Factory->EnableExperimentalFeatures(0, nullptr, nullptr, nullptr));
+            Check.Report("factory_experimental_models", "0x%08lX",
+                         Factory->EnableExperimentalFeatures(1, &D3D12ExperimentalShaderModels, nullptr, nullptr));
+
+            /* Which devices come back depends on the flags and the global singleton */
+            Check.MakeDevice(&Global);
+            Check.Report("factory_device_check", "0x%08lX",
+                         Factory->CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr));
+            Check.Report("factory_device_bad_level", "0x%08lX",
+                         Factory->CreateDevice(nullptr, (D3D_FEATURE_LEVEL)0x1234, IID_PPV_ARGS(&Third)));
+            Third.Reset();
+            hr = Factory->CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&First));
+            Check.Report("factory_device_new", "0x%08lX same %d", hr, First.Get() == Global.Get());
+            Factory->SetFlags(D3D12_DEVICE_FACTORY_FLAG_ALLOW_RETURNING_EXISTING_DEVICE);
+            hr = Factory->CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Second));
+            Check.Report("factory_device_existing", "0x%08lX same %d %d", hr, Second.Get() == Global.Get(),
+                         Second.Get() == First.Get());
+            Factory->SetFlags(D3D12_DEVICE_FACTORY_FLAG_DISALLOW_STORING_NEW_DEVICE_AS_SINGLETON);
+            hr = Factory->CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Third));
+            Check.Report("factory_device_unstored", "0x%08lX same %d %d", hr, Third.Get() == Global.Get(),
+                         Third.Get() == First.Get());
+
+            /* Fresh factories, with and without the global state, asking for the existing device */
+            for (UINT Variant = 0; Variant < 3; Variant++)
+            {
+                ComPtr<ID3D12DeviceFactory> Fresh;
+                ComPtr<ID3D12Device> Found;
+
+                if (FAILED(Check.GetInterface(CLSID_D3D12DeviceFactory, IID_PPV_ARGS(&Fresh))))
+                    break;
+                if (Variant != 0)
+                    Fresh->InitializeFromGlobalState();
+                Fresh->SetFlags(Variant == 2 ? (D3D12_DEVICE_FACTORY_FLAGS)3
+                                             : D3D12_DEVICE_FACTORY_FLAG_ALLOW_RETURNING_EXISTING_DEVICE);
+                hr = Fresh->CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Found));
+                sprintf_s(Key, "factory_fresh_existing_%u", Variant);
+                Check.Report(Key, "0x%08lX same %d", hr, Found.Get() == Global.Get());
+            }
+
+            if (First != nullptr && First.Get() != Global.Get())
+            {
+                ComPtr<ID3D12Device> Again;
+
+                Check.MakeDevice(&Again);
+                Check.Report("factory_global_after", "same %d", Again.Get() == Global.Get());
+            }
+        }
+
+        /* Queues from different creators */
+        if (Global != nullptr)
+        {
+            ComPtr<ID3D12Device9> Device9;
+
+            if (SUCCEEDED(Global.As(&Device9)))
+            {
+                D3D12_COMMAND_QUEUE_DESC QueueDesc = {};
+                ComPtr<ID3D12CommandQueue> QueueA;
+                ComPtr<ID3D12CommandQueue> QueueB;
+                ComPtr<ID3D12CommandQueue> QueueNull;
+
+                QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+                Check.Report("queue1_a", "0x%08lX",
+                             Device9->CreateCommandQueue1(&QueueDesc, CreatorA, IID_PPV_ARGS(&QueueA)));
+                Check.Report("queue1_b", "0x%08lX",
+                             Device9->CreateCommandQueue1(&QueueDesc, CreatorB, IID_PPV_ARGS(&QueueB)));
+                Check.Report("queue1_null_creator", "0x%08lX",
+                             Device9->CreateCommandQueue1(&QueueDesc, GUID_NULL, IID_PPV_ARGS(&QueueNull)));
+                QueueNull.Reset();
+                Check.Report("queue1_no_out", "0x%08lX",
+                             Device9->CreateCommandQueue1(&QueueDesc, CreatorA, __uuidof(ID3D12CommandQueue), nullptr));
+                QueueDesc.Type = (D3D12_COMMAND_LIST_TYPE)99;
+                Check.Report("queue1_bad_type", "0x%08lX",
+                             Device9->CreateCommandQueue1(&QueueDesc, CreatorA, IID_PPV_ARGS(&QueueNull)));
+            }
+        }
+    }
 }
 
 /* create: every feature level, adapter and interface the device can be asked for */
