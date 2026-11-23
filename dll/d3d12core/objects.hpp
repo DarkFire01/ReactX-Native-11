@@ -27,6 +27,12 @@ public:
         _In_ const D3D12_COMMAND_QUEUE_DESC& Desc,
         _Outptr_ RxCommandQueue** Queue);
 
+    /* The checks a queue description passes before anything is made */
+    static
+    HRESULT
+    Validate(
+        _In_ const D3D12_COMMAND_QUEUE_DESC& Desc);
+
     HRESULT
     STDMETHODCALLTYPE
     QueryInterface(

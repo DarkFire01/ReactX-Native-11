@@ -264,6 +264,12 @@ RxDevice12::QueryDeviceCaps()
     if (FAILED(hr))
         return hr;
 
+    /* Shader visible heap limits; drivers without the query keep the tier limits */
+    HasHeapLimits = SUCCEEDED(Adapter->GetCaps(D3D12DDICAPS_TYPE_OPTIONS_0102, nullptr, &HeapLimits,
+                                                sizeof(HeapLimits)));
+    if (!HasHeapLimits)
+        HeapLimits.MaxSamplerDescriptorHeapSize = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
+
     QueryVirtualAddressBits();
     return S_OK;
 }
@@ -663,6 +669,13 @@ RxDevice12::CreateCommandQueue(
     if (pDesc == nullptr)
         return E_INVALIDARG;
 
+    /* A valid request without an output is a caller error, not a check */
+    hr = RxCommandQueue::Validate(*pDesc);
+    if (FAILED(hr))
+        return hr;
+    if (ppCommandQueue == nullptr)
+        return E_UNEXPECTED;
+
     hr = RxCommandQueue::Create(*this, *pDesc, &Queue);
     if (FAILED(hr))
         return hr;
@@ -682,6 +695,10 @@ RxDevice12::CreateCommandAllocator(
 
     if (ppCommandAllocator != nullptr)
         *ppCommandAllocator = nullptr;
+    if (RxQueueFlagsOf(type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE)
+        return E_INVALIDARG;
+    if (ppCommandAllocator == nullptr)
+        return E_UNEXPECTED;
 
     hr = RxCommandAllocator::Create(*this, type, &Allocator);
     if (FAILED(hr))
@@ -706,8 +723,20 @@ RxDevice12::CreateCommandList(
 
     if (ppCommandList != nullptr)
         *ppCommandList = nullptr;
-    if (Allocator == nullptr || nodeMask > 1)
+    if (Allocator == nullptr || nodeMask > 1 || RxQueueFlagsOf(type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE ||
+        Allocator->GetType() != type)
+    {
         return E_INVALIDARG;
+    }
+
+    /* Video lists are their own objects, which no graphics list interface reaches */
+    if (type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
+        type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
+    {
+        return E_NOINTERFACE;
+    }
+    if (ppCommandList == nullptr)
+        return E_UNEXPECTED;
 
     hr = RxCommandList::Create(*this, type, Allocator, pInitialState, &List);
     if (FAILED(hr))
@@ -771,8 +800,11 @@ RxDevice12::CreateDescriptorHeap(
     RxDescriptorHeap* Heap;
     HRESULT hr;
 
-    if (ppvHeap != nullptr)
-        *ppvHeap = nullptr;
+    /* Without an output nothing is checked */
+    if (ppvHeap == nullptr)
+        return S_FALSE;
+
+    *ppvHeap = nullptr;
     if (pDescriptorHeapDesc == nullptr)
         return E_INVALIDARG;
 

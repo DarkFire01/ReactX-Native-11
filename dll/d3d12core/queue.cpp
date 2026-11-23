@@ -21,15 +21,9 @@ RxCommandQueue::Create(
 
     *Queue = nullptr;
 
-    if (RxQueueFlagsOf(Desc.Type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE || Desc.Type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-        return E_INVALIDARG;
-    if (Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_NORMAL && Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_HIGH &&
-        Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
-    {
-        return E_INVALIDARG;
-    }
-    if ((Desc.Flags & ~D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT) != 0 || Desc.NodeMask > 1)
-        return E_INVALIDARG;
+    hr = Validate(Desc);
+    if (FAILED(hr))
+        return hr;
 
     hr = Device.CheckUsable();
     if (FAILED(hr))
@@ -47,6 +41,23 @@ RxCommandQueue::Create(
     }
 
     *Queue = Created;
+    return S_OK;
+}
+
+HRESULT
+RxCommandQueue::Validate(
+    _In_ const D3D12_COMMAND_QUEUE_DESC& Desc)
+{
+    if (RxQueueFlagsOf(Desc.Type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE || Desc.Type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
+        return E_INVALIDARG;
+    if (Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_NORMAL && Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_HIGH &&
+        Desc.Priority != D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
+    {
+        return E_INVALIDARG;
+    }
+    if ((Desc.Flags & ~D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT) != 0 || Desc.NodeMask > 1)
+        return E_INVALIDARG;
+
     return S_OK;
 }
 
