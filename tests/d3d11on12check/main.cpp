@@ -4,10 +4,10 @@
  * PURPOSE:     Direct3D 11 on 12 behavior, printed as comparable facts
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  *
- * d3d11on12check [-runtime system|reactx|<dir>] [check ...]
+ * d3d11on12check [-runtime system|reactx|<dir>] [-d3d11 system|reactx|<dir>] [check ...]
  *
- * The runtime picks the d3d11on12.dll that is loaded before d3d11.dll from System32 asks for it, so
- * the same Direct3D 11 runtime drives the system layer or the ReactX one. D3D12 is always the
+ * The Direct3D 11 runtime picks the d3d11on12.dll that is loaded before it asks for one, so either
+ * runtime, the system's or ReactX's, drives the system layer or the ReactX one. D3D12 is always the
  * system's. The trace checks print the D3D12 calls the layer makes, hooked on the device and queue.
  */
 
@@ -563,6 +563,7 @@ wmain(
 {
     std::vector<std::string> Wanted;
     PCWSTR Runtime = L"system";
+    PCWSTR Core = L"system";
     WCHAR System[MAX_PATH];
     WCHAR Loaded[MAX_PATH];
     PFN_D3D12_CREATE_DEVICE CreateD3D12;
@@ -580,6 +581,12 @@ wmain(
         if (_wcsicmp(argv[Index], L"-runtime") == 0 && Index + 1 < argc)
         {
             Runtime = argv[++Index];
+            continue;
+        }
+
+        if (_wcsicmp(argv[Index], L"-d3d11") == 0 && Index + 1 < argc)
+        {
+            Core = argv[++Index];
             continue;
         }
 
@@ -601,13 +608,17 @@ wmain(
 
     CreateD3D12 = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(
         GetProcAddress(LoadLibraryW((std::wstring(System) + L"\\d3d12.dll").c_str()), "D3D12CreateDevice"));
-    D3d11 = LoadLibraryW((std::wstring(System) + L"\\d3d11.dll").c_str());
-    Check.CreateDevice = reinterpret_cast<PFN_D3D11ON12_CREATE_DEVICE>(GetProcAddress(D3d11, "D3D11On12CreateDevice"));
+    D3d11 = LoadLibraryW((OcRuntimeDirectory(Core) + L"d3d11.dll").c_str());
+    Check.CreateDevice = D3d11 ? reinterpret_cast<PFN_D3D11ON12_CREATE_DEVICE>(
+                                     GetProcAddress(D3d11, "D3D11On12CreateDevice"))
+                               : nullptr;
     if (CreateD3D12 == nullptr || Check.CreateDevice == nullptr)
     {
         fprintf(stderr, "error: missing exports\n");
         return 1;
     }
+    GetModuleFileNameW(D3d11, Loaded, _countof(Loaded));
+    fprintf(stderr, "d3d11: %ls\n", Loaded);
 
     if (FAILED(CreateD3D12(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Check.Device))))
     {
