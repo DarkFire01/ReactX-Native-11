@@ -7,6 +7,7 @@
 
 #include "views.hpp"
 #include "formats.hpp"
+#include "resourcecheck.hpp"
 
 #include <type_traits>
 
@@ -296,6 +297,9 @@ RxShaderResourceTraits::Resolve(
     {
         return E_INVALIDARG;
     }
+
+    if (Resource.Dimension != D3D11_RESOURCE_DIMENSION_BUFFER && !RxIsViewFormatOf(Resource.Format, Desc.Format))
+        return E_INVALIDARG;
 
     Args->Format = Desc.Format;
     switch (Desc.ViewDimension)

@@ -38,6 +38,12 @@ RxTextureRequest
 RxMakeTextureRequest(
     _In_ const D3D11_TEXTURE3D_DESC& Desc);
 
+/* A fully typed texture is only viewed in its own format, a typeless one in any format of its family */
+BOOLEAN
+RxIsViewFormatOf(
+    _In_ DXGI_FORMAT ResourceFormat,
+    _In_ DXGI_FORMAT ViewFormat);
+
 /* E_INVALIDARG for anything the API would refuse, S_OK otherwise */
 HRESULT
 RxCheckTextureRequest(

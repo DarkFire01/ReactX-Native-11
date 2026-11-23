@@ -148,6 +148,28 @@ RxCastFamily(
     return 1;
 }
 
+BOOLEAN
+RxIsViewFormatOf(
+    _In_ DXGI_FORMAT ResourceFormat,
+    _In_ DXGI_FORMAT ViewFormat)
+{
+    DXGI_FORMAT Family[8];
+    UINT Count;
+    UINT Index;
+
+    if (!RxIsTypelessFormat(ResourceFormat))
+        return ViewFormat == ResourceFormat;
+
+    Count = RxCastFamily(ResourceFormat, Family);
+    for (Index = 0; Index < Count; Index++)
+    {
+        if (Family[Index] == ViewFormat)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 /* Combined support of everything in the family, so a typeless texture can be bound as any member could */
 static
 UINT
