@@ -700,8 +700,6 @@ ScTranslateLerp(
     ScResult(Context, Instr, D3D10_SB_OPCODE_MAD, Dst, &Weight, &Result, &From);
 }
 
-/* Pixel shader samplers the raster state marks as depth textures compare instead of sampling */
-static
 BOOL
 ScUsesShadowCompare(
     _In_ const ScContext* Context,
@@ -728,7 +726,7 @@ ScTranslateTexLdl(
     Instr.Destination(&Dst);
     Context->SourceOperand(&Coordinate, Instr, 0, 0, 4);
 
-    /* The comparison path is only taken by pixel shaders, which are not converted yet */
+    /* The comparison path is only taken by pixel shaders, which do not sample here yet */
     if (ScUsesShadowCompare(Context, Sampler))
         return E_NOTIMPL;
 
@@ -743,7 +741,6 @@ ScTranslateTexLdl(
 }
 
 /* Emits the Direct3D 10 comparison for a Direct3D 9 one; gt and le swap their operands */
-static
 VOID
 ScCompare(
     _In_ ScContext* Context,

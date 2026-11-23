@@ -648,6 +648,7 @@ ScContext::ScContext(
     IfDepth(0),
     OutputsWritten(FALSE),
     LoopDepth(0xFF),
+    SecondPad(FALSE),
     TempBase(0),
     LastWasBreak(FALSE)
 {
@@ -1026,6 +1027,7 @@ ScContext::EmitColorKey(
 
 VOID
 ScContext::EmitResult(
+
     _In_ UINT Flags,
     _In_ D3D10_SB_OPCODE_TYPE Opcode,
     _In_ UINT Sampler,
@@ -1076,42 +1078,39 @@ ScContext::EmitResult(
     Asm->Add(Instruction);
 }
 
-template <class INPUTS>
 VOID
 ScContext::AllocateInputTemps(
-    _In_ const INPUTS& Inputs,
+    _In_ const std::vector<ScInputUse>& Uses,
     _Inout_ BYTE* Next)
 {
-    for (const NineScInput& Input : Inputs.Inputs)
+    for (const ScInputUse& Use : Uses)
     {
-        UINT Register = NineScInputRegister(Input);
-
-        if (Map->Inputs[Register].Kind == ScInputUnbound)
+        if (Map->Inputs[Use.Register].Kind == ScInputUnbound)
         {
-            InputTemps[Register] = *Next;
+            InputTemps[Use.Register] = *Next;
             *Next += 1;
         }
     }
 }
 
 VOID
-ScContext::InitializeVertexInputTemps(
-    _In_ const NineScInputs& Inputs,
+ScContext::InitializeInputTemps(
+    _In_ const std::vector<ScInputUse>& Uses,
     _In_ UINT TempCount)
 {
     std::vector<bool> Written(TempCount, false);
 
-    for (const NineScInput& Input : Inputs.Inputs)
+    for (const ScInputUse& Use : Uses)
     {
-        const ScInputRegister* Entry = &Map->Inputs[NineScInputRegister(Input)];
+        const ScInputRegister* Entry = &Map->Inputs[Use.Register];
 
         if (Entry->Kind == ScInputUnbound)
         {
-            /* An input the vertex declaration does not feed reads as Direct3D 9 defaults */
-            UINT Register = InputTemps[NineScInputRegister(Input)];
+            /* An input nothing feeds reads as Direct3D 9 defaults */
+            UINT Register = InputTemps[Use.Register];
             SB::COperandBase Default;
             SB::COperandBase Dst = ScTempDst(Register, ScMaskAll);
-            UINT Usage = NineScInputUsage(Input);
+            UINT Usage = Use.Usage;
 
             if (Usage == 4)
                 Default = SB::COperand(1.0f);
@@ -1178,10 +1177,20 @@ ScVertexContext::WriteDeclarations()
     UINT FloatSize = Shader->RangeEnd[NineScFloatBuffer];
     UINT IntegerSize = Shader->RangeEnd[NineScIntegerBuffer];
     UINT BooleanSize = Shader->RangeEnd[NineScBooleanBuffer];
+    std::vector<ScInputUse> Uses;
+
+    for (const NineScInput& Input : Inputs->Inputs)
+    {
+        ScInputUse Use;
+
+        Use.Register = static_cast<BYTE>(NineScInputRegister(Input));
+        Use.Usage = static_cast<BYTE>(NineScInputUsage(Input));
+        Uses.push_back(Use);
+    }
 
     TempBase = Shader->TempCount;
     Next = static_cast<BYTE>(Shader->LoopCount + Shader->TempCount);
-    AllocateInputTemps(*Inputs, &Next);
+    AllocateInputTemps(Uses, &Next);
     TempCount = Next;
 
     Asm->EmitTempsDecl(TempCount);
@@ -1242,7 +1251,7 @@ ScVertexContext::WriteDeclarations()
             Asm->EmitOutputDecl(Register, Mask);
     }
 
-    InitializeVertexInputTemps(*Inputs, TempCount);
+    InitializeInputTemps(Uses, TempCount);
 
     for (const NineScInput& Input : Inputs->Inputs)
     {

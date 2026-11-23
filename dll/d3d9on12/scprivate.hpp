@@ -94,16 +94,34 @@ struct ScShader
     UINT Version;
     UINT Flags;
 
-    /* Vertex shaders only */
+    /* Vertex shader outputs, or the inputs a pixel shader reads */
     NineScOutputs Outputs;
+
+    /* Vertex shaders only */
     NineScInputs Inputs;
     UINT VertexFlags;
+
+    /* Pixel shaders only: flags, the outputs written and the register the position arrives in */
+    UINT PixelFlags;
+    BYTE ColorWrites;
+    BYTE PositionRegister;
 
     ScShader();
 };
 
 /* Vertex flag: outputs are indexed, so they live in an indexable temp */
 static constexpr UINT ScVertexIndexedOutputs = 1;
+
+/* Pixel flags: bump environment constants are read, inputs are indexed */
+static constexpr UINT ScPixelBumpMatrix = 1;
+static constexpr UINT ScPixelIndexedInputs = 0x200;
+
+/* An input the shader reads: the register it is declared in and its usage */
+struct ScInputUse
+{
+    BYTE Register;
+    BYTE Usage;
+};
 
 /* The Direct3D 10 token writer with the counters the converter reports */
 class ScAsm : public SB::CShaderAsm
@@ -213,6 +231,8 @@ public:
     BOOLEAN OutputsWritten;
     /* Index into LoopTemps of the innermost loop, 0xFF outside every loop */
     BYTE LoopDepth;
+    /* Set after the first texm3x3pad of a matrix, so the second writes y */
+    BOOLEAN SecondPad;
     /* Next temp a loop or rep counter takes */
     UINT TempBase;
     BOOLEAN LastWasBreak;
@@ -283,16 +303,22 @@ public:
         _In_ UINT Planes,
         _In_ const SB::COperandBase& Position);
 
-    template <class INPUTS>
     VOID
     AllocateInputTemps(
-        _In_ const INPUTS& Inputs,
+        _In_ const std::vector<ScInputUse>& Uses,
         _Inout_ BYTE* Next);
 
     VOID
-    InitializeVertexInputTemps(
-        _In_ const NineScInputs& Inputs,
+    InitializeInputTemps(
+        _In_ const std::vector<ScInputUse>& Uses,
         _In_ UINT TempCount);
+
+    VOID
+    EmitSampleCompare(
+        _In_ const ScInstr& Instr,
+        _In_ const SB::COperandBase& Dst,
+        _In_ UINT Sampler,
+        _In_ const SB::COperandBase& Coordinate);
 
     HRESULT
     Translate(
@@ -340,7 +366,61 @@ public:
     VOID WriteOutputs() override;
 };
 
+class ScPixelContext : public ScContext
+{
+public:
+    NineScOutputs* Decls;
+    UINT PixelFlags;
+    const NineScOutput* FogDecl;
+    const NineScOutput* SecondColorDecl;
+    BYTE PositionRegister;
+
+    ScPixelContext(
+        _In_ UINT Runtime,
+        _In_ ScAsm* Writer,
+        _In_ const NineScRasterStates* States,
+        _In_ ScShader* Info,
+        _In_ NineScOutputs* Inputs);
+
+    HRESULT WriteDeclarations() override;
+    VOID WriteOutputs() override;
+
+private:
+    VOID WriteAlphaTest();
+    VOID WriteFog();
+    VOID WritePixelFog();
+};
+
+/* Pixel shader instructions; E_NOTIMPL when the opcode is not one of them */
+HRESULT
+ScTranslatePixelInstruction(
+    _In_ ScContext* Context,
+    _In_ ScInstr& Instr);
+
+/* Fog is computed in the pixel shader when the state asks for it below ps_3_0 */
+BOOL
+ScImplicitFog(
+    _In_ const NineScRasterStates* Raster,
+    _In_ UINT Version);
+
+/* Pixel shader samplers the raster state marks as depth textures compare instead of sampling */
+BOOL
+ScUsesShadowCompare(
+    _In_ const ScContext* Context,
+    _In_ UINT Sampler);
+
+/* Emits the Direct3D 10 comparison for a Direct3D 9 one */
+VOID
+ScCompare(
+    _In_ ScContext* Context,
+    _In_ UINT Comparison,
+    _In_ const SB::COperandBase& Dst,
+    _In_ const SB::COperandBase& Left,
+    _In_ const SB::COperandBase& Right);
+
+
 /* Operand construction */
+
 SB::COperandBase
 ScTempOperand(
     _In_ UINT Register);
