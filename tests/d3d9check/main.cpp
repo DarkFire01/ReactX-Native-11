@@ -3447,6 +3447,537 @@ NcCheckGamma(
     Plain->Release();
 }
 
+/* The resources the sharing checks make and open, each in one fixed description */
+enum NcShareKind
+{
+    NcShareTarget,
+    NcShareTargetLockable,
+    NcShareTargetSmall,
+    NcShareTargetFormat,
+    NcShareDepth,
+    NcSharePlain,
+    NcShareTexture,
+    NcShareTextureLevels,
+    NcShareTextureTarget,
+    NcShareCube,
+    NcShareVolume,
+    NcShareVertices,
+    NcShareVerticesLong,
+    NcShareIndices,
+    NcShareCount,
+};
+
+static const PCSTR NcShareNames[] =
+{
+    "target", "target_lockable", "target_small", "target_format", "depth", "plain", "texture", "texture_levels",
+    "texture_target", "cube", "volume", "vertices", "vertices_long", "indices",
+};
+
+static
+HRESULT
+NcMakeShared(
+    _In_ IDirect3DDevice9* Device,
+    _In_ NcShareKind Kind,
+    _Inout_opt_ HANDLE* Shared,
+    _Outptr_result_maybenull_ IDirect3DResource9** Made)
+{
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    HRESULT hr = E_FAIL;
+
+    *Made = nullptr;
+    switch (Kind)
+    {
+    case NcShareTarget:
+    case NcShareTargetLockable:
+        hr = Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                        Kind == NcShareTargetLockable, &Surface, Shared);
+        break;
+    case NcShareTargetSmall:
+        hr = Device->CreateRenderTarget(8, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, Shared);
+        break;
+    case NcShareTargetFormat:
+        hr = Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, Shared);
+        break;
+    case NcShareDepth:
+        hr = Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, Shared);
+        break;
+    case NcSharePlain:
+        hr = Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, Shared);
+        break;
+    case NcShareTexture:
+        hr = Device->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, Shared);
+        break;
+    case NcShareTextureLevels:
+        hr = Device->CreateTexture(16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, Shared);
+        break;
+    case NcShareTextureTarget:
+        hr = Device->CreateTexture(16, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture,
+                                   Shared);
+        break;
+    case NcShareCube:
+        hr = Device->CreateCubeTexture(8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube, Shared);
+        break;
+    case NcShareVolume:
+        hr = Device->CreateVolumeTexture(8, 8, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Volume, Shared);
+        break;
+    case NcShareVertices:
+    case NcShareVerticesLong:
+        hr = Device->CreateVertexBuffer(Kind == NcShareVertices ? 64 : 128, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT,
+                                        &Vertices, Shared);
+        break;
+    case NcShareIndices:
+        hr = Device->CreateIndexBuffer(64, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &Indices, Shared);
+        break;
+    default:
+        break;
+    }
+    if (Surface != nullptr)
+        *Made = Surface;
+    else if (Texture != nullptr)
+        *Made = Texture;
+    else if (Cube != nullptr)
+        *Made = Cube;
+    else if (Volume != nullptr)
+        *Made = Volume;
+    else if (Vertices != nullptr)
+        *Made = Vertices;
+    else if (Indices != nullptr)
+        *Made = Indices;
+    return hr;
+}
+
+/* The result of a creation or an open, with what the resource reports about itself */
+static
+VOID
+NcPrintShared(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_opt_ IDirect3DResource9* Resource,
+    _In_opt_ const HANDLE* Shared)
+{
+    printf("%s = %08lX handle %s", Name, Result,
+           Shared == nullptr ? "none" : (*Shared != NULL ? "set" : "null"));
+    if (Resource == nullptr)
+    {
+        printf(" null\n");
+        return;
+    }
+    switch (Resource->GetType())
+    {
+    case D3DRTYPE_SURFACE:
+    {
+        D3DSURFACE_DESC Desc = {};
+
+        static_cast<IDirect3DSurface9*>(Resource)->GetDesc(&Desc);
+        printf(" surface fmt %u usage %08lX pool %u size %ux%u", Desc.Format, Desc.Usage, Desc.Pool, Desc.Width,
+               Desc.Height);
+        break;
+    }
+    case D3DRTYPE_TEXTURE:
+    {
+        IDirect3DTexture9* Texture = static_cast<IDirect3DTexture9*>(Resource);
+        D3DSURFACE_DESC Desc = {};
+
+        Texture->GetLevelDesc(0, &Desc);
+        printf(" texture levels %lu fmt %u usage %08lX pool %u size %ux%u", Texture->GetLevelCount(), Desc.Format,
+               Desc.Usage, Desc.Pool, Desc.Width, Desc.Height);
+        break;
+    }
+    case D3DRTYPE_CUBETEXTURE:
+    {
+        IDirect3DCubeTexture9* Cube = static_cast<IDirect3DCubeTexture9*>(Resource);
+        D3DSURFACE_DESC Desc = {};
+
+        Cube->GetLevelDesc(0, &Desc);
+        printf(" cube levels %lu fmt %u size %u", Cube->GetLevelCount(), Desc.Format, Desc.Width);
+        break;
+    }
+    case D3DRTYPE_VOLUMETEXTURE:
+    {
+        IDirect3DVolumeTexture9* Volume = static_cast<IDirect3DVolumeTexture9*>(Resource);
+        D3DVOLUME_DESC Desc = {};
+
+        Volume->GetLevelDesc(0, &Desc);
+        printf(" volume levels %lu fmt %u size %ux%ux%u", Volume->GetLevelCount(), Desc.Format, Desc.Width,
+               Desc.Height, Desc.Depth);
+        break;
+    }
+    case D3DRTYPE_VERTEXBUFFER:
+    {
+        D3DVERTEXBUFFER_DESC Desc = {};
+
+        static_cast<IDirect3DVertexBuffer9*>(Resource)->GetDesc(&Desc);
+        printf(" vertices size %u usage %08lX pool %u fvf %08lX", Desc.Size, Desc.Usage, Desc.Pool, Desc.FVF);
+        break;
+    }
+    case D3DRTYPE_INDEXBUFFER:
+    {
+        D3DINDEXBUFFER_DESC Desc = {};
+
+        static_cast<IDirect3DIndexBuffer9*>(Resource)->GetDesc(&Desc);
+        printf(" indices size %u usage %08lX pool %u fmt %u", Desc.Size, Desc.Usage, Desc.Pool, Desc.Format);
+        break;
+    }
+    default:
+        printf(" type %u", Resource->GetType());
+        break;
+    }
+    printf("\n");
+}
+
+/* Pixels a render target holds, read back through a system memory surface of the same device */
+static
+VOID
+NcPrintSharedPixels(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Target)
+{
+    IDirect3DSurface9* Copy = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    HRESULT hr;
+
+    hr = Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Copy, nullptr);
+    if (FAILED(hr))
+    {
+        printf("%s = %08lX\n", Name, hr);
+        return;
+    }
+    hr = Device->GetRenderTargetData(Target, Copy);
+    if (SUCCEEDED(hr))
+        hr = Copy->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    if (SUCCEEDED(hr))
+    {
+        printf("%s = %08lX first %08lX last %08lX\n", Name, hr, *static_cast<const DWORD*>(Locked.pBits),
+               *reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(Locked.pBits) + Locked.Pitch * 7 + 4 * 15));
+        Copy->UnlockRect();
+    }
+    else
+    {
+        printf("%s = %08lX\n", Name, hr);
+    }
+    Copy->Release();
+}
+
+/* Shared resources made on one extended device and opened by handle on another */
+static
+VOID
+NcCheckSharedOn(
+    _In_ IDirect3DDevice9Ex* First,
+    _In_ IDirect3DDevice9Ex* Second,
+    _In_ IDirect3DDevice9* Plain)
+{
+    IDirect3DResource9* Made[NcShareCount] = {};
+    HANDLE Handles[NcShareCount] = {};
+    IDirect3DResource9* Opened;
+    IDirect3DSurface9* Surface;
+    IDirect3DTexture9* Texture;
+    HANDLE Handle;
+    char Name[96];
+    HRESULT hr;
+
+    for (UINT Kind = 0; Kind < NcShareCount; Kind++)
+    {
+        hr = NcMakeShared(First, static_cast<NcShareKind>(Kind), &Handles[Kind], &Made[Kind]);
+        sprintf_s(Name, "shared_make[%s]", NcShareNames[Kind]);
+        NcPrintShared(Name, hr, Made[Kind], &Handles[Kind]);
+    }
+
+    for (UINT Source = 0; Source < NcShareCount; Source++)
+    {
+        if (Handles[Source] == NULL)
+            continue;
+        for (UINT Kind = 0; Kind < NcShareCount; Kind++)
+        {
+            Handle = Handles[Source];
+            hr = NcMakeShared(Second, static_cast<NcShareKind>(Kind), &Handle, &Opened);
+            sprintf_s(Name, "shared_open[%s,%s]", NcShareNames[Source], NcShareNames[Kind]);
+            NcPrintShared(Name, hr, Opened, nullptr);
+            printf("%s_same = %d\n", Name, Handle == Handles[Source]);
+            if (Opened != nullptr)
+                printf("%s_release = %lu\n", Name, Opened->Release());
+        }
+        Handle = Handles[Source];
+        hr = NcMakeShared(First, static_cast<NcShareKind>(Source), &Handle, &Opened);
+        sprintf_s(Name, "shared_open_self[%s]", NcShareNames[Source]);
+        NcPrintShared(Name, hr, Opened, nullptr);
+        if (Opened != nullptr)
+            printf("%s_release = %lu\n", Name, Opened->Release());
+        Handle = Handles[Source];
+        hr = NcMakeShared(Plain, static_cast<NcShareKind>(Source), &Handle, &Opened);
+        sprintf_s(Name, "shared_open_plain[%s]", NcShareNames[Source]);
+        NcPrintShared(Name, hr, Opened, nullptr);
+        if (Opened != nullptr)
+            printf("%s_release = %lu\n", Name, Opened->Release());
+    }
+
+    /* Handles that name nothing, and creations sharing cannot apply to */
+    Handle = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(0x40000002));
+    hr = NcMakeShared(Second, NcShareTarget, &Handle, &Opened);
+    NcPrintShared("shared_open_bogus", hr, Opened, &Handle);
+    if (Opened != nullptr)
+        Opened->Release();
+
+    Handle = NULL;
+    Surface = nullptr;
+    hr = First->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_4_SAMPLES, 0, FALSE, &Surface, &Handle);
+    NcPrintShared("shared_make_multisample", hr, Surface, &Handle);
+    if (Surface != nullptr)
+        Surface->Release();
+    Handle = NULL;
+    Surface = nullptr;
+    hr = First->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, &Handle);
+    NcPrintShared("shared_make_plain_sysmem", hr, Surface, &Handle);
+    if (Surface != nullptr)
+        Surface->Release();
+    Handle = NULL;
+    Surface = nullptr;
+    hr = First->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH, &Surface, &Handle);
+    NcPrintShared("shared_make_plain_scratch", hr, Surface, &Handle);
+    if (Surface != nullptr)
+        Surface->Release();
+    Handle = NULL;
+    Texture = nullptr;
+    hr = First->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, &Handle);
+    NcPrintShared("shared_make_texture_managed", hr, Texture, &Handle);
+    if (Texture != nullptr)
+        Texture->Release();
+    Handle = NULL;
+    Texture = nullptr;
+    hr = First->CreateTexture(16, 8, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, &Handle);
+    NcPrintShared("shared_make_texture_dynamic", hr, Texture, &Handle);
+    if (Texture != nullptr)
+        Texture->Release();
+    Handle = NULL;
+    Texture = nullptr;
+    hr = First->CreateTexture(16, 8, 0, D3DUSAGE_RENDERTARGET | D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8,
+                              D3DPOOL_DEFAULT, &Texture, &Handle);
+    NcPrintShared("shared_make_texture_autogen", hr, Texture, &Handle);
+    if (Texture != nullptr)
+        Texture->Release();
+    {
+        static DWORD Pixels[16 * 8];
+
+        for (UINT Index = 0; Index < _countof(Pixels); Index++)
+            Pixels[Index] = 0xFF000000 | (Index * 0x10203);
+        Handle = Pixels;
+        Texture = nullptr;
+        hr = First->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Texture, &Handle);
+        NcPrintShared("shared_make_texture_memory", hr, Texture, &Handle);
+        if (Texture != nullptr)
+        {
+            D3DLOCKED_RECT Locked = {};
+
+            hr = Texture->LockRect(0, &Locked, nullptr, D3DLOCK_READONLY);
+            printf("shared_make_texture_memory_lock = %08lX same %d pitch %d first %08lX\n", hr,
+                   Locked.pBits == Pixels, Locked.Pitch,
+                   SUCCEEDED(hr) ? *static_cast<const DWORD*>(Locked.pBits) : 0);
+            if (SUCCEEDED(hr))
+                Texture->UnlockRect(0);
+            Texture->Release();
+        }
+        Handle = Pixels;
+        Texture = nullptr;
+        hr = First->CreateTexture(16, 8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Texture, &Handle);
+        NcPrintShared("shared_make_texture_memory_levels", hr, Texture, &Handle);
+        if (Texture != nullptr)
+            Texture->Release();
+        Handle = NULL;
+        Texture = nullptr;
+        hr = First->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Texture, &Handle);
+        NcPrintShared("shared_make_texture_memory_null", hr, Texture, &Handle);
+        if (Texture != nullptr)
+            Texture->Release();
+    }
+    {
+        static const DWORD Usages[] =
+        {
+            D3DUSAGE_RESTRICTED_CONTENT, D3DUSAGE_RESTRICT_SHARED_RESOURCE, D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER,
+            D3DUSAGE_NONSECURE,
+        };
+
+        for (DWORD Usage : Usages)
+        {
+            Handle = NULL;
+            Surface = nullptr;
+            hr = First->CreateRenderTargetEx(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, &Handle,
+                                             Usage);
+            sprintf_s(Name, "shared_make_target_ex[%08lX]", Usage);
+            NcPrintShared(Name, hr, Surface, &Handle);
+            if (Surface != nullptr)
+            {
+                IDirect3DSurface9* Other = nullptr;
+
+                hr = Second->CreateRenderTargetEx(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Other,
+                                                  &Handle, Usage);
+                sprintf_s(Name, "shared_open_target_ex[%08lX]", Usage);
+                NcPrintShared(Name, hr, Other, nullptr);
+                if (Other != nullptr)
+                    Other->Release();
+                Other = nullptr;
+                hr = Second->CreateRenderTargetEx(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Other,
+                                                  &Handle, 0);
+                sprintf_s(Name, "shared_open_target_ex_plain[%08lX]", Usage);
+                NcPrintShared(Name, hr, Other, nullptr);
+                if (Other != nullptr)
+                    Other->Release();
+                Surface->Release();
+            }
+            Handle = NULL;
+            Surface = nullptr;
+            hr = First->CreateOffscreenPlainSurfaceEx(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, &Handle,
+                                                      Usage);
+            sprintf_s(Name, "shared_make_plain_ex[%08lX]", Usage);
+            NcPrintShared(Name, hr, Surface, &Handle);
+            if (Surface != nullptr)
+                Surface->Release();
+            Handle = NULL;
+            Texture = nullptr;
+            hr = First->CreateTexture(16, 8, 1, Usage, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, &Handle);
+            sprintf_s(Name, "shared_make_texture_usage[%08lX]", Usage);
+            NcPrintShared(Name, hr, Texture, &Handle);
+            if (Texture != nullptr)
+                Texture->Release();
+        }
+    }
+
+    /* Levels, usages and vertex formats the driver may or may not share */
+    {
+        static const struct
+        {
+            PCSTR Name;
+            UINT Kind;
+            UINT Levels;
+            DWORD Usage;
+            DWORD Fvf;
+        } Cases[] =
+        {
+            { "texture_target_levels", 0, 2, D3DUSAGE_RENDERTARGET, 0 },
+            { "texture_dynamic_levels", 0, 2, D3DUSAGE_DYNAMIC, 0 },
+            { "cube_levels", 1, 2, 0, 0 },
+            { "cube_target", 1, 1, D3DUSAGE_RENDERTARGET, 0 },
+            { "cube_target_levels", 1, 2, D3DUSAGE_RENDERTARGET, 0 },
+            { "cube_dynamic", 1, 1, D3DUSAGE_DYNAMIC, 0 },
+            { "volume_levels", 2, 2, 0, 0 },
+            { "volume_dynamic", 2, 1, D3DUSAGE_DYNAMIC, 0 },
+            { "vertices_dynamic", 3, 0, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0 },
+            { "vertices_fvf", 3, 0, D3DUSAGE_WRITEONLY, D3DFVF_XYZ | D3DFVF_DIFFUSE },
+            { "vertices_dynamic_fvf", 3, 0, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFVF_XYZ | D3DFVF_DIFFUSE },
+            { "vertices_plain", 3, 0, 0, 0 },
+            { "vertices_dynamic_only", 3, 0, D3DUSAGE_DYNAMIC, 0 },
+        };
+
+        for (const auto& Case : Cases)
+        {
+            IDirect3DResource9* Resource = nullptr;
+            IDirect3DTexture9* Planar = nullptr;
+            IDirect3DCubeTexture9* Cube = nullptr;
+            IDirect3DVolumeTexture9* Volume = nullptr;
+            IDirect3DVertexBuffer9* Vertices = nullptr;
+
+            Handle = NULL;
+            if (Case.Kind == 0)
+                hr = First->CreateTexture(16, 16, Case.Levels, Case.Usage, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Planar,
+                                          &Handle);
+            else if (Case.Kind == 1)
+                hr = First->CreateCubeTexture(8, Case.Levels, Case.Usage, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube,
+                                              &Handle);
+            else if (Case.Kind == 2)
+                hr = First->CreateVolumeTexture(8, 8, 4, Case.Levels, Case.Usage, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                                &Volume, &Handle);
+            else
+                hr = First->CreateVertexBuffer(96, Case.Usage, Case.Fvf, D3DPOOL_DEFAULT, &Vertices, &Handle);
+            if (Planar != nullptr)
+                Resource = Planar;
+            else if (Cube != nullptr)
+                Resource = Cube;
+            else if (Volume != nullptr)
+                Resource = Volume;
+            else
+                Resource = Vertices;
+            sprintf_s(Name, "shared_make_case[%s]", Case.Name);
+            NcPrintShared(Name, hr, Resource, &Handle);
+            if (Resource != nullptr)
+                Resource->Release();
+        }
+    }
+
+    /* What one device writes the other reads */
+    if (Made[NcShareTarget] != nullptr)
+    {
+        IDirect3DSurface9* Target = static_cast<IDirect3DSurface9*>(Made[NcShareTarget]);
+
+        printf("shared_fill = %08lX\n", First->ColorFill(Target, nullptr, 0xFF336699));
+        NcPrintSharedPixels("shared_pixels_first", First, Target);
+        Handle = Handles[NcShareTarget];
+        hr = NcMakeShared(Second, NcShareTarget, &Handle, &Opened);
+        if (Opened != nullptr)
+        {
+            NcPrintSharedPixels("shared_pixels_second", Second, static_cast<IDirect3DSurface9*>(Opened));
+            printf("shared_fill_second = %08lX\n",
+                   Second->ColorFill(static_cast<IDirect3DSurface9*>(Opened), nullptr, 0xFF112233));
+            NcPrintSharedPixels("shared_pixels_back", Second, static_cast<IDirect3DSurface9*>(Opened));
+            NcPrintSharedPixels("shared_pixels_first_again", First, Target);
+            printf("shared_opened_release = %lu\n", Opened->Release());
+        }
+    }
+
+    for (UINT Kind = 0; Kind < NcShareCount; Kind++)
+    {
+        if (Made[Kind] != nullptr)
+            printf("shared_release[%s] = %lu\n", NcShareNames[Kind], Made[Kind]->Release());
+    }
+}
+
+static
+VOID
+NcCheckShared(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Nine = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    HWND Other = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* First = nullptr;
+    IDirect3DDevice9Ex* Second = nullptr;
+    IDirect3DDevice9* Plain = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Made = Parameters;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                   &First);
+    printf("shared_create_first = %08lX\n", hr);
+    Made = Parameters;
+    Made.hDeviceWindow = Other;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Other, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                   &Second);
+    printf("shared_create_second = %08lX\n", hr);
+    Made = Parameters;
+    Made.hDeviceWindow = Other;
+    hr = Nine->CreateDevice(0, D3DDEVTYPE_HAL, Other, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, &Plain);
+    printf("shared_create_plain = %08lX\n", hr);
+    if (First != nullptr && Second != nullptr && Plain != nullptr)
+        NcCheckSharedOn(First, Second, Plain);
+    if (Plain != nullptr)
+        printf("shared_plain_release = %lu\n", Plain->Release());
+    if (Second != nullptr)
+        printf("shared_second_release = %lu\n", Second->Release());
+    if (First != nullptr)
+        printf("shared_first_release = %lu\n", First->Release());
+    DestroyWindow(Other);
+    DestroyWindow(Window);
+    Nine->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -3471,6 +4002,7 @@ static const NineCheckInfo NcChecks[] =
     { "resources", NcCheckResources },
     { "copies", NcCheckCopies },
     { "gamma", NcCheckGamma },
+    { "shared", NcCheckShared },
 };
 
 static
