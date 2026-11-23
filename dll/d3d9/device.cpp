@@ -361,6 +361,27 @@ D9Device::SendViewportRange(VOID)
     CurrentViewport.MaxZ = Range.MaxZ;
 }
 
+VOID
+D9Device::SendResetViewport(VOID)
+{
+    const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
+    D3DDDIARG_VIEWPORTINFO Viewport = {};
+    D3DDDIARG_ZRANGE Range = {};
+
+    CurrentViewport.X = 0;
+    CurrentViewport.Y = 0;
+    CurrentViewport.Width = Parameters.BackBufferWidth;
+    CurrentViewport.Height = Parameters.BackBufferHeight;
+    Viewport.Width = CurrentViewport.Width;
+    Viewport.Height = CurrentViewport.Height;
+    Range.MinZ = CurrentViewport.MinZ;
+    Range.MaxZ = CurrentViewport.MaxZ;
+    DdiViewport(&Viewport);
+    DdiZRange(&Range);
+    SetRect(&ScissorRect, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
+    DdiScissorRect(&ScissorRect);
+}
+
 /* Fills the render state table with its defaults; the driver keeps what it was last sent */
 VOID
 D9Device::SetDefaultState(
@@ -424,6 +445,16 @@ D9Device::SetDefaultState(
     }
     for (D9Stream& Stream : Streams)
         Stream.Frequency = 1;
+    FrequenciesPending = FALSE;
+    ZeroMemory(&CurrentMaterial, sizeof(CurrentMaterial));
+    ZeroMemory(ClipPlanes, sizeof(ClipPlanes));
+    CurrentClipStatus.ClipUnion = 0;
+    CurrentClipStatus.ClipIntersection = 0xFFFFFFFF;
+    CurrentFvf = 0;
+    PatchSegments = 0.0f;
+    delete[] Lights;
+    Lights = nullptr;
+    LightCapacity = 0;
 
     /* The displacement map sampler starts unset unless the driver can sample one */
     for (UINT Slot = 0; Slot < D9TextureSlotCount; Slot++)
@@ -1077,10 +1108,11 @@ D9Device::ResetCommon(
 
     NotReset = FALSE;
     BindRenderTargets();
+    /* An extended device keeps its state; only the viewport and scissor rectangle cover the new back buffer,
+       the viewport keeping its depth range */
     if (IsEx)
     {
-        SendViewport();
-        SetDefaultState(Parameters);
+        SendResetViewport();
         return S_OK;
     }
 

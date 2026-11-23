@@ -2295,6 +2295,9 @@ private:
     ComputeCaps(VOID);
 
     VOID
+    SendResetViewport(VOID);
+
+    VOID
     SetDefaultState(
         _In_ const D3DPRESENT_PARAMETERS* Parameters);
 
