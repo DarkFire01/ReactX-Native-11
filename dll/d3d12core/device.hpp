@@ -700,35 +700,58 @@ public:
     BOOLEAN
     TryAddRef()
     {
-        LONG Count = RefCount;
+        LONG Count = Uses;
 
         while (Count != 0)
         {
-            LONG Seen = InterlockedCompareExchange(&RefCount, Count + 1, Count);
+            LONG Seen = InterlockedCompareExchange(&Uses, Count + 1, Count);
 
             if (Seen == Count)
+            {
+                AddRef();
+                ReleaseUse();
                 return TRUE;
+            }
             Count = Seen;
         }
         return FALSE;
     }
 
+    /* Application references together hold one use; the object lives while any use is left */
     ULONG
     STDMETHODCALLTYPE
     AddRef(VOID) override
     {
-        return InterlockedIncrement(&RefCount);
+        LONG Count = InterlockedIncrement(&RefCount);
+
+        if (Count == 1)
+            AddUse();
+        return Count;
     }
 
     ULONG
     STDMETHODCALLTYPE
     Release(VOID) override
     {
-        ULONG Count = InterlockedDecrement(&RefCount);
+        LONG Count = InterlockedDecrement(&RefCount);
 
         if (Count == 0)
-            delete this;
+            ReleaseUse();
         return Count;
+    }
+
+    /* What other runtime objects hold, which applications do not see in the reference count */
+    VOID
+    AddUse()
+    {
+        InterlockedIncrement(&Uses);
+    }
+
+    VOID
+    ReleaseUse()
+    {
+        if (InterlockedDecrement(&Uses) == 0)
+            delete this;
     }
 
     HRESULT
@@ -836,6 +859,7 @@ private:
 
     BOOLEAN HoldsDevice = TRUE;
     LONG RefCount = 1;
+    LONG Uses = 1;
     RxIdentity Unknown{ this };
 };
 

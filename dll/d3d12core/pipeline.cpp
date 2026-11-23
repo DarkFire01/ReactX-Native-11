@@ -741,7 +741,7 @@ RxPipelineState::Initialize(
     Root = RxUnwrap12<RxRootSignature>(Desc.RootSignature);
     if (Root == nullptr)
         return E_INVALIDARG;
-    Root->AddRef();
+    Root->AddUse();
 
     if (IsCompute)
     {
@@ -847,7 +847,7 @@ RxPipelineState::~RxPipelineState()
             Shader->ReleaseUse();
     }
     if (Root != nullptr)
-        Root->Release();
+        Root->ReleaseUse();
 }
 
 HRESULT
