@@ -6480,6 +6480,89 @@ TrScenarioDrawsMixedAsync(
     Plain->Release();
 }
 
+/* A mixed device of the plain object reset and released while draws from memory are still recorded, drawn
+   through a declaration the application keeps across the reset or through a vertex format */
+static
+VOID
+TrScenarioDrawsMixedRelease(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+
+    for (UINT Pass = 0; Pass < 2; Pass++)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        IDirect3DVertexDeclaration9* Declaration = nullptr;
+        IDirect3DVertexDeclaration9* Spare = nullptr;
+        IDirect3DTexture9* Managed = nullptr;
+        D3DPRESENT_PARAMETERS Made;
+
+        TrPhase(Pass == 0 ? "draws mixed release declaration create" : "draws mixed release format create");
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_MIXED_VERTEXPROCESSING,
+                                                  &Parameters, &Device));
+        if (Device == nullptr)
+            continue;
+        TrSettle(Device);
+        if (Pass == 0)
+        {
+            TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrDrawElements, &Declaration));
+            TrApi("CreateVertexDeclaration spare", Device->CreateVertexDeclaration(TrDrawElements, &Spare));
+            TrApi("CreateTexture managed", Device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+                                                                 &Managed, nullptr));
+            if (Managed != nullptr)
+                Managed->PreLoad();
+            TrApi("SetVertexDeclaration spare", Device->SetVertexDeclaration(Spare));
+            TrApi("DrawPrimitiveUP spare", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, TrDrawVertices,
+                                                                   TrDrawStride));
+            TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+        }
+        else
+        {
+            TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1));
+        }
+        TrSettle(Device);
+
+        TrPhase("draws mixed release draw");
+        TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF302010, 1.0f, 0));
+        TrApi("BeginScene", Device->BeginScene());
+        TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, TrDrawVertices, TrDrawStride));
+        TrApi("DrawIndexedPrimitiveUP", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 4, 2,
+                                                                       TrDrawIndices16, D3DFMT_INDEX16,
+                                                                       TrDrawVertices, TrDrawStride));
+        TrApi("EndScene", Device->EndScene());
+
+        TrPhase("draws mixed release reset");
+        Made = Parameters;
+        TrApi("Reset", Device->Reset(&Made));
+        TrSettle(Device);
+
+        TrPhase("draws mixed release again");
+        if (Pass == 0)
+            TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+        else
+            TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1));
+        TrApi("BeginScene", Device->BeginScene());
+        TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, TrDrawVertices, TrDrawStride));
+        TrApi("EndScene", Device->EndScene());
+        TrRelease(Declaration);
+        TrRelease(Spare);
+        TrRelease(Managed);
+
+        TrPhase("draws mixed release pending");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* A state one fixed function case sets: a stage state, or a render state when the stage is TrFixedRender */
 struct TrFixedSet
 {
@@ -7957,6 +8040,7 @@ static const TrScenario TrScenarios[] =
     { "draws_mixed", TrScenarioDrawsMixed },
     { "draws_mixed_async", TrScenarioDrawsMixedAsync },
     { "draws_mixed_switch", TrScenarioDrawsMixedSwitch },
+    { "draws_mixed_release", TrScenarioDrawsMixedRelease },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
