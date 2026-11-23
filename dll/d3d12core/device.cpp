@@ -224,6 +224,10 @@ RxDevice12::Initialize(
     if (FAILED(hr))
         return hr;
 
+    hr = QueryValidationCaps();
+    if (FAILED(hr))
+        return hr;
+
     hr = CreateInternalObjects();
     if (FAILED(hr))
         return hr;

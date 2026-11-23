@@ -91,6 +91,26 @@ struct RxSessionCaps12
     GUID* Types;
 };
 
+/* Device answers resource validation reads, gathered once the device is up */
+struct RxValidationCaps12
+{
+    UINT TiledTier;
+    UINT ResourceHeapTier;
+    UINT RaytracingTier;
+    UINT ShadingRateTier;
+    UINT SamplerFeedbackTier;
+    UINT SamplePositionsTier;
+    BOOLEAN StandardSwizzle;
+    BOOLEAN CrossAdapterRowMajor;
+    BOOLEAN SrvOnlyTiledTier3;
+    BOOLEAN Msaa64KbAligned;
+    BOOLEAN UnalignedBlocks;
+    BOOLEAN WriteableMsaa;
+    BOOLEAN GpuUploadHeaps;
+    BOOLEAN ManualWriteTracking;
+    BOOLEAN ComputeWriteWatch;
+};
+
 /* What the driver hands back through SetCommandListDDITableCb: the table a list should use */
 struct RxListTableToken12
 {
@@ -431,6 +451,26 @@ public:
         _In_ RxSchedulingGroup* Group,
         _In_ D3D12_COMMAND_LIST_TYPE Type);
 
+    const RxValidationCaps12&
+    GetValidationCaps() const
+    {
+        return ValidationCaps;
+    }
+
+    D3D_FEATURE_LEVEL
+    GetFeatureLevel() const
+    {
+        return Level;
+    }
+
+    /* Whether the memory of an API node is the system's own */
+    BOOLEAN
+    IsNodeUma(
+        _In_ UINT NodeIndex) const
+    {
+        return NodeIndex < ApiNodeCount && Nodes[ApiToPhysical[NodeIndex]].Uma;
+    }
+
     /* Compute queues the driver puts beside one direct queue, 0 when it groups nothing */
     UINT
     GetComputeQueuesPerGroup() const
@@ -481,6 +521,9 @@ private:
 
     HRESULT
     CreateInternalObjects();
+
+    HRESULT
+    QueryValidationCaps();
 
     HRESULT
     QuerySessionCaps();
@@ -570,6 +613,7 @@ private:
     HRESULT RemovedReason = S_OK;
     SRWLOCK GroupLock = SRWLOCK_INIT;
     RxSchedulingGroup* OpenGroups = nullptr;
+    RxValidationCaps12 ValidationCaps = {};
     RxPrivateDataStore PrivateData;
 };
 

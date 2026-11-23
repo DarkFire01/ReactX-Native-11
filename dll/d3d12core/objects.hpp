@@ -536,10 +536,42 @@ private:
 
 /* Descriptor and footprint helpers shared by the device and command lists */
 
-/* A desc with defaults filled the way the runtime stores it; FALSE when the desc can not exist */
-BOOLEAN
-RxNormalizeResourceDesc(
+/* Fills the mip count and alignment a desc leaves at 0, the way the runtime stores it */
+VOID
+RxFillResourceDefaults(
     _Inout_ D3D12_RESOURCE_DESC1& Desc);
+
+/* The rules every resource description meets; the clear value is checked when given */
+HRESULT
+RxValidateResourceDesc(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_opt_ const D3D12_CLEAR_VALUE* Clear);
+
+/* Heap properties and flags given to a committed resource */
+HRESULT
+RxValidateCommittedHeap(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_HEAP_PROPERTIES& Properties,
+    _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ UINT NodeIndex);
+
+/* Whether a resource may live in a heap of this type and these flags */
+HRESULT
+RxValidateHeapPlacement(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_HEAP_TYPE Type,
+    _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_opt_ const D3D12_CLEAR_VALUE* Clear);
+
+/* The state a new resource may start in */
+HRESULT
+RxValidateInitialState(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ D3D12_HEAP_TYPE HeapType);
 
 /* The driver form of an API resource desc */
 VOID
@@ -550,6 +582,7 @@ RxToDdiResource(
 /* GetCopyableFootprints for one desc; FALSE when the desc or range is invalid */
 BOOLEAN
 RxCopyableFootprints(
+    _In_ RxDevice12& Device,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_ UINT FirstSubresource,
     _In_ UINT NumSubresources,

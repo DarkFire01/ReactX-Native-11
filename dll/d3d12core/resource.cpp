@@ -7,6 +7,7 @@
 
 #include "objects.hpp"
 #include "formats.hpp"
+#include "formatlayout12.hpp"
 
 constexpr UINT64 RxDefaultPlacement = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 constexpr UINT64 RxMsaaPlacement = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -80,62 +81,17 @@ RxFormatBlock(
     return TRUE;
 }
 
-BOOLEAN
-RxNormalizeResourceDesc(
+VOID
+RxFillResourceDefaults(
     _Inout_ D3D12_RESOURCE_DESC1& Desc)
 {
-    UINT BlockWidth;
-    UINT BlockHeight;
-    UINT BlockBytes;
     UINT64 Largest;
 
     if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
     {
-        if (Desc.Width == 0 || Desc.Height != 1 || Desc.DepthOrArraySize != 1 || Desc.MipLevels != 1 ||
-            Desc.Format != DXGI_FORMAT_UNKNOWN || Desc.SampleDesc.Count != 1 || Desc.SampleDesc.Quality != 0 ||
-            Desc.Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR ||
-            (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0)
-        {
-            return FALSE;
-        }
-
         if (Desc.Alignment == 0)
             Desc.Alignment = RxDefaultPlacement;
-        return Desc.Alignment == RxDefaultPlacement;
-    }
-
-    if (Desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE1D && Desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        Desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
-    {
-        return FALSE;
-    }
-
-    if (Desc.Width == 0 || Desc.Height == 0 || Desc.DepthOrArraySize == 0 || Desc.SampleDesc.Count == 0 ||
-        !RxFormatBlock(Desc.Format, &BlockWidth, &BlockHeight, &BlockBytes))
-    {
-        return FALSE;
-    }
-
-    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D && Desc.Height != 1)
-        return FALSE;
-
-    /* The largest textures the API allows */
-    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D &&
-        (Desc.Width > D3D12_REQ_TEXTURE1D_U_DIMENSION || Desc.DepthOrArraySize > D3D12_REQ_TEXTURE1D_ARRAY_AXIS_DIMENSION))
-    {
-        return FALSE;
-    }
-    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-        (Desc.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || Desc.Height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
-         Desc.DepthOrArraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION))
-    {
-        return FALSE;
-    }
-    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D &&
-        (Desc.Width > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION || Desc.Height > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION ||
-         Desc.DepthOrArraySize > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION))
-    {
-        return FALSE;
+        return;
     }
 
     Largest = Desc.Width;
@@ -146,13 +102,8 @@ RxNormalizeResourceDesc(
 
     if (Desc.MipLevels == 0)
         Desc.MipLevels = (UINT16)(RxHighestBit(Largest) + 1);
-    else if (Desc.MipLevels > RxHighestBit(Largest) + 1)
-        return FALSE;
-
     if (Desc.Alignment == 0)
         Desc.Alignment = Desc.SampleDesc.Count > 1 ? RxMsaaPlacement : RxDefaultPlacement;
-
-    return TRUE;
 }
 
 /* API resource states as the barrier layout the driver starts a resource in */
@@ -324,9 +275,7 @@ RxAllocationInfoForDescs(
     /* One bad description fails the whole query before anything is written */
     for (Index = 0; Index < Count; Index++)
     {
-        D3D12_RESOURCE_DESC1 Desc = Descs[Index];
-
-        if (!RxNormalizeResourceDesc(Desc))
+        if (Count > 0x3333333 || FAILED(RxValidateResourceDesc(Device, Descs[Index], nullptr)))
         {
             Total.SizeInBytes = UINT64_MAX;
             Total.Alignment = RxDefaultPlacement;
@@ -341,8 +290,7 @@ RxAllocationInfoForDescs(
         D3D12_RESOURCE_ALLOCATION_INFO Info;
         UINT64 Offset;
 
-        RxNormalizeResourceDesc(Desc);
-
+        RxFillResourceDefaults(Desc);
         RxToDdiResource(Desc, Ddi);
         Info = RxAllocationInfo(Device, Desc, Ddi);
 
@@ -421,54 +369,6 @@ RxImplicitHeapFlags(
     return Flags | D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES;
 }
 
-/* Whether a resource may live in a heap of this type and these flags */
-static
-BOOLEAN
-RxResourceFitsHeap(
-    _In_ const RxDevice12& Device,
-    _In_ D3D12_HEAP_TYPE Type,
-    _In_ D3D12_HEAP_FLAGS HeapFlags,
-    _In_ const D3D12_RESOURCE_DESC1& Desc)
-{
-    BOOLEAN CrossAdapter = (HeapFlags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0;
-    BOOLEAN CpuHeap = Type == D3D12_HEAP_TYPE_UPLOAD || Type == D3D12_HEAP_TYPE_READBACK;
-    BOOLEAN TargetOrDepth = (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
-                                           D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0;
-
-    /* Cross adapter resources and heaps only come together */
-    if (CrossAdapter != ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER) != 0))
-        return FALSE;
-
-    if (Desc.Layout == D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE && !Device.HasStandardSwizzle() &&
-        (!CrossAdapter || (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
-                                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) != 0))
-    {
-        return FALSE;
-    }
-
-    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-    {
-        if (CpuHeap && (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
-                                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) != 0)
-        {
-            return FALSE;
-        }
-        return (HeapFlags & D3D12_HEAP_FLAG_DENY_BUFFERS) == 0;
-    }
-
-    /* CPU visible textures go through custom or GPU upload heaps instead */
-    if (CpuHeap)
-        return FALSE;
-    if (TargetOrDepth && (HeapFlags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES) != 0)
-        return FALSE;
-    if (!TargetOrDepth && (HeapFlags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES) != 0)
-        return FALSE;
-
-    /* Row major textures are for sharing across adapters */
-    return Desc.Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR ||
-           (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && CrossAdapter);
-}
-
 HRESULT
 RxResource::CreateCommitted(
     _In_ RxDevice12& Device,
@@ -484,26 +384,7 @@ RxResource::CreateCommitted(
     HRESULT hr;
 
     *Resource = nullptr;
-
-    if (!RxNormalizeResourceDesc(Normal))
-        return E_INVALIDARG;
-
-    if (HeapProperties.Type < D3D12_HEAP_TYPE_DEFAULT || HeapProperties.Type > D3D12_HEAP_TYPE_GPU_UPLOAD ||
-        HeapProperties.CreationNodeMask > 1 || HeapProperties.VisibleNodeMask > 1)
-    {
-        return E_INVALIDARG;
-    }
-
-    /* Only CUSTOM heaps say their own page property and pool */
-    if (HeapProperties.Type != D3D12_HEAP_TYPE_CUSTOM &&
-        (HeapProperties.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_UNKNOWN ||
-         HeapProperties.MemoryPoolPreference != D3D12_MEMORY_POOL_UNKNOWN))
-    {
-        return E_INVALIDARG;
-    }
-
-    if (!RxResourceFitsHeap(Device, HeapProperties.Type, HeapFlags, Normal))
-        return E_INVALIDARG;
+    RxFillResourceDefaults(Normal);
 
     hr = Device.CheckUsable();
     if (FAILED(hr))
@@ -741,10 +622,14 @@ RxResource::Unmap(
     _In_opt_ const D3D12_RANGE* pWrittenRange)
 {
     AcquireSRWLockExclusive(&MapLock);
-    if (MapCount != 0 && --MapCount == 0)
+    if (MapCount != 0)
     {
-        Device.Ddi().pfnUnmapHeap(Device.Handle(), DriverHeap);
-        MappedBase = nullptr;
+        MapCount -= 1;
+        if (MapCount == 0)
+        {
+            Device.Ddi().pfnUnmapHeap(Device.Handle(), DriverHeap);
+            MappedBase = nullptr;
+        }
     }
     ReleaseSRWLockExclusive(&MapLock);
 }
@@ -810,6 +695,7 @@ RxResource::GetProtectedResourceSession(
 
 BOOLEAN
 RxCopyableFootprints(
+    _In_ RxDevice12& Device,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_ UINT FirstSubresource,
     _In_ UINT NumSubresources,
@@ -820,63 +706,76 @@ RxCopyableFootprints(
     _Out_opt_ UINT64* TotalBytes)
 {
     D3D12_RESOURCE_DESC1 Normal = Desc;
-    UINT BlockWidth;
-    UINT BlockHeight;
-    UINT BlockBytes;
+    BOOLEAN Buffer = Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+    UINT PerPlane;
     UINT Subresources;
     UINT64 Running = 0;
     UINT64 Total = 0;
     UINT Index;
 
-    if (!RxNormalizeResourceDesc(Normal))
+    if (FAILED(RxValidateResourceDesc(Device, Desc, nullptr)))
+        return FALSE;
+    if (Buffer && Desc.Width >= 0xFFFFFFFF)
         return FALSE;
 
-    if (Normal.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-    {
-        BlockWidth = 1;
-        BlockHeight = 1;
-        BlockBytes = 1;
-        Subresources = 1;
-    }
-    else
-    {
-        RxFormatBlock(Normal.Format, &BlockWidth, &BlockHeight, &BlockBytes);
-        Subresources = Normal.MipLevels *
-                       (Normal.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Normal.DepthOrArraySize);
-    }
+    RxFillResourceDefaults(Normal);
+    PerPlane = Normal.MipLevels;
+    if (Normal.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+        PerPlane *= Normal.DepthOrArraySize;
+    Subresources = PerPlane * (Buffer ? 1 : RxFormatPlaneCount(Normal.Format));
 
-    if (FirstSubresource > Subresources || NumSubresources > Subresources - FirstSubresource)
+    if (NumSubresources != 0 && (FirstSubresource >= Subresources || NumSubresources > Subresources ||
+                                 FirstSubresource + NumSubresources > Subresources))
+    {
         return FALSE;
+    }
 
     for (Index = 0; Index < NumSubresources; Index++)
     {
-        UINT Mip = (FirstSubresource + Index) % Normal.MipLevels;
-        UINT64 Width = Normal.Width >> Mip ? Normal.Width >> Mip : 1;
-        UINT Height = Normal.Height >> Mip ? Normal.Height >> Mip : 1;
+        UINT Subresource = FirstSubresource + Index;
+        UINT Mip = Subresource % Normal.MipLevels;
+        DXGI_FORMAT Format = Normal.Format;
+        UINT64 Width = Normal.Width;
+        UINT Height = Normal.Height;
         UINT Depth = 1;
+        UINT BlockWidth = 1;
+        UINT BlockHeight = 1;
+        UINT BlockBytes = 1;
+        UINT64 PitchWidth = Width;
         UINT64 Columns;
         UINT Rows;
         UINT64 RowSize;
         UINT64 RowPitch;
         UINT64 Offset;
 
+        /* Planar formats copy each plane in a format of its own */
+        if (!Buffer)
+        {
+            RxFormatPlane(Normal.Format, Subresource / PerPlane, Normal.Width, Normal.Height, &Format, &Width, &Height,
+                          &PitchWidth);
+            RxFormatBlock(Format, &BlockWidth, &BlockHeight, &BlockBytes);
+        }
+
+        Width = Width >> Mip ? Width >> Mip : 1;
+        PitchWidth = PitchWidth >> Mip ? PitchWidth >> Mip : 1;
+        Height = Height >> Mip ? Height >> Mip : 1;
         if (Normal.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
             Depth = Normal.DepthOrArraySize >> Mip ? Normal.DepthOrArraySize >> Mip : 1;
 
         Columns = (Width + BlockWidth - 1) / BlockWidth;
         Rows = (Height + BlockHeight - 1) / BlockHeight;
         RowSize = Columns * BlockBytes;
-        /* Buffers report the copy pitch too, though their one row never steps by it */
-        RowPitch = RxAlignUp(RowSize, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+        /* Buffers report the copy pitch too, though their one row never steps by it; planar rows align further */
+        RowPitch = RxAlignUp((PitchWidth + BlockWidth - 1) / BlockWidth * BlockBytes,
+                             RxFormatIsPlanar(Normal.Format) ? D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
+                                                             : D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 
-        Offset = Normal.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER
-                     ? Running
-                     : RxAlignUp(Running, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        Offset = Buffer ? Running : RxAlignUp(Running, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
 
         if (Layouts != nullptr)
         {
             Layouts[Index].Offset = BaseOffset + Offset;
-            Layouts[Index].Footprint.Format = Normal.Format;
+            Layouts[Index].Footprint.Format = Format;
             Layouts[Index].Footprint.Width = (UINT)(Columns * BlockWidth);
             Layouts[Index].Footprint.Height = Rows * BlockHeight;
             Layouts[Index].Footprint.Depth = Depth;
@@ -936,8 +835,37 @@ RxCreateCommittedCommon(
 
     if (ppvResource != nullptr)
         *ppvResource = nullptr;
-    if (pHeapProperties == nullptr || pDesc == nullptr)
+    if (pHeapProperties == nullptr)
         return E_INVALIDARG;
+
+    /* One node: the creation node validation reads is always the first */
+    hr = RxValidateCommittedHeap(Device, *pHeapProperties, HeapFlags, 0);
+    if (FAILED(hr))
+        return hr;
+    if (pDesc == nullptr)
+        return E_INVALIDARG;
+
+    hr = RxValidateHeapPlacement(Device, pHeapProperties->Type, HeapFlags, *pDesc, pOptimizedClearValue);
+    if (FAILED(hr))
+        return hr;
+    hr = RxValidateInitialState(Device, InitialResourceState, *pDesc, pHeapProperties->Type);
+    if (FAILED(hr))
+        return hr;
+
+    if ((HeapFlags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0 &&
+        (pDesc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR))
+    {
+        return E_INVALIDARG;
+    }
+    if ((HeapFlags & D3D12_HEAP_FLAG_ALLOW_SHADER_ATOMICS) != 0 &&
+        (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0)
+    {
+        return E_INVALIDARG;
+    }
+
+    /* Without an out pointer the call only answers whether creation would work */
+    if (ppvResource == nullptr)
+        return S_FALSE;
     if (pProtectedSession != nullptr)
         return E_NOTIMPL;
 
@@ -1076,6 +1004,7 @@ RxDevice12::GetCustomHeapProperties(
 static
 VOID
 RxFootprintsOrFill(
+    _In_ RxDevice12& Device,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_ UINT FirstSubresource,
     _In_ UINT NumSubresources,
@@ -1085,7 +1014,7 @@ RxFootprintsOrFill(
     _Out_writes_opt_(NumSubresources) UINT64* pRowSizeInBytes,
     _Out_opt_ UINT64* pTotalBytes)
 {
-    if (RxCopyableFootprints(Desc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows, pRowSizeInBytes,
+    if (RxCopyableFootprints(Device, Desc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows, pRowSizeInBytes,
                              pTotalBytes))
     {
         return;
@@ -1120,7 +1049,7 @@ RxDevice12::GetCopyableFootprints(
         return;
 
     Wide = RxWidenDesc(*pResourceDesc);
-    RxFootprintsOrFill(Wide, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows, pRowSizeInBytes,
+    RxFootprintsOrFill(*this, Wide, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows, pRowSizeInBytes,
                        pTotalBytes);
 }
 
@@ -1139,6 +1068,6 @@ RxDevice12::GetCopyableFootprints1(
     if (pResourceDesc == nullptr)
         return;
 
-    RxFootprintsOrFill(*pResourceDesc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
+    RxFootprintsOrFill(*this, *pResourceDesc, FirstSubresource, NumSubresources, BaseOffset, pLayouts, pNumRows,
                        pRowSizeInBytes, pTotalBytes);
 }
