@@ -2,13 +2,14 @@
 nt_add_usermode_lib(d3d9on12sc
     sccontext.cpp
     scgs.cpp
+    scfinal.cpp
     scops.cpp
     scpixel.cpp
     sctexture.cpp
     sctl.cpp
     shaderconv.cpp)
 set_target_properties(d3d9on12sc PROPERTIES NT_CXX_EXCEPTIONS ON)
-target_link_libraries(d3d9on12sc PUBLIC d3d12translationlayer)
+target_link_libraries(d3d9on12sc PUBLIC d3d12translationlayer rxcommon)
 
 nt_add_usermode_dll(d3d9on12
     DEF d3d9on12.def
