@@ -865,6 +865,16 @@ TrDeviceInputs(
         TrAppend(Text, " copy %08X", Blt->CopyFlags);
         break;
     }
+    case TR_DEVICE_SLOT(pfnVolBlt1):
+    {
+        const D3DDDIARG_VOLUMEBLT1* Blt = static_cast<const D3DDDIARG_VOLUMEBLT1*>(Args);
+
+        TrAppend(Text, " dst %s src %s at %u,%u,%u box %u %u %u %u %u %u copy %08X",
+                 TrDriver(Blt->hDstResource).c_str(), TrDriver(Blt->hSrcResource).c_str(), Blt->DstX, Blt->DstY,
+                 Blt->DstZ, Blt->SrcBox.Left, Blt->SrcBox.Top, Blt->SrcBox.Right, Blt->SrcBox.Bottom,
+                 Blt->SrcBox.Front, Blt->SrcBox.Back, Blt->CopyFlags);
+        break;
+    }
     case TR_DEVICE_SLOT(pfnDiscard):
     {
         const D3DDDIARG_DISCARD* Discard = static_cast<const D3DDDIARG_DISCARD*>(Args);
@@ -2452,6 +2462,436 @@ TrScenarioBuffersPlain(
     Plain->Release();
 }
 
+/* Prints what a texture creation made: its level count, top level description and LOD */
+static
+VOID
+TrDescribeTexture(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_opt_ IDirect3DTexture9* Texture)
+{
+    D3DSURFACE_DESC Desc = {};
+
+    TrCloseLine();
+    if (Texture == nullptr)
+    {
+        printf("api tex %s = %08lX null\n", Name, Result);
+        return;
+    }
+    Texture->GetLevelDesc(0, &Desc);
+    printf("api tex %s = %08lX levels %lu fmt %u usage %08lX pool %u size %ux%u lod %lu type %u\n", Name, Result,
+           Texture->GetLevelCount(), Desc.Format, Desc.Usage, Desc.Pool, Desc.Width, Desc.Height,
+           Texture->GetLOD(), Texture->GetType());
+}
+
+/* Locks one level of a texture through the texture and through its surface */
+static
+VOID
+TrLockTextureLevel(
+    _In_ IDirect3DTexture9* Texture,
+    _In_ UINT Level)
+{
+    IDirect3DSurface9* Surface = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    RECT Part = { 0, 0, 4, 2 };
+    HRESULT hr;
+
+    hr = Texture->GetSurfaceLevel(Level, &Surface);
+    TrCloseLine();
+    printf("api GetSurfaceLevel %u = %08lX\n", Level, hr);
+    if (Surface != nullptr)
+    {
+        TrLockSurface("level", Surface, nullptr, 0);
+        TrLockSurface("level part", Surface, &Part, D3DLOCK_READONLY);
+    }
+
+    hr = Texture->LockRect(Level, &Locked, nullptr, 0);
+    TrCloseLine();
+    printf("api LockRect %u = %08lX pitch %d\n", Level, hr, Locked.Pitch);
+    if (SUCCEEDED(hr))
+    {
+        *static_cast<DWORD*>(Locked.pBits) = 0x55667788;
+        TrApi("UnlockRect", Texture->UnlockRect(Level));
+    }
+    TrApi("UnlockRect again", Texture->UnlockRect(Level));
+    if (Surface != nullptr)
+        TrApi("surface UnlockRect again", Surface->UnlockRect());
+    hr = Texture->LockRect(Level, &Locked, &Part, D3DLOCK_NO_DIRTY_UPDATE);
+    TrCloseLine();
+    printf("api LockRect part %u = %08lX\n", Level, hr);
+    if (SUCCEEDED(hr))
+        TrApi("UnlockRect", Texture->UnlockRect(Level));
+    if (Surface != nullptr)
+        Surface->Release();
+}
+
+/* 2D textures across pools, usages and level counts, with locks, dirty rectangles, LOD and mip generation */
+static
+VOID
+TrTextureWork(
+    _In_ IDirect3DDevice9* Device,
+    _In_ BOOLEAN IsEx)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Width;
+        UINT Height;
+        UINT Levels;
+        DWORD Usage;
+        D3DFORMAT Format;
+        D3DPOOL Pool;
+    } Cases[] =
+    {
+        { "chain", 16, 8, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "one", 16, 8, 1, 0, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT },
+        { "dynamic", 16, 8, 2, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "target", 16, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "autogen", 16, 8, 0, D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "autogen target", 16, 16, 0, D3DUSAGE_AUTOGENMIPMAP | D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8,
+          D3DPOOL_DEFAULT },
+        { "depth", 16, 8, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D24S8, D3DPOOL_DEFAULT },
+        { "sysmem", 16, 8, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "sysmem dynamic", 16, 8, 3, D3DUSAGE_DYNAMIC, D3DFMT_R5G6B5, D3DPOOL_SYSTEMMEM },
+        { "scratch", 16, 8, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH },
+        { "managed", 16, 8, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED },
+        { "dxt1", 16, 16, 0, 0, D3DFMT_DXT1, D3DPOOL_DEFAULT },
+        { "dxt5 sysmem", 8, 8, 0, 0, D3DFMT_DXT5, D3DPOOL_SYSTEMMEM },
+        { "odd", 10, 6, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "too many levels", 16, 8, 6, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "zero", 0, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "unknown", 16, 8, 1, 0, D3DFMT_UNKNOWN, D3DPOOL_DEFAULT },
+        { "bad usage", 16, 8, 1, D3DUSAGE_WRITEONLY, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "autogen sysmem", 16, 8, 0, D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "autogen levels", 16, 8, 2, D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "textapi", 16, 8, 1, D3DUSAGE_TEXTAPI, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "software", 16, 8, 2, D3DUSAGE_SOFTWAREPROCESSING, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM },
+        { "d16", 16, 8, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D16, D3DPOOL_DEFAULT },
+        { "d16 lockable", 16, 8, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D16_LOCKABLE, D3DPOOL_DEFAULT },
+        { "managed alias", 16, 8, 2, 0, D3DFMT_A8R8G8B8, static_cast<D3DPOOL>(6) },
+    };
+    IDirect3DTexture9* Texture;
+    D3DLOCKED_RECT Locked;
+    RECT Part = { 8, 0, 12, 4 };
+    RECT Dirty = { 2, 2, 6, 4 };
+    HRESULT hr;
+
+    TrPhase("textures 2d");
+    for (const auto& Case : Cases)
+    {
+        Texture = nullptr;
+        hr = Device->CreateTexture(Case.Width, Case.Height, Case.Levels, Case.Usage, Case.Format, Case.Pool, &Texture,
+                                   nullptr);
+        TrDescribeTexture(Case.Name, hr, Texture);
+        if (Texture == nullptr)
+            continue;
+        TrLockTextureLevel(Texture, 0);
+        if (Texture->GetLevelCount() > 1)
+            TrLockTextureLevel(Texture, 1);
+        TrApi("AddDirtyRect", Texture->AddDirtyRect(&Dirty));
+        TrApi("AddDirtyRect all", Texture->AddDirtyRect(nullptr));
+        TrCloseLine();
+        printf("api SetLOD = %lu\n", Texture->SetLOD(1));
+        printf("api GetLOD = %lu\n", Texture->GetLOD());
+        printf("api SetPriority = %lu\n", Texture->SetPriority(5));
+        printf("api GetPriority = %lu\n", Texture->GetPriority());
+        Texture->PreLoad();
+        TrCloseLine();
+        printf("api GetAutoGenFilterType = %u\n", Texture->GetAutoGenFilterType());
+        TrApi("SetAutoGenFilterType", Texture->SetAutoGenFilterType(D3DTEXF_POINT));
+        TrCloseLine();
+        printf("api GetAutoGenFilterType = %u\n", Texture->GetAutoGenFilterType());
+        Texture->GenerateMipSubLevels();
+        TrApi("SetTexture", Device->SetTexture(0, Texture));
+        TrApi("SetTexture null", Device->SetTexture(0, nullptr));
+        TrCloseLine();
+        printf("api Release = %lu\n", Texture->Release());
+    }
+
+    if (!IsEx)
+    {
+        TrPhase("textures managed");
+        TrCloseLine();
+        printf("api available %s\n", Device->GetAvailableTextureMem() != 0 ? "some" : "none");
+        Texture = nullptr;
+        hr = Device->CreateTexture(16, 16, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, nullptr);
+        TrDescribeTexture("managed", hr, Texture);
+        if (Texture != nullptr)
+        {
+            TrLockTextureLevel(Texture, 1);
+            Texture->PreLoad();
+            TrApi("AddDirtyRect", Texture->AddDirtyRect(&Dirty));
+            Texture->PreLoad();
+            TrApi("AddDirtyRect", Texture->AddDirtyRect(&Dirty));
+            TrApi("AddDirtyRect second", Texture->AddDirtyRect(&Part));
+            Texture->PreLoad();
+            hr = Texture->LockRect(0, &Locked, &Part, 0);
+            TrApi("LockRect part", hr);
+            if (SUCCEEDED(hr))
+                TrApi("UnlockRect", Texture->UnlockRect(0));
+            Texture->PreLoad();
+            TrCloseLine();
+            printf("api SetLOD = %lu\n", Texture->SetLOD(2));
+            Texture->PreLoad();
+            TrApi("SetTexture", Device->SetTexture(0, Texture));
+            TrApi("EvictManagedResources", Device->EvictManagedResources());
+            TrLockTextureLevel(Texture, 0);
+            Texture->PreLoad();
+            TrApi("SetTexture null", Device->SetTexture(0, nullptr));
+            TrCloseLine();
+            printf("api Release = %lu\n", Texture->Release());
+        }
+        TrApi("EvictManagedResources", Device->EvictManagedResources());
+
+        IDirect3DCubeTexture9* Cube = nullptr;
+        hr = Device->CreateCubeTexture(8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Cube, nullptr);
+        TrApi("CreateCubeTexture managed", hr);
+        if (Cube != nullptr)
+        {
+            Cube->PreLoad();
+            TrApi("AddDirtyRect", Cube->AddDirtyRect(D3DCUBEMAP_FACE_NEGATIVE_Z, &Dirty));
+            hr = Cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_Y, 0, &Locked, &Dirty, 0);
+            TrApi("LockRect", hr);
+            if (SUCCEEDED(hr))
+                TrApi("UnlockRect", Cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_Y, 0));
+            Cube->PreLoad();
+            TrCloseLine();
+            printf("api Release = %lu\n", Cube->Release());
+        }
+
+        IDirect3DVolumeTexture9* Volume = nullptr;
+        D3DBOX Box = { 1, 1, 3, 2, 1, 2 };
+        D3DLOCKED_BOX LockedBox;
+        hr = Device->CreateVolumeTexture(8, 4, 4, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Volume, nullptr);
+        TrApi("CreateVolumeTexture managed", hr);
+        if (Volume != nullptr)
+        {
+            Volume->PreLoad();
+            TrApi("AddDirtyBox", Volume->AddDirtyBox(&Box));
+            Volume->PreLoad();
+            hr = Volume->LockBox(0, &LockedBox, &Box, 0);
+            TrApi("LockBox", hr);
+            if (SUCCEEDED(hr))
+                TrApi("UnlockBox", Volume->UnlockBox(0));
+            hr = Volume->LockBox(1, &LockedBox, nullptr, 0);
+            TrApi("LockBox 1", hr);
+            if (SUCCEEDED(hr))
+                TrApi("UnlockBox 1", Volume->UnlockBox(1));
+            Volume->PreLoad();
+            TrCloseLine();
+            printf("api SetLOD = %lu\n", Volume->SetLOD(1));
+            Volume->PreLoad();
+            printf("api Release = %lu\n", Volume->Release());
+        }
+    }
+}
+
+/* Cube textures: faces, their levels and locks */
+static
+VOID
+TrCubeWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DSurface9* Face = nullptr;
+    D3DSURFACE_DESC Desc = {};
+    D3DLOCKED_RECT Locked = {};
+    RECT Dirty = { 0, 0, 2, 2 };
+    HRESULT hr;
+
+    TrPhase("textures cube");
+    static const struct
+    {
+        PCSTR Name;
+        UINT Edge;
+        UINT Levels;
+        DWORD Usage;
+        D3DPOOL Pool;
+    } Cases[] =
+    {
+        { "cube", 8, 0, 0, D3DPOOL_DEFAULT },
+        { "cube dynamic", 8, 2, D3DUSAGE_DYNAMIC, D3DPOOL_DEFAULT },
+        { "cube sysmem", 8, 0, 0, D3DPOOL_SYSTEMMEM },
+        { "cube target", 8, 1, D3DUSAGE_RENDERTARGET, D3DPOOL_DEFAULT },
+        { "cube scratch", 4, 0, 0, D3DPOOL_SCRATCH },
+        { "cube zero", 0, 1, 0, D3DPOOL_DEFAULT },
+    };
+
+    for (const auto& Case : Cases)
+    {
+        Cube = nullptr;
+        hr = Device->CreateCubeTexture(Case.Edge, Case.Levels, Case.Usage, D3DFMT_A8R8G8B8, Case.Pool, &Cube,
+                                       nullptr);
+        TrCloseLine();
+        if (Cube == nullptr)
+        {
+            printf("api %s = %08lX null\n", Case.Name, hr);
+            continue;
+        }
+        Cube->GetLevelDesc(0, &Desc);
+        printf("api %s = %08lX levels %lu usage %08lX pool %u size %ux%u type %u\n", Case.Name, hr,
+               Cube->GetLevelCount(), Desc.Usage, Desc.Pool, Desc.Width, Desc.Height, Cube->GetType());
+        hr = Cube->GetCubeMapSurface(D3DCUBEMAP_FACE_NEGATIVE_Y, 0, &Face);
+        TrApi("GetCubeMapSurface", hr);
+        if (Face != nullptr)
+        {
+            TrLockSurface("face", Face, nullptr, 0);
+            Face->Release();
+            Face = nullptr;
+        }
+        hr = Cube->LockRect(D3DCUBEMAP_FACE_POSITIVE_Z, Cube->GetLevelCount() - 1, &Locked, nullptr, 0);
+        TrCloseLine();
+        printf("api LockRect face = %08lX pitch %d\n", hr, Locked.Pitch);
+        if (SUCCEEDED(hr))
+            TrApi("UnlockRect face", Cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_Z, Cube->GetLevelCount() - 1));
+        TrApi("UnlockRect face again", Cube->UnlockRect(D3DCUBEMAP_FACE_POSITIVE_Z, 0));
+        TrApi("AddDirtyRect", Cube->AddDirtyRect(D3DCUBEMAP_FACE_POSITIVE_X, &Dirty));
+        TrApi("SetTexture", Device->SetTexture(1, Cube));
+        TrApi("SetTexture null", Device->SetTexture(1, nullptr));
+        TrCloseLine();
+        printf("api Release = %lu\n", Cube->Release());
+    }
+}
+
+/* Volume textures: levels, boxes and locks */
+static
+VOID
+TrVolumeWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Width;
+        UINT Height;
+        UINT Depth;
+        UINT Levels;
+        DWORD Usage;
+        D3DPOOL Pool;
+    } Cases[] =
+    {
+        { "volume", 8, 8, 4, 0, 0, D3DPOOL_DEFAULT },
+        { "volume dynamic", 8, 4, 2, 2, D3DUSAGE_DYNAMIC, D3DPOOL_DEFAULT },
+        { "volume sysmem", 8, 8, 4, 0, 0, D3DPOOL_SYSTEMMEM },
+        { "volume scratch", 4, 4, 4, 0, 0, D3DPOOL_SCRATCH },
+        { "volume target", 4, 4, 4, 1, D3DUSAGE_RENDERTARGET, D3DPOOL_DEFAULT },
+        { "volume zero", 4, 4, 0, 1, 0, D3DPOOL_DEFAULT },
+    };
+    IDirect3DVolumeTexture9* Volume;
+    IDirect3DVolume9* Level;
+    D3DVOLUME_DESC Desc;
+    D3DLOCKED_BOX Locked;
+    D3DBOX Box = { 0, 0, 2, 2, 0, 1 };
+    HRESULT hr;
+
+    TrPhase("textures volume");
+    for (const auto& Case : Cases)
+    {
+        Volume = nullptr;
+        Desc = {};
+        hr = Device->CreateVolumeTexture(Case.Width, Case.Height, Case.Depth, Case.Levels, Case.Usage,
+                                         D3DFMT_A8R8G8B8, Case.Pool, &Volume, nullptr);
+        TrCloseLine();
+        if (Volume == nullptr)
+        {
+            printf("api %s = %08lX null\n", Case.Name, hr);
+            continue;
+        }
+        Volume->GetLevelDesc(0, &Desc);
+        printf("api %s = %08lX levels %lu usage %08lX pool %u size %ux%ux%u type %u\n", Case.Name, hr,
+               Volume->GetLevelCount(), Desc.Usage, Desc.Pool, Desc.Width, Desc.Height, Desc.Depth,
+               Volume->GetType());
+
+        Level = nullptr;
+        hr = Volume->GetVolumeLevel(0, &Level);
+        TrApi("GetVolumeLevel", hr);
+        if (Level != nullptr)
+        {
+            Locked = {};
+            hr = Level->LockBox(&Locked, &Box, 0);
+            TrCloseLine();
+            printf("api LockBox level = %08lX pitch %d %d\n", hr, Locked.RowPitch, Locked.SlicePitch);
+            if (SUCCEEDED(hr))
+                TrApi("UnlockBox level", Level->UnlockBox());
+            Level->Release();
+        }
+        Locked = {};
+        hr = Volume->LockBox(Volume->GetLevelCount() - 1, &Locked, nullptr, D3DLOCK_READONLY);
+        TrCloseLine();
+        printf("api LockBox last = %08lX pitch %d %d\n", hr, Locked.RowPitch, Locked.SlicePitch);
+        if (SUCCEEDED(hr))
+            TrApi("UnlockBox last", Volume->UnlockBox(Volume->GetLevelCount() - 1));
+        TrApi("AddDirtyBox", Volume->AddDirtyBox(&Box));
+        TrApi("SetTexture", Device->SetTexture(2, Volume));
+        TrApi("SetTexture null", Device->SetTexture(2, nullptr));
+        TrCloseLine();
+        printf("api Release = %lu\n", Volume->Release());
+    }
+}
+
+/* Textures on a windowed extended device */
+static
+VOID
+TrScenarioTextures(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("textures create");
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                     nullptr, &Device);
+    TrApi("CreateDeviceEx", hr);
+    if (Device != nullptr)
+    {
+        TrTextureWork(Device, TRUE);
+        TrCubeWork(Device);
+        TrVolumeWork(Device);
+        TrPhase("textures release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+}
+
+/* The same textures and the managed pool on a device of the plain object */
+static
+VOID
+TrScenarioTexturesPlain(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("textures create");
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    TrApi("CreateDevice", hr);
+    if (Device != nullptr)
+    {
+        TrTextureWork(Device, FALSE);
+        TrCubeWork(Device);
+        TrVolumeWork(Device);
+        TrPhase("textures release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -2468,6 +2908,8 @@ static const TrScenario TrScenarios[] =
     { "surfaces_plain", TrScenarioSurfacesPlain },
     { "buffers", TrScenarioBuffers },
     { "buffers_plain", TrScenarioBuffersPlain },
+    { "textures", TrScenarioTextures },
+    { "textures_plain", TrScenarioTexturesPlain },
 };
 
 static
