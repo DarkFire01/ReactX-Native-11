@@ -876,8 +876,13 @@ RxWarpDraw::ClipPrimitive(
     if (Count == 1)
         return;
 
-    for (UINT Index = 0; Index < Count; Index++)
-        Polygon.push_back(*Corners[Index]);
+    /* Triangles start from the same corner as unclipped ones before the planes cut them */
+    {
+        UINT First = (Count == 3) ? RxWarpFirstCorner(Corners, PositionRegister) : 0;
+
+        for (UINT Index = 0; Index < Count; Index++)
+            Polygon.push_back(*Corners[(First + Index) % Count]);
+    }
 
     for (UINT Plane = 0; Plane < PlaneCount && Polygon.size() >= Count; Plane++)
     {
