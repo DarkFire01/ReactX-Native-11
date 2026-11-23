@@ -6347,6 +6347,108 @@ TrScenarioDrawsMixed(
     Plain->Release();
 }
 
+/* Software vertex processing switched on and off in the middle of a frame on a mixed device, with a shader
+   only the runtime's pipeline runs bound across the switch */
+static
+VOID
+TrMixedSwitchWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DVertexShader9* Software = nullptr;
+    IDirect3DPixelShader9* Color = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    static const FLOAT Offset[4] = { 0.25f, -0.125f, 0.0f, 0.0f };
+    VOID* Data = nullptr;
+
+    TrPhase("mixed switch create");
+    TrApi("CreateVertexShader", Device->CreateVertexShader(TrDrawVertexCode, &Vertex));
+    TrApi("CreateVertexShader software", Device->CreateVertexShader(TrMixedSoftwareCode, &Software));
+    TrApi("CreatePixelShader color", Device->CreatePixelShader(TrDrawColorCode, &Color));
+    TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrDrawElements, &Declaration));
+    TrApi("CreateVertexBuffer", Device->CreateVertexBuffer(sizeof(TrDrawVertices), D3DUSAGE_SOFTWAREPROCESSING, 0,
+                                                           D3DPOOL_DEFAULT, &Buffer, nullptr));
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    if (Buffer != nullptr && SUCCEEDED(Buffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        Buffer->Unlock();
+    }
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("SetPixelShader", Device->SetPixelShader(Color));
+    TrApi("SetVertexShaderConstantF 300", Device->SetVertexShaderConstantF(300, Offset, 1));
+    TrSettle(Device);
+
+    TrPhase("mixed switch draw");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("DrawPrimitive hardware", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 4, 1));
+    TrApi("SetSoftwareVertexProcessing TRUE", Device->SetSoftwareVertexProcessing(TRUE));
+    TrApi("SetVertexShader software", Device->SetVertexShader(Software));
+    TrApi("SetSoftwareVertexProcessing FALSE", Device->SetSoftwareVertexProcessing(FALSE));
+    TrApi("DrawPrimitive software shader hardware", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 4, 1));
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("DrawPrimitive hardware again", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "mixed switch");
+    TrSettle(Device);
+
+    TrPhase("mixed switch release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetPixelShader null", Device->SetPixelShader(nullptr));
+    TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrRelease(Vertex);
+    TrRelease(Software);
+    TrRelease(Color);
+    TrRelease(Declaration);
+    TrRelease(Buffer);
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
+/* Switches between hardware and software vertex processing on a mixed vertex processing device */
+static
+VOID
+TrScenarioDrawsMixedSwitch(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+
+    TrPhase("draws mixed switch create");
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_MIXED_VERTEXPROCESSING,
+                                              &Parameters, &Device));
+    if (Device != nullptr)
+    {
+        TrSettle(Device);
+        TrMixedSwitchWork(Device);
+        TrPhase("draws mixed switch release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* Asynchronous locks and draws from memory on a mixed vertex processing device of the plain object */
 static
 VOID
@@ -7854,6 +7956,7 @@ static const TrScenario TrScenarios[] =
     { "draws_plain", TrScenarioDrawsPlain },
     { "draws_mixed", TrScenarioDrawsMixed },
     { "draws_mixed_async", TrScenarioDrawsMixedAsync },
+    { "draws_mixed_switch", TrScenarioDrawsMixedSwitch },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
