@@ -36,6 +36,7 @@ XaSourceVoice::XaSourceVoice(
     Passthrough = FALSE;
     CountedResamplers = 0;
     CountedMatrices = 0;
+    Wma = nullptr;
 }
 
 XaSourceVoice::~XaSourceVoice()
@@ -54,6 +55,7 @@ XaSourceVoice::~XaSourceVoice()
         DeferredList = Deferred->Next;
         delete Deferred;
     }
+    XaWmaRelease(this);
     XaParameterFree(&Ratio);
     delete[] reinterpret_cast<BYTE*>(Format);
     delete[] Decoded;
@@ -73,6 +75,9 @@ XaSourceVoice::Initialize(
     UINT32 Target;
     UINT32 FormatSize;
     float InitialRatio;
+    WORD SourceTag = XaFormatTag(NewFormat);
+    const WAVEFORMATEX* Compressed = nullptr;
+    HRESULT hr;
 
     if (NewFormat->nChannels == 0 || NewFormat->nChannels > XA_MAX_CHANNELS)
     {
@@ -126,6 +131,27 @@ XaSourceVoice::Initialize(
         return E_OUTOFMEMORY;
     memset(Format, 0, sizeof(WAVEFORMATEX));
     memcpy(Format, NewFormat, FormatSize);
+
+    /* xWMA plays as the 16 bit PCM its decoder puts out */
+    if (SourceTag == XA_TAG_WMA2 || SourceTag == XA_TAG_WMA3)
+    {
+        Compressed = NewFormat;
+        if (Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+        {
+            WAVEFORMATEXTENSIBLE* Extensible = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(Format);
+
+            Extensible->Samples.wValidBitsPerSample = 16;
+            Extensible->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+        }
+        else
+        {
+            Format->wFormatTag = WAVE_FORMAT_PCM;
+        }
+        Format->wBitsPerSample = 16;
+        Format->nBlockAlign = static_cast<WORD>(sizeof(SHORT) * (Format->nChannels & 0x7FFF));
+        Format->nAvgBytesPerSec = Format->nSamplesPerSec * Format->nBlockAlign;
+        NewFormat = Format;
+    }
     FormatTag = XaFormatTag(NewFormat);
     BlockAlign = NewFormat->nBlockAlign;
     FramesPerBlock = FormatTag == WAVE_FORMAT_ADPCM ? XaAdpcmFramesPerBlock(NewFormat) : 1;
@@ -139,7 +165,10 @@ XaSourceVoice::Initialize(
     InitialRatio = XaMin(XaMax(1.0f, XA_MIN_RATIO), MaxFrequencyRatio);
     if (!XaParameterInit(&Ratio, sizeof(InitialRatio), &InitialRatio))
         return E_OUTOFMEMORY;
-    return InitializeCommon(Flags, SendList, Chain);
+    hr = InitializeCommon(Flags, SendList, Chain);
+    if (SUCCEEDED(hr) && Compressed != nullptr)
+        hr = XaWmaInitialize(this, Compressed);
+    return hr;
 }
 
 HRESULT
@@ -385,8 +414,15 @@ XaSourceVoice::SubmitSourceBuffer(
 {
     XaQueuedBuffer* Entry;
     UINT32 Frames;
+    HRESULT hr;
 
     Engine->Lock();
+    if (Wma != nullptr)
+    {
+        hr = XaWmaSubmit(this, Buffer, BufferWma);
+        Engine->Unlock();
+        return hr;
+    }
     if (Buffer == nullptr || BufferWma != nullptr || QueuedCount >= XA_MAX_QUEUED)
     {
         XA_TRACE_ONCE(L"SubmitSourceBuffer: no buffer, WMA data, or the queue is full");
@@ -444,7 +480,9 @@ STDMETHODCALLTYPE
 XaSourceVoice::Discontinuity()
 {
     Engine->Lock();
-    if (QueueTail != nullptr)
+    if (Wma != nullptr)
+        XaWmaDiscontinuity(this);
+    else if (QueueTail != nullptr)
         QueueTail->Flags |= XAUDIO2_END_OF_STREAM;
     Engine->Unlock();
     return S_OK;
@@ -478,6 +516,12 @@ XaSourceVoice::GetState(
     if (State == nullptr || (Flags & ~XAUDIO2_VOICE_NOSAMPLESPLAYED) != 0)
     {
         XA_TRACE_ONCE(L"GetState: no state or flags %08X", Flags);
+        Engine->Unlock();
+        return;
+    }
+    if (Wma != nullptr)
+    {
+        XaWmaGetState(this, State, (Flags & XAUDIO2_VOICE_NOSAMPLESPLAYED) == 0);
         Engine->Unlock();
         return;
     }

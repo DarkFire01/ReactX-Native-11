@@ -469,7 +469,17 @@ XaProcessSource(
     float* Output;
 
     if (Voice->FlushPending)
-        XaApplyFlush(Voice);
+    {
+        if (Voice->Wma != nullptr)
+        {
+            Voice->FlushPending = FALSE;
+            XaWmaFlush(Voice);
+        }
+        else
+        {
+            XaApplyFlush(Voice);
+        }
+    }
     if (Voice->PlayState != XaPlayRunning)
         return;
 
@@ -478,7 +488,9 @@ XaProcessSource(
     if (Voice->ExitLoopPending && Voice->ExitLoopSet == XA_OPSET_NOW)
     {
         Voice->ExitLoopPending = FALSE;
-        if (Voice->Queue != nullptr && Voice->Queue->LoopCount != 0)
+        if (Voice->Wma != nullptr)
+            XaWmaExitLoop(Voice);
+        else if (Voice->Queue != nullptr && Voice->Queue->LoopCount != 0)
             Voice->Queue->LoopCount = Voice->Queue->LoopsDone;
     }
 
@@ -495,8 +507,10 @@ XaProcessSource(
         Needed = XaResamplerInputFrames(Voice->Resampler, Frames);
     }
 
-    Available = XaQueuedFrames(Voice);
-    if (Needed > Available)
+    Available = Voice->Wma != nullptr ? XaWmaQueuedFrames(Voice) : XaQueuedFrames(Voice);
+
+    /* xWMA voices decode what they are short of themselves, so the callback asks for nothing */
+    if (Needed > Available && Voice->Wma == nullptr)
         Required = static_cast<UINT32>((Needed - Available) * Voice->BlockAlign / Voice->FramesPerBlock);
     if (Voice->Callback != nullptr)
         Voice->Callback->OnVoiceProcessingPassStart(Required);
@@ -509,7 +523,10 @@ XaProcessSource(
     if (Input != nullptr && Output != nullptr)
     {
         XaPrepareRaw(Voice, Needed);
-        Gathered = XaGatherFrames(Voice, Needed, Input);
+        if (Voice->Wma != nullptr)
+            Gathered = XaWmaGather(Voice, Needed, Input);
+        else
+            Gathered = XaGatherFrames(Voice, Needed, Input);
         if (Voice->HasConverter)
         {
             if (Gathered == 0)

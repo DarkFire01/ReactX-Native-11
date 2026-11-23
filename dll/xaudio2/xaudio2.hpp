@@ -90,6 +90,7 @@ class XaMasterVoice;
 struct XaSend;
 struct XaEffectChain;
 class XaEndpoint;
+struct XaWmaSource;
 
 template <typename T>
 constexpr
@@ -878,7 +879,54 @@ public:
     SIZE_T RawCapacity;
     const BYTE* DecodedData;
     UINT32 DecodedBlock;
+
+    /* xWMA voices decode into 16 bit frames that play like PCM */
+    XaWmaSource* Wma;
 };
+
+/* wmasource.cpp */
+HRESULT
+XaWmaInitialize(
+    _Inout_ XaSourceVoice* Voice,
+    _In_ const WAVEFORMATEX* Format);
+
+VOID
+XaWmaRelease(
+    _Inout_ XaSourceVoice* Voice);
+
+HRESULT
+XaWmaSubmit(
+    _Inout_ XaSourceVoice* Voice,
+    _In_opt_ const XAUDIO2_BUFFER* Buffer,
+    _In_opt_ const XAUDIO2_BUFFER_WMA* BufferWma);
+
+VOID
+XaWmaFlush(
+    _Inout_ XaSourceVoice* Voice);
+
+VOID
+XaWmaDiscontinuity(
+    _Inout_ XaSourceVoice* Voice);
+
+VOID
+XaWmaExitLoop(
+    _Inout_ XaSourceVoice* Voice);
+
+VOID
+XaWmaGetState(
+    _In_ const XaSourceVoice* Voice,
+    _Out_ XAUDIO2_VOICE_STATE* State,
+    _In_ BOOLEAN WithSamples);
+
+UINT32
+XaWmaQueuedFrames(
+    _In_ const XaSourceVoice* Voice);
+
+UINT32
+XaWmaGather(
+    _Inout_ XaSourceVoice* Voice,
+    _In_ UINT32 Needed,
+    _Out_writes_(Needed * Voice->InputChannels) float* Output);
 
 class XaSubmixVoice final : public IXAudio2SubmixVoice, public XaVoice
 {
