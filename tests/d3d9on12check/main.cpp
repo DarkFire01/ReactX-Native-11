@@ -567,6 +567,77 @@ CkReadBack(
     Copy->Release();
 }
 
+/* Reaches the Direct3D 12 device and a surface's resource through IDirect3DDevice9On12, then hands it back */
+static
+VOID
+CkInterop(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Surface,
+    _In_ IDirect3DSurface9* Flush)
+{
+    IDirect3DDevice9On12* On12 = nullptr;
+    IDirect3DDevice9Ex* Ex = nullptr;
+    ID3D12Device* Device12 = nullptr;
+    ID3D12CommandQueue* Queue = nullptr;
+    ID3D12Resource* Resource = nullptr;
+    ID3D12Fence* Fence = nullptr;
+    UINT64 Value = 1;
+    D3D12_COMMAND_QUEUE_DESC QueueDesc = {};
+    HRESULT hr;
+
+    printf("== interop\n");
+    if (SUCCEEDED(Device->QueryInterface(IID_PPV_ARGS(&Ex))))
+    {
+        hr = Ex->SetMaximumFrameLatency(2);
+        printf("SetMaximumFrameLatency hr %08lX\n", hr);
+        Ex->Release();
+    }
+
+    hr = Device->QueryInterface(IID_PPV_ARGS(&On12));
+    printf("QueryInterface IDirect3DDevice9On12 hr %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+
+    hr = On12->GetD3D12Device(IID_PPV_ARGS(&Device12));
+    printf("GetD3D12Device hr %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = Device12->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue));
+        printf("CreateCommandQueue hr %08lX\n", hr);
+    }
+
+    if (Queue != nullptr)
+    {
+        hr = On12->UnwrapUnderlyingResource(Surface, Queue, IID_PPV_ARGS(&Resource));
+        printf("UnwrapUnderlyingResource hr %08lX\n", hr);
+        if (Resource != nullptr)
+        {
+            D3D12_RESOURCE_DESC Desc = Resource->GetDesc();
+
+            printf("  resource dim %u size %llux%u format %u flags %X\n", Desc.Dimension, Desc.Width, Desc.Height,
+                   Desc.Format, Desc.Flags);
+            Resource->Release();
+            hr = Device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
+            printf("CreateFence hr %08lX\n", hr);
+            if (Fence != nullptr)
+            {
+                hr = Queue->Signal(Fence, 1);
+                printf("Signal hr %08lX\n", hr);
+                hr = On12->ReturnUnderlyingResource(Surface, 1, &Value, &Fence);
+                printf("ReturnUnderlyingResource hr %08lX\n", hr);
+                fflush(stdout);
+                CkReadBack(Device, Surface, Flush, "returned");
+                Fence->Release();
+            }
+        }
+        Queue->Release();
+    }
+
+    if (Device12 != nullptr)
+        Device12->Release();
+    On12->Release();
+}
+
 /* Clears, fills, copies and presents the back buffer, reading the results back */
 static
 VOID
@@ -621,7 +692,10 @@ CkScene(
     printf("Present hr %08lX\n", hr);
 
     if (Target != nullptr)
+    {
+        CkInterop(Device, Target, Flush);
         Target->Release();
+    }
     if (Flush != nullptr)
         Flush->Release();
     if (Depth != nullptr)

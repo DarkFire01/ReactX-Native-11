@@ -538,7 +538,7 @@ BOOLEAN
 CkPrivateHasResult(
     _In_ UINT Slot)
 {
-    return Slot != 11 && Slot != 18 && Slot != 20 && Slot != 21;
+    return Slot != 11 && Slot != 18 && Slot != 20 && Slot != 21 && Slot != 22;
 }
 
 /* The arguments of a private entry the runtime called */
@@ -665,7 +665,8 @@ CkDispatch(
     Line += Text;
 
     /* Methods without a result print none */
-    if (!((Family == CkFamilyDevice && ((Slot >= 17 && Slot <= 24) || Slot == 38 || Slot == 42 || Slot == 63 ||
+    if (!((Family == CkFamilyDdi && (Slot == 141 || Slot == 142)) ||
+          (Family == CkFamilyDevice && ((Slot >= 17 && Slot <= 24) || Slot == 38 || Slot == 42 || Slot == 63 ||
                                         Slot == 72)) ||
           (Family == CkFamilyQueue && Slot >= 8 && Slot <= 13) || (Family == CkFamilyPrivate && !CkPrivateHasResult(Slot))))
     {
