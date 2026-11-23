@@ -4786,6 +4786,185 @@ NcCheckConstantsOn(
     printf("%s_reset_pb = %08lX %08X\n", Prefix, hr, NcHashState(ReadBools, sizeof(ReadBools)));
 }
 
+/* The state a block check sets and reads, as one hash */
+static
+UINT
+NcHashBlockState(
+    _In_ IDirect3DDevice9* Device)
+{
+    struct
+    {
+        DWORD States[4];
+        DWORD Stage;
+        DWORD Sampler;
+        D3DMATRIX View;
+        D3DVIEWPORT9 Viewport;
+        FLOAT Constants[8];
+        INT Ints[4];
+        BOOL Bools[2];
+        FLOAT Plane[4];
+        UINT Frequency;
+        DWORD Fvf;
+    } Snapshot;
+
+    memset(&Snapshot, 0, sizeof(Snapshot));
+    Device->GetRenderState(D3DRS_CULLMODE, &Snapshot.States[0]);
+    Device->GetRenderState(D3DRS_FOGCOLOR, &Snapshot.States[1]);
+    Device->GetRenderState(D3DRS_ZENABLE, &Snapshot.States[2]);
+    Device->GetRenderState(D3DRS_AMBIENT, &Snapshot.States[3]);
+    Device->GetTextureStageState(0, D3DTSS_COLOROP, &Snapshot.Stage);
+    Device->GetSamplerState(1, D3DSAMP_ADDRESSU, &Snapshot.Sampler);
+    Device->GetTransform(D3DTS_VIEW, &Snapshot.View);
+    Device->GetViewport(&Snapshot.Viewport);
+    Device->GetVertexShaderConstantF(2, Snapshot.Constants, 2);
+    Device->GetPixelShaderConstantI(1, Snapshot.Ints, 1);
+    Device->GetVertexShaderConstantB(4, Snapshot.Bools, 2);
+    Device->GetClipPlane(0, Snapshot.Plane);
+    Device->GetStreamSourceFreq(2, &Snapshot.Frequency);
+    Device->GetFVF(&Snapshot.Fvf);
+    return NcHashState(&Snapshot, sizeof(Snapshot));
+}
+
+/* Sets the state a block check looks at from a seed */
+static
+VOID
+NcSetBlockState(
+    _In_ IDirect3DDevice9* Device,
+    _In_ UINT Seed)
+{
+    D3DMATRIX View = {};
+    D3DVIEWPORT9 Viewport = { Seed, 1, 16, 8 + Seed, 0.25f, 0.75f };
+    FLOAT Constants[8];
+    INT Ints[4] = { static_cast<INT>(Seed), 2, 3, 4 };
+    BOOL Bools[2] = { static_cast<BOOL>(Seed % 2), TRUE };
+    FLOAT Plane[4] = { 0.0f, 1.0f, static_cast<FLOAT>(Seed), 0.0f };
+
+    for (UINT Index = 0; Index < _countof(Constants); Index++)
+        Constants[Index] = static_cast<FLOAT>(Seed * 10 + Index);
+    View._11 = static_cast<FLOAT>(Seed);
+    View._44 = 1.0f;
+    Device->SetRenderState(D3DRS_CULLMODE, Seed % 3 + 1);
+    Device->SetRenderState(D3DRS_FOGCOLOR, 0x00010203 * Seed);
+    Device->SetRenderState(D3DRS_ZENABLE, Seed % 2);
+    Device->SetRenderState(D3DRS_AMBIENT, 0x11111111 * Seed);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, Seed % 5 + 1);
+    Device->SetSamplerState(1, D3DSAMP_ADDRESSU, Seed % 3 + 1);
+    Device->SetTransform(D3DTS_VIEW, &View);
+    Device->SetViewport(&Viewport);
+    Device->SetVertexShaderConstantF(2, Constants, 2);
+    Device->SetPixelShaderConstantI(1, Ints, 1);
+    Device->SetVertexShaderConstantB(4, Bools, 2);
+    Device->SetClipPlane(0, Plane);
+    Device->SetStreamSourceFreq(2, Seed + 1);
+    Device->SetFVF(Seed % 2 == 0 ? D3DFVF_XYZ | D3DFVF_DIFFUSE : D3DFVF_XYZRHW);
+}
+
+/* Recorded blocks and each predefined kind: what the device holds after recording, applying and capturing */
+static
+VOID
+NcCheckBlocksOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Types[] = { 0, D3DSBT_ALL, D3DSBT_PIXELSTATE, D3DSBT_VERTEXSTATE, 4, 0x7FFFFFFF };
+    IDirect3DStateBlock9* Block = nullptr;
+    IDirect3DStateBlock9* Other = nullptr;
+    HRESULT hr;
+
+    printf("%s_initial = %08X\n", Prefix, NcHashBlockState(Device));
+    printf("%s_end_idle = %08lX\n", Prefix, Device->EndStateBlock(&Other));
+    printf("%s_begin = %08lX\n", Prefix, Device->BeginStateBlock());
+    printf("%s_begin_again = %08lX\n", Prefix, Device->BeginStateBlock());
+    NcSetBlockState(Device, 1);
+    printf("%s_create_recording = %08lX\n", Prefix, Device->CreateStateBlock(D3DSBT_ALL, &Other));
+    printf("%s_recording = %08X\n", Prefix, NcHashBlockState(Device));
+    hr = Device->EndStateBlock(&Block);
+    printf("%s_end = %08lX\n", Prefix, hr);
+    if (Block != nullptr)
+    {
+        printf("%s_apply = %08lX\n", Prefix, Block->Apply());
+        printf("%s_applied = %08X\n", Prefix, NcHashBlockState(Device));
+        NcSetBlockState(Device, 2);
+        printf("%s_capture = %08lX\n", Prefix, Block->Capture());
+        NcSetBlockState(Device, 3);
+        printf("%s_apply_captured = %08lX\n", Prefix, Block->Apply());
+        printf("%s_captured = %08X\n", Prefix, NcHashBlockState(Device));
+        printf("%s_release = %lu\n", Prefix, Block->Release());
+        Block = nullptr;
+    }
+
+    for (DWORD Type : Types)
+    {
+        NcSetBlockState(Device, 4);
+        hr = Device->CreateStateBlock(static_cast<D3DSTATEBLOCKTYPE>(Type), &Block);
+        printf("%s_create[%lX] = %08lX\n", Prefix, Type, hr);
+        if (Block == nullptr)
+            continue;
+        NcSetBlockState(Device, 5);
+        printf("%s_apply[%lX] = %08lX %08X\n", Prefix, Type, Block->Apply(), NcHashBlockState(Device));
+        NcSetBlockState(Device, 6);
+        printf("%s_capture[%lX] = %08lX\n", Prefix, Type, Block->Capture());
+        NcSetBlockState(Device, 7);
+        printf("%s_apply_captured[%lX] = %08lX %08X\n", Prefix, Type, Block->Apply(), NcHashBlockState(Device));
+        printf("%s_release[%lX] = %lu\n", Prefix, Type, Block->Release());
+        Block = nullptr;
+    }
+}
+
+/* State blocks on every kind of vertex processing a windowed device can have */
+static
+VOID
+NcCheckBlocks(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "blocks_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "blocks_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "blocks_sw", D3DCREATE_SOFTWARE_VERTEXPROCESSING, TRUE },
+        { "blocks_mixed", D3DCREATE_MIXED_VERTEXPROCESSING, TRUE },
+        { "blocks_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, nullptr,
+                                           &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckBlocksOn(Case.Name, Device);
+        printf("%s_device_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* Shader constants on every kind of vertex processing a windowed device can have */
 static
 VOID
@@ -4870,6 +5049,7 @@ static const NineCheckInfo NcChecks[] =
     { "presentstats", NcCheckPresentStats },
     { "states", NcCheckStates },
     { "constants", NcCheckConstants },
+    { "blocks", NcCheckBlocks },
 };
 
 static
