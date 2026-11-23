@@ -2794,6 +2794,277 @@ TcCheckPipelines(
     Check.Report("device_refs_after", "%ld", (LONG)TcRefCount(Device.Get()) - (LONG)DeviceRefs);
 }
 
+/* Whether a device child's IUnknown stands apart from its API interfaces, and is one object with them */
+static
+VOID
+TcReportIdentity(
+    _In_ TwelveCheck& Check,
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Created,
+    _In_opt_ ID3D12DeviceChild* Child)
+{
+    ComPtr<IUnknown> Unknown;
+    ComPtr<IUnknown> Again;
+    ComPtr<ID3D12DeviceChild> Back;
+    ComPtr<ID3D12Object> Object;
+    ULONG Before;
+    ULONG Held;
+    CHAR Key[64];
+
+    sprintf_s(Key, "%s", Name);
+    if (Child == nullptr)
+    {
+        Check.Report(Key, "0x%08lX none", Created);
+        return;
+    }
+
+    Child->QueryInterface(IID_PPV_ARGS(&Unknown));
+    Child->QueryInterface(IID_PPV_ARGS(&Again));
+    Child->QueryInterface(IID_PPV_ARGS(&Object));
+    Unknown->QueryInterface(IID_PPV_ARGS(&Back));
+    Before = TcRefCount(Child);
+    Unknown->AddRef();
+    Held = TcRefCount(Child);
+    Unknown->Release();
+
+    Check.Report(Key, "0x%08lX apart %u stable %u object %u back %u shared %u", Created,
+                 static_cast<void*>(Unknown.Get()) != static_cast<void*>(Child), Unknown.Get() == Again.Get(),
+                 static_cast<void*>(Object.Get()) == static_cast<void*>(Child), Back.Get() == Child, Held == Before + 1);
+}
+
+/*
+ * Which interface pointers of a child are the same: each face is numbered by the first face that gave
+ * the same pointer, with 0 for the pointer creation handed out. A face the child lacks prints as x.
+ */
+static
+VOID
+TcReportFaces(
+    _In_ TwelveCheck& Check,
+    _In_z_ PCSTR Name,
+    _In_opt_ IUnknown* Created,
+    _In_reads_(Count) const IID* const* Faces,
+    _In_ UINT Count)
+{
+    void* Seen[16] = {};
+    std::string Text;
+    CHAR Key[64];
+
+    if (Created == nullptr)
+        return;
+
+    Seen[0] = Created;
+    for (UINT Index = 0; Index < Count && Index + 1 < _countof(Seen); Index++)
+    {
+        IUnknown* Face = nullptr;
+        UINT Class = Index + 1;
+
+        if (FAILED(Created->QueryInterface(*Faces[Index], reinterpret_cast<void**>(&Face))))
+        {
+            Text += " x";
+            continue;
+        }
+        Seen[Index + 1] = Face;
+        for (UINT Earlier = 0; Earlier <= Index; Earlier++)
+        {
+            if (Seen[Earlier] == Face)
+            {
+                Class = Earlier;
+                break;
+            }
+        }
+        Face->Release();
+        Text += " " + std::to_string(Class);
+    }
+
+    sprintf_s(Key, "%s_faces", Name);
+    Check.Report(Key, "%s", Text.c_str() + 1);
+}
+
+/* identity: the IUnknown each kind of device child hands out */
+static
+VOID
+TcCheckIdentity(
+    _In_ TwelveCheck& Check)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12CommandQueue> Queue;
+    ComPtr<ID3D12CommandAllocator> Allocator;
+    ComPtr<ID3D12GraphicsCommandList> List;
+    ComPtr<ID3D12Fence> Fence;
+    ComPtr<ID3D12DescriptorHeap> DescriptorHeap;
+    ComPtr<ID3D12Resource> Committed;
+    ComPtr<ID3D12Heap> Heap;
+    ComPtr<ID3D12Resource> Placed;
+    ComPtr<ID3D12QueryHeap> QueryHeap;
+    ComPtr<ID3D12CommandSignature> Signature;
+    ComPtr<ID3D12RootSignature> Root;
+    ComPtr<ID3D12PipelineState> Pipeline;
+    ComPtr<ID3D12Device1> Device1;
+    ComPtr<ID3D12PipelineLibrary> Library;
+    ComPtr<ID3DBlob> Blob;
+    ComPtr<ID3DBlob> Errors;
+    D3D12_COMMAND_QUEUE_DESC QueueDesc = {};
+    D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
+    D3D12_HEAP_PROPERTIES Properties = {};
+    D3D12_RESOURCE_DESC Buffer = {};
+    D3D12_HEAP_DESC Memory = {};
+    D3D12_QUERY_HEAP_DESC Queries = {};
+    D3D12_INDIRECT_ARGUMENT_DESC Argument = {};
+    D3D12_COMMAND_SIGNATURE_DESC SignatureDesc = {};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    D3D12_COMPUTE_PIPELINE_STATE_DESC Compute = {};
+    HRESULT hr;
+
+    if (FAILED(Check.MakeDevice(&Device)))
+    {
+        Check.Report("device", "none");
+        return;
+    }
+
+    QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    hr = Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue));
+    TcReportIdentity(Check, "queue", hr, Queue.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12CommandQueue) };
+
+        TcReportFaces(Check, "queue", Queue.Get(), Faces, _countof(Faces));
+    }
+
+    hr = Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&Allocator));
+    TcReportIdentity(Check, "allocator", hr, Allocator.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12CommandAllocator) };
+
+        TcReportFaces(Check, "allocator", Allocator.Get(), Faces, _countof(Faces));
+    }
+    if (Allocator != nullptr)
+    {
+        hr = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, Allocator.Get(), nullptr, IID_PPV_ARGS(&List));
+        TcReportIdentity(Check, "list", hr, List.Get());
+        {
+            static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12CommandList), &__uuidof(ID3D12GraphicsCommandList), &__uuidof(ID3D12GraphicsCommandList1), &__uuidof(ID3D12GraphicsCommandList4), &__uuidof(ID3D12GraphicsCommandList10) };
+
+            TcReportFaces(Check, "list", List.Get(), Faces, _countof(Faces));
+        }
+        if (List != nullptr)
+            List->Close();
+    }
+
+    hr = Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
+    TcReportIdentity(Check, "fence", hr, Fence.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12Fence), &__uuidof(ID3D12Fence1) };
+
+        TcReportFaces(Check, "fence", Fence.Get(), Faces, _countof(Faces));
+    }
+
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    HeapDesc.NumDescriptors = 4;
+    hr = Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&DescriptorHeap));
+    TcReportIdentity(Check, "descriptor_heap", hr, DescriptorHeap.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12DescriptorHeap) };
+
+        TcReportFaces(Check, "descriptor_heap", DescriptorHeap.Get(), Faces, _countof(Faces));
+    }
+
+    Properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    Buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Buffer.Width = 65536;
+    Buffer.Height = 1;
+    Buffer.DepthOrArraySize = 1;
+    Buffer.MipLevels = 1;
+    Buffer.SampleDesc.Count = 1;
+    Buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    hr = Device->CreateCommittedResource(&Properties, D3D12_HEAP_FLAG_NONE, &Buffer, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                         nullptr, IID_PPV_ARGS(&Committed));
+    TcReportIdentity(Check, "committed", hr, Committed.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12Resource), &__uuidof(ID3D12Resource1), &__uuidof(ID3D12Resource2) };
+
+        TcReportFaces(Check, "committed", Committed.Get(), Faces, _countof(Faces));
+    }
+
+    Memory.SizeInBytes = 65536;
+    Memory.Properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    Memory.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+    hr = Device->CreateHeap(&Memory, IID_PPV_ARGS(&Heap));
+    TcReportIdentity(Check, "heap", hr, Heap.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12Heap), &__uuidof(ID3D12Heap1) };
+
+        TcReportFaces(Check, "heap", Heap.Get(), Faces, _countof(Faces));
+    }
+    if (Heap != nullptr)
+    {
+        hr = Device->CreatePlacedResource(Heap.Get(), 0, &Buffer, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                          IID_PPV_ARGS(&Placed));
+        TcReportIdentity(Check, "placed", hr, Placed.Get());
+        {
+            static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12Resource), &__uuidof(ID3D12Resource2) };
+
+            TcReportFaces(Check, "placed", Placed.Get(), Faces, _countof(Faces));
+        }
+    }
+
+    Queries.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+    Queries.Count = 4;
+    hr = Device->CreateQueryHeap(&Queries, IID_PPV_ARGS(&QueryHeap));
+    TcReportIdentity(Check, "query_heap", hr, QueryHeap.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12QueryHeap) };
+
+        TcReportFaces(Check, "query_heap", QueryHeap.Get(), Faces, _countof(Faces));
+    }
+
+    Argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    SignatureDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
+    SignatureDesc.NumArgumentDescs = 1;
+    SignatureDesc.pArgumentDescs = &Argument;
+    hr = Device->CreateCommandSignature(&SignatureDesc, nullptr, IID_PPV_ARGS(&Signature));
+    TcReportIdentity(Check, "command_signature", hr, Signature.Get());
+    {
+        static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12CommandSignature) };
+
+        TcReportFaces(Check, "command_signature", Signature.Get(), Faces, _countof(Faces));
+    }
+
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    if (Check.SerializeVersioned != nullptr && SUCCEEDED(Check.SerializeVersioned(&RootDesc, &Blob, &Errors)))
+    {
+        hr = Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_PPV_ARGS(&Root));
+        TcReportIdentity(Check, "root_signature", hr, Root.Get());
+        {
+            static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12RootSignature) };
+
+            TcReportFaces(Check, "root_signature", Root.Get(), Faces, _countof(Faces));
+        }
+    }
+    if (Root != nullptr)
+    {
+        Compute.pRootSignature = Root.Get();
+        Compute.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
+        hr = Device->CreateComputePipelineState(&Compute, IID_PPV_ARGS(&Pipeline));
+        TcReportIdentity(Check, "pipeline", hr, Pipeline.Get());
+        {
+            static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12PipelineState) };
+
+            TcReportFaces(Check, "pipeline", Pipeline.Get(), Faces, _countof(Faces));
+        }
+    }
+
+    if (SUCCEEDED(Device.As(&Device1)))
+    {
+        hr = Device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&Library));
+        TcReportIdentity(Check, "pipeline_library", hr, Library.Get());
+        {
+            static const IID* const Faces[] = { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12Pageable), &__uuidof(ID3D12PipelineLibrary), &__uuidof(ID3D12PipelineLibrary1) };
+
+            TcReportFaces(Check, "pipeline_library", Library.Get(), Faces, _countof(Faces));
+        }
+    }
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -2820,6 +3091,7 @@ static const CheckInfo Checks[] =
     { "layouts", TcCheckLayouts },
     { "rootsigs", TcCheckRootSignatures },
     { "pipelines", TcCheckPipelines },
+    { "identity", TcCheckIdentity },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
