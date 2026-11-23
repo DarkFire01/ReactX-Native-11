@@ -490,12 +490,36 @@ CkQueryAdapter(
     }
 }
 
+/*
+ * The runtime hands its batch to the driver on a lock only when the locked handle hashes onto a slot
+ * marked by the current batch, so a plain readback flushes at a point that depends on handle values.
+ * Locking a surface that was just filled always flushes, which empties the batch at a fixed point.
+ */
+static
+VOID
+CkFlushBatch(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Flush,
+    _In_z_ PCSTR Label)
+{
+    D3DLOCKED_RECT Locked = {};
+    HRESULT hr;
+
+    hr = Device->ColorFill(Flush, nullptr, 0);
+    printf("%s flush ColorFill hr %08lX\n", Label, hr);
+    hr = Flush->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    printf("%s flush LockRect hr %08lX\n", Label, hr);
+    if (SUCCEEDED(hr))
+        Flush->UnlockRect();
+}
+
 /* Reads a render target back through a system memory surface and prints a few pixels and a sum */
 static
 VOID
 CkReadBack(
     _In_ IDirect3DDevice9* Device,
     _In_ IDirect3DSurface9* Target,
+    _In_opt_ IDirect3DSurface9* Flush,
     _In_z_ PCSTR Label)
 {
     static const POINT Probes[] = { { 0, 0 }, { 10, 10 }, { 30, 20 }, { 63, 47 } };
@@ -503,6 +527,9 @@ CkReadBack(
     D3DLOCKED_RECT Locked = {};
     D3DSURFACE_DESC Desc = {};
     HRESULT hr;
+
+    if (Flush != nullptr)
+        CkFlushBatch(Device, Flush, Label);
 
     Target->GetDesc(&Desc);
     hr = Device->CreateOffscreenPlainSurface(Desc.Width, Desc.Height, Desc.Format, D3DPOOL_SYSTEMMEM, &Copy, nullptr);
@@ -548,6 +575,7 @@ CkScene(
     IDirect3DSurface9* Back = nullptr;
     IDirect3DSurface9* Target = nullptr;
     IDirect3DSurface9* Depth = nullptr;
+    IDirect3DSurface9* Flush = nullptr;
     RECT Fill = { 8, 8, 24, 24 };
     RECT Source = { 0, 0, 32, 24 };
     RECT Dest = { 0, 0, 64, 48 };
@@ -564,7 +592,10 @@ CkScene(
 
     hr = Device->ColorFill(Back, &Fill, 0xFF00FF00);
     printf("ColorFill hr %08lX\n", hr);
-    CkReadBack(Device, Back, "back");
+
+    hr = Device->CreateOffscreenPlainSurface(4, 4, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &Flush, nullptr);
+    printf("flush CreateOffscreenPlainSurface hr %08lX\n", hr);
+    CkReadBack(Device, Back, Flush, "back");
 
     hr = Device->CreateDepthStencilSurface(64, 48, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, TRUE, &Depth, nullptr);
     printf("CreateDepthStencilSurface hr %08lX\n", hr);
@@ -582,7 +613,7 @@ CkScene(
     {
         hr = Device->StretchRect(Back, &Source, Target, &Dest, D3DTEXF_POINT);
         printf("StretchRect hr %08lX\n", hr);
-        CkReadBack(Device, Target, "target");
+        CkReadBack(Device, Target, Flush, "target");
     }
 
     hr = Device->Present(nullptr, nullptr, nullptr, nullptr);
@@ -590,13 +621,14 @@ CkScene(
 
     if (Target != nullptr)
         Target->Release();
+    if (Flush != nullptr)
+        Flush->Release();
     if (Depth != nullptr)
     {
         Device->SetDepthStencilSurface(nullptr);
         Depth->Release();
     }
     Back->Release();
-    CkFlushWorkers();
 }
 
 static
@@ -622,11 +654,9 @@ CkCreateDevice(
     printf("IDirect3D9::CreateDevice behavior %08lX hr %08lX\n", Behavior, hr);
     if (Device != nullptr)
     {
-        CkFlushWorkers();
         CkScene(Device);
         printf("  device released %lu\n", Device->Release());
     }
-    CkFlushWorkers();
     CkFlushState();
 }
 
@@ -713,7 +743,6 @@ wmain(
         CkCreateDevice(D3D, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING);
         CkCreateDevice(D3D, Window, D3DCREATE_SOFTWARE_VERTEXPROCESSING);
         printf("released %lu\n", D3D->Release());
-        CkFlushWorkers();
     }
 
     printf("== Direct3DCreate9On12Ex\n");
@@ -724,7 +753,6 @@ wmain(
         CkQueryAdapter(D3DEx);
         CkCreateDevice(D3DEx, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING);
         printf("released %lu\n", D3DEx->Release());
-        CkFlushWorkers();
     }
 
     printf("adapters opened %u\n", Ck.Adapters);

@@ -16,10 +16,6 @@ CkWrapDeviceTable(
 BOOLEAN
 CkHookD3D12(VOID);
 
-/* Prints what other threads did since the last flush, one thread after another */
-VOID
-CkFlushWorkers(VOID);
-
 /* Prints how often each state only DDI entry was called since the last time, with its result */
 VOID
 CkFlushState(VOID);

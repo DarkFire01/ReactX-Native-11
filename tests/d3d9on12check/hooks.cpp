@@ -6,7 +6,8 @@
  *
  * Every wrapper takes twelve integer arguments and forwards all of them, which covers each wrapped
  * method on ARM64 and x64. Methods that return a structure are left alone. Objects print as the order
- * they first appeared in; calls from other threads are marked, since their order is not fixed.
+ * they first appeared in. The runtime hands its batch to whichever thread drains it first but never to
+ * two at once, so lines print in one stream without naming the thread.
  */
 
 #define WIN32_NO_STATUS
@@ -106,51 +107,26 @@ static const PCSTR CkQueueNames[] =
     "GetTimestampFrequency", "GetClockCalibration",
 };
 
-/* Each thread names its objects and buffers its lines apart, since threads interleave differently each run */
-struct CkThread
-{
-    UINT Index;
-    UINT NextId;
-    UINT Depth;
-    std::vector<std::string> Lines;
-};
-
 struct CkHookState
 {
     PFN_CK_FORWARD Originals[CkFamilyCount][CkSlotLimit];
     std::unordered_map<const VOID*, std::string> Ids;
-    std::vector<CkThread*> Threads;
     std::map<std::string, UINT> StateCalls;
-    DWORD MainThread;
+    UINT NextId;
     SRWLOCK Lock;
 };
 
-static CkHookState CkHooks = { {}, {}, {}, {}, 0, SRWLOCK_INIT };
-static thread_local CkThread* CkSelf;
+static CkHookState CkHooks = { {}, {}, {}, 0, SRWLOCK_INIT };
 
-static
-CkThread*
-CkCurrentThread(VOID)
-{
-    if (CkSelf != nullptr)
-        return CkSelf;
+/* How deep in wrapped calls the current thread is, for indenting the calls a call makes */
+static thread_local UINT CkDepth;
 
-    CkSelf = new CkThread();
-    AcquireSRWLockExclusive(&CkHooks.Lock);
-    CkSelf->Index = GetCurrentThreadId() == CkHooks.MainThread ? 0 : static_cast<UINT>(CkHooks.Threads.size()) + 1;
-    if (CkSelf->Index != 0)
-        CkHooks.Threads.push_back(CkSelf);
-    ReleaseSRWLockExclusive(&CkHooks.Lock);
-    return CkSelf;
-}
-
-/* A name for a pointer: the thread that first saw it and its order there */
+/* A name for a pointer: the order it first appeared in */
 static
 std::string
 CkName(
     _In_opt_ const VOID* Object)
 {
-    CkThread* Self;
     std::string Name;
     char Buffer[32];
 
@@ -160,22 +136,18 @@ CkName(
     AcquireSRWLockExclusive(&CkHooks.Lock);
     auto Found = CkHooks.Ids.find(Object);
     if (Found != CkHooks.Ids.end())
+    {
         Name = Found->second;
-    ReleaseSRWLockExclusive(&CkHooks.Lock);
-    if (!Name.empty())
-        return Name;
-
-    Self = CkCurrentThread();
-    Self->NextId += 1;
-    if (Self->Index == 0)
-        sprintf_s(Buffer, "%u", Self->NextId);
+    }
     else
-        sprintf_s(Buffer, "w%u.%u", Self->Index, Self->NextId);
-
-    AcquireSRWLockExclusive(&CkHooks.Lock);
-    CkHooks.Ids[Object] = Buffer;
+    {
+        CkHooks.NextId += 1;
+        sprintf_s(Buffer, "%u", CkHooks.NextId);
+        Name = Buffer;
+        CkHooks.Ids[Object] = Name;
+    }
     ReleaseSRWLockExclusive(&CkHooks.Lock);
-    return Buffer;
+    return Name;
 }
 
 UINT
@@ -580,11 +552,10 @@ CkDispatch(
     _In_ UINT Slot,
     _In_reads_(CkArgumentCount) UINT_PTR* A)
 {
-    CkThread* Self = CkCurrentThread();
     std::string Text;
     std::string Line;
     UINT_PTR Result;
-    UINT Depth = Self->Depth;
+    UINT Depth = CkDepth;
 
     if (Family == CkFamilyDdi)
     {
@@ -602,9 +573,9 @@ CkDispatch(
         CkDescribeQueueCall(&Text, Slot, A);
     }
 
-    Self->Depth += 1;
+    CkDepth += 1;
     Result = CkHooks.Originals[Family][Slot](A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[8], A[9], A[10], A[11]);
-    Self->Depth -= 1;
+    CkDepth -= 1;
 
     if (Family == CkFamilyDdi && SUCCEEDED(static_cast<HRESULT>(Result)))
         CkDescribeDdiResult(&Text, Slot, A);
@@ -640,29 +611,10 @@ CkDispatch(
         return Result;
     }
 
-    if (Self->Index == 0)
-        printf("%s\n", Line.c_str());
-    else
-    {
-        /* The main thread drains these lines while workers keep adding to them */
-        AcquireSRWLockExclusive(&CkHooks.Lock);
-        Self->Lines.push_back(Line);
-        ReleaseSRWLockExclusive(&CkHooks.Lock);
-    }
-    return Result;
-}
-
-VOID
-CkFlushWorkers(VOID)
-{
     AcquireSRWLockExclusive(&CkHooks.Lock);
-    for (CkThread* Thread : CkHooks.Threads)
-    {
-        for (const std::string& Line : Thread->Lines)
-            printf("[worker %u] %s\n", Thread->Index, Line.c_str());
-        Thread->Lines.clear();
-    }
+    printf("%s\n", Line.c_str());
     ReleaseSRWLockExclusive(&CkHooks.Lock);
+    return Result;
 }
 
 template <UINT Family, UINT Slot>
@@ -770,7 +722,6 @@ CkHookD3D12(VOID)
     ID3D12CommandQueue* Queue = nullptr;
     BOOLEAN Hooked = FALSE;
 
-    CkHooks.MainThread = GetCurrentThreadId();
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))))
         return FALSE;
 
