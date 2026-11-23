@@ -696,3 +696,28 @@ SceneOpsClamp(
 {
     return TcOpsRun(Device, Result, TcOpsClampSource, "clamp", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
 }
+
+/* Sizes of every unordered access view kind, next to the read only ones */
+static const char TcOpsSizeSource[] =
+    "[numthreads(64, 1, 1)] void sizes(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 64;\n"
+    "    uint w, h, n, s;\n"
+    "    Grid.GetDimensions(w, h);\n"
+    "    Typed.GetDimensions(n);\n"
+    "    Out.Store4(Base, uint4(w, h, n, t));\n"
+    "    Counted.GetDimensions(n, s);\n"
+    "    Out.GetDimensions(w);\n"
+    "    Out.Store4(Base + 16, uint4(n, s, w, Grid[uint2(t % 8, t / 8)]));\n"
+    "    Image.GetDimensions(t % 3, w, h, n);\n"
+    "    Out.Store4(Base + 32, uint4(w, h, n, Typed[t % 64]));\n"
+    "}\n";
+
+static
+HRESULT
+SceneOpsSize(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsSizeSource, "sizes", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+}
