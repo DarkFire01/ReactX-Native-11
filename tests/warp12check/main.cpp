@@ -2863,6 +2863,7 @@ static const TcScene Scenes[] =
     { "opsaddr", SceneOpsAddress },
     { "opsclamp", SceneOpsClamp },
     { "opssize", SceneOpsSize },
+    { "opswave", SceneOpsWave },
     { "timestamp", SceneTimestamp },
 };
 

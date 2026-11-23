@@ -722,3 +722,61 @@ SceneOpsSize(
 {
     return TcOpsRun(Device, Result, TcOpsSizeSource, "sizes", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 1);
 }
+
+/* Wave size, lane indices and every wave reduction, prefix, read and quad operation, uniform and divergent */
+static const char TcOpsWaveSource[] =
+    "[numthreads(64, 1, 1)] void waves(uint t : SV_DispatchThreadID, uint g : SV_GroupIndex)\n"
+    "{\n"
+    "    uint Base = t * 160;\n"
+    "    uint Lane = WaveGetLaneIndex();\n"
+    "    uint4 Ballot = WaveActiveBallot((t * 7) % 3 == 0);\n"
+    "    float Wide = ((t & 3) == 0) ? 16777216.0 : ((t & 3) == 3) ? -16777216.0 : 1.0 + (t & 7) * 0.25;\n"
+    "    float Small = (t % 5) * 0.1 + 0.3;\n"
+    "    int Signed = (int)(t * 2654435761u) >> 20;\n"
+    "    Out.Store4(Base, uint4(WaveGetLaneCount(), Lane, WaveIsFirstLane(), WaveActiveCountBits(t & 1)));\n"
+    "    Out.Store4(Base + 16, Ballot);\n"
+    "    Out.Store4(Base + 32, uint4(WaveActiveSum(t), WavePrefixSum(t + 1), WaveReadLaneFirst(t * 3), WaveReadLaneAt(t, 1)));\n"
+    "    Out.Store4(Base + 48, uint4(QuadReadAcrossX(t), QuadReadAcrossY(t), QuadReadAcrossDiagonal(t), QuadReadLaneAt(t, 2)));\n"
+    "    Out.Store4(Base + 64, asuint(float4(WaveActiveSum(Wide), WavePrefixSum(Wide), WaveActiveProduct(Small), WavePrefixProduct(Small))));\n"
+    "    Out.Store4(Base + 80, uint4(asuint(WaveActiveMin(Small - 0.5)), asuint(WaveActiveMax(-Small)), WaveActiveMin(Signed), WaveActiveMax(Signed)));\n"
+    "    Out.Store4(Base + 96, uint4(WaveActiveMin((uint)Signed), WaveActiveMax((uint)Signed), WaveActiveBitAnd(t | 0x30), WaveActiveBitOr(t << 3)));\n"
+    "    Out.Store4(Base + 112, uint4(WaveActiveBitXor(t * 5), WaveActiveAllTrue(t % 4 != 3) | (WaveActiveAnyTrue(t % 8 == 5) << 1) |\n"
+    "                                 (WaveActiveAllEqual(t / 4) << 2) | (WaveActiveAllEqual(Small) << 3), WavePrefixCountBits(t % 3 == 1),\n"
+    "                                 WavePrefixProduct(t + 1)));\n"
+    "    if (t % 3 != 0)\n"
+    "    {\n"
+    "        uint4 Some = WaveActiveBallot(true);\n"
+    "        Out.Store4(Base + 128, uint4(WaveActiveSum(t), WavePrefixSum(t), WaveIsFirstLane() | (WaveReadLaneFirst(t) << 4), Some.x));\n"
+    "        Out.Store(Base + 144, WaveActiveCountBits(true) | (WaveActiveMin(t) << 8) | (asuint(WaveActiveSum(Small)) & 0xFFFF0000));\n"
+    "    }\n"
+    "}\n";
+
+/* Groups that do not fill their last wave, laid out in two dimensions */
+static const char TcOpsWavePartSource[] =
+    "[numthreads(5, 3, 1)] void parts(uint3 t : SV_DispatchThreadID, uint g : SV_GroupIndex, uint3 Group : SV_GroupID)\n"
+    "{\n"
+    "    uint Flat = Group.x * 15 + g;\n"
+    "    uint Base = Flat * 32;\n"
+    "    uint4 Ballot = WaveActiveBallot(true);\n"
+    "    Out.Store4(Base, uint4(WaveGetLaneIndex(), WaveActiveSum(Flat), WavePrefixSum(g), Ballot.x));\n"
+    "    Out.Store4(Base + 16, uint4(QuadReadAcrossX(Flat), QuadReadAcrossDiagonal(t.y), WaveReadLaneFirst(t.x), WaveActiveCountBits(t.y == 1)));\n"
+    "}\n";
+
+static const TcOpsBuild TcOpsWaveBuilds[] =
+{
+    { NULL, L"cs_6_0", NULL },
+    { NULL, L"cs_6_6", NULL },
+};
+
+static
+HRESULT
+SceneOpsWave(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    HRESULT hr = TcOpsRun(Device, Result, TcOpsWaveSource, "waves", TcOpsWaveBuilds, ARRAYSIZE(TcOpsWaveBuilds), 1);
+
+    if (SUCCEEDED(hr))
+        hr = TcOpsRun(Device, Result, TcOpsWavePartSource, "parts", TcOpsWaveBuilds, ARRAYSIZE(TcOpsWaveBuilds), 3);
+    return hr;
+}
