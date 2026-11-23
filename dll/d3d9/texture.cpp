@@ -886,6 +886,86 @@ D9TextureCore::GenerateMipsCore(VOID)
         Device->DriverGenerateMips(Resource, Filter);
 }
 
+static
+D9TextureCore*
+D9CoreOf(
+    _In_ IDirect3DBaseTexture9* Texture);
+
+BOOLEAN
+D9TextureCore::IsAnySubresourceLocked() const
+{
+    for (UINT Index = 0; Index < Faces * Levels; Index++)
+    {
+        if (Subresources[Index].Locked)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* The system hands the driver any two textures of one type, whatever their sizes, levels and formats */
+HRESULT
+D9TextureCore::CopyDirtyInto(
+    _In_ D9TextureCore* Target)
+{
+    D3DBOX Whole = { 0, 0, Width, Height, 0, Depth };
+
+    if (Kind != Target->Kind)
+        return D3DERR_INVALIDCALL;
+
+    for (UINT Remaining = Faces; Remaining > 0; Remaining -= 1)
+    {
+        UINT Face = Remaining - 1;
+        UINT Regions = DirtyCount[Face];
+
+        for (UINT Region = 0; Region < (Regions == D9DirtyWhole ? 1 : Regions); Region++)
+        {
+            const D3DBOX* Box = Regions == D9DirtyWhole ? &Whole : &DirtyRegions[Face][Region];
+
+            if (Kind == D9TextureKind::Volume)
+                Device->DriverVolBlt(Target->Resource, Resource, Box);
+            else
+                Device->DriverTexBlt(Target->Resource, Resource, Face, Box);
+        }
+        DirtyCount[Face] = 0;
+    }
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::UpdateTexture(
+    _In_opt_ IDirect3DBaseTexture9* SourceTexture,
+    _In_opt_ IDirect3DBaseTexture9* DestinationTexture)
+{
+    D9_DEVICE_LOCK();
+
+    D9TextureCore* Source;
+    D9TextureCore* Target;
+    BOOLEAN SourceAutogen;
+    BOOLEAN TargetAutogen;
+
+    if (NotReset || SourceTexture == nullptr || DestinationTexture == nullptr)
+        return D3DERR_INVALIDCALL;
+    Source = D9CoreOf(SourceTexture);
+    Target = D9CoreOf(DestinationTexture);
+    if (Source->Device9() != this || Target->Device9() != this)
+        return D3DERR_INVALIDCALL;
+
+    /* Generated levels only copy into generated levels, which take a single level source otherwise */
+    SourceAutogen = (Source->UsageOf() & D3DUSAGE_AUTOGENMIPMAP) != 0;
+    TargetAutogen = (Target->UsageOf() & D3DUSAGE_AUTOGENMIPMAP) != 0;
+    if (SourceAutogen ? !TargetAutogen : (TargetAutogen && SourceTexture->GetLevelCount() != 1))
+    {
+        D9_TRACE_ONCE(L"UpdateTexture: generated levels do not match");
+        return D3DERR_INVALIDCALL;
+    }
+    if (Source->PoolOf() != D3DPOOL_SYSTEMMEM || Target->PoolOf() != D3DPOOL_DEFAULT)
+    {
+        D9_TRACE_ONCE(L"UpdateTexture: copies go from system memory to the default pool");
+        return D3DERR_INVALIDCALL;
+    }
+    return Source->CopyDirtyInto(Target);
+}
+
 VOID
 D9TextureCore::Evict(VOID)
 {

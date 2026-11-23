@@ -588,6 +588,39 @@ public:
     VOID
     Evict(VOID) override;
 
+    D9Resource*
+    DriverResource() const
+    {
+        return Resource;
+    }
+
+    D3DPOOL
+    PoolOf() const
+    {
+        return Pool;
+    }
+
+    DWORD
+    UsageOf() const
+    {
+        return Usage;
+    }
+
+    BOOLEAN
+    IsSubresourceLocked(
+        _In_ UINT Index) const
+    {
+        return Subresources[Index].Locked;
+    }
+
+    BOOLEAN
+    IsAnySubresourceLocked() const;
+
+    /* UpdateTexture: copies what changed since the last copy into a texture of the same type */
+    HRESULT
+    CopyDirtyInto(
+        _In_ D9TextureCore* Target);
+
     VOID
     Upload(VOID);
 

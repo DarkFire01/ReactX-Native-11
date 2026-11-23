@@ -2008,15 +2008,6 @@ D9Device::UpdateSurface(
 }
 
 STDMETHODIMP
-D9Device::UpdateTexture(
-    _In_opt_ IDirect3DBaseTexture9* SourceTexture,
-    _In_opt_ IDirect3DBaseTexture9* DestinationTexture)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::GetRenderTargetData(
     _Out_ IDirect3DSurface9* RenderTarget,
     _Out_ IDirect3DSurface9* DestSurface)
