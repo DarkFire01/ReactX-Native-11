@@ -82,6 +82,7 @@ public:
     UINT ElementCount = 0;
     UINT Flags = 0;
     UINT Counter = 0;           /* append and consume, and counter buffers */
+    UINT Mapping = 0x1688;      /* Direct3D 12 component mapping, three bits per component: 0 to 3 pick, 4 and 5 force zero and one */
 };
 
 class RxWarpBlendState

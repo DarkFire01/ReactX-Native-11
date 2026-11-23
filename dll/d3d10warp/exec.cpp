@@ -1601,6 +1601,46 @@ RxWarpMachine::Arithmetic(
     }
 }
 
+/*
+ * A Direct3D 12 view's component mapping over what a load or sample returned. Gathers chose
+ * their channel before sampling; a forced one there fills all four texels.
+ */
+static
+VOID
+RxWarpMapComponents(
+    _In_ const RxWarpView *View,
+    _In_ UINT Opcode,
+    _Inout_updates_(4) UINT *Raw,
+    _Inout_ BOOLEAN *Filtered,
+    _Inout_updates_(4) INT *Fixed)
+{
+    BOOLEAN Integer = RxWarpFormatIsInteger(View->Format);
+    UINT One = Integer ? 1 : 0x3F800000;
+    UINT Source[4];
+    INT SourceFixed[4];
+
+    if (Opcode == D3D10_1_SB_OPCODE_GATHER4 || Opcode == D3D11_SB_OPCODE_GATHER4_C || Opcode == D3D11_SB_OPCODE_GATHER4_PO ||
+        Opcode == D3D11_SB_OPCODE_GATHER4_PO_C)
+    {
+        return;
+    }
+    memcpy(Source, Raw, sizeof(Source));
+    memcpy(SourceFixed, Fixed, sizeof(SourceFixed));
+    for (UINT Component = 0; Component < 4; Component++)
+    {
+        UINT Picked = (View->Mapping >> (3 * Component)) & 7;
+
+        if (Picked < 4)
+        {
+            Raw[Component] = Source[Picked];
+            Fixed[Component] = SourceFixed[Picked];
+            continue;
+        }
+        Raw[Component] = (Picked == 5) ? One : 0;
+        *Filtered = FALSE;
+    }
+}
+
 VOID
 RxWarpMachine::Texture(
     _In_ const RX_WARP_INSTRUCTION &Instruction)
@@ -1822,6 +1862,15 @@ RxWarpMachine::Texture(
                 {
                     Request.Gather = TRUE;
                     Request.GatherComponent = SamplerOperand->Swizzle[0];
+
+                    /* The view's mapping decides which channel a gather reads */
+                    if (Request.View != nullptr && Request.View->Mapping != 0x1688 && Request.GatherComponent < 4)
+                    {
+                        UINT Picked = (Request.View->Mapping >> (3 * Request.GatherComponent)) & 7;
+
+                        if (Picked < 4)
+                            Request.GatherComponent = Picked;
+                    }
                 }
 
                 /* Only the low six bits of a programmable offset count, signed */
@@ -1853,9 +1902,11 @@ RxWarpMachine::Texture(
                 break;
         }
 
+        Filtered[Lane] = RxWarpLastByteFilter(FilteredFixed[Lane]);
+        if (Request.View != nullptr && Request.View->Mapping != 0x1688)
+            RxWarpMapComponents(Request.View, Opcode, Raw, &Filtered[Lane], FilteredFixed[Lane]);
         for (UINT Component = 0; Component < 4; Component++)
             Result[Lane][Component] = Raw[Resource->Swizzle[Component]];
-        Filtered[Lane] = RxWarpLastByteFilter(FilteredFixed[Lane]);
     }
     Store(Instruction, 0, Result, TRUE);
 

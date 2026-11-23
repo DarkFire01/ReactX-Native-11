@@ -248,6 +248,7 @@ RxWarp12CreateShaderResourceView(
 
     UNREFERENCED_PARAMETER(Device);
     Target->Stride = 0;
+    View.Mapping = Args->Shader4ComponentMapping & 0xFFF;
     switch (Args->ResourceDimension)
     {
         case D3D12DDI_RD_BUFFER:
