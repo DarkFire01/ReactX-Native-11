@@ -608,6 +608,13 @@ D9QueryDriverCaps(
         D9Trace(L"GetCaps(GETFORMATDATA) failed 0x%08lX", hr);
         return FALSE;
     }
+    for (UINT Index = 0; Index < Adapter->FormatCount; Index++)
+    {
+        const FORMATOP* Op = &Adapter->Formats[Index];
+
+        if ((Op->Operations & FORMATOP_PIXELSIZE) != 0 && Op->PrivateFormatBitCount != 0)
+            D9RegisterFormatBits(static_cast<D3DFORMAT>(Op->Format), Op->PrivateFormatBitCount);
+    }
     D9UnifyDepthSpellings(Adapter->Formats, Adapter->FormatCount);
 
     if (Adapter->QueryCount != 0)

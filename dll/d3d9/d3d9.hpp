@@ -532,6 +532,15 @@ LONG
 D9BytesPerPixel(
     _In_ D3DFORMAT Format);
 
+VOID
+D9RegisterFormatBits(
+    _In_ D3DFORMAT Format,
+    _In_ UINT Bits);
+
+LONG
+D9PixelStride(
+    _In_ D3DFORMAT Format);
+
 BOOLEAN
 D9DriverHasOps(
     _In_ const D9Adapter* Adapter,

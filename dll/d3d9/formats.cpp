@@ -102,6 +102,64 @@ D9BytesPerPixel(
     }
 }
 
+/* Sizes of formats the runtime does not know, as drivers reported them; the first report of a format holds */
+static constexpr UINT D9RegisteredFormatLimit = 64;
+
+static struct
+{
+    D3DFORMAT Format;
+    UINT Bits;
+} D9RegisteredFormats[D9RegisteredFormatLimit];
+
+static UINT D9RegisteredFormatCount;
+static SRWLOCK D9RegisteredFormatLock = SRWLOCK_INIT;
+
+VOID
+D9RegisterFormatBits(
+    _In_ D3DFORMAT Format,
+    _In_ UINT Bits)
+{
+    AcquireSRWLockExclusive(&D9RegisteredFormatLock);
+    for (UINT Index = 0; Index < D9RegisteredFormatCount; Index++)
+    {
+        if (D9RegisteredFormats[Index].Format == Format)
+        {
+            ReleaseSRWLockExclusive(&D9RegisteredFormatLock);
+            return;
+        }
+    }
+    if (D9RegisteredFormatCount < D9RegisteredFormatLimit)
+    {
+        D9RegisteredFormats[D9RegisteredFormatCount].Format = Format;
+        D9RegisteredFormats[D9RegisteredFormatCount].Bits = Bits;
+        D9RegisteredFormatCount += 1;
+    }
+    ReleaseSRWLockExclusive(&D9RegisteredFormatLock);
+}
+
+/* Bytes per pixel for laying out memory, with the sizes drivers reported for formats of their own */
+LONG
+D9PixelStride(
+    _In_ D3DFORMAT Format)
+{
+    LONG Stride = D9BytesPerPixel(Format);
+
+    if (Stride != 0)
+        return Stride;
+
+    AcquireSRWLockShared(&D9RegisteredFormatLock);
+    for (UINT Index = 0; Index < D9RegisteredFormatCount; Index++)
+    {
+        if (D9RegisteredFormats[Index].Format == Format)
+        {
+            Stride = static_cast<LONG>(D9RegisteredFormats[Index].Bits >> 3);
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&D9RegisteredFormatLock);
+    return Stride;
+}
+
 /* Depth formats applications may ask for under a test the driver lists in reversed component order */
 static
 BOOLEAN
