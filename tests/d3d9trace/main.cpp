@@ -24,6 +24,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <utility>
@@ -134,7 +135,8 @@ static const PCSTR TrKernelNames[] =
     "D3DKMTOpenAdapterFromHdc", "D3DKMTOpenAdapterFromLuid", "D3DKMTOpenAdapterFromGdiDisplayName",
     "D3DKMTOpenAdapterFromDeviceName", "D3DKMTCloseAdapter", "D3DKMTEnumAdapters", "D3DKMTEnumAdapters2",
     "D3DKMTGetDisplayModeList", "D3DKMTGetMultisampleMethodList", "D3DKMTCheckMonitorPowerState",
-    "D3DKMTCheckExclusiveOwnership", "D3DKMTSetProperties", "D3DKMTQueryStatistics",
+    "D3DKMTCheckExclusiveOwnership", "D3DKMTSetProperties", "D3DKMTQueryStatistics", "D3DKMTCreateDCFromMemory",
+    "D3DKMTDestroyDCFromMemory",
 };
 
 enum TrKernelCall
@@ -1365,6 +1367,12 @@ TrKernelInputs(
         {
             const D3DKMT_GETDEVICESTATE* State = static_cast<const D3DKMT_GETDEVICESTATE*>(Args);
             TrAppend(Text, " dev %s type %u", TrKernel(State->hDevice).c_str(), State->StateType);
+        }
+        else if (strcmp(TrKernelNames[Slot], "D3DKMTCreateDCFromMemory") == 0)
+        {
+            const D3DKMT_CREATEDCFROMMEMORY* Dc = static_cast<const D3DKMT_CREATEDCFROMMEMORY*>(Args);
+            TrAppend(Text, " fmt %u size %ux%u pitch %u %s palette %s", Dc->Format, Dc->Width, Dc->Height, Dc->Pitch,
+                     Dc->pMemory != nullptr ? "mem" : "nomem", Dc->pColorTable != nullptr ? "set" : "none");
         }
         break;
     }
@@ -3067,6 +3075,233 @@ TrScenarioResourcesPlain(
     Plain->Release();
 }
 
+/* The copy calls between surfaces and textures, and device contexts on surfaces */
+static
+VOID
+TrCopyWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSurface9* Memory = nullptr;
+    IDirect3DSurface9* Plain = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Lockable = nullptr;
+    IDirect3DSurface9* Big = nullptr;
+    IDirect3DSurface9* Multi = nullptr;
+    IDirect3DSurface9* Depth = nullptr;
+    IDirect3DSurface9* DepthOther = nullptr;
+    IDirect3DSurface9* Back = nullptr;
+    IDirect3DSurface9* Level = nullptr;
+    IDirect3DTexture9* Source = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DTexture9* Shaded = nullptr;
+    IDirect3DCubeTexture9* CubeSource = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DVolumeTexture9* VolumeSource = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    RECT Part = { 2, 1, 10, 5 };
+    RECT Wide = { 0, 0, 32, 16 };
+    POINT At = { 4, 2 };
+    HDC Dc = NULL;
+
+    TrPhase("copies create");
+    Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Memory, nullptr);
+    Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Plain, nullptr);
+    Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Target, nullptr);
+    Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &Lockable, nullptr);
+    Device->CreateRenderTarget(32, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Big, nullptr);
+    Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_4_SAMPLES, 0, FALSE, &Multi, nullptr);
+    Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Depth, nullptr);
+    Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &DepthOther, nullptr);
+    Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back);
+    Device->CreateTexture(16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Source, nullptr);
+    Device->CreateTexture(16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    Device->CreateTexture(16, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Shaded, nullptr);
+    Device->CreateCubeTexture(8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &CubeSource, nullptr);
+    Device->CreateCubeTexture(8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube, nullptr);
+    Device->CreateVolumeTexture(8, 4, 2, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &VolumeSource, nullptr);
+    Device->CreateVolumeTexture(8, 4, 2, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Volume, nullptr);
+    if (Memory == nullptr || Plain == nullptr || Target == nullptr || Lockable == nullptr || Big == nullptr ||
+        Multi == nullptr || Depth == nullptr || DepthOther == nullptr || Back == nullptr || Source == nullptr ||
+        Texture == nullptr || Shaded == nullptr || CubeSource == nullptr || Cube == nullptr ||
+        VolumeSource == nullptr || Volume == nullptr)
+    {
+        TrCloseLine();
+        printf("api copies = missing objects\n");
+    }
+    else
+    {
+        TrPhase("copies update surface");
+        TrApi("UpdateSurface", Device->UpdateSurface(Memory, nullptr, Target, nullptr));
+        TrApi("UpdateSurface part", Device->UpdateSurface(Memory, &Part, Lockable, &At));
+        TrApi("UpdateSurface plain", Device->UpdateSurface(Memory, &Part, Plain, nullptr));
+        {
+            IDirect3DSurface9* From = nullptr;
+
+            Source->GetSurfaceLevel(1, &From);
+            Texture->GetSurfaceLevel(1, &Level);
+            TrApi("UpdateSurface level", Device->UpdateSurface(From, nullptr, Level, nullptr));
+            Level->Release();
+            From->Release();
+        }
+        TrApi("UpdateSurface bad", Device->UpdateSurface(Target, nullptr, Memory, nullptr));
+
+        TrPhase("copies stretch");
+        TrApi("StretchRect", Device->StretchRect(Target, nullptr, Big, nullptr, D3DTEXF_NONE));
+        TrApi("StretchRect point", Device->StretchRect(Target, &Part, Big, &Wide, D3DTEXF_POINT));
+        TrApi("StretchRect linear", Device->StretchRect(Big, nullptr, Target, nullptr, D3DTEXF_LINEAR));
+        TrApi("StretchRect plain", Device->StretchRect(Plain, nullptr, Lockable, nullptr, D3DTEXF_NONE));
+        TrApi("StretchRect resolve", Device->StretchRect(Multi, nullptr, Target, nullptr, D3DTEXF_NONE));
+        TrApi("StretchRect depth", Device->StretchRect(Depth, nullptr, DepthOther, nullptr, D3DTEXF_NONE));
+        TrApi("StretchRect back", Device->StretchRect(Back, &Part, Target, nullptr, D3DTEXF_NONE));
+        Shaded->GetSurfaceLevel(0, &Level);
+        TrApi("StretchRect texture", Device->StretchRect(Target, nullptr, Level, nullptr, D3DTEXF_NONE));
+        Level->Release();
+        TrApi("StretchRect bad", Device->StretchRect(Target, nullptr, Memory, nullptr, D3DTEXF_NONE));
+
+        TrPhase("copies fill");
+        TrApi("ColorFill", Device->ColorFill(Target, nullptr, 0xFF102030));
+        TrApi("ColorFill part", Device->ColorFill(Plain, &Part, 0x80405060));
+        TrApi("ColorFill back", Device->ColorFill(Back, &Part, 0x00FF00FF));
+        TrApi("ColorFill bad", Device->ColorFill(Memory, nullptr, 0));
+
+        TrPhase("copies readback");
+        TrApi("GetRenderTargetData", Device->GetRenderTargetData(Target, Memory));
+        TrApi("GetRenderTargetData lockable", Device->GetRenderTargetData(Lockable, Memory));
+        TrApi("GetRenderTargetData bad", Device->GetRenderTargetData(Plain, Memory));
+        Source->GetSurfaceLevel(0, &Level);
+        TrApi("GetRenderTargetData level", Device->GetRenderTargetData(Target, Level));
+        Level->Release();
+
+        TrPhase("copies dc");
+        TrApi("GetDC", Memory->GetDC(&Dc));
+        if (Dc != NULL)
+        {
+            SetPixel(Dc, 1, 1, RGB(0x10, 0x20, 0x30));
+            TrApi("ReleaseDC", Memory->ReleaseDC(Dc));
+        }
+        Dc = NULL;
+        TrApi("GetDC plain", Plain->GetDC(&Dc));
+        if (Dc != NULL)
+            TrApi("ReleaseDC plain", Plain->ReleaseDC(Dc));
+        Dc = NULL;
+        TrApi("GetDC lockable", Lockable->GetDC(&Dc));
+        if (Dc != NULL)
+            TrApi("ReleaseDC lockable", Lockable->ReleaseDC(Dc));
+        Dc = NULL;
+        Source->GetSurfaceLevel(0, &Level);
+        TrApi("GetDC level", Level->GetDC(&Dc));
+        if (Dc != NULL)
+            TrApi("ReleaseDC level", Level->ReleaseDC(Dc));
+        Level->Release();
+
+        TrPhase("copies update texture");
+        TrApi("UpdateTexture", Device->UpdateTexture(Source, Texture));
+        TrApi("UpdateTexture clean", Device->UpdateTexture(Source, Texture));
+        TrApi("AddDirtyRect", Source->AddDirtyRect(&Part));
+        TrApi("UpdateTexture dirty", Device->UpdateTexture(Source, Texture));
+        if (SUCCEEDED(Source->LockRect(1, &Locked, &Part, 0)))
+            Source->UnlockRect(1);
+        TrApi("UpdateTexture lock", Device->UpdateTexture(Source, Texture));
+        TrApi("UpdateTexture cube", Device->UpdateTexture(CubeSource, Cube));
+        TrApi("UpdateTexture cube clean", Device->UpdateTexture(CubeSource, Cube));
+        TrApi("UpdateTexture volume", Device->UpdateTexture(VolumeSource, Volume));
+        TrApi("UpdateTexture volume clean", Device->UpdateTexture(VolumeSource, Volume));
+        TrApi("UpdateTexture bad", Device->UpdateTexture(Texture, Source));
+
+        TrPhase("copies scene");
+        TrApi("BeginScene", Device->BeginScene());
+        TrApi("BeginScene again", Device->BeginScene());
+        TrApi("StretchRect depth scene", Device->StretchRect(Depth, nullptr, DepthOther, nullptr, D3DTEXF_NONE));
+        TrApi("StretchRect scene", Device->StretchRect(Target, nullptr, Big, nullptr, D3DTEXF_NONE));
+        TrApi("EndScene", Device->EndScene());
+        TrApi("EndScene again", Device->EndScene());
+        {
+            IDirect3DTexture9* Larger = nullptr;
+            RECT Area = { 4, 2, 13, 11 };
+
+            Device->CreateTexture(32, 16, 4, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Larger, nullptr);
+            if (Larger != nullptr)
+            {
+                TrApi("UpdateTexture larger", Device->UpdateTexture(Larger, Texture));
+                TrApi("AddDirtyRect larger", Larger->AddDirtyRect(&Area));
+                TrApi("UpdateTexture larger dirty", Device->UpdateTexture(Larger, Texture));
+                Larger->Release();
+            }
+        }
+    }
+
+    TrPhase("copies release");
+    for (IUnknown* Object : std::initializer_list<IUnknown*>{ Memory, Plain, Target, Lockable, Big, Multi, Depth,
+                                                              DepthOther, Back, Source, Texture, Shaded, CubeSource,
+                                                              Cube, VolumeSource, Volume })
+    {
+        if (Object != nullptr)
+            Object->Release();
+    }
+}
+
+/* Copies on a windowed extended device */
+static
+VOID
+TrScenarioCopies(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferFormat = D3DFMT_A8R8G8B8;
+
+    TrPhase("copies device");
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                     nullptr, &Device);
+    TrApi("CreateDeviceEx", hr);
+    if (Device != nullptr)
+    {
+        TrCopyWork(Device);
+        TrPhase("copies device release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+}
+
+/* The same copies on a device of the plain object, whose blits and fills go through the batch */
+static
+VOID
+TrScenarioCopiesPlain(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferFormat = D3DFMT_A8R8G8B8;
+
+    TrPhase("copies device");
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    TrApi("CreateDevice", hr);
+    if (Device != nullptr)
+    {
+        TrCopyWork(Device);
+        TrPhase("copies device release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -3087,6 +3322,8 @@ static const TrScenario TrScenarios[] =
     { "textures_plain", TrScenarioTexturesPlain },
     { "resources", TrScenarioResources },
     { "resources_plain", TrScenarioResourcesPlain },
+    { "copies", TrScenarioCopies },
+    { "copies_plain", TrScenarioCopiesPlain },
 };
 
 static
