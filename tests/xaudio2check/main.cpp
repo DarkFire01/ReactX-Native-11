@@ -3172,6 +3172,92 @@ XcCheckEq(VOID)
 
 static
 VOID
+XcCheckEcho(VOID)
+{
+    static const FXECHO_PARAMETERS Short = { 0.7f, 0.6f, 7.5f };
+    static const FXECHO_PARAMETERS Long = { 0.3f, 0.9f, 260.0f };
+    FXECHO_INITDATA Init = { 20.0f };
+    FXECHO_INITDATA Big = { 1500.0f };
+    XcApoRun& Run = *new XcApoRun();
+    IXAPO* Apo = XcCreateFx("echo", __uuidof(FXEcho), nullptr, 0, TRUE);
+    IXAPO* Sized;
+
+    if (Apo == nullptr)
+        return;
+    XcApoParameters("echo parameters", Apo, sizeof(FXECHO_PARAMETERS));
+    printf("echo initialize = %08lX\n", Apo->Initialize(&Init, 1));
+
+    /* Parameters set before the lock give way to the defaults it writes */
+    XcApoSet(Apo, &Long, sizeof(Long));
+    Run.Apo = Apo;
+    Run.InChannels = 2;
+    Run.OutChannels = 2;
+    Run.Frames = 480;
+    Run.InPlace = FALSE;
+    Run.Amplitude = 0.5f;
+    Run.Seed = 3;
+    printf("echo lock = %08lX\n", XcApoLock(&Run, 48000));
+    XcApoParameters("echo parameters locked", Apo, sizeof(FXECHO_PARAMETERS));
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoParameters("echo parameters processed", Apo, sizeof(FXECHO_PARAMETERS));
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Short, sizeof(Short));
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoParameters("echo parameters short", Apo, sizeof(FXECHO_PARAMETERS));
+    XcApoBlock("echo", &Run, XAPO_BUFFER_SILENT, TRUE);
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("echo", &Run, XAPO_BUFFER_SILENT, FALSE);
+    XcApoBlock("echo", &Run, XAPO_BUFFER_SILENT, TRUE);
+    Run.InPlace = TRUE;
+    XcApoSet(Apo, &Long, sizeof(Long));
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->Reset();
+    XcApoBlock("echo", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+    printf("echo release %lu\n", Apo->Release());
+
+    /* Creation data sets the longest delay, which also caps the default one */
+    Sized = XcCreateFx("echo sized", __uuidof(FXEcho), &Init, sizeof(Init), FALSE);
+    if (Sized != nullptr)
+    {
+        Run.Apo = Sized;
+        Run.InChannels = 1;
+        Run.OutChannels = 1;
+        Run.Frames = 441;
+        Run.InPlace = FALSE;
+        printf("echo sized lock = %08lX\n", XcApoLock(&Run, 44100));
+        XcApoParameters("echo sized parameters", Sized, sizeof(FXECHO_PARAMETERS));
+        XcApoBlock("echo sized", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoSet(Sized, &Short, sizeof(Short));
+        XcApoBlock("echo sized", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoSet(Sized, &Long, sizeof(Long));
+        XcApoBlock("echo sized", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoBlock("echo sized", &Run, XAPO_BUFFER_VALID, TRUE);
+        Sized->UnlockForProcess();
+        printf("echo sized release %lu\n", Sized->Release());
+    }
+    Sized = XcCreateFx("echo big", __uuidof(FXEcho), &Big, 0, FALSE);
+    if (Sized != nullptr)
+    {
+        Run.Apo = Sized;
+        Run.InChannels = 6;
+        Run.OutChannels = 6;
+        Run.Frames = 160;
+        printf("echo big lock = %08lX\n", XcApoLock(&Run, 16000));
+        XcApoParameters("echo big parameters", Sized, sizeof(FXECHO_PARAMETERS));
+        XcApoBlock("echo big", &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoBlock("echo big", &Run, XAPO_BUFFER_VALID, TRUE);
+        Sized->UnlockForProcess();
+        printf("echo big release %lu\n", Sized->Release());
+    }
+    delete &Run;
+}
+
+static
+VOID
 XcCheckApos(VOID)
 {
     PXC_CREATE_APO CreateMeter = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, "CreateAudioVolumeMeter"));
@@ -3185,6 +3271,7 @@ XcCheckApos(VOID)
     if (FAILED(XcCreate(&Engine, 0)))
         return;
     XcCheckEq();
+    XcCheckEcho();
     Engine->Release();
 }
 
