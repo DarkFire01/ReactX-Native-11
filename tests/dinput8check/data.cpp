@@ -836,6 +836,21 @@ DcCheckHidProperties(VOID)
                 }
             }
         }
+
+        /* The type's map file is safe to ask for on the device itself */
+        {
+            DIPROPSTRING MapFile;
+            HRESULT Result;
+
+            memset(&MapFile, 0xCC, sizeof(MapFile));
+            MapFile.diph.dwSize = sizeof(MapFile);
+            MapFile.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+            MapFile.diph.dwObj = 0;
+            MapFile.diph.dwHow = DIPH_DEVICE;
+            Result = Device->GetProperty(MAKEDIPROP(0xFFFD), &MapFile.diph);
+            MapFile.wsz[MAX_PATH - 1] = L'\0';
+            printf("  get mapfile = %08lX first %04X '%s'\n", Result, MapFile.wsz[0], DcWide(MapFile.wsz).c_str());
+        }
         Device->Release();
     }
     Wide->Release();
