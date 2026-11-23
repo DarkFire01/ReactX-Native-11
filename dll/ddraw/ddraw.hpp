@@ -94,6 +94,9 @@ struct DdHardware : public RxKernelDevice
     BOOLEAN UsesFlush1 = FALSE;
     BOOLEAN Lost = FALSE;
 
+    /* The kernel's budget trim registration for the driver device */
+    VOID* TrimHandle = nullptr;
+
     /* The present the runtime is building while the driver runs it; DdPresentCb finishes it */
     D3DKMT_PRESENT Present = {};
 

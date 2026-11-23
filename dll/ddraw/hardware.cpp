@@ -17,6 +17,20 @@ static constexpr UINT DdUmdInterface = 7;
 /* Below this much local memory the runtime borrows from the shared pool */
 static constexpr ULONGLONG DdDefaultMinimumLocal = 0x2000000;
 
+typedef NTSTATUS (APIENTRY* PDD_REGISTER_TRIM)(D3DKMT_REGISTERTRIMNOTIFICATION*);
+typedef NTSTATUS (APIENTRY* PDD_UNREGISTER_TRIM)(D3DKMT_UNREGISTERTRIMNOTIFICATION*);
+typedef NTSTATUS (APIENTRY* PDD_GET_DEVICE_STATE)(D3DKMT_GETDEVICESTATE*);
+
+static
+FARPROC
+DdGdiThunk(
+    _In_z_ PCSTR Name)
+{
+    HMODULE Gdi = GetModuleHandleW(L"gdi32.dll");
+
+    return Gdi != NULL ? GetProcAddress(Gdi, Name) : nullptr;
+}
+
 static
 PFND3DKMT_OPENADAPTERFROMHDC
 DdOpenFromHdcThunk(VOID)
@@ -371,6 +385,80 @@ DdLoadUserModeDriver(
     return TRUE;
 }
 
+/* The kernel asks the driver to give back memory when the budget shrinks */
+static
+VOID
+APIENTRY
+DdTrimNotify(
+    _Inout_ D3DKMT_TRIMNOTIFICATION* Notification)
+{
+    DdHardware* Hardware = static_cast<DdHardware*>(Notification->Context);
+    D3DDDIARG_TRIMRESIDENCYSET Trim = {};
+
+    Trim.TrimFlags = Notification->Flags;
+    Trim.NumBytesToTrim = Notification->NumBytesToTrim;
+    Hardware->DeviceFunctions.pfnTrimResidencySet(Hardware->DriverDevice, &Trim);
+}
+
+static
+BOOLEAN
+DdRegisterTrim(
+    _Inout_ DdHardware* Hardware)
+{
+    static PDD_REGISTER_TRIM Register = reinterpret_cast<PDD_REGISTER_TRIM>(DdGdiThunk("D3DKMTRegisterTrimNotification"));
+    D3DKMT_REGISTERTRIMNOTIFICATION Args = {};
+    NTSTATUS Status;
+
+    if (Hardware->DriverDevice == NULL || Hardware->DeviceFunctions.pfnTrimResidencySet == nullptr || Register == nullptr)
+        return TRUE;
+
+    Args.AdapterLuid = Hardware->AdapterLuid;
+    Args.hDevice = Hardware->DeviceHandle;
+    Args.Callback = DdTrimNotify;
+    Args.Context = Hardware;
+    Status = Register(&Args);
+    if (!NT_SUCCESS(Status))
+    {
+        DdTrace(L"D3DKMTRegisterTrimNotification failed 0x%08lX", Status);
+        return FALSE;
+    }
+    Hardware->TrimHandle = Args.Handle;
+    return TRUE;
+}
+
+/* A stopped device or a desktop switch since the last reset keeps the display from being used */
+static
+BOOLEAN
+DdDeviceUsable(
+    _In_ DdHardware* Hardware)
+{
+    static PDD_GET_DEVICE_STATE GetState = reinterpret_cast<PDD_GET_DEVICE_STATE>(DdGdiThunk("D3DKMTGetDeviceState"));
+    D3DKMT_GETDEVICESTATE State = {};
+
+    if (GetState == nullptr)
+        return TRUE;
+
+    State.hDevice = Hardware->DeviceHandle;
+    State.StateType = D3DKMT_DEVICESTATE_EXECUTION;
+    if (Hardware->Lost ||
+        (NT_SUCCESS(GetState(&State)) && State.ExecutionState == D3DKMT_DEVICEEXECUTION_STOPPED))
+    {
+        DdTrace(L"display device is stopped, running without hardware");
+        return FALSE;
+    }
+
+    /* The reset question is asked of no device in particular */
+    ZeroMemory(&State, sizeof(State));
+    State.StateType = D3DKMT_DEVICESTATE_RESET;
+    GetState(&State);
+    if (State.ResetState.DesktopSwitched)
+    {
+        DdTrace(L"the desktop switched since the device was reset, running without hardware");
+        return FALSE;
+    }
+    return TRUE;
+}
+
 _Ret_maybenull_
 DdHardware*
 DdOpenHardware(
@@ -378,7 +466,7 @@ DdOpenHardware(
 {
     PFND3DKMT_OPENADAPTERFROMHDC OpenFromHdc = DdOpenFromHdcThunk();
     D3DKMT_OPENADAPTERFROMHDC Open = {};
-    BOOLEAN NeedsUpdate = FALSE;
+    BOOL NeedsUpdate = FALSE;
     DdHardware* Hardware;
     NTSTATUS Status;
 
@@ -408,6 +496,11 @@ DdOpenHardware(
     Hardware->AdapterHandle = Open.hAdapter;
     Hardware->AdapterLuid = Open.AdapterLuid;
     Hardware->VidPnSourceId = Open.VidPnSourceId;
+    if (!DdLoadUserModeDriver(Hardware))
+    {
+        DdCloseHardware(Hardware);
+        return nullptr;
+    }
 
     /* A driver waiting on an update reboot is treated as absent */
     if (NT_SUCCESS(DdQueryKernel(Hardware->AdapterHandle, KMTQAITYPE_CHECKDRIVERUPDATESTATUS, &NeedsUpdate,
@@ -418,8 +511,8 @@ DdOpenHardware(
         return nullptr;
     }
 
-    if (!DdLoadUserModeDriver(Hardware) || !DdCreateKernelDevice(Hardware) || !DdOpenDriverAdapter(Hardware) ||
-        !DdCreateDriverDevice(Hardware) || !DdQueryAdapterState(Hardware))
+    if (!DdCreateKernelDevice(Hardware) || !DdOpenDriverAdapter(Hardware) || !DdCreateDriverDevice(Hardware) ||
+        !DdQueryAdapterState(Hardware) || !DdRegisterTrim(Hardware) || !DdDeviceUsable(Hardware))
     {
         DdCloseHardware(Hardware);
         return nullptr;
@@ -432,11 +525,20 @@ VOID
 DdCloseHardware(
     _In_opt_ DdHardware* Hardware)
 {
+    static PDD_UNREGISTER_TRIM Unregister =
+        reinterpret_cast<PDD_UNREGISTER_TRIM>(DdGdiThunk("D3DKMTUnregisterTrimNotification"));
+    D3DKMT_UNREGISTERTRIMNOTIFICATION Stop = {};
     D3DKMT_CLOSEADAPTER Close;
 
     if (Hardware == nullptr)
         return;
 
+    if (Hardware->TrimHandle != nullptr && Unregister != nullptr)
+    {
+        Stop.Handle = Hardware->TrimHandle;
+        Unregister(&Stop);
+        Hardware->TrimHandle = nullptr;
+    }
     DdDestroyDriverDevice(Hardware);
     if (Hardware->DriverAdapter != NULL && Hardware->Functions.pfnCloseAdapter != nullptr)
         Hardware->Functions.pfnCloseAdapter(Hardware->DriverAdapter);
