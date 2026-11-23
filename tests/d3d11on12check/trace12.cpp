@@ -858,7 +858,24 @@ TrAdopt(
             }
         }
 
-        TrInstallFamily(Object, Kind->Family);
+        /* Video command lists come back as plain command lists, and their vtables differ from the graphics one */
+        static thread_local BOOLEAN Probing;
+
+        if (Kind->Family == Tr12FamilyList && !Probing)
+        {
+            IUnknown* Unknown = static_cast<IUnknown*>(Object);
+            ID3D12GraphicsCommandList* Graphics = nullptr;
+
+            Probing = TRUE;
+            if (SUCCEEDED(Unknown->QueryInterface(IID_PPV_ARGS(&Graphics))))
+                Graphics->Release();
+            else
+                Kind = nullptr;
+            Probing = FALSE;
+        }
+
+        if (Kind != nullptr)
+            TrInstallFamily(Object, Kind->Family);
     }
     TrDepth -= 1;
     return Name;
