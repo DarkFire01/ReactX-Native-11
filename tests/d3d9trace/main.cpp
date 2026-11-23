@@ -3831,6 +3831,748 @@ TrScenarioPresentStats(
     Plain->Release();
 }
 
+/* Prints a Get call that returns one DWORD; the value is read only once the call has run */
+static
+VOID
+TrApiValue(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_ const DWORD* Value)
+{
+    TrCloseLine();
+    printf("api %s = %08lX value %08lX\n", Name, Result, *Value);
+}
+
+/* Every render state read, set to what it holds, then set to a changed value */
+static
+VOID
+TrRenderStateWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const struct
+    {
+        UINT State;
+        DWORD Value;
+    } Retireds[] =
+    {
+        { 10, 0 }, { 30, 0 }, { 164, 0 }, { 196, 0xFFFFFFFF }, { 197, 0xFFFFFFFF }, { 1, 0xBAADCAFE }, { 2, 0 },
+    };
+    char Name[64];
+
+    TrPhase("states render");
+    for (const auto& Retired : Retireds)
+    {
+        sprintf_s(Name, "SetRenderState %u initial", Retired.State);
+        TrApi(Name, Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(Retired.State), Retired.Value));
+    }
+    for (UINT State = 0; State < 260; State++)
+    {
+        DWORD Value = 0xDEADBEEF;
+        HRESULT hr = Device->GetRenderState(static_cast<D3DRENDERSTATETYPE>(State), &Value);
+
+        sprintf_s(Name, "GetRenderState %u", State);
+        TrApiValue(Name, hr, &Value);
+        sprintf_s(Name, "SetRenderState %u same", State);
+        TrApi(Name, Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(State), Value));
+        sprintf_s(Name, "SetRenderState %u changed", State);
+        TrApi(Name, Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(State), Value ^ 1));
+        Value = 0xDEADBEEF;
+        hr = Device->GetRenderState(static_cast<D3DRENDERSTATETYPE>(State), &Value);
+        sprintf_s(Name, "GetRenderState %u after", State);
+        TrApiValue(Name, hr, &Value);
+    }
+    TrApi("SetRenderState 1000", Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(1000), 3));
+    TrApi("SetRenderState 0xFFFFFFFF", Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(0xFFFFFFFF), 3));
+    TrApi("SetRenderState cull", Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_CW));
+    TrApi("SetRenderState cull again", Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_CW));
+}
+
+/* Every texture stage state of a few stages, and the stage and type limits */
+static
+VOID
+TrStageStateWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Stages[] = { 0, 1, 7, 8, 9 };
+    char Name[64];
+
+    TrPhase("states stages");
+    for (DWORD Stage : Stages)
+    {
+        for (UINT Type = 0; Type < 35; Type++)
+        {
+            DWORD Value = 0xDEADBEEF;
+            HRESULT hr = Device->GetTextureStageState(Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(Type), &Value);
+
+            sprintf_s(Name, "GetTextureStageState %u %u", Stage, Type);
+            TrApiValue(Name, hr, &Value);
+            sprintf_s(Name, "SetTextureStageState %u %u same", Stage, Type);
+            TrApi(Name, Device->SetTextureStageState(Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(Type), Value));
+            sprintf_s(Name, "SetTextureStageState %u %u changed", Stage, Type);
+            TrApi(Name, Device->SetTextureStageState(Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(Type), Value ^ 1));
+            Value = 0xDEADBEEF;
+            hr = Device->GetTextureStageState(Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(Type), &Value);
+            sprintf_s(Name, "GetTextureStageState %u %u after", Stage, Type);
+            TrApiValue(Name, hr, &Value);
+        }
+    }
+}
+
+/* Every sampler state of pixel, displacement map and vertex samplers, and the limits */
+static
+VOID
+TrSamplerStateWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Samplers[] = { 0, 1, 15, 16, 17, D3DDMAPSAMPLER, D3DVERTEXTEXTURESAMPLER0,
+                                      D3DVERTEXTEXTURESAMPLER3, D3DVERTEXTEXTURESAMPLER3 + 1 };
+    char Name[64];
+
+    TrPhase("states samplers");
+    for (DWORD Sampler : Samplers)
+    {
+        for (UINT Type = 0; Type < 14; Type++)
+        {
+            DWORD Value = 0xDEADBEEF;
+            HRESULT hr = Device->GetSamplerState(Sampler, static_cast<D3DSAMPLERSTATETYPE>(Type), &Value);
+
+            sprintf_s(Name, "GetSamplerState %u %u", Sampler, Type);
+            TrApiValue(Name, hr, &Value);
+            sprintf_s(Name, "SetSamplerState %u %u same", Sampler, Type);
+            TrApi(Name, Device->SetSamplerState(Sampler, static_cast<D3DSAMPLERSTATETYPE>(Type), Value));
+            sprintf_s(Name, "SetSamplerState %u %u changed", Sampler, Type);
+            TrApi(Name, Device->SetSamplerState(Sampler, static_cast<D3DSAMPLERSTATETYPE>(Type), Value ^ 1));
+            Value = 0xDEADBEEF;
+            hr = Device->GetSamplerState(Sampler, static_cast<D3DSAMPLERSTATETYPE>(Type), &Value);
+            sprintf_s(Name, "GetSamplerState %u %u after", Sampler, Type);
+            TrApiValue(Name, hr, &Value);
+        }
+    }
+}
+
+/* Prints a matrix as the hash the driver side uses */
+static
+VOID
+TrApiMatrix(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_ const D3DMATRIX* Matrix)
+{
+    TrCloseLine();
+    printf("api %s = %08lX matrix %08X\n", Name, Result, TrHash(Matrix, sizeof(*Matrix)));
+}
+
+/* Transforms set, read back and multiplied, over the view, projection, texture and world slots */
+static
+VOID
+TrTransformWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Types[] = { 0, 1, D3DTS_VIEW, D3DTS_PROJECTION, 4, D3DTS_TEXTURE0, D3DTS_TEXTURE7, 24, 255,
+                                   D3DTS_WORLD, D3DTS_WORLD1, D3DTS_WORLDMATRIX(255), D3DTS_WORLDMATRIX(256), 1000 };
+    D3DMATRIX Matrix;
+    D3DMATRIX Read;
+    char Name[64];
+
+    TrPhase("states transforms");
+    for (UINT Index = 0; Index < 16; Index++)
+        reinterpret_cast<FLOAT*>(&Matrix)[Index] = static_cast<FLOAT>(Index + 1) * 0.5f;
+    for (DWORD Type : Types)
+    {
+        D3DTRANSFORMSTATETYPE State = static_cast<D3DTRANSFORMSTATETYPE>(Type);
+
+        FillMemory(&Read, sizeof(Read), 0xCD);
+        sprintf_s(Name, "GetTransform %u", Type);
+        TrApiMatrix(Name, Device->GetTransform(State, &Read), &Read);
+        sprintf_s(Name, "SetTransform %u", Type);
+        TrApi(Name, Device->SetTransform(State, &Matrix));
+        sprintf_s(Name, "SetTransform %u again", Type);
+        TrApi(Name, Device->SetTransform(State, &Matrix));
+        sprintf_s(Name, "MultiplyTransform %u", Type);
+        TrApi(Name, Device->MultiplyTransform(State, &Matrix));
+        FillMemory(&Read, sizeof(Read), 0xCD);
+        sprintf_s(Name, "GetTransform %u after", Type);
+        TrApiMatrix(Name, Device->GetTransform(State, &Read), &Read);
+    }
+
+    /* Types past the last world matrix land on it */
+    Matrix._11 = 9.0f;
+    TrApi("SetTransform 4000", Device->SetTransform(static_cast<D3DTRANSFORMSTATETYPE>(4000), &Matrix));
+    FillMemory(&Read, sizeof(Read), 0xCD);
+    TrApiMatrix("GetTransform 511 last", Device->GetTransform(D3DTS_WORLDMATRIX(255), &Read), &Read);
+    Matrix._34 = 0.0f;
+    Matrix._33 = 0.0f;
+    TrApi("SetTransform projection flat", Device->SetTransform(D3DTS_PROJECTION, &Matrix));
+    Matrix._33 = 2.0f;
+    Matrix._34 = 2.0f;
+    TrApi("SetTransform projection even", Device->SetTransform(D3DTS_PROJECTION, &Matrix));
+}
+
+/* Prints a viewport read back */
+static
+VOID
+TrApiViewport(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_ const D3DVIEWPORT9* Viewport)
+{
+    TrCloseLine();
+    printf("api %s = %08lX viewport %lu %lu %lu %lu %08X %08X\n", Name, Result, Viewport->X, Viewport->Y,
+           Viewport->Width, Viewport->Height, TrBits(Viewport->MinZ), TrBits(Viewport->MaxZ));
+}
+
+/* Viewports inside and outside the target, depth ranges, scissor rectangles */
+static
+VOID
+TrViewportWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DVIEWPORT9 Viewports[] =
+    {
+        { 0, 0, 16, 8, 0.0f, 1.0f },
+        { 0, 0, 16, 8, 0.0f, 1.0f },
+        { 2, 3, 10, 5, 0.25f, 0.75f },
+        { 2, 3, 10, 5, 0.25f, 0.5f },
+        { 0, 0, 0, 0, 0.0f, 1.0f },
+        { 0, 0, 4000, 4000, 0.0f, 1.0f },
+        { 60, 0, 10, 10, 0.0f, 1.0f },
+        { 0, 0, 16, 8, 0.75f, 0.25f },
+        { 0, 0, 16, 8, -1.0f, 2.0f },
+        { 0, 0, 16, 8, 0.5f, 0.5f },
+        { 0xFFFFFFF0, 0, 32, 8, 0.0f, 1.0f },
+    };
+    static const RECT Rects[] =
+    {
+        { 1, 2, 9, 7 }, { 1, 2, 9, 7 }, { 0, 0, 0, 0 }, { 5, 5, 2, 2 }, { -4, -4, 4000, 4000 }, { 0, 0, 1, 1 },
+    };
+    D3DVIEWPORT9 Read;
+    RECT Rect;
+    char Name[64];
+
+    TrPhase("states viewport");
+    FillMemory(&Read, sizeof(Read), 0xCD);
+    TrApiViewport("GetViewport", Device->GetViewport(&Read), &Read);
+    for (UINT Index = 0; Index < _countof(Viewports); Index++)
+    {
+        sprintf_s(Name, "SetViewport %u", Index);
+        TrApi(Name, Device->SetViewport(&Viewports[Index]));
+        FillMemory(&Read, sizeof(Read), 0xCD);
+        sprintf_s(Name, "GetViewport %u", Index);
+        TrApiViewport(Name, Device->GetViewport(&Read), &Read);
+    }
+
+    TrPhase("states scissor");
+    SetRect(&Rect, 9, 9, 9, 9);
+    TrApi("GetScissorRect", Device->GetScissorRect(&Rect));
+    TrCloseLine();
+    printf("api scissor = %ld %ld %ld %ld\n", Rect.left, Rect.top, Rect.right, Rect.bottom);
+    for (UINT Index = 0; Index < _countof(Rects); Index++)
+    {
+        sprintf_s(Name, "SetScissorRect %u", Index);
+        TrApi(Name, Device->SetScissorRect(&Rects[Index]));
+        SetRect(&Rect, 9, 9, 9, 9);
+        sprintf_s(Name, "GetScissorRect %u", Index);
+        TrApi(Name, Device->GetScissorRect(&Rect));
+        TrCloseLine();
+        printf("api scissor = %ld %ld %ld %ld\n", Rect.left, Rect.top, Rect.right, Rect.bottom);
+    }
+}
+
+/* Prints a material read back */
+static
+VOID
+TrApiMaterial(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_ const D3DMATERIAL9* Material)
+{
+    TrCloseLine();
+    printf("api %s = %08lX material %08X\n", Name, Result, TrHash(Material, sizeof(*Material)));
+}
+
+/* Prints a light read back */
+static
+VOID
+TrApiLight(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_ const D3DLIGHT9* Light)
+{
+    TrCloseLine();
+    printf("api %s = %08lX light %08X\n", Name, Result, TrHash(Light, sizeof(*Light)));
+}
+
+/* Material, lights and their enables, user clip planes, clip status and N patch mode */
+static
+VOID
+TrLightingWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Lights[] = { 0, 1, 7, 8, 100 };
+    D3DMATERIAL9 Material = {};
+    D3DMATERIAL9 ReadMaterial;
+    D3DLIGHT9 Light = {};
+    D3DLIGHT9 ReadLight;
+    D3DCLIPSTATUS9 Status = { D3DCS_LEFT, D3DCS_ALL };
+    D3DCLIPSTATUS9 ReadStatus;
+    FLOAT Plane[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    FLOAT ReadPlane[4];
+    BOOL Enabled;
+    char Name[64];
+
+    TrPhase("states material");
+    FillMemory(&ReadMaterial, sizeof(ReadMaterial), 0xCD);
+    TrApiMaterial("GetMaterial", Device->GetMaterial(&ReadMaterial), &ReadMaterial);
+    Material.Diffuse.r = 0.5f;
+    Material.Power = 3.0f;
+    TrApi("SetMaterial", Device->SetMaterial(&Material));
+    TrApi("SetMaterial again", Device->SetMaterial(&Material));
+    Material.Power = -1.0f;
+    TrApi("SetMaterial negative", Device->SetMaterial(&Material));
+    FillMemory(&ReadMaterial, sizeof(ReadMaterial), 0xCD);
+    TrApiMaterial("GetMaterial", Device->GetMaterial(&ReadMaterial), &ReadMaterial);
+
+    TrPhase("states lights");
+    Light.Type = D3DLIGHT_DIRECTIONAL;
+    Light.Diffuse.r = 1.0f;
+    Light.Direction.z = 1.0f;
+    for (DWORD Index : Lights)
+    {
+        FillMemory(&ReadLight, sizeof(ReadLight), 0xCD);
+        sprintf_s(Name, "GetLight %lu", Index);
+        TrApiLight(Name, Device->GetLight(Index, &ReadLight), &ReadLight);
+        Enabled = 7;
+        sprintf_s(Name, "GetLightEnable %lu", Index);
+        TrApiValue(Name, Device->GetLightEnable(Index, &Enabled), reinterpret_cast<DWORD*>(&Enabled));
+        sprintf_s(Name, "SetLight %lu", Index);
+        TrApi(Name, Device->SetLight(Index, &Light));
+        sprintf_s(Name, "SetLight %lu again", Index);
+        TrApi(Name, Device->SetLight(Index, &Light));
+        sprintf_s(Name, "LightEnable %lu", Index);
+        TrApi(Name, Device->LightEnable(Index, TRUE));
+        sprintf_s(Name, "LightEnable %lu again", Index);
+        TrApi(Name, Device->LightEnable(Index, 5));
+        FillMemory(&ReadLight, sizeof(ReadLight), 0xCD);
+        sprintf_s(Name, "GetLight %lu after", Index);
+        TrApiLight(Name, Device->GetLight(Index, &ReadLight), &ReadLight);
+        Enabled = 7;
+        sprintf_s(Name, "GetLightEnable %lu after", Index);
+        TrApiValue(Name, Device->GetLightEnable(Index, &Enabled), reinterpret_cast<DWORD*>(&Enabled));
+    }
+    TrApi("LightEnable 20 new", Device->LightEnable(20, TRUE));
+    FillMemory(&ReadLight, sizeof(ReadLight), 0xCD);
+    TrApiLight("GetLight 20", Device->GetLight(20, &ReadLight), &ReadLight);
+    TrApi("LightEnable 21 off", Device->LightEnable(21, FALSE));
+    TrApi("LightEnable 1 off", Device->LightEnable(1, FALSE));
+    Light.Type = D3DLIGHT_SPOT;
+    Light.Range = 10.0f;
+    Light.Theta = 0.5f;
+    Light.Phi = 1.0f;
+    TrApi("SetLight spot", Device->SetLight(2, &Light));
+    Light.Type = static_cast<D3DLIGHTTYPE>(9);
+    TrApi("SetLight bad type", Device->SetLight(3, &Light));
+    Light.Type = D3DLIGHT_POINT;
+    Light.Range = -1.0f;
+    TrApi("SetLight bad range", Device->SetLight(3, &Light));
+    Light.Range = 1.0f;
+    Light.Attenuation0 = -1.0f;
+    TrApi("SetLight bad attenuation", Device->SetLight(3, &Light));
+    Light.Type = D3DLIGHT_DIRECTIONAL;
+    Light.Attenuation0 = 0.0f;
+    Light.Direction.z = 0.0f;
+    TrApi("SetLight zero direction", Device->SetLight(3, &Light));
+
+    TrPhase("states clip planes");
+    for (DWORD Index = 0; Index < 8; Index++)
+    {
+        for (FLOAT& Value : ReadPlane)
+            Value = -9.0f;
+        sprintf_s(Name, "GetClipPlane %lu", Index);
+        TrApi(Name, Device->GetClipPlane(Index, ReadPlane));
+        TrCloseLine();
+        printf("api plane = %08X\n", TrHash(ReadPlane, sizeof(ReadPlane)));
+        sprintf_s(Name, "SetClipPlane %lu", Index);
+        TrApi(Name, Device->SetClipPlane(Index, Plane));
+        sprintf_s(Name, "SetClipPlane %lu again", Index);
+        TrApi(Name, Device->SetClipPlane(Index, Plane));
+    }
+
+    TrPhase("states clip status");
+    FillMemory(&ReadStatus, sizeof(ReadStatus), 0xCD);
+    TrApi("GetClipStatus", Device->GetClipStatus(&ReadStatus));
+    TrCloseLine();
+    printf("api status = %08lX %08lX\n", ReadStatus.ClipUnion, ReadStatus.ClipIntersection);
+    TrApi("SetClipStatus", Device->SetClipStatus(&Status));
+    FillMemory(&ReadStatus, sizeof(ReadStatus), 0xCD);
+    TrApi("GetClipStatus", Device->GetClipStatus(&ReadStatus));
+    TrCloseLine();
+    printf("api status = %08lX %08lX\n", ReadStatus.ClipUnion, ReadStatus.ClipIntersection);
+
+    TrPhase("states npatch");
+    TrCloseLine();
+    printf("api GetNPatchMode = %08X\n", TrBits(Device->GetNPatchMode()));
+    TrApi("SetNPatchMode 2", Device->SetNPatchMode(2.0f));
+    TrApi("SetNPatchMode 2 again", Device->SetNPatchMode(2.0f));
+    TrApi("SetNPatchMode -1", Device->SetNPatchMode(-1.0f));
+    TrCloseLine();
+    printf("api GetNPatchMode = %08X\n", TrBits(Device->GetNPatchMode()));
+    TrApi("SetNPatchMode 0", Device->SetNPatchMode(0.0f));
+}
+
+/* Vertex processing mode, FVF, streams, indices and textures bound and read back */
+static
+VOID
+TrBindingWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Fvfs[] = { 0, D3DFVF_XYZ, D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, D3DFVF_XYZRHW,
+                                  D3DFVF_XYZ | D3DFVF_XYZRHW, 0xFFFFFFFF, D3DFVF_XYZB5 | D3DFVF_LASTBETA_UBYTE4 };
+    static constexpr UINT Instanced = static_cast<UINT>(D3DSTREAMSOURCE_INSTANCEDATA);
+    static const UINT Frequencies[] = { 1, 0, 3, D3DSTREAMSOURCE_INDEXEDDATA | 2, Instanced | 1,
+                                        D3DSTREAMSOURCE_INDEXEDDATA | Instanced | 1, D3DSTREAMSOURCE_INDEXEDDATA };
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DVertexBuffer9* ReadBuffer;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    IDirect3DIndexBuffer9* ReadIndices;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DBaseTexture9* ReadTexture;
+    UINT Offset;
+    UINT Stride;
+    DWORD Fvf;
+    char Name[64];
+
+    TrPhase("states vertex processing");
+    TrCloseLine();
+    printf("api GetSoftwareVertexProcessing = %d\n", Device->GetSoftwareVertexProcessing());
+    TrApi("SetSoftwareVertexProcessing TRUE", Device->SetSoftwareVertexProcessing(TRUE));
+    TrCloseLine();
+    printf("api GetSoftwareVertexProcessing = %d\n", Device->GetSoftwareVertexProcessing());
+    TrApi("SetSoftwareVertexProcessing 2", Device->SetSoftwareVertexProcessing(2));
+    TrCloseLine();
+    printf("api GetSoftwareVertexProcessing = %d\n", Device->GetSoftwareVertexProcessing());
+    TrApi("SetSoftwareVertexProcessing FALSE", Device->SetSoftwareVertexProcessing(FALSE));
+    TrCloseLine();
+    printf("api GetSoftwareVertexProcessing = %d\n", Device->GetSoftwareVertexProcessing());
+
+    TrPhase("states fvf");
+    for (DWORD Value : Fvfs)
+    {
+        sprintf_s(Name, "SetFVF %08lX", Value);
+        TrApi(Name, Device->SetFVF(Value));
+        Fvf = 0xDEADBEEF;
+        sprintf_s(Name, "GetFVF %08lX", Value);
+        TrApiValue(Name, Device->GetFVF(&Fvf), &Fvf);
+    }
+    TrApi("SetFVF again", Device->SetFVF(0xFFFFFFFF));
+
+    TrPhase("states streams");
+    TrApi("CreateVertexBuffer", Device->CreateVertexBuffer(256, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &Buffer,
+                                                           nullptr));
+    TrApi("CreateIndexBuffer", Device->CreateIndexBuffer(64, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT,
+                                                         &Indices, nullptr));
+    for (UINT Stream = 0; Stream < 17; Stream += 5)
+    {
+        sprintf_s(Name, "SetStreamSource %u", Stream);
+        TrApi(Name, Device->SetStreamSource(Stream, Buffer, 16, 12));
+        sprintf_s(Name, "SetStreamSource %u again", Stream);
+        TrApi(Name, Device->SetStreamSource(Stream, Buffer, 16, 12));
+        ReadBuffer = reinterpret_cast<IDirect3DVertexBuffer9*>(1);
+        Offset = 99;
+        Stride = 99;
+        sprintf_s(Name, "GetStreamSource %u", Stream);
+        TrApi(Name, Device->GetStreamSource(Stream, &ReadBuffer, &Offset, &Stride));
+        TrCloseLine();
+        printf("api stream = %d %u %u\n", ReadBuffer == Buffer ? 1 : ReadBuffer == nullptr ? 0 : 2, Offset, Stride);
+        if (ReadBuffer == Buffer)
+            ReadBuffer->Release();
+    }
+    TrApi("SetStreamSource odd offset", Device->SetStreamSource(1, Buffer, 3, 12));
+    TrApi("SetStreamSource odd stride", Device->SetStreamSource(1, Buffer, 4, 3));
+    TrApi("SetStreamSource stride 0", Device->SetStreamSource(1, Buffer, 0, 0));
+    TrApi("SetStreamSource null", Device->SetStreamSource(1, nullptr, 0, 0));
+    TrApi("SetStreamSource null offset", Device->SetStreamSource(2, nullptr, 8, 4));
+    for (UINT Frequency : Frequencies)
+    {
+        UINT Read = 0xDEADBEEF;
+
+        sprintf_s(Name, "SetStreamSourceFreq 0 %08X", Frequency);
+        TrApi(Name, Device->SetStreamSourceFreq(0, Frequency));
+        sprintf_s(Name, "SetStreamSourceFreq 1 %08X", Frequency);
+        TrApi(Name, Device->SetStreamSourceFreq(1, Frequency));
+        sprintf_s(Name, "GetStreamSourceFreq 1 %08X", Frequency);
+        TrApiValue(Name, Device->GetStreamSourceFreq(1, &Read), reinterpret_cast<DWORD*>(&Read));
+    }
+    TrApi("SetStreamSourceFreq 16", Device->SetStreamSourceFreq(16, 1));
+    TrApi("SetStreamSourceFreq 0 1", Device->SetStreamSourceFreq(0, 1));
+    TrApi("SetStreamSourceFreq 1 1", Device->SetStreamSourceFreq(1, 1));
+
+    TrPhase("states indices");
+    TrApi("SetIndices", Device->SetIndices(Indices));
+    TrApi("SetIndices again", Device->SetIndices(Indices));
+    ReadIndices = reinterpret_cast<IDirect3DIndexBuffer9*>(1);
+    TrApi("GetIndices", Device->GetIndices(&ReadIndices));
+    TrCloseLine();
+    printf("api indices = %d\n", ReadIndices == Indices ? 1 : ReadIndices == nullptr ? 0 : 2);
+    if (ReadIndices == Indices)
+        ReadIndices->Release();
+    TrApi("SetIndices null", Device->SetIndices(nullptr));
+    ReadIndices = reinterpret_cast<IDirect3DIndexBuffer9*>(1);
+    TrApi("GetIndices null", Device->GetIndices(&ReadIndices));
+    TrCloseLine();
+    printf("api indices = %d\n", ReadIndices == Indices ? 1 : ReadIndices == nullptr ? 0 : 2);
+
+    TrPhase("states textures");
+    TrApi("CreateTexture", Device->CreateTexture(8, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr));
+    TrApi("CreateCubeTexture", Device->CreateCubeTexture(8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube, nullptr));
+    TrApi("SetTexture 0", Device->SetTexture(0, Texture));
+    TrApi("SetTexture 0 again", Device->SetTexture(0, Texture));
+    TrApi("SetTexture 1 cube", Device->SetTexture(1, Cube));
+    TrApi("SetTexture 16", Device->SetTexture(16, Texture));
+    TrApi("SetTexture dmap", Device->SetTexture(D3DDMAPSAMPLER, Texture));
+    TrApi("SetTexture vertex", Device->SetTexture(D3DVERTEXTEXTURESAMPLER0, Texture));
+    TrApi("SetTexture vertex 3", Device->SetTexture(D3DVERTEXTEXTURESAMPLER3, Cube));
+    ReadTexture = reinterpret_cast<IDirect3DBaseTexture9*>(1);
+    TrApi("GetTexture 0", Device->GetTexture(0, &ReadTexture));
+    TrCloseLine();
+    printf("api texture = %d\n", ReadTexture == Texture ? 1 : ReadTexture == nullptr ? 0 : 2);
+    if (ReadTexture == Texture)
+        ReadTexture->Release();
+    ReadTexture = reinterpret_cast<IDirect3DBaseTexture9*>(1);
+    TrApi("GetTexture 2", Device->GetTexture(2, &ReadTexture));
+    TrCloseLine();
+    printf("api texture = %d\n", ReadTexture == nullptr ? 0 : 2);
+    TrApi("SetTexture 0 null", Device->SetTexture(0, nullptr));
+    TrApi("SetTexture 1 null", Device->SetTexture(1, nullptr));
+    TrApi("SetTexture vertex null", Device->SetTexture(D3DVERTEXTEXTURESAMPLER0, nullptr));
+    TrApi("SetTexture vertex 3 null", Device->SetTexture(D3DVERTEXTEXTURESAMPLER3, nullptr));
+    TrApi("SetTexture dmap null", Device->SetTexture(D3DDMAPSAMPLER, nullptr));
+    TrApi("SetStreamSource 0 null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetStreamSource 5 null", Device->SetStreamSource(5, nullptr, 0, 0));
+    TrApi("SetStreamSource 10 null", Device->SetStreamSource(10, nullptr, 0, 0));
+    TrApi("SetStreamSource 15 null", Device->SetStreamSource(15, nullptr, 0, 0));
+    TrRelease(Texture);
+    TrRelease(Cube);
+    TrRelease(Buffer);
+    TrRelease(Indices);
+}
+
+/* All the fixed function and pipeline state of one device. Null pointers, lights near the top of the index
+   range, a texture on sampler 261 and sampler state types past 13 are left out: the system crashes on them */
+static
+VOID
+TrStateWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    TrRenderStateWork(Device);
+    TrStageStateWork(Device);
+    TrSamplerStateWork(Device);
+    TrTransformWork(Device);
+    TrViewportWork(Device);
+    TrLightingWork(Device);
+    TrBindingWork(Device);
+}
+
+/* Pipeline state on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioStates(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.EnableAutoDepthStencil = TRUE;
+    Parameters.AutoDepthStencilFormat = D3DFMT_D24S8;
+
+    TrPhase("states create");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrStateWork(Device);
+        TrPhase("states release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
+/* The same state on hardware and pure devices of the plain object */
+static
+VOID
+TrScenarioStatesPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING,
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "states plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrStateWork(Device);
+            TrPhase("states plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
+/* A present hands everything recorded so far to the driver, so a batching device's calls come out in a
+   fixed place; each stretch between presents stays short enough that no worker takes part of it */
+static
+VOID
+TrSettle(
+    _In_ IDirect3DDevice9* Device)
+{
+    TrApi("Present settle", Device->Present(nullptr, nullptr, nullptr, nullptr));
+}
+
+/* The vertex pipeline states, clip planes and stream frequencies the software pipeline keeps from the
+   driver, then a few other states, read back */
+static
+VOID
+TrSoftwareStateSet(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD States[] = { 29, 48, 60, 137, 139, 143, 152, 157, 170, 7, 22, 164 };
+    FLOAT Plane[4] = { 1.0f, 0.0f, 0.0f, 2.0f };
+    D3DVIEWPORT9 Viewport = { 1, 1, 8, 8, 0.5f, 0.5f };
+    char Name[64];
+    DWORD Value;
+    HRESULT hr;
+
+    for (DWORD State : States)
+    {
+        Value = 0xDEADBEEF;
+        hr = Device->GetRenderState(static_cast<D3DRENDERSTATETYPE>(State), &Value);
+        sprintf_s(Name, "GetRenderState %lu", State);
+        TrApiValue(Name, hr, &Value);
+        sprintf_s(Name, "SetRenderState %lu changed", State);
+        TrApi(Name, Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(State), Value ^ 3));
+    }
+    TrApi("SetClipPlane 0", Device->SetClipPlane(0, Plane));
+    TrApi("SetClipPlane 9", Device->SetClipPlane(9, Plane));
+    TrApi("SetStreamSourceFreq 1", Device->SetStreamSourceFreq(1, D3DSTREAMSOURCE_INDEXEDDATA | 4));
+    TrApi("SetStreamSourceFreq 0 zero", Device->SetStreamSourceFreq(0, 0));
+    TrApi("SetTextureStageState bump", Device->SetTextureStageState(1, D3DTSS_BUMPENVMAT10, 0x3F000000));
+    TrApi("SetTextureStageState constant", Device->SetTextureStageState(2, D3DTSS_CONSTANT, 0x80FF4020));
+    TrApi("SetSamplerState filter", Device->SetSamplerState(3, D3DSAMP_MIPFILTER, D3DTEXF_GAUSSIANQUAD));
+    TrApi("SetViewport", Device->SetViewport(&Viewport));
+    TrApi("SetNPatchMode", Device->SetNPatchMode(3.0f));
+}
+
+/* State on a device that records its driver calls for a worker thread */
+static
+VOID
+TrSoftwareStateWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    D3DMATRIX Projection = {};
+    FLOAT Plane[4] = {};
+    UINT Frequency = 0;
+
+    TrPhase("software settle");
+    TrSettle(Device);
+
+    TrPhase("software states");
+    TrCloseLine();
+    printf("api GetSoftwareVertexProcessing = %d\n", Device->GetSoftwareVertexProcessing());
+    TrSoftwareStateSet(Device);
+    Projection._33 = 2.0f;
+    Projection._34 = 1.0f;
+    Projection._43 = -1.0f;
+    TrApi("SetTransform projection", Device->SetTransform(D3DTS_PROJECTION, &Projection));
+    TrSettle(Device);
+
+    TrPhase("software switch");
+    TrApi("SetSoftwareVertexProcessing TRUE", Device->SetSoftwareVertexProcessing(TRUE));
+    TrSoftwareStateSet(Device);
+    TrSettle(Device);
+    TrApi("SetSoftwareVertexProcessing FALSE", Device->SetSoftwareVertexProcessing(FALSE));
+    TrCloseLine();
+    printf("api GetSoftwareVertexProcessing = %d\n", Device->GetSoftwareVertexProcessing());
+    TrSettle(Device);
+    TrApi("SetSoftwareVertexProcessing TRUE", Device->SetSoftwareVertexProcessing(TRUE));
+    TrApi("SetStreamSourceFreq 2", Device->SetStreamSourceFreq(2, 7));
+    TrApi("SetSoftwareVertexProcessing FALSE", Device->SetSoftwareVertexProcessing(FALSE));
+    TrSettle(Device);
+    TrApi("SetClipPlane 1", Device->SetClipPlane(1, Plane));
+    TrSettle(Device);
+
+    TrPhase("software read back");
+    TrApi("GetClipPlane 9", Device->GetClipPlane(9, Plane));
+    TrCloseLine();
+    printf("api plane = %08X\n", TrHash(Plane, sizeof(Plane)));
+    TrApi("GetStreamSourceFreq 1", Device->GetStreamSourceFreq(1, &Frequency));
+    TrCloseLine();
+    printf("api frequency = %08X\n", Frequency);
+    TrCloseLine();
+    printf("api GetNPatchMode = %08X\n", TrBits(Device->GetNPatchMode()));
+}
+
+/* State on software and mixed vertex processing devices of the plain object, whose driver calls go
+   through a worker thread */
+static
+VOID
+TrScenarioStatesSoftware(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] = { D3DCREATE_SOFTWARE_VERTEXPROCESSING, D3DCREATE_MIXED_VERTEXPROCESSING };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "states software create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSoftwareStateWork(Device);
+            TrPhase("states software release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -3856,6 +4598,9 @@ static const TrScenario TrScenarios[] =
     { "shared", TrScenarioShared },
     { "cursor", TrScenarioCursor },
     { "presentstats", TrScenarioPresentStats },
+    { "states", TrScenarioStates },
+    { "states_plain", TrScenarioStatesPlain },
+    { "states_software", TrScenarioStatesSoftware },
 };
 
 static
