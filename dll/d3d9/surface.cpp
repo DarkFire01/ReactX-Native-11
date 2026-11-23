@@ -679,6 +679,27 @@ D9Surface::UnlockRect()
     return hr;
 }
 
+D9Resource*
+D9Surface::CopyResource(
+    _Out_ UINT* Index) const
+{
+    if (Texture != nullptr)
+    {
+        *Index = Subresource;
+        return Texture->DriverResource();
+    }
+    *Index = 0;
+    return Resource;
+}
+
+BOOLEAN
+D9Surface::IsBusy() const
+{
+    if (Texture != nullptr)
+        return Texture->IsSubresourceLocked(Subresource);
+    return IsLocked;
+}
+
 STDMETHODIMP
 D9Surface::GetDC(
     _Out_ HDC* Dc)

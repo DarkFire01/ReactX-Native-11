@@ -325,6 +325,28 @@ public:
     VOID
     CountAsDefault(VOID);
 
+    /* The driver resource copies name, and which of its subresources this surface is */
+    D9Resource*
+    CopyResource(
+        _Out_ UINT* Index) const;
+
+    /* The texture a level or face belongs to, or nothing for a surface of its own */
+    D9TextureCore*
+    OwnerTexture() const
+    {
+        return Texture;
+    }
+
+    /* Locked, or lending its memory to a device context */
+    BOOLEAN
+    IsBusy() const;
+
+    BOOLEAN
+    IsDiscardable() const
+    {
+        return Discard;
+    }
+
     /* IUnknown */
     STDMETHOD(QueryInterface)(
         _In_ REFIID Iid,
@@ -974,6 +996,10 @@ D9IsHiddenDepth(
 
 BOOLEAN
 D9IsDxtFormat(
+    _In_ D3DFORMAT Format);
+
+BOOLEAN
+D9HasStencil(
     _In_ D3DFORMAT Format);
 
 /* present.cpp */

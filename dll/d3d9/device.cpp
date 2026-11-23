@@ -150,7 +150,6 @@ D9IsLockableDepth(
 }
 
 /* Depth formats with stencil bits */
-static
 BOOLEAN
 D9HasStencil(
     _In_ D3DFORMAT Format)
@@ -1997,51 +1996,9 @@ D9Device::CreateIndexBuffer(
 }
 
 STDMETHODIMP
-D9Device::UpdateSurface(
-    _In_opt_ IDirect3DSurface9* SourceSurface,
-    _In_opt_ const RECT* SourceRect,
-    _In_opt_ IDirect3DSurface9* DestinationSurface,
-    _In_opt_ const POINT* DestPoint)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetRenderTargetData(
-    _Out_ IDirect3DSurface9* RenderTarget,
-    _Out_ IDirect3DSurface9* DestSurface)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::GetFrontBufferData(
     _In_ UINT SwapChain,
     _Out_ IDirect3DSurface9* DestSurface)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::StretchRect(
-    _In_opt_ IDirect3DSurface9* SourceSurface,
-    _In_opt_ const RECT* SourceRect,
-    _In_opt_ IDirect3DSurface9* DestSurface,
-    _In_opt_ const RECT* DestRect,
-    _In_ D3DTEXTUREFILTERTYPE Filter)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::ColorFill(
-    _In_opt_ IDirect3DSurface9* Surface,
-    _In_opt_ const RECT* Rect,
-    _In_ D3DCOLOR Color)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;
