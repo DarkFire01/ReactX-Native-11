@@ -2762,6 +2762,8 @@ SceneCompute(
     return hr;
 }
 
+#include "ops.inl"
+
 static const TcScene Scenes[] =
 {
     { "ddi", SceneDdi },
@@ -2778,6 +2780,7 @@ static const TcScene Scenes[] =
     { "msaa", SceneMultisample },
     { "texture", SceneTexture },
     { "compute", SceneCompute },
+    { "opsflow", SceneOpsFlow },
 };
 
 static
