@@ -9,7 +9,9 @@
  * The system d3d9.dll is loaded with 9on12 requested. For reactx the driver beside this program is
  * loaded first, so the runtime's load of d3d9on12.dll by name finds it. The runtime's GetProcAddress
  * import is pointed at a wrapper in this process only, which wraps the private open and the adapter
- * table and prints every answer. Run once per runtime in separate processes and diff the output.
+ * table and prints every answer. The device DDI table and the Direct3D 12 device and queue methods are
+ * wrapped too, so the Direct3D 12 work behind each call shows. Run once per runtime in separate processes
+ * and diff the output.
  */
 
 #define WIN32_NO_STATUS
@@ -25,6 +27,8 @@
 
 #include <stdio.h>
 #include <string>
+
+#include "hooks.hpp"
 
 typedef HRESULT (APIENTRY* PFN_CK_OPEN_ADAPTER)(D3DDDIARG_OPENADAPTER*, const LUID*, VOID*);
 typedef VOID (APIENTRY* PFN_CK_GET_TABLE)(VOID*);
@@ -154,6 +158,8 @@ CkCreateDevice(
     printf("CreateDevice interface %u version %08X flags %08X\n", Args->Interface, Args->Version, Args->Flags.Value);
     hr = Ck.CreateDevice(hAdapter, Args);
     printf("  hr %08lX\n", hr);
+    if (SUCCEEDED(hr))
+        CkWrapDeviceTable(Args->pDeviceFuncs);
     return hr;
 }
 
@@ -507,6 +513,7 @@ CkCreateDevice(
     printf("IDirect3D9::CreateDevice behavior %08lX hr %08lX\n", Behavior, hr);
     if (Device != nullptr)
         printf("  device released %lu\n", Device->Release());
+    CkFlushWorkers();
 }
 
 static
@@ -573,6 +580,9 @@ wmain(
     if (Create == nullptr || CreateEx == nullptr)
         return 1;
 
+    if (!CkHookD3D12())
+        fwprintf(stderr, L"the Direct3D 12 methods are not traced\n");
+
     Window = CkCreateWindow();
     Args.Enable9On12 = TRUE;
 
@@ -585,6 +595,7 @@ wmain(
         CkCreateDevice(D3D, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING);
         CkCreateDevice(D3D, Window, D3DCREATE_SOFTWARE_VERTEXPROCESSING);
         printf("released %lu\n", D3D->Release());
+        CkFlushWorkers();
     }
 
     printf("== Direct3DCreate9On12Ex\n");
@@ -595,6 +606,7 @@ wmain(
         CkQueryAdapter(D3DEx);
         CkCreateDevice(D3DEx, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING);
         printf("released %lu\n", D3DEx->Release());
+        CkFlushWorkers();
     }
 
     printf("adapters opened %u\n", Ck.Adapters);
