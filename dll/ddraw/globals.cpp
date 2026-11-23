@@ -35,6 +35,8 @@ DdEnterLock(VOID)
     Uniqueness = DdQueryDisplayUniqueness();
     if ((Uniqueness != DdState.DisplayUniqueness || DdState.DeviceLost) && DdState.Recursion == 1)
     {
+        DdTrace(L"display settings uniqueness %u -> %u, device lost %d: resetting objects", DdState.DisplayUniqueness,
+                Uniqueness, DdState.DeviceLost);
         DdState.RestoreFailed = FALSE;
         DdState.Restoring = TRUE;
         DdResetAllObjects(TRUE);
