@@ -63,10 +63,18 @@ static const struct
     { D3DRS_DESTBLENDALPHA, D3DBLEND_ZERO }, { D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD },
 };
 
-/* Hardware vertex processing goes through the runtime's fixed function shaders and reports their limits */
-static constexpr DWORD D9ShaderPipelineVertexCaps = 0x0000017B;
+/* Vertex processing caps the runtime's own vertex pipelines report, with their light and blend limits */
+static constexpr DWORD D9PipelineVertexCaps = 0x0000017B;
 static constexpr DWORD D9ShaderPipelineLights = 10;
 static constexpr DWORD D9ShaderPipelineBlendIndex = 8;
+static constexpr DWORD D9SoftwarePipelineLights = 0xFF;
+static constexpr DWORD D9SoftwarePipelineBlendIndex = 0xFF;
+
+/* Fog coordinates in the vertex format, a driver cap the runtime never shows */
+static constexpr DWORD D9MiscCapsFogInFvf = 0x00002000;
+
+/* Device caps the software vertex pipeline clears from what the driver reports */
+static constexpr DWORD D9SoftwareDevCapsCleared = 0x07400000;
 
 /* Depth formats the application may lock */
 static
@@ -75,6 +83,16 @@ D9IsLockableDepth(
     _In_ D3DFORMAT Format)
 {
     return Format == D3DFMT_D16_LOCKABLE || Format == D3DFMT_D32F_LOCKABLE || Format == D3DFMT_D32_LOCKABLE;
+}
+
+/* Depth formats with stencil bits */
+static
+BOOLEAN
+D9HasStencil(
+    _In_ D3DFORMAT Format)
+{
+    return Format == D3DFMT_D15S1 || Format == D3DFMT_D24S8 || Format == D3DFMT_D24X4S4 ||
+           Format == D3DFMT_D24FS8 || Format == D3DFMT_S8_LOCKABLE;
 }
 
 static
@@ -154,10 +172,37 @@ D9Device::ComputeCaps(VOID)
     Enum->GetDeviceCaps(Adapter->Ordinal, DeviceType, &Caps);
     if ((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) == 0)
     {
-        Caps.VertexProcessingCaps = D9ShaderPipelineVertexCaps;
+        Caps.VertexProcessingCaps = D9PipelineVertexCaps;
         Caps.MaxActiveLights = D9ShaderPipelineLights;
         Caps.MaxVertexBlendMatrixIndex = D9ShaderPipelineBlendIndex;
+        return;
     }
+
+    /* Software vertex processing reports what the runtime's pipeline can do, whatever the driver says */
+    Caps.DevCaps &= ~D9SoftwareDevCapsCleared;
+    Caps.DevCaps2 |= D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET;
+    Caps.PrimitiveMiscCaps = (Caps.PrimitiveMiscCaps & ~(D9MiscCapsFogInFvf | D3DPMISCCAPS_CLIPPLANESCALEDPOINTS)) |
+                             D3DPMISCCAPS_CLIPTLVERTS;
+    Caps.RasterCaps |= D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGRANGE;
+    Caps.FVFCaps |= D3DFVFCAPS_PSIZE;
+    if (Caps.MaxPointSize == 0.0f)
+        Caps.MaxPointSize = 64.0f;
+    Caps.VertexProcessingCaps = D9PipelineVertexCaps;
+    Caps.MaxActiveLights = D9SoftwarePipelineLights;
+    Caps.MaxUserClipPlanes = 6;
+    Caps.MaxVertexBlendMatrices = 4;
+    Caps.MaxVertexBlendMatrixIndex = D9SoftwarePipelineBlendIndex;
+    Caps.MaxStreams = 16;
+    Caps.VertexShaderVersion = D3DVS_VERSION(3, 0);
+    Caps.MaxVertexShaderConst = 8192;
+    Caps.DeclTypes |= 0x000003FF;
+    Caps.VS20Caps.Caps = D3DVS20CAPS_PREDICATION;
+    Caps.VS20Caps.DynamicFlowControlDepth = D3DVS20_MAX_DYNAMICFLOWCONTROLDEPTH;
+    Caps.VS20Caps.NumTemps = D3DVS20_MAX_NUMTEMPS;
+    Caps.VS20Caps.StaticFlowControlDepth = D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
+    Caps.VertexTextureFilterCaps = 0x1B031B00;
+    Caps.MaxVShaderInstructionsExecuted = 0xFFFFFFFF;
+    Caps.MaxVertexShader30InstructionSlots = D3DMAX30SHADERINSTRUCTIONS;
 }
 
 HRESULT
@@ -510,13 +555,29 @@ D9Device::Clear(
         D9_TRACE_ONCE(L"Clear: there is no depth buffer to clear");
         return D3DERR_INVALIDCALL;
     }
-
-    SetRect(&Viewport, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
-    if (Count != 0 && Rects != nullptr)
+    if ((Flags & D3DCLEAR_STENCIL) != 0 && !D9HasStencil(DepthStencil->Describe().Format))
     {
-        Clipped = new (std::nothrow) RECT[Count];
-        if (Clipped == nullptr)
-            return E_OUTOFMEMORY;
+        D9_TRACE_ONCE(L"Clear: the depth buffer has no stencil bits");
+        return D3DERR_INVALIDCALL;
+    }
+
+    /* The driver always gets rectangles; without any the viewport is the one */
+    SetRect(&Viewport, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
+    if (Count == 0 || Rects == nullptr)
+    {
+        Count = 1;
+        Rects = nullptr;
+    }
+    Clipped = new (std::nothrow) RECT[Count];
+    if (Clipped == nullptr)
+        return E_OUTOFMEMORY;
+    if (Rects == nullptr)
+    {
+        Clipped[0] = Viewport;
+        Kept = 1;
+    }
+    else
+    {
         for (DWORD Index = 0; Index < Count; Index++)
         {
             RECT Area = { Rects[Index].x1, Rects[Index].y1, Rects[Index].x2, Rects[Index].y2 };
@@ -550,11 +611,15 @@ D9Device::SetRenderState(
     D9_DEVICE_LOCK();
     D3DDDIARG_RENDERSTATE Args = {};
 
-    if (static_cast<DWORD>(State) >= D9RenderStateCount || D9IsRetiredState(State))
+    if (static_cast<DWORD>(State) >= D9RenderStateCount)
     {
         D9_TRACE_ONCE(L"SetRenderState: state %u is not valid", State);
         return D3DERR_INVALIDCALL;
     }
+
+    /* Retired states are accepted and dropped */
+    if (D9IsRetiredState(State))
+        return S_OK;
 
     RenderStates[State] = Value;
     Args.State = static_cast<D3DDDIRENDERSTATETYPE>(State);
