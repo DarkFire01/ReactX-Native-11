@@ -15,6 +15,7 @@ nt_add_usermode_dll(d3d12core
         devicecaps.cpp
         devicecreate.cpp
         features.cpp
+        formatlayout12.cpp
         formatsupport12.cpp
         formattable12.cpp
         fence.cpp
@@ -23,6 +24,7 @@ nt_add_usermode_dll(d3d12core
         queue_stubs.cpp
         resource.cpp
         resource_stubs.cpp
+        resourcevalidate.cpp
         rootsignature.cpp
         schedulinggroup.cpp)
 target_link_libraries(d3d12core PRIVATE rxcommon ole32 advapi32 dxguid)
