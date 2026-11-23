@@ -1456,9 +1456,11 @@ TcCheckQueues(
                     Desc.Priority = Priority;
                     Desc.Flags = (D3D12_COMMAND_QUEUE_FLAGS)Flag;
                     Desc.NodeMask = Node;
+                    ComPtr<ID3D12CommandQueue> Queue;
+
                     hr = Device->CreateCommandQueue(&Desc, __uuidof(ID3D12CommandQueue), nullptr);
                     sprintf_s(Key, "queue_%u_%d_%u_%u", Type, Priority, Flag, Node);
-                    Check.Report(Key, "0x%08lX", hr);
+                    Check.Report(Key, "0x%08lX 0x%08lX", hr, Device->CreateCommandQueue(&Desc, IID_PPV_ARGS(&Queue)));
                 }
             }
         }
@@ -1659,9 +1661,16 @@ TcCheckDescriptorHeaps(
                     Desc.NumDescriptors = Count;
                     Desc.Flags = (D3D12_DESCRIPTOR_HEAP_FLAGS)Flags;
                     Desc.NodeMask = Node;
+                    ComPtr<ID3D12DescriptorHeap> Heap;
+                    HRESULT Checked = Device->CreateDescriptorHeap(&Desc, __uuidof(ID3D12DescriptorHeap), nullptr);
+                    HRESULT Made = E_ABORT;
+
+                    /* The system runtime crashes making an empty shader visible heap */
+                    if (Count != 0 || (Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0)
+                        Made = Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap));
+
                     sprintf_s(Key, "heap_%u_%u_%u_%u", Type, Count, Flags, Node);
-                    Check.Report(Key, "0x%08lX", Device->CreateDescriptorHeap(&Desc, __uuidof(ID3D12DescriptorHeap),
-                                                                               nullptr));
+                    Check.Report(Key, "0x%08lX 0x%08lX", Checked, Made);
                 }
             }
         }
