@@ -3722,89 +3722,198 @@ XcCheckApos(VOID)
     Engine->Release();
 }
 
-/* Records what the default endpoint plays, which carries the engine output */
-class XcLoopback
+/*
+ * Records the bytes a runtime hands to WASAPI by wrapping the shared audio client and render client
+ * method tables. A loopback capture is not exact here: the endpoint stream effect adds a noise floor
+ * near 1e-10 behind a 256 frame lookahead and the capture drops packets now and then.
+ */
+typedef HRESULT (STDMETHODCALLTYPE* PXC_INITIALIZE)(IAudioClient*, AUDCLNT_SHAREMODE, DWORD, REFERENCE_TIME, REFERENCE_TIME,
+                                                     const WAVEFORMATEX*, LPCGUID);
+typedef HRESULT (STDMETHODCALLTYPE* PXC_GET_BUFFER)(IAudioRenderClient*, UINT32, BYTE**);
+typedef HRESULT (STDMETHODCALLTYPE* PXC_RELEASE_BUFFER)(IAudioRenderClient*, UINT32, DWORD);
+
+struct XcRenderTap
 {
-public:
-    XcLoopback() : Client(nullptr), Capture(nullptr), Format(nullptr) {}
+    CRITICAL_SECTION Lock;
+    BOOLEAN Ready;
+    BOOLEAN Recording;
+    PXC_INITIALIZE Initialize;
+    PXC_GET_BUFFER GetBuffer;
+    PXC_RELEASE_BUFFER ReleaseBuffer;
+    BYTE* Pending;
+    BYTE Format[sizeof(WAVEFORMATEXTENSIBLE)];
+    UINT32 Streams;
+    BYTE* Bytes;
+    SIZE_T Count;
+    SIZE_T Capacity;
+};
 
-    ~XcLoopback()
+static XcRenderTap XcTap;
+
+static
+HRESULT
+STDMETHODCALLTYPE
+XcTapInitialize(
+    _In_ IAudioClient* Client,
+    _In_ AUDCLNT_SHAREMODE ShareMode,
+    _In_ DWORD Flags,
+    _In_ REFERENCE_TIME Duration,
+    _In_ REFERENCE_TIME Periodicity,
+    _In_ const WAVEFORMATEX* Format,
+    _In_opt_ LPCGUID Session)
+{
+    HRESULT hr = XcTap.Initialize(Client, ShareMode, Flags, Duration, Periodicity, Format, Session);
+
+    if (SUCCEEDED(hr) && XcTap.Recording && Format != nullptr)
     {
-        if (Client != nullptr)
-            Client->Stop();
-        if (Capture != nullptr)
-            Capture->Release();
-        if (Client != nullptr)
-            Client->Release();
-        CoTaskMemFree(Format);
-        delete[] Samples;
+        EnterCriticalSection(&XcTap.Lock);
+        memset(XcTap.Format, 0, sizeof(XcTap.Format));
+        memcpy(XcTap.Format, Format, sizeof(WAVEFORMATEX) + (Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE ? 22 : 0));
+        XcTap.Streams += 1;
+        LeaveCriticalSection(&XcTap.Lock);
     }
+    return hr;
+}
 
-    HRESULT
-    Start(VOID)
+static
+HRESULT
+STDMETHODCALLTYPE
+XcTapGetBuffer(
+    _In_ IAudioRenderClient* Render,
+    _In_ UINT32 Frames,
+    _Outptr_ BYTE** Data)
+{
+    HRESULT hr = XcTap.GetBuffer(Render, Frames, Data);
+
+    XcTap.Pending = SUCCEEDED(hr) ? *Data : nullptr;
+    return hr;
+}
+
+static
+HRESULT
+STDMETHODCALLTYPE
+XcTapReleaseBuffer(
+    _In_ IAudioRenderClient* Render,
+    _In_ UINT32 Frames,
+    _In_ DWORD Flags)
+{
+    const WAVEFORMATEX* Format = reinterpret_cast<const WAVEFORMATEX*>(XcTap.Format);
+
+    EnterCriticalSection(&XcTap.Lock);
+    if (XcTap.Recording && XcTap.Pending != nullptr && Format->nBlockAlign != 0)
     {
-        IMMDeviceEnumerator* Enumerator = nullptr;
-        IMMDevice* Endpoint = nullptr;
-        HRESULT hr;
+        SIZE_T Size = static_cast<SIZE_T>(Frames) * Format->nBlockAlign;
 
-        Capacity = 48000 * 8;
-        Count = 0;
-        Samples = new (std::nothrow) float[Capacity];
-        if (Samples == nullptr)
-            return E_OUTOFMEMORY;
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&Enumerator));
-        if (SUCCEEDED(hr))
-            hr = Enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &Endpoint);
-        if (SUCCEEDED(hr))
-            hr = Endpoint->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&Client));
-        if (SUCCEEDED(hr))
-            hr = Client->GetMixFormat(&Format);
-        if (SUCCEEDED(hr))
-            hr = Client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 10000000, 0, Format, nullptr);
-        if (SUCCEEDED(hr))
-            hr = Client->GetService(IID_PPV_ARGS(&Capture));
-        if (SUCCEEDED(hr))
-            hr = Client->Start();
-        if (Endpoint != nullptr)
-            Endpoint->Release();
-        if (Enumerator != nullptr)
-            Enumerator->Release();
-        return hr;
+        if (Size > XcTap.Capacity - XcTap.Count)
+            Size = XcTap.Capacity - XcTap.Count;
+        if (Flags & AUDCLNT_BUFFERFLAGS_SILENT)
+            memset(XcTap.Bytes + XcTap.Count, 0, Size);
+        else
+            memcpy(XcTap.Bytes + XcTap.Count, XcTap.Pending, Size);
+        XcTap.Count += Size;
     }
+    XcTap.Pending = nullptr;
+    LeaveCriticalSection(&XcTap.Lock);
+    return XcTap.ReleaseBuffer(Render, Frames, Flags);
+}
 
-    VOID
-    Collect(
-        _In_ DWORD Milliseconds)
+static
+VOID
+XcPatchSlot(
+    _Inout_ void** Slot,
+    _In_ void* Replacement,
+    _Out_ void** Original)
+{
+    DWORD Protection;
+
+    *Original = *Slot;
+    if (*Slot == Replacement)
+        return;
+    VirtualProtect(Slot, sizeof(*Slot), PAGE_READWRITE, &Protection);
+    *Slot = Replacement;
+    VirtualProtect(Slot, sizeof(*Slot), Protection, &Protection);
+}
+
+/* Both runtimes reach WASAPI through the same audioses classes, so one patch covers every stream */
+static
+HRESULT
+XcTapInstall(VOID)
+{
+    IMMDeviceEnumerator* Enumerator = nullptr;
+    IMMDevice* Endpoint = nullptr;
+    IAudioClient* Client = nullptr;
+    IAudioRenderClient* Render = nullptr;
+    WAVEFORMATEX* Mix = nullptr;
+    HRESULT hr;
+
+    if (XcTap.Ready)
+        return S_OK;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&Enumerator));
+    if (SUCCEEDED(hr))
+        hr = Enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &Endpoint);
+    if (SUCCEEDED(hr))
+        hr = Endpoint->Activate(__uuidof(IAudioClient2), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&Client));
+    if (SUCCEEDED(hr))
+        hr = Client->GetMixFormat(&Mix);
+    if (SUCCEEDED(hr))
+        hr = Client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0, Mix, nullptr);
+    if (SUCCEEDED(hr))
+        hr = Client->GetService(IID_PPV_ARGS(&Render));
+    if (SUCCEEDED(hr))
     {
-        ULONGLONG End = GetTickCount64() + Milliseconds;
+        void** ClientSlots = *reinterpret_cast<void***>(Client);
+        void** RenderSlots = *reinterpret_cast<void***>(Render);
+        void* Original;
 
-        while (GetTickCount64() < End)
+        fprintf(stderr, "endpoint %u channels at %lu Hz\n", Mix->nChannels, Mix->nSamplesPerSec);
+        InitializeCriticalSection(&XcTap.Lock);
+        XcTap.Capacity = 96000 * 8 * 4;
+        XcTap.Bytes = new (std::nothrow) BYTE[XcTap.Capacity];
+        if (XcTap.Bytes == nullptr)
+            hr = E_OUTOFMEMORY;
+        if (SUCCEEDED(hr))
         {
-            UINT32 Packet = 0;
-
-            Sleep(5);
-            while (SUCCEEDED(Capture->GetNextPacketSize(&Packet)) && Packet != 0)
-            {
-                BYTE* Data;
-                UINT32 Frames;
-                DWORD Flags;
-
-                if (FAILED(Capture->GetBuffer(&Data, &Frames, &Flags, nullptr, nullptr)))
-                    break;
-                for (UINT32 Index = 0; Index < Frames * Format->nChannels && Count < Capacity; Index++)
-                    Samples[Count++] = (Flags & AUDCLNT_BUFFERFLAGS_SILENT) ? 0.0f : reinterpret_cast<float*>(Data)[Index];
-                Capture->ReleaseBuffer(Frames);
-            }
+            XcPatchSlot(&ClientSlots[3], reinterpret_cast<void*>(XcTapInitialize), &Original);
+            XcTap.Initialize = reinterpret_cast<PXC_INITIALIZE>(Original);
+            XcPatchSlot(&RenderSlots[3], reinterpret_cast<void*>(XcTapGetBuffer), &Original);
+            XcTap.GetBuffer = reinterpret_cast<PXC_GET_BUFFER>(Original);
+            XcPatchSlot(&RenderSlots[4], reinterpret_cast<void*>(XcTapReleaseBuffer), &Original);
+            XcTap.ReleaseBuffer = reinterpret_cast<PXC_RELEASE_BUFFER>(Original);
+            XcTap.Ready = TRUE;
         }
     }
+    CoTaskMemFree(Mix);
+    if (Render != nullptr)
+        Render->Release();
+    if (Client != nullptr)
+        Client->Release();
+    if (Endpoint != nullptr)
+        Endpoint->Release();
+    if (Enumerator != nullptr)
+        Enumerator->Release();
+    return hr;
+}
 
-    IAudioClient* Client;
-    IAudioCaptureClient* Capture;
-    WAVEFORMATEX* Format;
-    float* Samples = nullptr;
-    SIZE_T Count = 0;
-    SIZE_T Capacity = 0;
-};
+static
+VOID
+XcTapStart(VOID)
+{
+    EnterCriticalSection(&XcTap.Lock);
+    memset(XcTap.Format, 0, sizeof(XcTap.Format));
+    XcTap.Streams = 0;
+    XcTap.Count = 0;
+    XcTap.Recording = TRUE;
+    LeaveCriticalSection(&XcTap.Lock);
+}
+
+static
+VOID
+XcTapStop(VOID)
+{
+    EnterCriticalSection(&XcTap.Lock);
+    XcTap.Recording = FALSE;
+    LeaveCriticalSection(&XcTap.Lock);
+}
 
 /* Quiet noise with a marker frame first, so the start lines up between runtimes */
 static
@@ -4292,6 +4401,152 @@ XcCheckMix(VOID)
                 printf("\n");
             }
         }
+    }
+}
+
+/* Prints the stream format and the rendered frames from the first sounding one to the last */
+static
+VOID
+XcPrintTap(VOID)
+{
+    const WAVEFORMATEX* Format = reinterpret_cast<const WAVEFORMATEX*>(XcTap.Format);
+    const WAVEFORMATEXTENSIBLE* Extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(XcTap.Format);
+    const DWORD* Words = reinterpret_cast<const DWORD*>(XcTap.Bytes);
+    UINT32 Channels = Format->nChannels;
+    SIZE_T Frames;
+    SIZE_T First;
+    SIZE_T Last = 0;
+
+    if (Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+        printf("  stream ext %u %lu %u valid %u mask %08lX sub %08lX streams %u\n", Format->nChannels, Format->nSamplesPerSec,
+               Format->wBitsPerSample, Extensible->Samples.wValidBitsPerSample, Extensible->dwChannelMask,
+               Extensible->SubFormat.Data1, XcTap.Streams);
+    else
+        printf("  stream tag %u %u %lu %u streams %u\n", Format->wFormatTag, Format->nChannels, Format->nSamplesPerSec,
+               Format->wBitsPerSample, XcTap.Streams);
+    if (Channels == 0 || Format->wBitsPerSample != 32)
+        return;
+    Frames = XcTap.Count / Format->nBlockAlign;
+    First = Frames;
+    for (SIZE_T Frame = 0; Frame < Frames; Frame++)
+    {
+        for (UINT32 Channel = 0; Channel < Channels; Channel++)
+        {
+            if (Words[Frame * Channels + Channel] != 0)
+            {
+                if (First == Frames)
+                    First = Frame;
+                Last = Frame;
+            }
+        }
+    }
+    if (First == Frames)
+    {
+        printf("  silent\n");
+        return;
+    }
+    {
+        const float* Start = reinterpret_cast<const float*>(Words + First * Channels);
+        SIZE_T Span = Last - First + 1;
+
+        printf("  lead %zu frames\n", First);
+        printf("  frames %zu hash %08X\n", Span, XcHash(Start, Span * Channels));
+        for (SIZE_T Frame = 0; Frame < Span; Frame++)
+        {
+            if (Frame >= 24 && !(Frame >= 470 && Frame < 490) && Frame + 8 < Span)
+                continue;
+            printf("  frame %4zu", Frame);
+            for (UINT32 Channel = 0; Channel < Channels && Channel < 8; Channel++)
+                printf(" %08lX", XcBits(Start[Frame * Channels + Channel]));
+            printf("\n");
+        }
+    }
+}
+
+/* The mastering voice device stage: rate and layout conversion to the endpoint stream */
+static
+VOID
+XcCheckDevice(VOID)
+{
+    static const struct
+    {
+        UINT32 Channels;
+        UINT32 Rate;
+        UINT32 SourceChannels;
+    } Cases[] =
+    {
+        { XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 2 },
+        { 2, 44100, 2 },
+        { 2, 32000, 2 },
+        { 2, 96000, 2 },
+        { 1, 48000, 1 },
+        { 1, 24000, 1 },
+        { 6, 48000, 6 },
+        { 6, 44100, 6 },
+        { 4, 16000, 4 },
+        { 8, 48000, 8 },
+        { 3, 88200, 3 },
+    };
+    static BYTE Data[96000 * 8 * 2 / 5];
+    HRESULT hr = XcTapInstall();
+
+    if (FAILED(hr))
+    {
+        printf("device tap = %08lX\n", hr);
+        return;
+    }
+    for (UINT Case = 0; Case < ARRAYSIZE(Cases); Case++)
+    {
+        XcVoiceCallback Callback;
+        IXAudio2* Engine = nullptr;
+        IXAudio2MasteringVoice* Master = nullptr;
+        IXAudio2SourceVoice* Source = nullptr;
+        XAUDIO2_VOICE_DETAILS Details = {};
+        XAUDIO2_BUFFER Buffer = {};
+        WAVEFORMATEX Format;
+
+        XcTapStart();
+        if (FAILED(XcCreate(&Engine, 0)))
+            return;
+
+        /* Every voice starts on the first pass, so the converter phase is the same each run */
+        Engine->StopEngine();
+        hr = Engine->CreateMasteringVoice(&Master, Cases[Case].Channels, Cases[Case].Rate);
+        printf("device[%u] master %u/%u = %08lX\n", Case, Cases[Case].Channels, Cases[Case].Rate, hr);
+        if (FAILED(hr))
+        {
+            Engine->Release();
+            continue;
+        }
+        Master->GetVoiceDetails(&Details);
+        printf("  details %u %u\n", Details.InputChannels, Details.InputSampleRate);
+        XcPcm(&Format, WAVE_FORMAT_PCM, static_cast<WORD>(Cases[Case].SourceChannels), Details.InputSampleRate, 16);
+        Buffer.AudioBytes = Format.nAvgBytesPerSec / 5 / Format.nBlockAlign * Format.nBlockAlign;
+        XcFillNoise(Data, Buffer.AudioBytes, &Format);
+        Buffer.pAudioData = Data;
+        Buffer.Flags = XAUDIO2_END_OF_STREAM;
+        hr = Engine->CreateSourceVoice(&Source, &Format, 0, 2.0f, &Callback);
+        if (SUCCEEDED(hr))
+            hr = Source->SubmitSourceBuffer(&Buffer);
+        if (SUCCEEDED(hr))
+            hr = Source->Start();
+        if (FAILED(hr))
+        {
+            printf("  source = %08lX\n", hr);
+            Engine->Release();
+            continue;
+        }
+        XcStreamEnded = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        Engine->StartEngine();
+        if (WaitForSingleObject(XcStreamEnded, 3000) != WAIT_OBJECT_0)
+            printf("  no stream end\n");
+        Sleep(100);
+        Source->DestroyVoice();
+        Engine->Release();
+        XcTapStop();
+        CloseHandle(XcStreamEnded);
+        XcStreamEnded = nullptr;
+        XcPrintTap();
     }
 }
 
@@ -4897,6 +5152,8 @@ wmain(
     /* Audible, so only on request */
     if (XcSection != nullptr && _wcsicmp(XcSection, L"mix") == 0)
         XcCheckMix();
+    if (XcSection != nullptr && _wcsicmp(XcSection, L"device") == 0)
+        XcCheckDevice();
 
     FreeLibrary(XcModule);
     CoUninitialize();
