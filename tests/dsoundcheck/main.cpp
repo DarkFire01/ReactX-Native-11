@@ -2878,6 +2878,147 @@ DcCheckMixLayouts(VOID)
     }
 }
 
+static
+BOOLEAN
+DcFrameHeard(
+    _In_ const DcLoopback* Loopback,
+    _In_ size_t Frame)
+{
+    UINT Channels = Loopback->Format->nChannels;
+
+    for (UINT Channel = 0; Channel < Channels; Channel++)
+    {
+        if (Loopback->Samples[Frame * Channels + Channel] != 0.0f)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* A buffer that needs the endpoint layout arrives while a wider one plays on a stream opened in its layout */
+static
+VOID
+DcCheckLayoutLock(VOID)
+{
+    const UINT Case = 68;
+    WAVEFORMATEXTENSIBLE Wide;
+    WAVEFORMATEX Narrow;
+    IDirectSound8* Sound = nullptr;
+    IDirectSoundBuffer* Playing = nullptr;
+    IDirectSoundBuffer* Second = nullptr;
+    IDirectSoundNotify* Notify = nullptr;
+    DSBPOSITIONNOTIFY Marks[2];
+    HANDLE Events[2];
+    DcLoopback Loopback;
+    VOID* Part1;
+    DWORD Size1;
+    DWORD Status = 0;
+    HRESULT hr;
+
+    if (Case < DcFirstMixCase)
+        return;
+    hr = Loopback.Start();
+    if (FAILED(hr))
+    {
+        printf("mix[%u] loopback = %08lX\n", Case, hr);
+        return;
+    }
+    DcExtensible(&Wide, KSDATAFORMAT_SUBTYPE_PCM, 6, Loopback.Format->nSamplesPerSec, 16, 16, KSAUDIO_SPEAKER_5POINT1);
+    DcFormat(&Narrow, WAVE_FORMAT_PCM, 2, Loopback.Format->nSamplesPerSec, 16);
+    if (FAILED(DcOpenMixDevice(&Sound, &Wide.Format)))
+        return;
+
+    printf("mix[%u] lock during play\n", Case);
+    hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLPOSITIONNOTIFY,
+                      Wide.Format.nAvgBytesPerSec / 4 / Wide.Format.nBlockAlign * Wide.Format.nBlockAlign, &Wide.Format, &Playing);
+    printf("  playing = %08lX\n", hr);
+    if (FAILED(hr))
+    {
+        Sound->Release();
+        return;
+    }
+    Playing->Lock(0, 0, &Part1, &Size1, nullptr, nullptr, DSBLOCK_ENTIREBUFFER);
+    for (DWORD Index = 0; Index < Size1 / sizeof(SHORT); Index++)
+    {
+        DWORD Frame = Index / Wide.Format.nChannels;
+        DWORD Channel = Index % Wide.Format.nChannels;
+        double Angle = 6.283185307179586 * (Frame % 48) / 48.0 + Channel * 0.7;
+
+        static_cast<SHORT*>(Part1)[Index] = static_cast<SHORT>(sin(Angle) * 0.004 * 32768.0);
+    }
+    Playing->Unlock(Part1, Size1, nullptr, 0);
+    Playing->SetPan(1500);
+
+    Events[0] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    Events[1] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    Marks[0].dwOffset = 0;
+    Marks[0].hEventNotify = Events[0];
+    Marks[1].dwOffset = DSBPN_OFFSETSTOP;
+    Marks[1].hEventNotify = Events[1];
+    Playing->QueryInterface(IID_IDirectSoundNotify, reinterpret_cast<void**>(&Notify));
+    if (Notify != nullptr)
+    {
+        printf("  setnotify = %08lX\n", Notify->SetNotificationPositions(2, Marks));
+        Notify->Release();
+    }
+
+    Loopback.Collect(100);
+    printf("  play = %08lX\n", Playing->Play(0, 0, DSBPLAY_LOOPING));
+    Loopback.Collect(200);
+    printf("  before start %d stop %d\n", WaitForSingleObject(Events[0], 0) == WAIT_OBJECT_0,
+           WaitForSingleObject(Events[1], 0) == WAIT_OBJECT_0);
+
+    /* The stereo buffer locks the final mix to the endpoint layout while the wide one plays */
+    hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, Narrow.nAvgBytesPerSec / 4, &Narrow, &Second);
+    printf("  second = %08lX\n", hr);
+    Playing->GetStatus(&Status);
+    printf("  after lock status %lX start %d stop %d\n", Status, WaitForSingleObject(Events[0], 0) == WAIT_OBJECT_0,
+           WaitForSingleObject(Events[1], 0) == WAIT_OBJECT_0);
+    Loopback.Collect(700);
+    printf("  stop = %08lX\n", Playing->Stop());
+    printf("  after stop stop %d\n", WaitForSingleObject(Events[1], 100) == WAIT_OBJECT_0);
+    Loopback.Collect(50);
+
+    /* The tone repeats every 48 frames, so where the buffer picks up again after the reopen does not show */
+    {
+        UINT Channels = Loopback.Format->nChannels;
+        size_t Total = Loopback.Samples.size() / Channels;
+        size_t Frame = 0;
+        size_t Quiet = 0;
+
+        while (Frame < Total && !DcFrameHeard(&Loopback, Frame))
+            Frame += 1;
+        while (Frame < Total && Quiet < 100)
+        {
+            Quiet = DcFrameHeard(&Loopback, Frame) ? 0 : Quiet + 1;
+            Frame += 1;
+        }
+        if (Quiet < 100)
+        {
+            printf("  no gap\n");
+        }
+        else
+        {
+            size_t Gap = Quiet;
+
+            while (Frame < Total && !DcFrameHeard(&Loopback, Frame))
+            {
+                Gap += 1;
+                Frame += 1;
+            }
+            printf("  gap %zu frames\n", Gap);
+            Loopback.Samples.erase(Loopback.Samples.begin(), Loopback.Samples.begin() + Frame * Channels);
+        }
+    }
+    DcShowHeard(Case, &Loopback, 400);
+
+    if (Second != nullptr)
+        Second->Release();
+    Playing->Release();
+    CloseHandle(Events[0]);
+    CloseHandle(Events[1]);
+    printf("release %lu\n", Sound->Release());
+}
+
 int
 wmain(
     _In_ int argc,
@@ -2943,6 +3084,7 @@ wmain(
     {
         DcCheckMix();
         DcCheckMixLayouts();
+        DcCheckLayoutLock();
     }
 
     DestroyWindow(DcWindow);
