@@ -103,7 +103,8 @@ XaMasterVoice::OpenEndpoint(
         if (FAILED(hr))
             return hr;
     }
-    hr = Endpoint->Open(DeviceId, Category, Channels, Mask, InputRate);
+    hr = Endpoint->Open(DeviceId, Category, &Engine->Context, (CreationFlags & XA_MASTER_DEFAULT_DEVICE) != 0, Channels, Mask,
+                        InputRate);
     if (FAILED(hr))
         return hr;
     return XaMixerPrepareMaster(this);

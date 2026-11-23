@@ -989,6 +989,8 @@ public:
     Open(
         _In_opt_z_ PCWSTR DeviceId,
         _In_ AUDIO_STREAM_CATEGORY Category,
+        _In_ const GUID* Context,
+        _In_ BOOLEAN FollowDefault,
         _In_ UINT32 Channels,
         _In_ DWORD ChannelMask,
         _In_ UINT32 Rate);
@@ -1305,6 +1307,9 @@ public:
     HANDLE ThreadStop;
     HANDLE RenderReady;
     DWORD RenderThreadId;
+
+    /* Made fresh for each engine and handed to every stream it opens */
+    GUID Context;
 
     /* XAUDIO2_STOP_ENGINE_WHEN_IDLE: a watcher thread starts and stops the engine with source voice activity */
     HANDLE IdleThread;

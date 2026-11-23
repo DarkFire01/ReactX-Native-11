@@ -24,6 +24,6 @@ nt_add_usermode_dll(xaudio2_9
         x3daudio.cpp
         xapobase.cpp)
 
-target_link_libraries(xaudio2_9 PRIVATE ole32 uuid)
+target_link_libraries(xaudio2_9 PRIVATE ole32 uuid mmdevapi)
 
 set_target_properties(xaudio2_9 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/reactx")

@@ -35,6 +35,7 @@ XaEngine::XaEngine()
     ThreadStop = nullptr;
     RenderReady = nullptr;
     RenderThreadId = 0;
+    memset(&Context, 0, sizeof(Context));
     IdleThread = nullptr;
     IdleQuit = nullptr;
     IdleSignal = nullptr;
@@ -98,6 +99,7 @@ XaEngine::Initialize(
     ThreadStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (ThreadStop == nullptr)
         return HRESULT_FROM_WIN32(GetLastError());
+    CoCreateGuid(&Context);
 
     /* Without the watcher the engine just keeps running, so a failure here is not fatal */
     if ((Flags & XAUDIO2_STOP_ENGINE_WHEN_IDLE) != 0)

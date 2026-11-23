@@ -85,26 +85,148 @@ XaCanonicalDeviceId(
     return hr;
 }
 
+/* Waits out ActivateAudioInterfaceAsync for the caller, which may be on any thread */
+class XaActivation final : public IActivateAudioInterfaceCompletionHandler, public IAgileObject
+{
+public:
+    XaActivation()
+    {
+        Done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Result = E_PENDING;
+        Interface = nullptr;
+    }
+
+    ~XaActivation()
+    {
+        if (Done != nullptr)
+            CloseHandle(Done);
+        if (Interface != nullptr)
+            Interface->Release();
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        REFIID Iid,
+        _COM_Outptr_ void** Object) override
+    {
+        if (IsEqualIID(Iid, IID_IUnknown) || IsEqualIID(Iid, __uuidof(IActivateAudioInterfaceCompletionHandler)))
+            *Object = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+        else if (IsEqualIID(Iid, __uuidof(IAgileObject)))
+            *Object = static_cast<IAgileObject*>(this);
+        else
+        {
+            *Object = nullptr;
+            return E_NOINTERFACE;
+        }
+        return S_OK;
+    }
+
+    /* The object lives on the activating thread's stack until the wait ends */
+    ULONG
+    STDMETHODCALLTYPE
+    AddRef() override
+    {
+        return 2;
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    Release() override
+    {
+        return 1;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    ActivateCompleted(
+        _In_ IActivateAudioInterfaceAsyncOperation* Operation) override
+    {
+        HRESULT Activated = E_FAIL;
+
+        Result = Operation->GetActivateResult(&Activated, &Interface);
+        if (SUCCEEDED(Result))
+            Result = Activated;
+        SetEvent(Done);
+        return S_OK;
+    }
+
+    HANDLE Done;
+    HRESULT Result;
+    IUnknown* Interface;
+};
+
+/* The render device interface class, whose path names the virtual default render device */
+static const GUID XaRenderClass = { 0xE6327CAD, 0xDCEC, 0x4949, { 0xAE, 0x8A, 0x99, 0x1E, 0x97, 0x6A, 0x79, 0xD2 } };
+
+/* A stream on the virtual default device moves to whatever endpoint becomes the default */
+static
+HRESULT
+XaActivateDefault(
+    _In_ PROPVARIANT* Parameters,
+    _Outptr_ IAudioClient2** Client)
+{
+    XaActivation Activation;
+    IActivateAudioInterfaceAsyncOperation* Operation = nullptr;
+    WCHAR Path[40];
+    HRESULT hr;
+
+    *Client = nullptr;
+    if (Activation.Done == nullptr)
+        return HRESULT_FROM_WIN32(GetLastError());
+    StringFromGUID2(XaRenderClass, Path, ARRAYSIZE(Path));
+    hr = ActivateAudioInterfaceAsync(Path, __uuidof(IAudioClient3), Parameters, &Activation, &Operation);
+    if (SUCCEEDED(hr))
+    {
+        WaitForSingleObject(Activation.Done, INFINITE);
+        hr = Activation.Result;
+    }
+    if (SUCCEEDED(hr))
+        hr = Activation.Interface->QueryInterface(__uuidof(IAudioClient3), reinterpret_cast<void**>(Client));
+    if (Operation != nullptr)
+        Operation->Release();
+    return hr;
+}
+
 /* An audio client on the endpoint with the stream category already set */
 static
 HRESULT
 XaActivateClient(
     _In_z_ PCWSTR DeviceId,
     _In_ AUDIO_STREAM_CATEGORY Category,
+    _In_opt_ const GUID* Context,
+    _In_ BOOLEAN FollowDefault,
     _Outptr_opt_ IMMDevice** DeviceOut,
     _Outptr_ IAudioClient2** Client)
 {
     IMMDeviceEnumerator* Enumerator = nullptr;
     IMMDevice* Device = nullptr;
     AudioClientProperties Properties = {};
+    PROPVARIANT Parameters;
     HRESULT hr;
 
+    /* The engine's context travels with the stream as a sixteen byte blob */
+    PropVariantInit(&Parameters);
+    if (Context != nullptr)
+    {
+        Parameters.vt = VT_BLOB;
+        Parameters.blob.cbSize = sizeof(*Context);
+        Parameters.blob.pBlobData = reinterpret_cast<BYTE*>(const_cast<GUID*>(Context));
+    }
     *Client = nullptr;
-    hr = XaEnumerator(&Enumerator);
-    if (SUCCEEDED(hr))
-        hr = Enumerator->GetDevice(DeviceId, &Device);
-    if (SUCCEEDED(hr))
-        hr = Device->Activate(__uuidof(IAudioClient2), CLSCTX_INPROC_SERVER, nullptr, reinterpret_cast<void**>(Client));
+    if (FollowDefault)
+    {
+        hr = XaActivateDefault(&Parameters, Client);
+    }
+    else
+    {
+        hr = XaEnumerator(&Enumerator);
+        if (SUCCEEDED(hr))
+            hr = Enumerator->GetDevice(DeviceId, &Device);
+        if (SUCCEEDED(hr))
+            hr = Device->Activate(__uuidof(IAudioClient3), CLSCTX_INPROC_SERVER, Context != nullptr ? &Parameters : nullptr,
+                                  reinterpret_cast<void**>(Client));
+    }
     if (SUCCEEDED(hr))
     {
         Properties.cbSize = sizeof(Properties);
@@ -186,7 +308,7 @@ XaQueryEndpointFormat(
     *Channels = 0;
     *Rate = 0;
     *Mask = 0;
-    hr = XaActivateClient(DeviceId, Category, nullptr, &Client);
+    hr = XaActivateClient(DeviceId, Category, nullptr, FALSE, nullptr, &Client);
     if (SUCCEEDED(hr))
         hr = Client->GetMixFormat(&Mix);
     if (SUCCEEDED(hr))
@@ -247,6 +369,8 @@ HRESULT
 XaEndpoint::Open(
     _In_opt_z_ PCWSTR DeviceId,
     _In_ AUDIO_STREAM_CATEGORY Category,
+    _In_ const GUID* Context,
+    _In_ BOOLEAN FollowDefault,
     _In_ UINT32 Channels,
     _In_ DWORD ChannelMask,
     _In_ UINT32 Rate)
@@ -260,7 +384,7 @@ XaEndpoint::Open(
     UINT32 Packets;
     HRESULT hr;
 
-    hr = XaActivateClient(DeviceId, Category, &Device, &Client2);
+    hr = XaActivateClient(DeviceId, Category, Context, FollowDefault, &Device, &Client2);
     if (FAILED(hr))
         return hr;
     Client = Client2;
