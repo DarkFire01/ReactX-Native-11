@@ -1139,18 +1139,22 @@ DdSetDisplayMode(
     return DdSetDisplayMode2(Com, Width, Height, BitCount, 0, 0);
 }
 
-static
+/* Puts the registry mode back once SetDisplayMode was tried, even when that attempt failed */
 HRESULT
 DdRestoreMode(
     _In_ DdLocal* Local)
 {
+    Local->Driver->Flags &= ~DdDriverModeX;
     if ((Local->Flags & DDRAWILCL_MODEHASBEENCHANGED) == 0)
         return S_OK;
 
     if (FAILED(DdChangeMode(Local, nullptr)))
         return E_NOTIMPL;
 
+    DdState.DisplayUniqueness = DdQueryDisplayUniqueness();
+    DdResetAllObjects(FALSE);
     Local->Flags = (Local->Flags & ~DDRAWILCL_MODEHASBEENCHANGED) | DDRAWILCL_DIRTYDC;
+    DdTrace(L"display mode restored");
     RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     return S_OK;
 }
@@ -1342,8 +1346,10 @@ DdSetCooperativeLevel(
     {
         if ((Local->Flags & DDRAWILCL_HASEXCLUSIVEMODE) != 0)
         {
+            /* The first interface keeps its mode when it leaves exclusive mode */
             Driver->ExclusiveOwner = nullptr;
-            DdRestoreMode(Local);
+            if ((Local->Flags & DDRAWILCL_V1SCLBEHAVIOUR) == 0)
+                DdRestoreMode(Local);
             ClipCursor(NULL);
             Local->Flags &= ~(DDRAWILCL_HASEXCLUSIVEMODE | DDRAWILCL_ISFULLSCREEN | DDRAWILCL_ALLOWMODEX);
             if ((Flags & DDSCL_NOWINDOWCHANGES) == 0 && IsWindow(Previous))

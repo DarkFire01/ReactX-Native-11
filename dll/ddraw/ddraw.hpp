@@ -959,6 +959,10 @@ DdGetAvailableMemory(
     _Out_opt_ DWORD* Free);
 
 HRESULT
+DdRestoreMode(
+    _In_ DdLocal* Local);
+
+HRESULT
 DdQueryObject(
     _In_ DdInterface* This,
     _In_opt_ const IID* Iid,

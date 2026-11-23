@@ -474,13 +474,24 @@ DdRetireLocal(
     _In_ DdLocal* Local)
 {
     DdDriver* Driver = Local->Driver;
+    DdDriver* Other;
+    BOOLEAN Owned;
+    BOOLEAN Mine;
 
     if (Driver != nullptr)
     {
         DdReleaseLocalSurfaces(Local);
         DdReleaseLocalPalettes(Local);
         DdReleaseLocalClippers(Local);
-        if (Driver->ExclusiveOwner == Local)
+
+        /* A mode SetDisplayMode tried goes back unless another object holds the display exclusively */
+        Mine = Driver->ExclusiveOwner == Local;
+        Owned = FALSE;
+        for (Other = DdState.Drivers; Other != nullptr; Other = Other->Next)
+            Owned = Owned || Other->ExclusiveOwner != nullptr;
+        if ((Local->Flags & DDRAWILCL_V1SCLBEHAVIOUR) != 0 ? (Driver->RefCount == 0 || !Owned || Mine) : !Owned)
+            DdRestoreMode(Local);
+        if (Mine)
             Driver->ExclusiveOwner = nullptr;
     }
 
