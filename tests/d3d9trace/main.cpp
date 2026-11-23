@@ -5080,6 +5080,213 @@ TrShaderWork(
     TrSettle(Device);
 }
 
+/* Element lists the declaration scenarios create from, valid and broken */
+struct TrDeclarationCase
+{
+    PCSTR Name;
+    UINT Count;
+    D3DVERTEXELEMENT9 Elements[6];
+};
+
+static const TrDeclarationCase TrDeclarationCases[] =
+{
+    { "position color", 3, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                             { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() } },
+    { "two streams", 4, { { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITIONT, 0 },
+                          { 1, 0, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                          { 1, 8, D3DDECLTYPE_SHORT4, 0, D3DDECLUSAGE_TEXCOORD, 3 }, D3DDECL_END() } },
+    { "normal blend", 5, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                           { 0, 12, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_NORMAL, 0 },
+                           { 0, 24, D3DDECLTYPE_UBYTE4, 0, D3DDECLUSAGE_BLENDINDICES, 0 },
+                           { 0, 28, D3DDECLTYPE_FLOAT1, 0, D3DDECLUSAGE_PSIZE, 0 }, D3DDECL_END() } },
+    { "empty", 1, { D3DDECL_END() } },
+    { "bad type", 2, { { 0, 0, 40, 0, D3DDECLUSAGE_POSITION, 0 }, D3DDECL_END() } },
+    { "bad usage", 2, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, 20, 0 }, D3DDECL_END() } },
+    { "odd offset", 2, { { 0, 2, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 }, D3DDECL_END() } },
+    { "repeated", 3, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                       { 0, 12, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 }, D3DDECL_END() } },
+    { "stream 16", 2, { { 16, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 }, D3DDECL_END() } },
+    { "bad method", 2, { { 0, 0, D3DDECLTYPE_FLOAT3, 9, D3DDECLUSAGE_POSITION, 0 }, D3DDECL_END() } },
+    { "texcoords", 5, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 1 },
+                        { 0, 16, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+                        { 0, 28, D3DDECLTYPE_FLOAT1, 0, D3DDECLUSAGE_TEXCOORD, 2 }, D3DDECL_END() } },
+    { "transformed", 3, { { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITIONT, 0 },
+                          { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() } },
+    { "weights", 4, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                      { 0, 12, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_BLENDWEIGHT, 0 },
+                      { 0, 20, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_BLENDINDICES, 0 }, D3DDECL_END() } },
+    { "no fixed function", 3, { { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+                                { 0, 12, D3DDECLTYPE_SHORT2, 0, D3DDECLUSAGE_TANGENT, 0 }, D3DDECL_END() } },
+};
+
+/* Declarations made from element lists and from formats, read back, bound and released */
+static
+VOID
+TrDeclarationWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Fvfs[] =
+    {
+        D3DFVF_XYZ, D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1, D3DFVF_XYZRHW | D3DFVF_SPECULAR,
+        D3DFVF_XYZB2 | D3DFVF_NORMAL | D3DFVF_TEX2 | D3DFVF_TEXCOORDSIZE1(1), D3DFVF_XYZB5 | D3DFVF_LASTBETA_UBYTE4,
+        D3DFVF_XYZW | D3DFVF_PSIZE, 0, D3DFVF_XYZB1, D3DFVF_XYZB1 | D3DFVF_LASTBETA_UBYTE4,
+        D3DFVF_XYZB1 | D3DFVF_LASTBETA_D3DCOLOR, D3DFVF_XYZB2 | D3DFVF_LASTBETA_UBYTE4,
+        D3DFVF_XYZB2 | D3DFVF_LASTBETA_D3DCOLOR, D3DFVF_XYZB3, D3DFVF_XYZB3 | D3DFVF_LASTBETA_UBYTE4,
+        D3DFVF_XYZB3 | D3DFVF_LASTBETA_D3DCOLOR, D3DFVF_XYZB4, D3DFVF_XYZB4 | D3DFVF_LASTBETA_UBYTE4,
+        D3DFVF_XYZB4 | D3DFVF_LASTBETA_D3DCOLOR, D3DFVF_XYZB5, D3DFVF_XYZB5 | D3DFVF_LASTBETA_D3DCOLOR,
+        D3DFVF_XYZ | D3DFVF_TEX3 | D3DFVF_TEXCOORDSIZE3(0) | D3DFVF_TEXCOORDSIZE4(1) | D3DFVF_TEXCOORDSIZE1(2),
+        D3DFVF_XYZ | 0x2000 | D3DFVF_SPECULAR, D3DFVF_NORMAL | D3DFVF_TEX1,
+    };
+    IDirect3DVertexDeclaration9* Made[_countof(TrDeclarationCases)] = {};
+    IDirect3DVertexDeclaration9* Bound = nullptr;
+    D3DVERTEXELEMENT9 Read[MAXD3DDECLLENGTH + 1];
+    DWORD Fvf;
+    char Name[96];
+
+    TrPhase("declarations create");
+    for (UINT Index = 0; Index < _countof(TrDeclarationCases); Index++)
+    {
+        const TrDeclarationCase* Case = &TrDeclarationCases[Index];
+        UINT Count = 0;
+        HRESULT hr;
+
+        sprintf_s(Name, "CreateVertexDeclaration %s", Case->Name);
+        TrApi(Name, Device->CreateVertexDeclaration(Case->Elements, &Made[Index]));
+        if (Made[Index] == nullptr)
+            continue;
+        hr = Made[Index]->GetDeclaration(nullptr, &Count);
+        TrCloseLine();
+        printf("api GetDeclaration count %s = %08lX %u\n", Case->Name, hr, Count);
+        FillMemory(Read, sizeof(Read), 0xCD);
+        hr = Made[Index]->GetDeclaration(Read, &Count);
+        TrCloseLine();
+        printf("api GetDeclaration %s = %08lX %u %08X\n", Case->Name, hr, Count, TrHash(Read, sizeof(Read)));
+    }
+    TrSettle(Device);
+
+    TrPhase("declarations bind");
+    for (UINT Index = 0; Index < _countof(TrDeclarationCases); Index++)
+    {
+        if (Made[Index] == nullptr)
+            continue;
+        sprintf_s(Name, "SetVertexDeclaration %s", TrDeclarationCases[Index].Name);
+        TrApi(Name, Device->SetVertexDeclaration(Made[Index]));
+        TrApi("SetVertexDeclaration again", Device->SetVertexDeclaration(Made[Index]));
+        Fvf = 0xDEADBEEF;
+        TrApi("GetFVF", Device->GetFVF(&Fvf));
+        TrCloseLine();
+        printf("api fvf = %08lX\n", Fvf);
+        TrApi("GetVertexDeclaration", Device->GetVertexDeclaration(&Bound));
+        TrCloseLine();
+        printf("api bound = %d\n", Bound == Made[Index]);
+        TrRelease(Bound);
+        Bound = nullptr;
+    }
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrSettle(Device);
+
+    TrPhase("declarations from formats");
+    for (DWORD Format : Fvfs)
+    {
+        UINT Count = 0;
+
+        sprintf_s(Name, "SetFVF %08lX", Format);
+        TrApi(Name, Device->SetFVF(Format));
+        TrApi("GetVertexDeclaration", Device->GetVertexDeclaration(&Bound));
+        if (Bound != nullptr)
+        {
+            FillMemory(Read, sizeof(Read), 0xCD);
+            Count = _countof(Read);
+            TrApi("GetDeclaration", Bound->GetDeclaration(Read, &Count));
+            TrCloseLine();
+            printf("api format declaration = %u %08X\n", Count, TrHash(Read, sizeof(Read)));
+            TrRelease(Bound);
+            Bound = nullptr;
+        }
+        Fvf = 0xDEADBEEF;
+        TrApi("GetFVF", Device->GetFVF(&Fvf));
+        TrCloseLine();
+        printf("api fvf = %08lX\n", Fvf);
+    }
+    TrSettle(Device);
+
+    TrPhase("declarations release");
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    for (IDirect3DVertexDeclaration9* Declaration : Made)
+        TrRelease(Declaration);
+    TrSettle(Device);
+}
+
+/* Declarations on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioDeclarations(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("declarations device");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrDeclarationWork(Device);
+        TrPhase("declarations device release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
+/* Declarations on pure, software and mixed devices of the plain object */
+static
+VOID
+TrScenarioDeclarationsPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING,
+        D3DCREATE_MIXED_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "declarations plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrDeclarationWork(Device);
+            TrPhase("declarations plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* Shaders on a hardware vertex processing extended device */
 static
 VOID
@@ -5395,6 +5602,8 @@ static const TrScenario TrScenarios[] =
     { "stateblocks_objects", TrScenarioStateBlockObjects },
     { "shaders", TrScenarioShaders },
     { "shaders_plain", TrScenarioShadersPlain },
+    { "declarations", TrScenarioDeclarations },
+    { "declarations_plain", TrScenarioDeclarationsPlain },
 };
 
 static
