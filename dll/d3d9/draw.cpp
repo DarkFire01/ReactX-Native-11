@@ -225,8 +225,8 @@ D9Device::ApplySwitch(VOID)
             }
             Switch.ClipPlanesMoved = 0;
             Switch.Allowed = (Switch.Allowed & D9AllowAfterVertexInit) | D9SwitchWantVertexConverter;
-            D9RestoreVertexConstants(Switch.VertexFloatsUsed, Switch.VertexIntsUsed, Limits.VertexFloats,
-                                     Limits.VertexInts, &Floats, &Ints);
+            D9RestoreVertexConstants(Switch.VertexFloatsUsed, Switch.VertexIntsUsed, Limits.DriverVertexFloats,
+                                     Limits.DriverVertexInts, &Floats, &Ints);
             if (Floats != 0)
                 DdiShaderConstants(D9BatchCall::VertexShaderConst, 0, Floats, VertexFloats, Floats * sizeof(*VertexFloats));
             if (Ints != 0)
@@ -712,6 +712,22 @@ D9Device::FlushVertexInput(VOID)
     SwitchDeclaration(Bound);
     if (Bound->Transformed)
         return S_OK;
+
+    /* A mixed device makes the driver's copy of a shader when it first draws in hardware; one only the
+       runtime's pipeline can run fails the draw */
+    if (VertexShader != nullptr && VertexShader->DriverHandle == NULL && !SoftwareVertices)
+    {
+        const D9ShaderLayout* Shape = VertexShader->Shape();
+
+        if (!Shape->HardwareCapable)
+        {
+            D9_TRACE_ONCE(L"a vertex shader the hardware cannot run drew without software vertex processing");
+            return D3DERR_INVALIDCALL;
+        }
+        hr = CreateDriverShader(FALSE, VertexShader->DriverCode(), Shape->StrippedSize, &VertexShader->DriverHandle);
+        if (FAILED(hr))
+            return hr;
+    }
     if (VertexShader != nullptr)
         SwitchVertexShader(VertexShader->DriverHandle, VertexShader->Shape()->Outputs);
     else

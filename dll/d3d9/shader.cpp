@@ -128,6 +128,15 @@ D9Device::SendVertexConstants(
         VertexConstantsPending = TRUE;
         return;
     }
+
+    /* The highest registers the application wrote come back when its shader replaces the converter's, which
+       holds them back meanwhile */
+    if (Call == D9BatchCall::VertexShaderConst && Switch.HasVertexConverter)
+        Switch.VertexFloatsUsed = Start + Count > Switch.VertexFloatsUsed ? Start + Count : Switch.VertexFloatsUsed;
+    else if (Call == D9BatchCall::VertexShaderConstI)
+        Switch.VertexIntsUsed = Start + Count > Switch.VertexIntsUsed ? Start + Count : Switch.VertexIntsUsed;
+    if (Call != D9BatchCall::VertexShaderConstB && Switch.VertexConverting)
+        return;
     if (D9OutsideRegisters(Start, Count, Registers))
     {
         if (Start >= Registers)
@@ -647,14 +656,19 @@ D9Device::SetVertexShader(
         RestoreShaderDefs(FALSE, Previous->Shape(), Next != nullptr ? Next->Shape() : nullptr);
     VertexShader = Next;
 
-    /* Without a driver copy the shader runs in the runtime's pipeline, which picks it up at the next draw */
-    if (Next != nullptr && Next->DriverHandle != NULL)
+    /* Without a driver copy the shader runs in the runtime's pipeline, which picks it up at the next draw; a
+       mixed device hands the driver its shaders only when it draws */
+    if (Next != nullptr && (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0)
+        DrawDirty |= D9DrawVertexInput;
+    else if (Next != nullptr && Next->DriverHandle != NULL)
         SwitchVertexShader(Next->DriverHandle, Next->Shape()->Outputs);
     else if (Next != nullptr)
         DrawDirty |= D9DrawVertexInput;
     else if (DriverHasVertexShaders())
         SwitchVertexShader(NULL, 0);
-    else
+    else if ((BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0 && !SoftwareVertices)
+        SwitchVertexShader(NULL, 0);
+    if (Next == nullptr && !DriverHasVertexShaders())
         DrawDirty |= D9DrawVertexInput;
     if (Previous != nullptr)
         Previous->Unbind();
