@@ -623,6 +623,13 @@ public:
     UnlockDriverSurface(
         _In_ D9Resource* Resource);
 
+    D3DDDI_POOL
+    BufferPlacement(
+        _In_ BOOLEAN IsVertex,
+        _In_ DWORD Usage,
+        _In_ DWORD Fvf,
+        _In_ D3DPOOL Pool) const;
+
     HRESULT
     CreateBufferResource(
         _In_ D3DFORMAT Format,
@@ -1532,13 +1539,6 @@ private:
         _In_ const D3DDDIARG_LOCK* Request,
         _In_ UINT LockCount,
         _Outptr_ VOID** Data);
-
-    D3DDDI_POOL
-    BufferPlacement(
-        _In_ BOOLEAN IsVertex,
-        _In_ DWORD Usage,
-        _In_ DWORD Fvf,
-        _In_ D3DPOOL Pool) const;
 
     template <class Buffer>
     HRESULT

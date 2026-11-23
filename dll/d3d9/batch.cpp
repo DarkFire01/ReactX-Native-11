@@ -45,7 +45,7 @@ D9Batch::~D9Batch()
     Stop();
 }
 
-/* A fill is a system memory buffer the runtime owns the memory of */
+/* A fill is a dynamic buffer placed like any other; in system memory the runtime owns its memory */
 HRESULT
 D9Batch::CreateFills(
     _Inout_ D9BatchBuffer* Buffer)
@@ -66,6 +66,18 @@ D9Batch::CreateFills(
 
     for (UINT Index = 0; Index < _countof(Fills); Index++)
     {
+        D3DDDI_POOL Placement = Device->BufferPlacement(Index == 0, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0,
+                                                        D3DPOOL_DEFAULT);
+
+        if (Placement != D3DDDIPOOL_SYSTEMMEM)
+        {
+            hr = Device->CreateBufferResource(static_cast<D3DFORMAT>(Fills[Index].Format), Fills[Index].Size,
+                                              Fills[Index].Flags, 0, Placement, nullptr, Targets[Index]);
+            if (FAILED(hr))
+                return hr;
+            continue;
+        }
+
         Buffer->Memory[Index] = VirtualAlloc(nullptr, Fills[Index].Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (Buffer->Memory[Index] == nullptr)
             return E_OUTOFMEMORY;
@@ -78,7 +90,7 @@ D9Batch::CreateFills(
     return S_OK;
 }
 
-/* The fills stay locked while the main thread records into their buffer; the driver is only told of it */
+/* The fills stay locked while the main thread records into their buffer; system memory ones only tell the driver */
 VOID
 D9Batch::LockFills(
     _Inout_ D9BatchBuffer* Buffer)
@@ -91,7 +103,7 @@ D9Batch::LockFills(
 
         Lock.hResource = Fill->DriverResource;
         Lock.Flags.Discard = TRUE;
-        Lock.Flags.NotifyOnly = TRUE;
+        Lock.Flags.NotifyOnly = Fill->Pool == D3DDDIPOOL_SYSTEMMEM;
         if (FAILED(Funcs->pfnLock(Driver, &Lock)))
             D9_TRACE_ONCE(L"the driver would not lock a batch fill");
     }
@@ -103,8 +115,16 @@ D9Batch::DestroyFills(
 {
     D9Resource* Targets[3] = { &Buffer->Vertices, &Buffer->Indices16, &Buffer->Indices32 };
 
+    /* Index fills in video memory are unlocked before they go; the vertex fill goes still locked */
     for (UINT Index = 0; Index < _countof(Targets); Index++)
     {
+        if (Index != 0 && Targets[Index]->DriverResource != NULL && Targets[Index]->Pool != D3DDDIPOOL_SYSTEMMEM)
+        {
+            D3DDDIARG_UNLOCK Unlock = {};
+
+            Unlock.hResource = Targets[Index]->DriverResource;
+            Funcs->pfnUnlock(Driver, &Unlock);
+        }
         if (Targets[Index]->DriverResource != NULL)
             Funcs->pfnDestroyResource(Driver, Targets[Index]->DriverResource);
         Targets[Index]->DriverResource = NULL;
