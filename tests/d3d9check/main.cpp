@@ -3978,6 +3978,294 @@ NcCheckShared(
     Nine->Release();
 }
 
+/* Hashes the bits of a bitmap the cursor checks read back */
+static
+DWORD
+NcHashBitmap(
+    _In_opt_ HBITMAP Bitmap,
+    _Out_ BITMAP* Info)
+{
+    std::vector<BYTE> Bits;
+    DWORD Hash = 2166136261UL;
+
+    ZeroMemory(Info, sizeof(*Info));
+    if (Bitmap == NULL || GetObjectW(Bitmap, sizeof(*Info), Info) == 0)
+        return 0;
+    Bits.resize(static_cast<SIZE_T>(Info->bmWidthBytes) * Info->bmHeight);
+    GetBitmapBits(Bitmap, static_cast<LONG>(Bits.size()), Bits.data());
+    for (BYTE Value : Bits)
+        Hash = (Hash ^ Value) * 16777619UL;
+    return Hash;
+}
+
+/* Which cursor the thread shows: none, the one it had before, or a new one, and what that one looks like */
+static
+VOID
+NcPrintCursor(
+    _In_z_ PCSTR Name,
+    _In_opt_ HCURSOR Before)
+{
+    HCURSOR Current = GetCursor();
+    ICONINFO Info = {};
+    BITMAP Mask;
+    BITMAP Color;
+    DWORD MaskHash;
+    DWORD ColorHash;
+
+    if (Current == NULL || Current == Before)
+    {
+        printf("%s = %s\n", Name, Current == NULL ? "none" : "before");
+        return;
+    }
+    if (!GetIconInfo(Current, &Info))
+    {
+        printf("%s = new noinfo\n", Name);
+        return;
+    }
+    MaskHash = NcHashBitmap(Info.hbmMask, &Mask);
+    ColorHash = NcHashBitmap(Info.hbmColor, &Color);
+    printf("%s = new icon %d hot %lu,%lu mask %ldx%ld bpp %u hash %08lX color %ldx%ld bpp %u hash %08lX\n", Name,
+           Info.fIcon, Info.xHotspot, Info.yHotspot, Mask.bmWidth, Mask.bmHeight, Mask.bmBitsPixel, MaskHash,
+           Color.bmWidth, Color.bmHeight, Color.bmBitsPixel, ColorHash);
+    if (Info.hbmMask != NULL)
+        DeleteObject(Info.hbmMask);
+    if (Info.hbmColor != NULL)
+        DeleteObject(Info.hbmColor);
+}
+
+/* Fills a 32 bit surface with a pattern whose alpha is opaque in most places */
+static
+VOID
+NcFillCursor(
+    _In_ IDirect3DSurface9* Surface,
+    _In_ UINT Width,
+    _In_ UINT Height)
+{
+    D3DLOCKED_RECT Locked = {};
+
+    if (FAILED(Surface->LockRect(&Locked, nullptr, 0)))
+        return;
+    for (UINT Y = 0; Y < Height; Y++)
+    {
+        DWORD* Row = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Locked.pBits) + Locked.Pitch * Y);
+
+        for (UINT X = 0; X < Width; X++)
+        {
+            DWORD Alpha = ((X + Y) % 5) == 0 ? 0x40000000 : 0xFF000000;
+
+            Row[X] = Alpha | ((X * 8) << 16) | ((Y * 8) << 8) | ((X ^ Y) == 3 ? 0 : 0x80);
+        }
+    }
+    Surface->UnlockRect();
+}
+
+/* The device cursor on a windowed chain: properties, visibility and position; the real cursor goes back after */
+static
+VOID
+NcCheckCursorOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DDevice9* Other,
+    _In_ const D3DPRESENT_PARAMETERS* Parameters,
+    _In_opt_ HCURSOR Before)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Width;
+        UINT Height;
+        D3DFORMAT Format;
+        D3DPOOL Pool;
+        UINT HotX;
+        UINT HotY;
+    } Plains[] =
+    {
+        { "sysmem", 32, 32, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 3, 5 },
+        { "scratch", 32, 32, D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH, 0, 0 },
+        { "default", 32, 32, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 31, 31 },
+        { "x8", 32, 32, D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 0 },
+        { "odd_width", 24, 32, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 0 },
+        { "odd_height", 32, 12, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 0 },
+        { "hot_x", 32, 32, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 32, 0 },
+        { "hot_y", 32, 32, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 32 },
+        { "small", 16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 15, 7 },
+        { "big", 64, 64, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 10, 20 },
+        { "huge", 8192, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0, 0 },
+    };
+    D3DPRESENT_PARAMETERS Again = *Parameters;
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DSurface9* Level = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    POINT Point = {};
+    char Name[96];
+    HRESULT hr;
+
+    printf("%s_show_early = %d\n", Prefix, Device->ShowCursor(TRUE));
+    printf("%s_show_early_again = %d\n", Prefix, Device->ShowCursor(TRUE));
+    printf("%s_hide_early = %d\n", Prefix, Device->ShowCursor(FALSE));
+    Device->SetCursorPosition(10, 12, 0);
+    sprintf_s(Name, "%s_cursor_early", Prefix);
+    NcPrintCursor(Name, Before);
+    printf("%s_props_null = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, nullptr));
+
+    for (const auto& Plain : Plains)
+    {
+        Surface = nullptr;
+        hr = Device->CreateOffscreenPlainSurface(Plain.Width, Plain.Height, Plain.Format, Plain.Pool, &Surface,
+                                                 nullptr);
+        if (Surface == nullptr)
+        {
+            printf("%s_props[%s] = none %08lX\n", Prefix, Plain.Name, hr);
+            continue;
+        }
+        if (Plain.Format == D3DFMT_A8R8G8B8 && Plain.Pool != D3DPOOL_DEFAULT)
+            NcFillCursor(Surface, Plain.Width, Plain.Height);
+        hr = Device->SetCursorProperties(Plain.HotX, Plain.HotY, Surface);
+        printf("%s_props[%s] = %08lX\n", Prefix, Plain.Name, hr);
+        sprintf_s(Name, "%s_cursor[%s]", Prefix, Plain.Name);
+        NcPrintCursor(Name, Before);
+        printf("%s_props[%s]_release = %lu\n", Prefix, Plain.Name, Surface->Release());
+    }
+
+    Surface = nullptr;
+    Device->CreateRenderTarget(32, 32, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        printf("%s_props_target = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, Surface));
+        printf("%s_props_target_release = %lu\n", Prefix, Surface->Release());
+    }
+    Surface = nullptr;
+    Device->CreateRenderTarget(32, 32, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        printf("%s_props_target_lockable = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, Surface));
+        printf("%s_props_target_lockable_release = %lu\n", Prefix, Surface->Release());
+    }
+    Device->CreateTexture(32, 32, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    if (Texture != nullptr)
+    {
+        Texture->GetSurfaceLevel(0, &Level);
+        printf("%s_props_texture = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, Level));
+        Level->Release();
+        printf("%s_props_texture_release = %lu\n", Prefix, Texture->Release());
+        Texture = nullptr;
+    }
+    Device->CreateTexture(32, 32, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    if (Texture != nullptr)
+    {
+        Texture->GetSurfaceLevel(0, &Level);
+        printf("%s_props_texture_dynamic = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, Level));
+        Level->Release();
+        printf("%s_props_texture_dynamic_release = %lu\n", Prefix, Texture->Release());
+        Texture = nullptr;
+    }
+    Surface = nullptr;
+    Other->CreateOffscreenPlainSurface(32, 32, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        printf("%s_props_other = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, Surface));
+        printf("%s_props_other_release = %lu\n", Prefix, Surface->Release());
+    }
+
+    /* A cursor the device holds, shown, moved and hidden */
+    Surface = nullptr;
+    Device->CreateOffscreenPlainSurface(32, 32, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, nullptr);
+    if (Surface == nullptr)
+        return;
+    NcFillCursor(Surface, 32, 32);
+    printf("%s_hold_props = %08lX\n", Prefix, Device->SetCursorProperties(7, 9, Surface));
+    Surface->AddRef();
+    printf("%s_hold_refs = %lu\n", Prefix, Surface->Release());
+    printf("%s_show = %d\n", Prefix, Device->ShowCursor(TRUE));
+    sprintf_s(Name, "%s_cursor_shown", Prefix);
+    NcPrintCursor(Name, Before);
+    printf("%s_show_again = %d\n", Prefix, Device->ShowCursor(TRUE));
+    Device->SetCursorPosition(100, 120, 0);
+    GetCursorPos(&Point);
+    printf("%s_position = %ld,%ld\n", Prefix, Point.x, Point.y);
+    SetCursorPos(30, 40);
+    Device->SetCursorPosition(100, 120, D3DCURSOR_IMMEDIATE_UPDATE);
+    GetCursorPos(&Point);
+    printf("%s_position_moved = %ld,%ld\n", Prefix, Point.x, Point.y);
+    Device->SetCursorPosition(101, 122, D3DCURSOR_IMMEDIATE_UPDATE);
+    GetCursorPos(&Point);
+    printf("%s_position_next = %ld,%ld\n", Prefix, Point.x, Point.y);
+    NcFillCursor(Surface, 16, 16);
+    printf("%s_props_shown = %08lX\n", Prefix, Device->SetCursorProperties(1, 2, Surface));
+    sprintf_s(Name, "%s_cursor_reprops", Prefix);
+    NcPrintCursor(Name, Before);
+    printf("%s_hide = %d\n", Prefix, Device->ShowCursor(FALSE));
+    sprintf_s(Name, "%s_cursor_hidden", Prefix);
+    NcPrintCursor(Name, Before);
+    Device->SetCursorPosition(140, 150, 0);
+    GetCursorPos(&Point);
+    printf("%s_position_hidden = %ld,%ld\n", Prefix, Point.x, Point.y);
+    printf("%s_hide_again = %d\n", Prefix, Device->ShowCursor(FALSE));
+    printf("%s_props_hidden = %08lX\n", Prefix, Device->SetCursorProperties(0, 0, Surface));
+    sprintf_s(Name, "%s_cursor_hidden_props", Prefix);
+    NcPrintCursor(Name, Before);
+    SetCursor(Before);
+    printf("%s_show_after_set = %d\n", Prefix, Device->ShowCursor(TRUE));
+    sprintf_s(Name, "%s_cursor_after_set", Prefix);
+    NcPrintCursor(Name, Before);
+    printf("%s_release_held = %lu\n", Prefix, Surface->Release());
+
+    printf("%s_reset = %08lX\n", Prefix, Device->Reset(&Again));
+    sprintf_s(Name, "%s_cursor_reset", Prefix);
+    NcPrintCursor(Name, Before);
+    printf("%s_show_reset = %d\n", Prefix, Device->ShowCursor(TRUE));
+    sprintf_s(Name, "%s_cursor_show_reset", Prefix);
+    NcPrintCursor(Name, Before);
+}
+
+static
+VOID
+NcCheckCursor(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HCURSOR Before = GetCursor();
+    POINT Saved = {};
+    HRESULT hr;
+
+    GetCursorPos(&Saved);
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Made = Parameters;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                   &DeviceEx);
+    printf("cursor_create_ex = %08lX\n", hr);
+    Made = Parameters;
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, &Device);
+    printf("cursor_create_plain = %08lX\n", hr);
+    if (DeviceEx != nullptr && Device != nullptr)
+    {
+        NcCheckCursorOn("cursor_ex", DeviceEx, Device, &Parameters, Before);
+        printf("cursor_ex_release = %lu\n", DeviceEx->Release());
+        NcPrintCursor("cursor_ex_released", Before);
+        DeviceEx = nullptr;
+        SetCursor(Before);
+        NcCheckCursorOn("cursor_plain", Device, Device, &Parameters, Before);
+        printf("cursor_plain_release = %lu\n", Device->Release());
+        NcPrintCursor("cursor_plain_released", Before);
+        Device = nullptr;
+    }
+    if (DeviceEx != nullptr)
+        DeviceEx->Release();
+    if (Device != nullptr)
+        Device->Release();
+    SetCursor(Before);
+    SetCursorPos(Saved.x, Saved.y);
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -4003,6 +4291,7 @@ static const NineCheckInfo NcChecks[] =
     { "copies", NcCheckCopies },
     { "gamma", NcCheckGamma },
     { "shared", NcCheckShared },
+    { "cursor", NcCheckCursor },
 };
 
 static
