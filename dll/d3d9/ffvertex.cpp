@@ -363,6 +363,86 @@ D9VsCoordinateSource(
     }
 }
 
+/* Coordinates made from the eye space position or normal; a reflection or sphere map also reads the eye
+   vector, which a local viewer takes from the position */
+static
+D9_VS_SOURCE
+D9VsGenerate(
+    _Inout_ D9VsWriter* Out,
+    _In_ DWORD Source,
+    _In_ BOOLEAN HasNormal,
+    _In_ BOOLEAN LocalViewer,
+    _Out_ UINT* Last)
+{
+    D9_VS_SOURCE Eye = D9VsSrc(D9VsTemp, D9VsTempEye, D9VsAll);
+    D9_VS_SOURCE Normal = D9VsSrc(D9VsTemp, D9VsTempNormal, D9VsAll);
+    D9_VS_SOURCE View = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsAll);
+    D9_VS_SOURCE Twice = D9VsSrc(D9VsTemp, 9, D9VsX);
+    D9_VS_TARGET Result = D9VsDst(D9VsTemp, D9VsTempScratch, 0x7);
+    D9_VS_SOURCE Made = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll);
+    BOOLEAN Sphere = Source == D3DTSS_TCI_SPHEREMAP;
+    D9_VS_TARGET Reflected = Sphere ? D9VsDst(D9VsTemp, 8, 0x7) : Result;
+
+    *Last = 2;
+    if (Source == D3DTSS_TCI_CAMERASPACENORMAL)
+    {
+        if (!HasNormal)
+            Out->Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempNormal, 0x7), D9VsConstant(D9VsConstZero, 0));
+        return Normal;
+    }
+    if (Source == D3DTSS_TCI_CAMERASPACEPOSITION)
+        return Eye;
+
+    /* The reflection of the eye vector about the normal, the eye looking down z unless the viewer is local */
+    if (LocalViewer)
+    {
+        Out->Op(D9VsNrm, D9VsDst(D9VsTemp, D9VsTempOut, 0x7), Eye);
+        if (HasNormal)
+        {
+            Out->Op(D9VsDp3, D9VsDst(D9VsTemp, 9, 0x1), Normal, View);
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 9, 0x1), Twice, Twice);
+            Out->Op(D9VsMad, Reflected, D9VsNegated(Twice), Normal, View);
+        }
+        else
+        {
+            Out->Op(D9VsMov, Reflected, View);
+        }
+        if (Sphere)
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 8, 0x4), D9VsSrc(D9VsTemp, 8, D9VsZ),
+                    D9VsNegated(D9VsConstant(D9VsConstZero, 3)));
+    }
+    else if (HasNormal)
+    {
+        Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 9, 0x1), D9VsSwizzled(Normal, D9VsZ), D9VsSwizzled(Normal, D9VsZ));
+        Out->Op(D9VsMul, Reflected, D9VsNegated(Twice), Normal);
+    }
+    else if (Sphere)
+    {
+        Out->Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempScratch, 0x3), D9VsConstant(D9VsConstNumbers, 0));
+        *Last = 1;
+        return Made;
+    }
+    else
+    {
+        Out->Op(D9VsMov, Result, D9VsConstant(D9VsConstZero, 0));
+    }
+    if (!Sphere)
+    {
+        if (!LocalViewer)
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, D9VsTempScratch, 0x4), Made, D9VsConstant(D9VsConstZero, 3));
+        return Made;
+    }
+
+    /* The sphere map halves the reflection over its length and moves it to the middle */
+    Out->Op(D9VsDp3, D9VsDst(D9VsTemp, 8, 0x4), D9VsSrc(D9VsTemp, 8, D9VsAll), D9VsSrc(D9VsTemp, 8, D9VsAll));
+    Out->Op(D9VsRsq, D9VsDst(D9VsTemp, 8, 0x4), D9VsSrc(D9VsTemp, 8, D9VsZ));
+    Out->Op(D9VsMul, D9VsDst(D9VsTemp, 8, 0x4), D9VsSrc(D9VsTemp, 8, D9VsZ), D9VsConstant(D9VsConstNumbers, 0));
+    Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempScratch, 0x3), D9VsSrc(D9VsTemp, 8, D9VsAll),
+            D9VsSrc(D9VsTemp, 8, D9VsZ), D9VsConstant(D9VsConstNumbers, 0));
+    *Last = 1;
+    return Made;
+}
+
 BOOLEAN
 D9BuildFixedVertexShader(
     _Inout_ D9_FIXED_VERTEX_KEY* Key,
@@ -489,31 +569,86 @@ D9BuildFixedVertexShader(
         Out.Op(D9VsMov, D9VsDst(D9VsRasterOut, 2, 0xF), Size);
     }
 
-    /* Each active stage gets the coordinates it reads in the output of its own number */
+    /* Each active stage gets the coordinates it reads in the output of its own number, through its transform
+       and its projection */
     Stages = (Modes >> 6) & 0xF;
     Writes |= Stages << 8;
     for (UINT Stage = 0; Stage < Stages; Stage++)
     {
+        static const BYTE Picks[4] = { D9VsX, D9VsY, D9VsZ, D9VsW };
         DWORD Source = D9VsCoordinateSource(Key->Stages[Stage]);
         DWORD Transform = (Key->Stages[Stage] >> 4) & 3;
         BOOLEAN Divide = ((Modes >> 24) & (1u << Stage)) != 0;
         D9_VS_SOURCE From;
-        UINT Floats;
+        D9_VS_SOURCE Result;
+        UINT Last;
 
-        if ((Source & 0xFFFF0000) != 0 || Transform != 0 || Divide)
-            return FALSE;
-        UNREFERENCED_PARAMETER(Projected);
-        From = Sets[Source & 7];
-        Floats = Key->Stages[Source & 7] >> 6;
-        Out.Op(D9VsMov, D9VsFirst(D9VsDst(D9VsTexcoordOut, Stage, 0xF), Floats + 1), From);
-        if (Floats == 0)
+        if ((Source & 0xFFFF0000) == 0)
+        {
+            From = Sets[Source & 7];
+            Last = Key->Stages[Source & 7] >> 6;
+        }
+        else
+        {
+            From = D9VsGenerate(&Out, Source, (In & D9VsInNormal) != 0, (In & D9VsLocalViewer) != 0, &Last);
+        }
+
+        if (Transform != 0)
+        {
+            UINT Matrix = D9VsConstTexture + 4 * Stage;
+            UINT Wanted = Transform + 1;
+            D9_VS_TARGET Work = D9VsFirst(D9VsDst(D9VsTemp, D9VsTempOut, 0xF), Wanted);
+            D9_VS_SOURCE Partial = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsAll);
+
+            /* A set the vertices lack reads zero through a temporary */
+            if (From.File == D9VsConst)
+            {
+                Out.Op(D9VsMov, D9VsFirst(D9VsDst(D9VsTemp, D9VsTempScratch, 0xF), Last + 1), From);
+                From = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll);
+            }
+            Out.Op(D9VsMul, Work, D9VsSwizzled(From, D9VsX), D9VsWhole(Matrix));
+            for (UINT Part = 1; Part <= Last && Part < 4; Part++)
+                Out.Op(D9VsMad, Work, D9VsSwizzled(From, Picks[Part]), D9VsWhole(Matrix + Part), Partial);
+            if (Last < 3)
+                Out.Op(D9VsAdd, Work, Partial, D9VsWhole(Matrix + Last + 1));
+            Last = Wanted - 1;
+            From = Partial;
+        }
+
+        Result = From;
+        if (Divide)
+        {
+            if (Projected)
+            {
+                if (From.File == D9VsTemp)
+                {
+                    Out.Op(D9VsMov, D9VsDst(D9VsTemp, From.Number, 0x8), D9VsSwizzled(From, Picks[Last]));
+                }
+                else if (Last != 3)
+                {
+                    Out.Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), From);
+                    Out.Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempScratch, 0x8), D9VsSwizzled(From, Picks[Last]));
+                    Result = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll);
+                }
+                Last = 3;
+            }
+            else
+            {
+                Out.Op(D9VsRcp, D9VsDst(D9VsTemp, D9VsTempOut, 0x1), D9VsSwizzled(From, Picks[Last]));
+                Out.Op(D9VsMul, D9VsFirst(D9VsDst(D9VsTemp, D9VsTempScratch, 0xF), Last + 1), From,
+                       D9VsSrc(D9VsTemp, D9VsTempOut, D9VsX));
+                Result = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll);
+            }
+        }
+
+        Out.Op(D9VsMov, D9VsFirst(D9VsDst(D9VsTexcoordOut, Stage, 0xF), Last + 1), Result);
+        if (Last == 0)
             Writes |= 3u << (2 * Stage + 16);
-        else if (Floats == 2)
+        else if (Last == 2)
             Writes |= 1u << (2 * Stage + 16);
-        else if (Floats == 3)
+        else if (Last == 3)
             Writes |= 2u << (2 * Stage + 16);
     }
-
     Out.Put(0x0000FFFF);
     if (Out.Overflow)
         return FALSE;
@@ -1171,6 +1306,70 @@ D9VsProductRow(
     }
 }
 
+/* The inverse the normals transform by, worked in doubles with each product and sum in the system's order; a
+   matrix without one gives the identity */
+static
+VOID
+D9VsInverse(
+    _In_ const D3DMATRIX* Matrix,
+    _Out_ D3DMATRIX* Inverse)
+{
+    const FLOAT* M = &Matrix->_11;
+    FLOAT* R = &Inverse->_11;
+    double A0 = M[0], A1 = M[1], A2 = M[2], A3 = M[3];
+    double B0 = M[4], B1 = M[5], B2 = M[6], B3 = M[7];
+    double C0 = M[8], C1 = M[9], C2 = M[10], C3 = M[11];
+    double D0 = M[12], D1 = M[13], D2 = M[14], D3 = M[15];
+    double P23 = B3 * A2 - B2 * A3;
+    double Q23 = C3 * A2 - C2 * A3;
+    double R23 = D3 * A2 - D2 * A3;
+    double S23 = C3 * B2 - C2 * B3;
+    double T23 = D3 * B2 - D2 * B3;
+    double U23 = D3 * C2 - D2 * C3;
+    double K0 = B1 * Q23 - C1 * P23 - A1 * S23;
+    double K1 = A1 * T23 - B1 * R23 + D1 * P23;
+    double K2 = C1 * R23 - D1 * Q23 - A1 * U23;
+    double K3 = B1 * U23 - C1 * T23 + D1 * S23;
+    double Det = D0 * K0 + C0 * K1 + B0 * K2 + A0 * K3;
+    double P01;
+    double Q01;
+    double R01;
+    double S01;
+    double T01;
+    double U01;
+    double Scale;
+
+    if (Det == 0.0)
+    {
+        ZeroMemory(Inverse, sizeof(*Inverse));
+        Inverse->_11 = Inverse->_22 = Inverse->_33 = Inverse->_44 = 1.0f;
+        return;
+    }
+    P01 = B1 * A0 - B0 * A1;
+    Q01 = C1 * A0 - C0 * A1;
+    R01 = D1 * A0 - D0 * A1;
+    S01 = C1 * B0 - C0 * B1;
+    T01 = D1 * B0 - D0 * B1;
+    U01 = D1 * C0 - D0 * C1;
+    Scale = 1.0 / Det;
+    R[0] = static_cast<FLOAT>(Scale * K3);
+    R[1] = static_cast<FLOAT>(Scale * K2);
+    R[2] = static_cast<FLOAT>(Scale * K1);
+    R[3] = static_cast<FLOAT>(K0 * Scale);
+    R[4] = static_cast<FLOAT>((C0 * T23 - D0 * S23 - B0 * U23) * Scale);
+    R[5] = static_cast<FLOAT>((A0 * U23 - C0 * R23 + D0 * Q23) * Scale);
+    R[6] = static_cast<FLOAT>((B0 * R23 - D0 * P23 - A0 * T23) * Scale);
+    R[7] = static_cast<FLOAT>((A0 * S23 - B0 * Q23 + C0 * P23) * Scale);
+    R[8] = static_cast<FLOAT>((U01 * B3 - T01 * C3 + S01 * D3) * Scale);
+    R[9] = static_cast<FLOAT>((R01 * C3 - Q01 * D3 - U01 * A3) * Scale);
+    R[10] = static_cast<FLOAT>((T01 * A3 - R01 * B3 + P01 * D3) * Scale);
+    R[11] = static_cast<FLOAT>((Q01 * B3 - P01 * C3 - S01 * A3) * Scale);
+    R[12] = static_cast<FLOAT>((T01 * C2 - S01 * D2 - U01 * B2) * Scale);
+    R[13] = static_cast<FLOAT>((U01 * A2 - R01 * C2 + Q01 * D2) * Scale);
+    R[14] = static_cast<FLOAT>((R01 * B2 - P01 * D2 - T01 * A2) * Scale);
+    R[15] = static_cast<FLOAT>((S01 * A2 - Q01 * B2 + P01 * C2) * Scale);
+}
+
 VOID
 D9VertexConverter::UpdateRegisters(VOID)
 {
@@ -1218,6 +1417,14 @@ D9VertexConverter::UpdateRegisters(VOID)
         {
             WriteMatrix(D9VsConstWorldView, &WorldView);
             Flags &= ~0x1000u;
+        }
+        if ((Key.Needs & D9VertexNeedsNormal) != 0 && (Flags & 0x100) != 0)
+        {
+            D3DMATRIX Inverse;
+
+            D9VsInverse(&WorldView, &Inverse);
+            WriteMatrix(D9VsConstNormal, &Inverse);
+            Flags &= ~0x100u;
         }
     }
     Updated = Flags;
