@@ -91,6 +91,10 @@ struct RxSessionCaps12
     GUID* Types;
 };
 
+/* RxDevice12::Get sharing: hand back the adapter's singleton, or record a new device as it */
+constexpr UINT RxDeviceReuseSingleton = 0x1;
+constexpr UINT RxDeviceStoreSingleton = 0x2;
+
 /* Device answers resource validation reads, gathered once the device is up */
 struct RxValidationCaps12
 {
@@ -221,12 +225,13 @@ private:
 class RxDevice12 final : public ID3D12Device14, public RxKernelDevice
 {
 public:
-    /* The device for an adapter, made the first time and shared after that */
+    /* The device for an adapter; Sharing says whether the adapter's singleton is handed back or becomes this one */
     static
     HRESULT
     Get(
         _In_ const LUID& AdapterLuid,
         _In_ D3D_FEATURE_LEVEL MinimumFeatureLevel,
+        _In_ UINT Sharing,
         _Outptr_ RxDevice12** Device);
 
     /* Whether an adapter could make a device at a level, without making one */

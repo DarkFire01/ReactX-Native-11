@@ -34,22 +34,19 @@ D3D12GetInterface(
     _In_ REFIID riid,
     _COM_Outptr_opt_ void** ppvDebug);
 
-/* What applications ask removed device data to record, applied to devices made after */
-struct RxDredState
-{
-    D3D12_DRED_ENABLEMENT AutoBreadcrumbs;
-    D3D12_DRED_ENABLEMENT PageFault;
-    D3D12_DRED_ENABLEMENT WatsonDump;
-    D3D12_DRED_ENABLEMENT BreadcrumbContext;
-    BOOL MarkersOnlyBreadcrumbs;
-};
+RxDredState RxProcessDred;
 
-static RxDredState RxProcessDred;
-
-/* Each request gets its own settings object; all of them write the process settings */
+/* Each request gets its own settings object; all of them write the state they were made for */
 class RxDredSettings final : public ID3D12DeviceRemovedExtendedDataSettings2
 {
 public:
+    explicit
+    RxDredSettings(
+        _In_ RxDredState* State)
+        : Target(State)
+    {
+    }
+
     HRESULT
     STDMETHODCALLTYPE
     QueryInterface(
@@ -95,7 +92,7 @@ public:
     SetAutoBreadcrumbsEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        RxProcessDred.AutoBreadcrumbs = Enablement;
+        Target->AutoBreadcrumbs = Enablement;
     }
 
     VOID
@@ -103,7 +100,7 @@ public:
     SetPageFaultEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        RxProcessDred.PageFault = Enablement;
+        Target->PageFault = Enablement;
     }
 
     VOID
@@ -111,7 +108,7 @@ public:
     SetWatsonDumpEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        RxProcessDred.WatsonDump = Enablement;
+        Target->WatsonDump = Enablement;
     }
 
     VOID
@@ -119,7 +116,7 @@ public:
     SetBreadcrumbContextEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        RxProcessDred.BreadcrumbContext = Enablement;
+        Target->BreadcrumbContext = Enablement;
     }
 
     VOID
@@ -127,14 +124,35 @@ public:
     UseMarkersOnlyAutoBreadcrumbs(
         BOOL MarkersOnly) override
     {
-        RxProcessDred.MarkersOnlyBreadcrumbs = MarkersOnly;
+        Target->MarkersOnlyBreadcrumbs = MarkersOnly;
     }
 
 private:
     ~RxDredSettings() = default;
 
     LONG RefCount = 1;
+    RxDredState* Target;
 };
+
+HRESULT
+RxMakeDredSettings(
+    _In_ RxDredState* Target,
+    _In_ REFIID riid,
+    _COM_Outptr_opt_ void** ppvObject)
+{
+    RxDredSettings* Settings;
+    HRESULT hr;
+
+    if (ppvObject == nullptr)
+        return S_FALSE;
+
+    Settings = new (std::nothrow) RxDredSettings(Target);
+    if (Settings == nullptr)
+        return E_OUTOFMEMORY;
+    hr = Settings->QueryInterface(riid, ppvObject);
+    Settings->Release();
+    return hr;
+}
 
 static const RxD3D12CoreExports RxCoreExports =
 {
@@ -167,20 +185,10 @@ D3D12GetInterface(
     }
 
     if (rclsid == CLSID_D3D12DeviceRemovedExtendedData)
-    {
-        RxDredSettings* Settings;
-        HRESULT hr;
+        return RxMakeDredSettings(&RxProcessDred, riid, ppvDebug);
 
-        if (ppvDebug == nullptr)
-            return S_FALSE;
-
-        Settings = new (std::nothrow) RxDredSettings();
-        if (Settings == nullptr)
-            return E_OUTOFMEMORY;
-        hr = Settings->QueryInterface(riid, ppvDebug);
-        Settings->Release();
-        return hr;
-    }
+    if (rclsid == CLSID_D3D12DeviceFactory)
+        return RxMakeDeviceFactory(riid, ppvDebug);
 
     /* The debug layer and driver verifier are separate installs on Windows too; the output is left alone */
     if (rclsid == CLSID_D3D12Debug || rclsid == RxDriverVerifierClsid)

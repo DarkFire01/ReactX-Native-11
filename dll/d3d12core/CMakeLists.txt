@@ -14,6 +14,7 @@ nt_add_usermode_dll(d3d12core
         device_stubs.cpp
         devicecaps.cpp
         devicecreate.cpp
+        devicefactory.cpp
         features.cpp
         formatlayout12.cpp
         formatsupport12.cpp

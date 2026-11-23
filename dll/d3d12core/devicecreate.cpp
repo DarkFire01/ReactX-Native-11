@@ -115,9 +115,10 @@ RxAdapterLuid(
 
 HRESULT
 WINAPI
-RxCreateDevice(
+RxCreateSharedDevice(
     _In_opt_ IUnknown* pAdapter,
     _In_ D3D_FEATURE_LEVEL MinimumFeatureLevel,
+    _In_ UINT Sharing,
     _In_ REFIID riid,
     _COM_Outptr_opt_ void** ppDevice)
 {
@@ -145,11 +146,23 @@ RxCreateDevice(
         return SUCCEEDED(hr) ? S_FALSE : hr;
     }
 
-    hr = RxDevice12::Get(Luid, MinimumFeatureLevel, &Device);
+    hr = RxDevice12::Get(Luid, MinimumFeatureLevel, Sharing, &Device);
     if (FAILED(hr))
         return hr;
 
     hr = Device->QueryInterface(riid, ppDevice);
     Device->Release();
     return hr;
+}
+
+HRESULT
+WINAPI
+RxCreateDevice(
+    _In_opt_ IUnknown* pAdapter,
+    _In_ D3D_FEATURE_LEVEL MinimumFeatureLevel,
+    _In_ REFIID riid,
+    _COM_Outptr_opt_ void** ppDevice)
+{
+    return RxCreateSharedDevice(pAdapter, MinimumFeatureLevel, RxDeviceReuseSingleton | RxDeviceStoreSingleton, riid,
+                                ppDevice);
 }

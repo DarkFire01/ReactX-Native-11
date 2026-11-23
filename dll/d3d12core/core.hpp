@@ -15,6 +15,41 @@ RxCreateDevice(
     _In_ REFIID riid,
     _COM_Outptr_opt_ void** ppDevice);
 
+/* D3D12CreateDevice with a choice over the adapter's singleton device, as device factories make */
+HRESULT
+WINAPI
+RxCreateSharedDevice(
+    _In_opt_ IUnknown* pAdapter,
+    _In_ D3D_FEATURE_LEVEL MinimumFeatureLevel,
+    _In_ UINT Sharing,
+    _In_ REFIID riid,
+    _COM_Outptr_opt_ void** ppDevice);
+
+/* What applications ask removed device data to record, applied to devices made after */
+struct RxDredState
+{
+    D3D12_DRED_ENABLEMENT AutoBreadcrumbs;
+    D3D12_DRED_ENABLEMENT PageFault;
+    D3D12_DRED_ENABLEMENT WatsonDump;
+    D3D12_DRED_ENABLEMENT BreadcrumbContext;
+    BOOL MarkersOnlyBreadcrumbs;
+};
+
+extern RxDredState RxProcessDred;
+
+/* A settings object writing one DRED state, the process one or a device factory's */
+HRESULT
+RxMakeDredSettings(
+    _In_ RxDredState* Target,
+    _In_ REFIID riid,
+    _COM_Outptr_opt_ void** ppvObject);
+
+/* A device factory starting from the process state */
+HRESULT
+RxMakeDeviceFactory(
+    _In_ REFIID riid,
+    _COM_Outptr_opt_ void** ppvObject);
+
 HRESULT
 WINAPI
 RxSerializeRootSignature(
