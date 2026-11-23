@@ -1914,6 +1914,269 @@ XcCheckCallbacks(VOID)
     XcStreamEnded = nullptr;
 }
 
+/* Waits until a callback event of the given kind shows up, or the time runs out */
+static
+BOOLEAN
+XcWaitForEvent(
+    _In_ CHAR Kind,
+    _In_ UINT32 Count,
+    _In_ DWORD Milliseconds)
+{
+    ULONGLONG End = GetTickCount64() + Milliseconds;
+
+    while (GetTickCount64() < End)
+    {
+        UINT32 Seen = 0;
+        LONG Total = XcEventCount;
+
+        if (Total > static_cast<LONG>(ARRAYSIZE(XcEvents)))
+            Total = ARRAYSIZE(XcEvents);
+        for (LONG Index = 0; Index < Total; Index++)
+        {
+            if (XcEvents[Index].Kind == Kind)
+                Seen += 1;
+        }
+        if (Seen >= Count)
+            return TRUE;
+        Sleep(2);
+    }
+    return FALSE;
+}
+
+/* Prints the buffer events alone, which do not depend on where passes fall */
+static
+VOID
+XcPrintBufferEvents(
+    _In_z_ PCSTR Name)
+{
+    LONG Count = XcEventCount;
+
+    if (Count > static_cast<LONG>(ARRAYSIZE(XcEvents)))
+        Count = ARRAYSIZE(XcEvents);
+    printf("%s buffer events", Name);
+    for (LONG Index = 0; Index < Count; Index++)
+    {
+        CHAR Kind = XcEvents[Index].Kind;
+
+        if (Kind == 'B' || Kind == 'b' || Kind == 'L' || Kind == 'E' || Kind == 'R')
+            printf(" %c%u", Kind, XcEvents[Index].Value);
+    }
+    printf("\n");
+}
+
+static
+VOID
+XcState(
+    _In_z_ PCSTR Name,
+    _In_ IXAudio2SourceVoice* Source)
+{
+    XAUDIO2_VOICE_STATE State;
+
+    memset(&State, 0, sizeof(State));
+    Source->GetState(&State);
+    printf("%s queued %u context %u played %llu\n", Name, State.BuffersQueued,
+           static_cast<UINT32>(reinterpret_cast<ULONG_PTR>(State.pCurrentBufferContext)), State.SamplesPlayed);
+}
+
+/* Buffer life on a playing voice: samples played, flushes, loop exits and restarts */
+static
+VOID
+XcCheckQueue(VOID)
+{
+    static SHORT Data[48000];
+    IXAudio2MasteringVoice* Master;
+    IXAudio2* Engine = XcEngineWithMaster(&Master, 2, 48000);
+    XcVoiceCallback Callback;
+    IXAudio2SourceVoice* Source = nullptr;
+    WAVEFORMATEX Format;
+    XAUDIO2_BUFFER Buffer = {};
+
+    if (Engine == nullptr)
+        return;
+    XcPcm(&Format, WAVE_FORMAT_PCM, 1, 48000, 16);
+    if (FAILED(Engine->CreateSourceVoice(&Source, &Format, 0, 2.0f, &Callback)))
+        return;
+    Source->SetVolume(0.0f);
+    Buffer.pAudioData = reinterpret_cast<const BYTE*>(Data);
+
+    /* Starving after a buffer without END_OF_STREAM keeps the count */
+    XcResetEvents();
+    Buffer.AudioBytes = 960 * 2;
+    Buffer.pContext = reinterpret_cast<void*>(1);
+    Source->SubmitSourceBuffer(&Buffer);
+    Source->Start();
+    XcWaitForEvent('b', 1, 2000);
+    Sleep(50);
+    XcState("starved", Source);
+    Source->Stop();
+    Sleep(30);
+    XcState("stopped", Source);
+    Buffer.AudioBytes = 480 * 2;
+    Buffer.pContext = reinterpret_cast<void*>(2);
+    Source->SubmitSourceBuffer(&Buffer);
+    XcState("submitted while stopped", Source);
+    XcResetEvents();
+    Source->Start();
+    XcWaitForEvent('b', 1, 2000);
+    Sleep(30);
+    XcState("restarted", Source);
+    Buffer.Flags = XAUDIO2_END_OF_STREAM;
+    Buffer.pContext = reinterpret_cast<void*>(3);
+    Source->SubmitSourceBuffer(&Buffer);
+    XcWaitForEvent('E', 1, 2000);
+    Sleep(30);
+    XcState("after end of stream", Source);
+    Buffer.Flags = 0;
+    XcPrintBufferEvents("queue");
+
+    /* Flushing a stopped voice */
+    Source->Stop();
+    XcResetEvents();
+    for (UINT Index = 0; Index < 3; Index++)
+    {
+        Buffer.AudioBytes = 4800 * 2;
+        Buffer.pContext = reinterpret_cast<void*>(static_cast<ULONG_PTR>(10 + Index));
+        Source->SubmitSourceBuffer(&Buffer);
+    }
+    printf("flush stopped = %08lX\n", Source->FlushSourceBuffers());
+    XcState("flushed", Source);
+    Sleep(60);
+    XcState("flushed later", Source);
+    XcPrintBufferEvents("flush stopped");
+
+    /* Flushing a playing voice keeps the buffer it is in */
+    XcResetEvents();
+    for (UINT Index = 0; Index < 3; Index++)
+    {
+        Buffer.AudioBytes = 9600 * 2;
+        Buffer.pContext = reinterpret_cast<void*>(static_cast<ULONG_PTR>(20 + Index));
+        Source->SubmitSourceBuffer(&Buffer);
+    }
+    Source->Start();
+    XcWaitForEvent('B', 1, 2000);
+    printf("flush playing = %08lX\n", Source->FlushSourceBuffers());
+    XcWaitForEvent('b', 3, 2000);
+    Sleep(30);
+    XcState("flushed playing", Source);
+    XcPrintBufferEvents("flush playing");
+
+    /* ExitLoop and Discontinuity on a looping buffer */
+    XcResetEvents();
+    Buffer.AudioBytes = 960 * 2;
+    Buffer.LoopBegin = 0;
+    Buffer.LoopLength = 480;
+    Buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+    Buffer.pContext = reinterpret_cast<void*>(30);
+    Source->SubmitSourceBuffer(&Buffer);
+    XcWaitForEvent('L', 3, 2000);
+    printf("exitloop playing = %08lX\n", Source->ExitLoop());
+    XcWaitForEvent('b', 1, 2000);
+    Sleep(30);
+    XcState("exited loop", Source);
+    Buffer.LoopLength = 0;
+    Buffer.LoopCount = 0;
+    Buffer.pContext = reinterpret_cast<void*>(31);
+    Source->SubmitSourceBuffer(&Buffer);
+    printf("discontinuity = %08lX\n", Source->Discontinuity());
+    XcWaitForEvent('E', 1, 2000);
+    Sleep(30);
+    XcState("discontinuity ended", Source);
+    XcPrintBufferEvents("loop");
+
+    /* The ratio and filter reach their getters once the voice has run */
+    {
+        float Ratio = 0.0f;
+
+        Source->SetFrequencyRatio(1.5f);
+        Source->GetFrequencyRatio(&Ratio);
+        printf("ratio before pass %08lX\n", XcBits(Ratio));
+        Buffer.AudioBytes = 4800 * 2;
+        Buffer.pContext = reinterpret_cast<void*>(40);
+        Source->SubmitSourceBuffer(&Buffer);
+        Sleep(60);
+        Source->GetFrequencyRatio(&Ratio);
+        printf("ratio after pass %08lX\n", XcBits(Ratio));
+        Source->SetFrequencyRatio(0.75f, 9);
+        Sleep(40);
+        Source->GetFrequencyRatio(&Ratio);
+        printf("ratio deferred %08lX\n", XcBits(Ratio));
+        Engine->CommitChanges(9);
+        Sleep(40);
+        Source->GetFrequencyRatio(&Ratio);
+        printf("ratio committed %08lX\n", XcBits(Ratio));
+    }
+    Source->Stop();
+    Source->DestroyVoice();
+
+    /* Filters on a running submix voice */
+    {
+        IXAudio2SubmixVoice* Submix = nullptr;
+        XAUDIO2_FILTER_PARAMETERS Filter = { BandPassFilter, 0.25f, 0.5f };
+        XAUDIO2_FILTER_PARAMETERS Read;
+
+        if (SUCCEEDED(Engine->CreateSubmixVoice(&Submix, 2, 48000, XAUDIO2_VOICE_USEFILTER)))
+        {
+            printf("submix setfilter = %08lX\n", Submix->SetFilterParameters(&Filter));
+            Sleep(40);
+            memset(&Read, 0xCC, sizeof(Read));
+            Submix->GetFilterParameters(&Read);
+            XcBytes("submix filter after pass", &Read, sizeof(Read));
+            Submix->DestroyVoice();
+        }
+    }
+    printf("release %lu\n", Engine->Release());
+}
+
+/* XAudio2 2.8 forwards everything to 2.9 */
+static
+VOID
+XcCheckLegacy(
+    _In_ PCWSTR Runtime)
+{
+    static const PCSTR Names[] =
+    {
+        "XAudio2Create", "CreateAudioReverb", "CreateAudioVolumeMeter", "CreateFX", "X3DAudioCalculate",
+        "X3DAudioInitialize", "XAudio2CreateWithVersionInfo", "XAudio2CreateV2_9", "CreateAudioReverbV2_8",
+    };
+    static const PCSTR Targets[] =
+    {
+        "XAudio2Create", "CreateAudioReverbV2_8", "CreateAudioVolumeMeter", "CreateFX", "X3DAudioCalculate",
+        "X3DAudioInitialize", "XAudio2CreateWithVersionInfo", "", "",
+    };
+    WCHAR Path[MAX_PATH];
+    PWSTR Slash;
+    HMODULE Legacy;
+
+    XcRuntimePath(Runtime, Path, ARRAYSIZE(Path));
+    Slash = wcsrchr(Path, L'\\');
+    if (Slash == nullptr)
+        return;
+    wcscpy_s(Slash + 1, ARRAYSIZE(Path) - (Slash + 1 - Path), L"xaudio2_8.dll");
+    Legacy = LoadLibraryW(Path);
+    if (Legacy == nullptr)
+    {
+        printf("legacy missing\n");
+        return;
+    }
+    for (UINT Index = 0; Index < ARRAYSIZE(Names); Index++)
+    {
+        FARPROC Named = GetProcAddress(Legacy, Names[Index]);
+        int Ordinal = 0;
+
+        for (int Probe = 1; Probe <= 16 && Named != nullptr; Probe++)
+        {
+            if (GetProcAddress(Legacy, MAKEINTRESOURCEA(Probe)) == Named)
+            {
+                Ordinal = Probe;
+                break;
+            }
+        }
+        printf("legacy %s = %s ordinal %d forwards %d\n", Names[Index], Named != nullptr ? "present" : "missing", Ordinal,
+               Named != nullptr && Targets[Index][0] != '\0' && Named == GetProcAddress(XcModule, Targets[Index]));
+    }
+    FreeLibrary(Legacy);
+}
+
 int
 wmain(
     _In_ int argc,
@@ -1972,6 +2235,10 @@ wmain(
         XcCheckState();
     if (XcWant(L"callbacks"))
         XcCheckCallbacks();
+    if (XcWant(L"queue"))
+        XcCheckQueue();
+    if (XcWant(L"legacy"))
+        XcCheckLegacy(Runtime);
 
     FreeLibrary(XcModule);
     CoUninitialize();
