@@ -2762,6 +2762,83 @@ SceneCompute(
     return hr;
 }
 
+/* Timestamp queries on direct, compute and copy queues: the frequency, and values that never run backwards */
+static
+HRESULT
+SceneTimestamp(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const D3D12_COMMAND_LIST_TYPE Types[3] = { D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_TYPE_COMPUTE, D3D12_COMMAND_LIST_TYPE_COPY };
+    SIZE_T LogStart = TcLogMark();
+    HRESULT hr = S_OK;
+
+    for (UINT Kind = 0; Kind < ARRAYSIZE(Types); Kind++)
+    {
+        D3D12_QUERY_HEAP_DESC Queries = { (Kind == 2) ? D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP : D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 4 };
+        ID3D12QueryHeap *Heap = NULL;
+        ID3D12Resource *Answers;
+        ID3D12Resource *From;
+        ID3D12Resource *To;
+        TcDrawKit Kit;
+        TcQueue Queue;
+        UINT64 Frequency = 0;
+        UINT64 Gpu = 0;
+        UINT64 Cpu = 0;
+        UINT64 *Values = NULL;
+        UINT Facts[4] = {};
+
+        hr = Queue.Create(Device, Types[Kind]);
+        if (SUCCEEDED(hr))
+            hr = Device->CreateQueryHeap(&Queries, IID_PPV_ARGS(&Heap));
+        Kit.Keep(Heap);
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            continue;
+        hr = Queue.Queue->GetTimestampFrequency(&Frequency);
+        TcAppend(Result, &hr, sizeof(hr));
+        TcAppend(Result, &Frequency, sizeof(Frequency));
+        hr = Queue.Queue->GetClockCalibration(&Gpu, &Cpu);
+        TcAppend(Result, &hr, sizeof(hr));
+
+        Answers = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, 256, D3D12_RESOURCE_FLAG_NONE));
+        From = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, 65536, D3D12_RESOURCE_FLAG_NONE));
+        To = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, 65536, D3D12_RESOURCE_FLAG_NONE));
+        if (Answers == NULL || From == NULL || To == NULL)
+            return E_OUTOFMEMORY;
+        Queue.List->EndQuery(Heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+        Queue.List->CopyBufferRegion(To, 0, From, 0, 65536);
+        Queue.List->EndQuery(Heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        Queue.List->CopyBufferRegion(From, 0, To, 0, 65536);
+        Queue.List->EndQuery(Heap, D3D12_QUERY_TYPE_TIMESTAMP, 2);
+        Queue.List->ResolveQueryData(Heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 3, Answers, 0);
+        hr = Queue.Submit();
+        if (SUCCEEDED(hr))
+        {
+            Queue.List->EndQuery(Heap, D3D12_QUERY_TYPE_TIMESTAMP, 3);
+            Queue.List->ResolveQueryData(Heap, D3D12_QUERY_TYPE_TIMESTAMP, 3, 1, Answers, 24);
+            hr = Queue.Submit();
+        }
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            continue;
+        hr = Answers->Map(0, NULL, reinterpret_cast<VOID **>(&Values));
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            continue;
+
+        /* Exact values differ from run to run; their order and how they relate to the calibration do not */
+        Facts[0] = Values[0] != 0;
+        Facts[1] = Values[1] >= Values[0] && Values[2] >= Values[1] && Values[3] >= Values[2];
+        Facts[2] = Values[0] >= Gpu;
+        Facts[3] = (Frequency != 0) && (Values[3] - Gpu) / Frequency < 60;
+        Answers->Unmap(0, NULL);
+        TcAppend(Result, Facts, sizeof(Facts));
+    }
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
 #include "ops.inl"
 
 static const TcScene Scenes[] =
@@ -2786,6 +2863,7 @@ static const TcScene Scenes[] =
     { "opsaddr", SceneOpsAddress },
     { "opsclamp", SceneOpsClamp },
     { "opssize", SceneOpsSize },
+    { "timestamp", SceneTimestamp },
 };
 
 static
