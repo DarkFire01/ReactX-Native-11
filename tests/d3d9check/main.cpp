@@ -99,8 +99,24 @@ NcCheckIdentifier(
                Adapter, hr, Id.Driver, Id.Description, Id.DeviceName, Id.DriverVersion.HighPart,
                Id.DriverVersion.LowPart, Id.VendorId, Id.DeviceId, Id.SubSysId, Id.Revision,
                Id.DeviceIdentifier.Data1, Id.DeviceIdentifier.Data2, Id.DeviceIdentifier.Data3, Id.WHQLLevel);
+        printf("identifier_guid[%u] = %02X%02X%02X%02X%02X%02X%02X%02X\n", Adapter, Id.DeviceIdentifier.Data4[0],
+               Id.DeviceIdentifier.Data4[1], Id.DeviceIdentifier.Data4[2], Id.DeviceIdentifier.Data4[3],
+               Id.DeviceIdentifier.Data4[4], Id.DeviceIdentifier.Data4[5], Id.DeviceIdentifier.Data4[6],
+               Id.DeviceIdentifier.Data4[7]);
         hr = Check->Nine->GetAdapterIdentifier(Adapter, D3DENUM_WHQL_LEVEL, &Id);
         printf("identifier_whql[%u] = %08lX whql %08lX\n", Adapter, hr, Id.WHQLLevel);
+        hr = Check->Nine->GetAdapterIdentifier(Adapter, D3DENUM_NO_DRIVERVERSION, &Id);
+        printf("identifier_noversion[%u] = %08lX version %08lX.%08lX guid %08lX-%02X%02X%02X%02X%02X%02X%02X%02X\n",
+               Adapter, hr, Id.DriverVersion.HighPart, Id.DriverVersion.LowPart, Id.DeviceIdentifier.Data1,
+               Id.DeviceIdentifier.Data4[0], Id.DeviceIdentifier.Data4[1], Id.DeviceIdentifier.Data4[2],
+               Id.DeviceIdentifier.Data4[3], Id.DeviceIdentifier.Data4[4], Id.DeviceIdentifier.Data4[5],
+               Id.DeviceIdentifier.Data4[6], Id.DeviceIdentifier.Data4[7]);
+        for (DWORD Flags : { 1UL, 8UL, 0x80000000UL, 6UL })
+        {
+            memset(&Id, 0xCC, sizeof(Id));
+            hr = Check->Nine->GetAdapterIdentifier(Adapter, Flags, &Id);
+            printf("identifier_flags[%u][%08lX] = %08lX vendor %08lX\n", Adapter, Flags, hr, Id.VendorId);
+        }
         printf("monitor[%u] = %s\n", Adapter, Check->Nine->GetAdapterMonitor(Adapter) != NULL ? "set" : "null");
         if (Check->Ex != nullptr)
         {
