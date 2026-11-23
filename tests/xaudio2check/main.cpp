@@ -2591,6 +2591,482 @@ XcCheckEffects(VOID)
     printf("release %lu\n", Engine->Release());
 }
 
+/* Built in XAPOs called directly, so their answers and output need no device */
+static BOOLEAN XcVerbose;
+
+static
+VOID
+XcFloatFormat(
+    _Out_ WAVEFORMATEX* Format,
+    _In_ WORD Channels,
+    _In_ DWORD Rate)
+{
+    XcPcm(Format, WAVE_FORMAT_IEEE_FLOAT, Channels, Rate, 32);
+}
+
+static
+VOID
+XcApoFormat(
+    _In_z_ PCSTR Name,
+    _In_opt_ const WAVEFORMATEX* Format)
+{
+    if (Format == nullptr)
+    {
+        printf("%s null\n", Name);
+        return;
+    }
+    XcBytes(Name, Format, Format->wFormatTag == WAVE_FORMAT_PCM ? 16 : Format->cbSize < 22 ? 18 + Format->cbSize : 40);
+}
+
+static
+VOID
+XcApoIdentity(
+    _In_z_ PCSTR Name,
+    _In_ IUnknown* Object)
+{
+    IXAPO* Apo = nullptr;
+    IXAPOParameters* Parameters = nullptr;
+    IUnknown* Unknown = nullptr;
+    XAPO_REGISTRATION_PROPERTIES* Properties = nullptr;
+    WCHAR Text[XAPO_REGISTRATION_STRING_LENGTH + 1];
+    HRESULT hr;
+
+    printf("%s qi xapo = %08lX\n", Name, Object->QueryInterface(IID_PPV_ARGS(&Apo)));
+    hr = Object->QueryInterface(IID_PPV_ARGS(&Parameters));
+    printf("%s qi parameters = %08lX same %d\n", Name, hr, Parameters != nullptr && static_cast<void*>(Parameters) == static_cast<void*>(Apo));
+    hr = Object->QueryInterface(IID_PPV_ARGS(&Unknown));
+    printf("%s qi unknown = %08lX same %d\n", Name, hr, static_cast<void*>(Unknown) == static_cast<void*>(Apo));
+    if (Parameters != nullptr)
+    {
+        IUnknown* Back = nullptr;
+
+        hr = Parameters->QueryInterface(IID_PPV_ARGS(&Back));
+        printf("%s parameters qi unknown = %08lX same %d\n", Name, hr, static_cast<void*>(Back) == static_cast<void*>(Apo));
+        if (Back != nullptr)
+            Back->Release();
+    }
+    {
+        IXAudio2* Wrong = reinterpret_cast<IXAudio2*>(1);
+
+        printf("%s qi other = %08lX null %d\n", Name, Object->QueryInterface(IID_PPV_ARGS(&Wrong)), Wrong == nullptr);
+    }
+    printf("%s addref %lu release %lu\n", Name, Object->AddRef(), Object->Release());
+    if (Apo == nullptr)
+        return;
+    hr = Apo->GetRegistrationProperties(&Properties);
+    printf("%s registration = %08lX\n", Name, hr);
+    if (SUCCEEDED(hr))
+    {
+        printf("%s clsid %08lX-%04X-%04X", Name, Properties->clsid.Data1, Properties->clsid.Data2, Properties->clsid.Data3);
+        XcBytes("", Properties->clsid.Data4, sizeof(Properties->clsid.Data4));
+        memcpy(Text, Properties->FriendlyName, sizeof(Properties->FriendlyName));
+        Text[XAPO_REGISTRATION_STRING_LENGTH] = L'\0';
+        printf("%s name '%ls'\n", Name, Text);
+        memcpy(Text, Properties->CopyrightInfo, sizeof(Properties->CopyrightInfo));
+        Text[XAPO_REGISTRATION_STRING_LENGTH] = L'\0';
+        printf("%s copyright '%ls'\n", Name, Text);
+        printf("%s version %u.%u flags %08X in %u-%u out %u-%u\n", Name, Properties->MajorVersion,
+               Properties->MinorVersion, Properties->Flags, Properties->MinInputBufferCount,
+               Properties->MaxInputBufferCount, Properties->MinOutputBufferCount, Properties->MaxOutputBufferCount);
+        CoTaskMemFree(Properties);
+    }
+    if (Parameters != nullptr)
+        Parameters->Release();
+    if (Unknown != nullptr)
+        Unknown->Release();
+    Apo->Release();
+}
+
+/* Asks both format questions for a run of requests against a float stereo partner */
+static
+VOID
+XcApoFormats(
+    _In_z_ PCSTR Name,
+    _In_ IXAPO* Apo)
+{
+    static const struct
+    {
+        WORD Tag;
+        WORD Channels;
+        DWORD Rate;
+        WORD Bits;
+    } Requests[] =
+    {
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 48000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 1, 48000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 6, 48000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 8, 48000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 44100, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 22000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 21999, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 48001, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 999, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 400000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 0, 48000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 65, 48000, 32 },
+        { WAVE_FORMAT_IEEE_FLOAT, 2, 48000, 16 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16 },
+        { WAVE_FORMAT_PCM, 1, 44100, 8 },
+        { WAVE_FORMAT_PCM, 2, 48000, 12 },
+        { WAVE_FORMAT_EXTENSIBLE, 2, 48000, 32 },
+        { WAVE_FORMAT_EXTENSIBLE, 6, 96000, 16 },
+    };
+    WAVEFORMATEX Partners[3];
+
+    XcFloatFormat(&Partners[0], 2, 48000);
+    XcFloatFormat(&Partners[1], 1, 44100);
+    XcPcm(&Partners[2], WAVE_FORMAT_PCM, 2, 48000, 16);
+    for (UINT PartnerIndex = 0; PartnerIndex < ARRAYSIZE(Partners); PartnerIndex++)
+    {
+        for (UINT Index = 0; Index < ARRAYSIZE(Requests); Index++)
+        {
+            WAVEFORMATEXTENSIBLE Request;
+            WAVEFORMATEX* Supported;
+            HRESULT hr;
+
+            memset(&Request, 0, sizeof(Request));
+            if (Requests[Index].Tag == WAVE_FORMAT_EXTENSIBLE)
+            {
+                XcExtensible(&Request, Requests[Index].Bits == 32 ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM,
+                             Requests[Index].Channels, Requests[Index].Rate, Requests[Index].Bits, Requests[Index].Bits,
+                             Requests[Index].Channels == 2 ? KSAUDIO_SPEAKER_STEREO : KSAUDIO_SPEAKER_5POINT1);
+            }
+            else
+            {
+                XcPcm(&Request.Format, Requests[Index].Tag, Requests[Index].Channels, Requests[Index].Rate,
+                      Requests[Index].Bits);
+            }
+            Supported = reinterpret_cast<WAVEFORMATEX*>(1);
+            hr = Apo->IsInputFormatSupported(&Partners[PartnerIndex], &Request.Format, &Supported);
+            printf("%s isinput %u/%u = %08lX\n", Name, PartnerIndex, Index, hr);
+            if (Supported != reinterpret_cast<WAVEFORMATEX*>(1))
+            {
+                XcApoFormat("  supported", Supported);
+                CoTaskMemFree(Supported);
+            }
+            printf("%s isinput bare %u/%u = %08lX\n", Name, PartnerIndex, Index,
+                   Apo->IsInputFormatSupported(&Partners[PartnerIndex], &Request.Format, nullptr));
+            Supported = reinterpret_cast<WAVEFORMATEX*>(1);
+            hr = Apo->IsOutputFormatSupported(&Partners[PartnerIndex], &Request.Format, &Supported);
+            printf("%s isoutput %u/%u = %08lX\n", Name, PartnerIndex, Index, hr);
+            if (Supported != reinterpret_cast<WAVEFORMATEX*>(1))
+            {
+                XcApoFormat("  supported", Supported);
+                CoTaskMemFree(Supported);
+            }
+        }
+    }
+}
+
+/* Locks for each pair and unlocks again, printing what LockForProcess answers */
+static
+VOID
+XcApoLocks(
+    _In_z_ PCSTR Name,
+    _In_ IXAPO* Apo)
+{
+    static const struct
+    {
+        WORD InChannels;
+        WORD OutChannels;
+        DWORD InRate;
+        DWORD OutRate;
+        WORD Tag;
+        UINT32 MaxFrames;
+    } Pairs[] =
+    {
+        { 2, 2, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 1, 1, 44100, 44100, WAVE_FORMAT_IEEE_FLOAT, 441 },
+        { 6, 6, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 1, 2, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 2, 1, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 1, 6, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 2, 6, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 2, 8, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 2, 2, 48000, 44100, WAVE_FORMAT_IEEE_FLOAT, 480 },
+        { 2, 2, 96000, 96000, WAVE_FORMAT_IEEE_FLOAT, 960 },
+        { 2, 2, 16000, 16000, WAVE_FORMAT_IEEE_FLOAT, 160 },
+        { 2, 2, 48000, 48000, WAVE_FORMAT_PCM, 480 },
+        { 2, 2, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 0 },
+        { 2, 2, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 64 },
+        { 12, 12, 48000, 48000, WAVE_FORMAT_IEEE_FLOAT, 480 },
+    };
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Pairs); Index++)
+    {
+        WAVEFORMATEX In;
+        WAVEFORMATEX Out;
+        XAPO_LOCKFORPROCESS_PARAMETERS InLock;
+        XAPO_LOCKFORPROCESS_PARAMETERS OutLock;
+        HRESULT hr;
+
+        XcPcm(&In, Pairs[Index].Tag, Pairs[Index].InChannels, Pairs[Index].InRate, Pairs[Index].Tag == WAVE_FORMAT_PCM ? 16 : 32);
+        XcPcm(&Out, Pairs[Index].Tag, Pairs[Index].OutChannels, Pairs[Index].OutRate, Pairs[Index].Tag == WAVE_FORMAT_PCM ? 16 : 32);
+        InLock.pFormat = &In;
+        InLock.MaxFrameCount = Pairs[Index].MaxFrames;
+        OutLock.pFormat = &Out;
+        OutLock.MaxFrameCount = Pairs[Index].MaxFrames;
+        hr = Apo->LockForProcess(1, &InLock, 1, &OutLock);
+        printf("%s lock %u = %08lX\n", Name, Index, hr);
+        if (SUCCEEDED(hr))
+            Apo->UnlockForProcess();
+    }
+}
+
+static
+UINT32
+XcHash(
+    _In_reads_(Count) const float* Values,
+    _In_ SIZE_T Count)
+{
+    UINT32 Hash = 2166136261u;
+
+    for (SIZE_T Index = 0; Index < Count; Index++)
+    {
+        DWORD Bits = XcBits(Values[Index]);
+
+        for (UINT Byte = 0; Byte < 4; Byte++)
+        {
+            Hash ^= (Bits >> (Byte * 8)) & 0xFF;
+            Hash *= 16777619u;
+        }
+    }
+    return Hash;
+}
+
+/* Noise with an impulse at the very start, loud enough to reach a limiter */
+static
+VOID
+XcApoSignal(
+    _Out_writes_(Count) float* Samples,
+    _In_ SIZE_T Count,
+    _Inout_ ULONG* Seed,
+    _In_ float Amplitude)
+{
+    for (SIZE_T Index = 0; Index < Count; Index++)
+    {
+        *Seed = *Seed * 1103515245 + 12345;
+        Samples[Index] = (static_cast<float>((*Seed >> 16) & 0x7FFF) / 32767.0f - 0.5f) * 2.0f * Amplitude;
+    }
+}
+
+/* One Process call on a locked XAPO, printed as a hash with a few samples */
+struct XcApoRun
+{
+    IXAPO* Apo;
+    UINT32 InChannels;
+    UINT32 OutChannels;
+    UINT32 Frames;
+    BOOLEAN InPlace;
+    float Amplitude;
+    ULONG Seed;
+    UINT Block;
+    float Input[960 * 8];
+    float Output[960 * 8];
+};
+
+static
+VOID
+XcApoBlock(
+    _In_z_ PCSTR Name,
+    _Inout_ XcApoRun* Run,
+    _In_ XAPO_BUFFER_FLAGS Flags,
+    _In_ BOOL Enabled)
+{
+    XAPO_PROCESS_BUFFER_PARAMETERS In;
+    XAPO_PROCESS_BUFFER_PARAMETERS Out;
+    UINT32 Count = Run->Frames * Run->OutChannels;
+
+    XcApoSignal(Run->Input, Run->Frames * Run->InChannels, &Run->Seed, Run->Amplitude);
+    if (Run->Block == 0)
+        Run->Input[0] = Run->Amplitude;
+    for (UINT32 Index = 0; Index < Count; Index++)
+        Run->Output[Index] = -7.0f;
+    In.pBuffer = Run->Input;
+    In.BufferFlags = Flags;
+    In.ValidFrameCount = Run->Frames;
+    Out.pBuffer = Run->InPlace ? Run->Input : Run->Output;
+    Out.BufferFlags = static_cast<XAPO_BUFFER_FLAGS>(5);
+    Out.ValidFrameCount = 12345;
+    Run->Apo->Process(1, &In, 1, &Out, Enabled);
+    {
+        const float* Result = static_cast<const float*>(Out.pBuffer);
+
+        printf("%s block %u flags %d enabled %d -> flags %d frames %u hash %08X", Name, Run->Block, Flags, Enabled,
+               Out.BufferFlags, Out.ValidFrameCount, XcHash(Result, Count));
+        for (UINT32 Index = 0; Index < 4 && Index < Count; Index++)
+            printf(" %08lX", XcBits(Result[Index]));
+        if (Count != 0)
+            printf(" %08lX", XcBits(Result[Count - 1]));
+        printf("\n");
+        if (XcVerbose)
+        {
+            for (UINT32 Index = 0; Index < Count; Index++)
+                printf("  %u %08lX\n", Index, XcBits(Result[Index]));
+        }
+    }
+    Run->Block += 1;
+}
+
+static
+HRESULT
+XcApoLock(
+    _In_ XcApoRun* Run,
+    _In_ DWORD Rate)
+{
+    WAVEFORMATEX In;
+    WAVEFORMATEX Out;
+    XAPO_LOCKFORPROCESS_PARAMETERS InLock;
+    XAPO_LOCKFORPROCESS_PARAMETERS OutLock;
+
+    XcFloatFormat(&In, static_cast<WORD>(Run->InChannels), Rate);
+    XcFloatFormat(&Out, static_cast<WORD>(Run->OutChannels), Rate);
+    InLock.pFormat = &In;
+    InLock.MaxFrameCount = Run->Frames;
+    OutLock.pFormat = &Out;
+    OutLock.MaxFrameCount = Run->Frames;
+    return Run->Apo->LockForProcess(1, &InLock, 1, &OutLock);
+}
+
+static
+VOID
+XcApoParameters(
+    _In_z_ PCSTR Name,
+    _In_ IXAPO* Apo,
+    _In_ UINT32 Size)
+{
+    IXAPOParameters* Parameters = nullptr;
+    BYTE Read[128];
+
+    if (FAILED(Apo->QueryInterface(IID_PPV_ARGS(&Parameters))))
+        return;
+    memset(Read, 0xCC, sizeof(Read));
+    Parameters->GetParameters(Read, Size);
+    XcBytes(Name, Read, Size);
+    Parameters->Release();
+}
+
+static
+VOID
+XcApoSet(
+    _In_ IXAPO* Apo,
+    _In_reads_bytes_(Size) const VOID* Values,
+    _In_ UINT32 Size)
+{
+    IXAPOParameters* Parameters = nullptr;
+
+    if (FAILED(Apo->QueryInterface(IID_PPV_ARGS(&Parameters))))
+        return;
+    Parameters->SetParameters(Values, Size);
+    Parameters->Release();
+}
+
+static
+VOID
+XcCheckMeter(
+    _In_ PXC_CREATE_APO CreateMeter)
+{
+    IUnknown* Object = nullptr;
+    IXAPO* Apo = nullptr;
+    IXAPOParameters* Parameters = nullptr;
+    XcApoRun& Run = *new XcApoRun();
+    float Peaks[8];
+    float Rms[8];
+    XAUDIO2FX_VOLUMEMETER_LEVELS Levels = { Peaks, Rms, 2 };
+    HRESULT hr;
+
+    hr = CreateMeter(&Object);
+    printf("meter create = %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+    XcApoIdentity("meter", Object);
+    Object->QueryInterface(IID_PPV_ARGS(&Apo));
+    Object->QueryInterface(IID_PPV_ARGS(&Parameters));
+    XcApoFormats("meter", Apo);
+    XcApoLocks("meter", Apo);
+    printf("meter initialize = %08lX\n", Apo->Initialize(nullptr, 0));
+    printf("meter initialize data = %08lX\n", Apo->Initialize(Peaks, 4));
+
+    Run.Apo = Apo;
+    Run.InChannels = 2;
+    Run.OutChannels = 2;
+    Run.Frames = 480;
+    Run.InPlace = TRUE;
+    Run.Amplitude = 0.5f;
+    Run.Seed = 99;
+    printf("meter lock = %08lX\n", XcApoLock(&Run, 48000));
+    for (UINT Step = 0; Step < 6; Step++)
+    {
+        static const XAPO_BUFFER_FLAGS Flags[6] = { XAPO_BUFFER_VALID, XAPO_BUFFER_VALID, XAPO_BUFFER_SILENT, XAPO_BUFFER_VALID,
+                                                    XAPO_BUFFER_VALID, XAPO_BUFFER_VALID };
+        static const BOOL Enabled[6] = { TRUE, TRUE, TRUE, FALSE, TRUE, TRUE };
+
+        if (Step == 4)
+            Run.Frames = 100;
+        XcApoBlock("meter", &Run, Flags[Step], Enabled[Step]);
+        memset(Peaks, 0xCC, sizeof(Peaks));
+        memset(Rms, 0xCC, sizeof(Rms));
+        Levels.ChannelCount = 2;
+        Parameters->GetParameters(&Levels, sizeof(Levels));
+        XcFloats("  peaks", Peaks, 3);
+        XcFloats("  rms", Rms, 3);
+        if (Step == 1)
+        {
+            memset(Peaks, 0xCC, sizeof(Peaks));
+            memset(Rms, 0xCC, sizeof(Rms));
+            Parameters->GetParameters(&Levels, sizeof(Levels));
+            XcFloats("  peaks again", Peaks, 3);
+            XcFloats("  rms again", Rms, 3);
+            Levels.ChannelCount = 1;
+            Levels.pRMSLevels = nullptr;
+            Parameters->GetParameters(&Levels, 4);
+            XcFloats("  peaks one", Peaks, 3);
+            Levels.pRMSLevels = Rms;
+        }
+    }
+    Run.Frames = 480;
+    Apo->Reset();
+    Levels.ChannelCount = 2;
+    Parameters->GetParameters(&Levels, sizeof(Levels));
+    XcFloats("  peaks after reset", Peaks, 2);
+    XcApoBlock("meter", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->Reset();
+    Parameters->GetParameters(&Levels, sizeof(Levels));
+    XcFloats("  peaks reset after block", Peaks, 2);
+    XcFloats("  rms reset after block", Rms, 2);
+    Apo->UnlockForProcess();
+
+    /* A zero frame valid block and a mono lock */
+    Run.InChannels = 1;
+    Run.OutChannels = 1;
+    printf("meter lock mono = %08lX\n", XcApoLock(&Run, 44100));
+    Run.Frames = 0;
+    XcApoBlock("meter mono", &Run, XAPO_BUFFER_VALID, TRUE);
+    Levels.ChannelCount = 1;
+    Parameters->GetParameters(&Levels, sizeof(Levels));
+    XcFloats("  peaks empty", Peaks, 1);
+    XcFloats("  rms empty", Rms, 1);
+    Run.Frames = 441;
+    XcApoBlock("meter mono", &Run, XAPO_BUFFER_VALID, TRUE);
+    Parameters->GetParameters(&Levels, sizeof(Levels));
+    XcFloats("  peaks mono", Peaks, 1);
+    XcFloats("  rms mono", Rms, 1);
+    Apo->UnlockForProcess();
+    Parameters->Release();
+    printf("meter release %lu %lu\n", Apo->Release(), Object->Release());
+    delete &Run;
+}
+
+static
+VOID
+XcCheckApos(VOID)
+{
+    PXC_CREATE_APO CreateMeter = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, "CreateAudioVolumeMeter"));
+
+    if (CreateMeter != nullptr)
+        XcCheckMeter(CreateMeter);
+}
+
 /* Records what the default endpoint plays, which carries the engine output */
 class XcLoopback
 {
@@ -3108,6 +3584,8 @@ wmain(
             Runtime = argv[++Index];
         else if (_wcsicmp(argv[Index], L"-section") == 0 && Index + 1 < argc)
             XcSection = argv[++Index];
+        else if (_wcsicmp(argv[Index], L"-verbose") == 0)
+            XcVerbose = TRUE;
     }
 
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -3158,6 +3636,8 @@ wmain(
         XcCheckLegacy(Runtime);
     if (XcWant(L"effects"))
         XcCheckEffects();
+    if (XcWant(L"apo"))
+        XcCheckApos();
 
     /* Audible, so only on request */
     if (XcSection != nullptr && _wcsicmp(XcSection, L"mix") == 0)
