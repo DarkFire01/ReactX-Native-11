@@ -3536,6 +3536,9 @@ private:
     BOOLEAN UsesFlush1 = FALSE;
     BOOLEAN Lost = FALSE;
 
+    /* A flip handed to the driver that has not reached the kernel yet; the next flip flushes it out first */
+    volatile LONG FlipQueued = 0;
+
     /* The last execution state the kernel reported, and whether a display mode change was seen */
     D3DKMT_DEVICEEXECUTION_STATE ExecutionState = static_cast<D3DKMT_DEVICEEXECUTION_STATE>(0);
     BOOLEAN ModeChanged = FALSE;

@@ -416,6 +416,7 @@ D9Device::PresentCallback(
 
     if (Lost)
         return S_OK;
+    InterlockedExchange(&FlipQueued, 0);
     if (!TakeQueuedPresent(&Queued) || ((Present->Flags.Value & 7) == 0 && !Present->Flags.RedirectedFlip))
         return E_INVALIDARG;
 
@@ -462,6 +463,7 @@ D9Device::SubmitPresentCallback(
     {
         return E_INVALIDARG;
     }
+    InterlockedExchange(&FlipQueued, 0);
     if (RxGetKmtThunks()->SubmitPresentToHwQueue == nullptr)
         return E_NOTIMPL;
 
@@ -740,6 +742,10 @@ D9Device::PresentToCompositor(
     NTSTATUS Status;
     HRESULT hr;
 
+    /* A driver past the early notify interface may still hold the last flip; it goes out before this one */
+    if (NotifiesEarly && ReadAcquire(&FlipQueued) != 0)
+        FlushDriver();
+
     ZeroMemory(Present, sizeof(*Present));
     Present->Flags.RedirectedFlip = TRUE;
     Present->Flags.FlipDoNotWait = DoNotWait;
@@ -813,6 +819,8 @@ D9Device::PresentToCompositor(
     DriverFlags.Blt = TRUE;
     if (DriverVersion > D9FlexibleRefreshVersion)
         DriverFlags.AllowFlexibleRefresh = Composed->FlipInterval <= 1;
+    if (NotifiesEarly)
+        InterlockedExchange(&FlipQueued, 1);
     hr = DriverPresent(Source->DriverResource, NULL, DriverFlags.Value);
     if (FAILED(hr))
     {
