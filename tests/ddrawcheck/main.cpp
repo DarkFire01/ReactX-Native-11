@@ -476,6 +476,36 @@ DcEnumMode2(
     return DDENUMRET_OK;
 }
 
+typedef ULONG (WINAPI* PDC_DISPLAY_UNIQUENESS)(VOID);
+
+/* Mode restores change the display settings asynchronously; later checks start once the value holds still */
+static
+VOID
+DcSettleDisplay(VOID)
+{
+    PDC_DISPLAY_UNIQUENESS Query =
+        reinterpret_cast<PDC_DISPLAY_UNIQUENESS>(GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "GdiEntry13"));
+    ULONGLONG Start = GetTickCount64();
+    ULONGLONG Changed = Start;
+    ULONG Last;
+    ULONG Now;
+
+    if (Query == nullptr)
+        return;
+    Last = Query();
+    while (GetTickCount64() - Changed < 1000 && GetTickCount64() - Start < 10000)
+    {
+        Sleep(50);
+        Now = Query();
+        if (Now != Last)
+        {
+            Last = Now;
+            Changed = GetTickCount64();
+        }
+    }
+    DwmFlush();
+}
+
 static
 VOID
 DcCheckModes(
@@ -564,6 +594,7 @@ DcCheckModes(
     printf("evaluate = %08lX\n", Draw7->EvaluateMode(0, nullptr));
     printf("start_test = %08lX\n", Draw7->StartModeTest(nullptr, 0, 0));
     Draw7->Release();
+    DcSettleDisplay();
 }
 
 static
@@ -748,6 +779,7 @@ DcCheckCooperative(
     printf("compact7 = %08lX\n", Draw7->Compact());
     printf("initialize7 = %08lX\n", Draw7->Initialize(nullptr));
     Draw7->Release();
+    DcSettleDisplay();
 }
 
 static
