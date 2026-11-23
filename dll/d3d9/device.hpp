@@ -160,6 +160,25 @@ enum class D9BatchCall : UINT
     Rename,
     Blt,
     ColorFill,
+    VertexShaderConst,
+    VertexShaderConstI,
+    VertexShaderConstB,
+    PixelShaderConstI,
+    PixelShaderConstB,
+};
+
+/* How many registers of each constant kind the application may set, and how many of the vertex ones the
+   driver's own pipeline holds */
+struct D9ConstantLimits
+{
+    UINT VertexFloats;
+    UINT VertexInts;
+    UINT VertexBools;
+    UINT PixelFloats;
+    UINT PixelInts;
+    UINT PixelBools;
+    UINT DriverVertexFloats;
+    UINT DriverVertexInts;
 };
 
 /* Slots of the table that remembers which batch last used a driver resource */
@@ -2409,6 +2428,36 @@ private:
         _In_reads_(Args->Count * 4) const FLOAT* Data);
 
     VOID
+    DdiShaderConstants(
+        _In_ D9BatchCall Call,
+        _In_ UINT Register,
+        _In_ UINT Count,
+        _In_reads_bytes_opt_(Size) const VOID* Data,
+        _In_ UINT Size);
+
+    HRESULT
+    CreateConstants(VOID);
+
+    VOID
+    ClearConstants(VOID);
+
+    VOID
+    SendVertexConstants(
+        _In_ D9BatchCall Call,
+        _In_ UINT Start,
+        _In_ UINT Count,
+        _In_reads_bytes_opt_(Count * Stride) const VOID* Data,
+        _In_ UINT Stride);
+
+    VOID
+    SendPixelConstants(
+        _In_ D9BatchCall Call,
+        _In_ UINT Start,
+        _In_ UINT Count,
+        _In_reads_bytes_opt_(Count * Stride) const VOID* Data,
+        _In_ UINT Stride);
+
+    VOID
     DdiViewport(
         _In_ const D3DDDIARG_VIEWPORTINFO* Args);
 
@@ -2664,6 +2713,17 @@ private:
 
     /* Between BeginScene and EndScene */
     BOOLEAN InScene = FALSE;
+
+    /* Shader constants as the application set them; vertex ones a mixed or software device keeps until a draw
+       on the hardware pipeline needs them */
+    D9ConstantLimits Limits = {};
+    FLOAT (*VertexFloats)[4] = nullptr;
+    INT (*VertexInts)[4] = nullptr;
+    BOOL* VertexBools = nullptr;
+    FLOAT (*PixelFloats)[4] = nullptr;
+    INT (*PixelInts)[4] = nullptr;
+    BOOL* PixelBools = nullptr;
+    BOOLEAN VertexConstantsPending = FALSE;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;

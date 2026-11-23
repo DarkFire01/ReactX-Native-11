@@ -1927,6 +1927,62 @@ D9Device::DdiPixelShaderConst(
     CopyMemory(Slot + sizeof(*Args), Data, DataSize);
 }
 
+/* Vertex constants of every kind and integer and boolean pixel constants; a recorded call hands the driver
+   the batch's copy of the data */
+VOID
+D9Device::DdiShaderConstants(
+    _In_ D9BatchCall Call,
+    _In_ UINT Register,
+    _In_ UINT Count,
+    _In_reads_bytes_opt_(Size) const VOID* Data,
+    _In_ UINT Size)
+{
+    D3DDDIARG_SETVERTEXSHADERCONST Range = {};
+    UINT* Slot = nullptr;
+
+    Range.Register = Register;
+    Range.Count = Count;
+    if (Batch != nullptr)
+        Slot = static_cast<UINT*>(Batch->Record(Call, sizeof(Range) + Size));
+    if (Slot != nullptr)
+    {
+        Slot[0] = Register;
+        Slot[1] = Count;
+        if (Data != nullptr)
+            CopyMemory(Slot + 2, Data, Size);
+        return;
+    }
+
+    switch (Call)
+    {
+    case D9BatchCall::VertexShaderConst:
+        DeviceFunctions.pfnSetVertexShaderConst(DriverDevice, &Range, Data);
+        break;
+    case D9BatchCall::VertexShaderConstI:
+        DeviceFunctions.pfnSetVertexShaderConstI(DriverDevice,
+                                                 reinterpret_cast<D3DDDIARG_SETVERTEXSHADERCONSTI*>(&Range),
+                                                 static_cast<const INT*>(Data));
+        break;
+    case D9BatchCall::VertexShaderConstB:
+        DeviceFunctions.pfnSetVertexShaderConstB(DriverDevice,
+                                                 reinterpret_cast<D3DDDIARG_SETVERTEXSHADERCONSTB*>(&Range),
+                                                 static_cast<const BOOL*>(Data));
+        break;
+    case D9BatchCall::PixelShaderConstI:
+        DeviceFunctions.pfnSetPixelShaderConstI(DriverDevice,
+                                                reinterpret_cast<D3DDDIARG_SETPIXELSHADERCONSTI*>(&Range),
+                                                static_cast<const INT*>(Data));
+        break;
+    case D9BatchCall::PixelShaderConstB:
+        DeviceFunctions.pfnSetPixelShaderConstB(DriverDevice,
+                                                reinterpret_cast<D3DDDIARG_SETPIXELSHADERCONSTB*>(&Range),
+                                                static_cast<const BOOL*>(Data));
+        break;
+    default:
+        break;
+    }
+}
+
 VOID
 D9Device::DdiViewport(
     _In_ const D3DDDIARG_VIEWPORTINFO* Args)

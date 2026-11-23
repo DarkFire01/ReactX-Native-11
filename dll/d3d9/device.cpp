@@ -214,6 +214,12 @@ D9Device::~D9Device()
     UnbindTextures();
     UnbindStreams();
     delete[] Lights;
+    delete[] VertexFloats;
+    delete[] VertexInts;
+    delete[] VertexBools;
+    delete[] PixelFloats;
+    delete[] PixelInts;
+    delete[] PixelBools;
     StopBatch();
     delete AutoDepthStencil;
     delete ImplicitChain;
@@ -698,6 +704,9 @@ D9Device::Initialize(
     if (FAILED(hr))
         return hr;
     ComputeCaps();
+    hr = CreateConstants();
+    if (FAILED(hr))
+        return hr;
 
     ImplicitChain = new (std::nothrow) D9SwapChain(this, 0);
     if (ImplicitChain == nullptr)
@@ -1116,6 +1125,7 @@ D9Device::ResetCommon(
         return S_OK;
     }
 
+    ClearConstants();
     SetDefaultState(Parameters);
     SendInitialState();
     return S_OK;
@@ -2454,66 +2464,6 @@ D9Device::GetVertexShader(
 }
 
 STDMETHODIMP
-D9Device::SetVertexShaderConstantF(
-    _In_ UINT StartRegister,
-    _In_opt_ const float* ConstantData,
-    _In_ UINT Vector4fCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetVertexShaderConstantF(
-    _In_ UINT StartRegister,
-    _Out_ float* ConstantData,
-    _In_ UINT Vector4fCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetVertexShaderConstantI(
-    _In_ UINT StartRegister,
-    _In_opt_ const int* ConstantData,
-    _In_ UINT Vector4iCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetVertexShaderConstantI(
-    _In_ UINT StartRegister,
-    _Out_ int* ConstantData,
-    _In_ UINT Vector4iCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetVertexShaderConstantB(
-    _In_ UINT StartRegister,
-    _In_opt_ const BOOL* ConstantData,
-    _In_ UINT BoolCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetVertexShaderConstantB(
-    _In_ UINT StartRegister,
-    _Out_ BOOL* ConstantData,
-    _In_ UINT BoolCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::CreatePixelShader(
     _In_opt_ const DWORD* Function,
     _Out_ IDirect3DPixelShader9** Shader)
@@ -2533,66 +2483,6 @@ D9Device::SetPixelShader(
 STDMETHODIMP
 D9Device::GetPixelShader(
     _Out_ IDirect3DPixelShader9** Shader)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetPixelShaderConstantF(
-    _In_ UINT StartRegister,
-    _In_opt_ const float* ConstantData,
-    _In_ UINT Vector4fCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetPixelShaderConstantF(
-    _In_ UINT StartRegister,
-    _Out_ float* ConstantData,
-    _In_ UINT Vector4fCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetPixelShaderConstantI(
-    _In_ UINT StartRegister,
-    _In_opt_ const int* ConstantData,
-    _In_ UINT Vector4iCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetPixelShaderConstantI(
-    _In_ UINT StartRegister,
-    _Out_ int* ConstantData,
-    _In_ UINT Vector4iCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetPixelShaderConstantB(
-    _In_ UINT StartRegister,
-    _In_opt_ const BOOL* ConstantData,
-    _In_ UINT BoolCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetPixelShaderConstantB(
-    _In_ UINT StartRegister,
-    _Out_ BOOL* ConstantData,
-    _In_ UINT BoolCount)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

@@ -30,6 +30,54 @@ struct D9BatchRecord
 
 static_assert(sizeof(D9BatchRecord) == 8);
 
+/* A recorded constant call: the register range, then the data */
+struct D9ConstantRecord
+{
+    UINT Register;
+    UINT Count;
+};
+
+/* Makes a recorded constant call with the copy of the data that follows it */
+static
+VOID
+D9RunShaderConstants(
+    _In_ const D3DDDI_DEVICEFUNCS* Funcs,
+    _In_ HANDLE Driver,
+    _In_ D9BatchCall Call,
+    _In_ BYTE* Args)
+{
+    D9ConstantRecord* Record = reinterpret_cast<D9ConstantRecord*>(Args);
+    VOID* Data = Record + 1;
+    D3DDDIARG_SETVERTEXSHADERCONST Range = {};
+
+    Range.Register = Record->Register;
+    Range.Count = Record->Count;
+    switch (Call)
+    {
+    case D9BatchCall::VertexShaderConst:
+        Funcs->pfnSetVertexShaderConst(Driver, &Range, Data);
+        break;
+    case D9BatchCall::VertexShaderConstI:
+        Funcs->pfnSetVertexShaderConstI(Driver, reinterpret_cast<D3DDDIARG_SETVERTEXSHADERCONSTI*>(&Range),
+                                        static_cast<INT*>(Data));
+        break;
+    case D9BatchCall::VertexShaderConstB:
+        Funcs->pfnSetVertexShaderConstB(Driver, reinterpret_cast<D3DDDIARG_SETVERTEXSHADERCONSTB*>(&Range),
+                                        static_cast<BOOL*>(Data));
+        break;
+    case D9BatchCall::PixelShaderConstI:
+        Funcs->pfnSetPixelShaderConstI(Driver, reinterpret_cast<D3DDDIARG_SETPIXELSHADERCONSTI*>(&Range),
+                                       static_cast<INT*>(Data));
+        break;
+    case D9BatchCall::PixelShaderConstB:
+        Funcs->pfnSetPixelShaderConstB(Driver, reinterpret_cast<D3DDDIARG_SETPIXELSHADERCONSTB*>(&Range),
+                                       static_cast<BOOL*>(Data));
+        break;
+    default:
+        break;
+    }
+}
+
 D9Batch::D9Batch(
     _In_ D9Device* Owner,
     _In_ const D3DDDI_DEVICEFUNCS* Functions,
@@ -397,6 +445,13 @@ D9Batch::Run(
             break;
         case D9BatchCall::ColorFill:
             Funcs->pfnColorFill(Driver, reinterpret_cast<D3DDDIARG_COLORFILL*>(Args));
+            break;
+        case D9BatchCall::VertexShaderConst:
+        case D9BatchCall::VertexShaderConstI:
+        case D9BatchCall::VertexShaderConstB:
+        case D9BatchCall::PixelShaderConstI:
+        case D9BatchCall::PixelShaderConstB:
+            D9RunShaderConstants(Funcs, Driver, Header->Call, Args);
             break;
         }
         Offset += Header->Size;
