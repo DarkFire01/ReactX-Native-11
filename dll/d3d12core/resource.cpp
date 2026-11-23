@@ -581,7 +581,14 @@ RxResource::QueryInterface(
     if (ppvObject == nullptr)
         return E_POINTER;
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
+    if (riid == __uuidof(IUnknown))
+    {
+        *ppvObject = Identity();
+        AddRef();
+        return S_OK;
+    }
+
+    if (riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12Resource) || riid == __uuidof(ID3D12Resource1) ||
         riid == __uuidof(ID3D12Resource2) || riid == PrivateId)
     {

@@ -1258,8 +1258,15 @@ RxPipelineState::QueryInterface(
         return S_OK;
     }
 
-    if (riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) || riid == __uuidof(ID3D12Pageable) ||
-        riid == __uuidof(ID3D12PipelineState) || riid == PrivateId)
+    /* The base interfaces are a face of their own; only the pipeline interface is the created pointer */
+    if (riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) || riid == __uuidof(ID3D12Pageable))
+    {
+        *ppvObject = ChildFace();
+        AddRef();
+        return S_OK;
+    }
+
+    if (riid == __uuidof(ID3D12PipelineState) || riid == PrivateId)
     {
         *ppvObject = static_cast<ID3D12PipelineState*>(this);
         AddRef();

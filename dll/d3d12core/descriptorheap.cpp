@@ -115,7 +115,14 @@ RxDescriptorHeap::QueryInterface(
     if (ppvObject == nullptr)
         return E_POINTER;
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
+    if (riid == __uuidof(IUnknown))
+    {
+        *ppvObject = Identity();
+        AddRef();
+        return S_OK;
+    }
+
+    if (riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12DescriptorHeap) || riid == PrivateId)
     {
         *ppvObject = static_cast<ID3D12DescriptorHeap*>(this);

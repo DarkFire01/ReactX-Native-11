@@ -837,6 +837,13 @@ public:
         return &Unknown;
     }
 
+    /* The base interfaces some kinds hand out apart from the interface creation returned */
+    ID3D12Pageable*
+    ChildFace()
+    {
+        return &Face;
+    }
+
 protected:
     RxDevice12& Device;
     RxPrivateDataStore PrivateData;
@@ -878,10 +885,93 @@ private:
         RxDeviceChild12* Object;
     };
 
+    class RxChildFace final : public ID3D12Pageable
+    {
+    public:
+        explicit RxChildFace(
+            _In_ RxDeviceChild12* Owner)
+            : Object(Owner)
+        {
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        QueryInterface(
+            _In_ REFIID riid,
+            _COM_Outptr_ void** ppvObject) override
+        {
+            return Object->QueryInterface(riid, ppvObject);
+        }
+
+        ULONG
+        STDMETHODCALLTYPE
+        AddRef(VOID) override
+        {
+            return Object->AddRef();
+        }
+
+        ULONG
+        STDMETHODCALLTYPE
+        Release(VOID) override
+        {
+            return Object->Release();
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        GetPrivateData(
+            _In_ REFGUID guid,
+            _Inout_ UINT* pDataSize,
+            _Out_writes_bytes_opt_(*pDataSize) void* pData) override
+        {
+            return Object->GetPrivateData(guid, pDataSize, pData);
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        SetPrivateData(
+            _In_ REFGUID guid,
+            _In_ UINT DataSize,
+            _In_reads_bytes_opt_(DataSize) const void* pData) override
+        {
+            return Object->SetPrivateData(guid, DataSize, pData);
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        SetPrivateDataInterface(
+            _In_ REFGUID guid,
+            _In_opt_ const IUnknown* pData) override
+        {
+            return Object->SetPrivateDataInterface(guid, pData);
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        SetName(
+            _In_z_ LPCWSTR Name) override
+        {
+            return Object->SetName(Name);
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        GetDevice(
+            _In_ REFIID riid,
+            _COM_Outptr_opt_ void** ppvDevice) override
+        {
+            return Object->GetDevice(riid, ppvDevice);
+        }
+
+    private:
+        RxDeviceChild12* Object;
+    };
+
     BOOLEAN HoldsDevice = TRUE;
     LONG RefCount = 1;
     LONG Uses = 1;
     RxIdentity Unknown{ this };
+    RxChildFace Face{ this };
 };
 
 /* Hands back the interface asked for, as creation methods do: NULL output only checks */

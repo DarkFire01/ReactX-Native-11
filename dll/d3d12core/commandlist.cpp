@@ -270,7 +270,7 @@ RxCommandList::QueryInterface(
 {
     static const IID* const Faces[] =
     {
-        &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12CommandList),
+        &__uuidof(ID3D12DeviceChild), &__uuidof(ID3D12CommandList),
         &__uuidof(ID3D12GraphicsCommandList), &__uuidof(ID3D12GraphicsCommandList1),
         &__uuidof(ID3D12GraphicsCommandList2), &__uuidof(ID3D12GraphicsCommandList3),
         &__uuidof(ID3D12GraphicsCommandList4), &__uuidof(ID3D12GraphicsCommandList5),
@@ -281,6 +281,21 @@ RxCommandList::QueryInterface(
 
     if (ppvObject == nullptr)
         return E_POINTER;
+
+    if (riid == __uuidof(IUnknown))
+    {
+        *ppvObject = Identity();
+        AddRef();
+        return S_OK;
+    }
+
+    /* A list's ID3D12Object is a face apart from the list interfaces, which all share one pointer */
+    if (riid == __uuidof(ID3D12Object))
+    {
+        *ppvObject = static_cast<ID3D12Object*>(ChildFace());
+        AddRef();
+        return S_OK;
+    }
 
     for (const IID* Face : Faces)
     {
