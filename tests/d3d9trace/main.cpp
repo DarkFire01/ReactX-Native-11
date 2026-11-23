@@ -162,6 +162,13 @@ enum TrKernelCall
     TrKmtUnlock2,
     TrKmtEscape,
     TrKmtQueryAdapterInfo,
+    TrKmtRender,
+    TrKmtSubmitCommand,
+    TrKmtGetDeviceState,
+    TrKmtSetDisplayPrivateDriverFormat,
+    TrKmtOpenResource,
+    TrKmtOpenResource2,
+    TrKmtQueryResourceInfo,
 };
 
 static constexpr UINT TrSlotLimit = 160;
@@ -345,7 +352,7 @@ TrAppendBytes(
         Text->append("null");
         return;
     }
-    for (UINT Index = 0; Index < Size && Index < 64; Index++)
+    for (UINT Index = 0; Index < Size && Index < 128; Index++)
         TrAppend(Text, "%02X", Bytes[Index]);
 }
 
@@ -734,6 +741,21 @@ TrDeviceInputs(
         Text->append(" ");
         TrDescribeResource(Text, static_cast<const D3DDDIARG_CREATERESOURCE2*>(Args), TRUE);
         break;
+    case TR_DEVICE_SLOT(pfnOpenResource):
+    {
+        const D3DDDIARG_OPENRESOURCE* Open = static_cast<const D3DDDIARG_OPENRESOURCE*>(Args);
+
+        Tr.PendingRuntime = reinterpret_cast<ULONG_PTR>(Open->hResource);
+        TrAppend(Text, " count %u kres %s drv %u res %s rot %u flags %08X", Open->NumAllocations,
+                 TrKernel(Open->hKMResource).c_str(), Open->PrivateDriverDataSize, TrRuntime(Open->hResource).c_str(),
+                 Open->Rotation, Open->Flags.Value);
+        for (UINT Index = 0; Index < Open->NumAllocations && Index < 16; Index++)
+        {
+            TrAppend(Text, " [%s drv %u]", TrKernel(Open->pOpenAllocationInfo[Index].hAllocation).c_str(),
+                     Open->pOpenAllocationInfo[Index].PrivateDriverDataSize);
+        }
+        break;
+    }
     case TR_DEVICE_SLOT(pfnPresent):
     {
         const D3DDDIARG_PRESENT* Present = static_cast<const D3DDDIARG_PRESENT*>(Args);
@@ -956,6 +978,22 @@ TrDeviceOutputs(
         HANDLE Driver = Slot == TR_DEVICE_SLOT(pfnCreateResource) ?
                         static_cast<D3DDDIARG_CREATERESOURCE*>(Args)->hResource :
                         static_cast<D3DDDIARG_CREATERESOURCE2*>(Args)->hResource;
+        if (SUCCEEDED(Result))
+        {
+            TrAppend(Text, " %s", TrDriver(Driver).c_str());
+            Tr.RuntimeOfDriver[reinterpret_cast<ULONG_PTR>(Driver)] = Tr.PendingRuntime;
+        }
+        else
+        {
+            /* The runtime frees a resource the driver refused, and may reuse its address */
+            TrForget(TrKindRuntime, Tr.PendingRuntime);
+        }
+        break;
+    }
+    case TR_DEVICE_SLOT(pfnOpenResource):
+    {
+        HANDLE Driver = static_cast<D3DDDIARG_OPENRESOURCE*>(Args)->hResource;
+
         if (SUCCEEDED(Result))
         {
             TrAppend(Text, " %s", TrDriver(Driver).c_str());
@@ -1275,6 +1313,21 @@ TrKernelInputs(
         TrDescribeAllocations(Text, Create->pAllocationInfo2, Create->NumAllocations);
         break;
     }
+    case TrKmtQueryResourceInfo:
+    {
+        const D3DKMT_QUERYRESOURCEINFO* Query = static_cast<const D3DKMT_QUERYRESOURCEINFO*>(Args);
+        TrAppend(Text, " dev %s share %s", TrKernel(Query->hDevice).c_str(), TrKernel(Query->hGlobalShare).c_str());
+        break;
+    }
+    case TrKmtOpenResource:
+    case TrKmtOpenResource2:
+    {
+        const D3DKMT_OPENRESOURCE* Open = static_cast<const D3DKMT_OPENRESOURCE*>(Args);
+        TrAppend(Text, " dev %s share %s count %u runtime %u drv %u total %u", TrKernel(Open->hDevice).c_str(),
+                 TrKernel(Open->hGlobalShare).c_str(), Open->NumAllocations, Open->PrivateRuntimeDataSize,
+                 Open->ResourcePrivateDriverDataSize, Open->TotalPrivateDriverDataBufferSize);
+        break;
+    }
     case TrKmtDestroyAllocation:
     {
         const D3DKMT_DESTROYALLOCATION* Destroy = static_cast<const D3DKMT_DESTROYALLOCATION*>(Args);
@@ -1419,6 +1472,32 @@ TrKernelOutputs(
         {
             TrAppend(Text, " res %s alloc", TrKernel(Create->hResource).c_str());
             TrAllocationHandles(Text, Create->pAllocationInfo2, Create->NumAllocations);
+            if (Create->hGlobalShare != 0)
+                TrAppend(Text, " share %s", TrKernel(Create->hGlobalShare).c_str());
+        }
+        break;
+    }
+    case TrKmtQueryResourceInfo:
+    {
+        const D3DKMT_QUERYRESOURCEINFO* Query = static_cast<const D3DKMT_QUERYRESOURCEINFO*>(Args);
+        if (NT_SUCCESS(Status))
+        {
+            TrAppend(Text, " runtime %u drv %u total %u count %u", Query->PrivateRuntimeDataSize,
+                     Query->ResourcePrivateDriverDataSize, Query->TotalPrivateDriverDataSize, Query->NumAllocations);
+        }
+        break;
+    }
+    case TrKmtOpenResource:
+    case TrKmtOpenResource2:
+    {
+        const D3DKMT_OPENRESOURCE* Open = static_cast<const D3DKMT_OPENRESOURCE*>(Args);
+        if (NT_SUCCESS(Status))
+        {
+            TrAppend(Text, " res %s alloc", TrKernel(Open->hResource).c_str());
+            for (UINT Index = 0; Index < Open->NumAllocations && Index < 16; Index++)
+                TrAppend(Text, " %s", TrKernel(Open->pOpenAllocationInfo[Index].hAllocation).c_str());
+            Text->append(" runtime ");
+            TrAppendBytes(Text, Open->pPrivateRuntimeData, Open->PrivateRuntimeDataSize);
         }
         break;
     }
@@ -3331,6 +3410,255 @@ TrScenarioCopiesPlain(
     Plain->Release();
 }
 
+/* Releases an object and prints the count it reports */
+static
+VOID
+TrRelease(
+    _In_opt_ IUnknown* Object)
+{
+    TrCloseLine();
+    if (Object != nullptr)
+        printf("api Release = %lu\n", Object->Release());
+}
+
+/* Resources made shared on one extended device and opened by their handles on a second */
+static
+VOID
+TrSharedWork(
+    _In_ IDirect3DDevice9Ex* First,
+    _In_ IDirect3DDevice9Ex* Second)
+{
+    static DWORD Pixels[16 * 8];
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Opened = nullptr;
+    IDirect3DSurface9* Other = nullptr;
+    IDirect3DSurface9* Copy = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DTexture9* OpenedTexture = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+    IDirect3DCubeTexture9* OpenedCube = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DVolumeTexture9* OpenedVolume = nullptr;
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DVertexBuffer9* OpenedVertices = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    HANDLE Handle = NULL;
+    HANDLE Again;
+
+    TrPhase("shared target");
+    TrApi("CreateRenderTarget shared", First->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                 FALSE, &Target, &Handle));
+    Again = Handle;
+    TrApi("CreateRenderTarget open", Second->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                FALSE, &Opened, &Again));
+    Again = Handle;
+    TrApi("CreateRenderTarget open lockable", Second->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE,
+                                                                         0, TRUE, &Other, &Again));
+    TrRelease(Other);
+    Other = nullptr;
+    Again = Handle;
+    TrApi("CreateTexture open target", Second->CreateTexture(16, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                                                             D3DPOOL_DEFAULT, &OpenedTexture, &Again));
+    TrRelease(OpenedTexture);
+    OpenedTexture = nullptr;
+    Again = Handle;
+    TrApi("CreateRenderTarget open self", First->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                    FALSE, &Other, &Again));
+    TrRelease(Other);
+    Other = nullptr;
+
+    TrPhase("shared contents");
+    if (Target != nullptr && Opened != nullptr)
+    {
+        TrApi("ColorFill", First->ColorFill(Target, nullptr, 0xFF336699));
+        TrApi("CreateOffscreenPlainSurface", Second->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8,
+                                                                                 D3DPOOL_SYSTEMMEM, &Copy, nullptr));
+        if (Copy != nullptr)
+            TrApi("GetRenderTargetData", Second->GetRenderTargetData(Opened, Copy));
+        TrRelease(Copy);
+    }
+    TrRelease(Opened);
+    TrRelease(Target);
+    Opened = nullptr;
+    Target = nullptr;
+
+    TrPhase("shared others");
+    Handle = NULL;
+    TrApi("CreateDepthStencilSurface shared", First->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8,
+                                                                               D3DMULTISAMPLE_NONE, 0, FALSE, &Target,
+                                                                               &Handle));
+    Again = Handle;
+    TrApi("CreateDepthStencilSurface open", Second->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8,
+                                                                              D3DMULTISAMPLE_NONE, 0, FALSE, &Opened,
+                                                                              &Again));
+    TrRelease(Opened);
+    TrRelease(Target);
+    Opened = nullptr;
+    Target = nullptr;
+    Handle = NULL;
+    TrApi("CreateOffscreenPlainSurface shared", First->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8,
+                                                                                   D3DPOOL_DEFAULT, &Target, &Handle));
+    Again = Handle;
+    TrApi("CreateOffscreenPlainSurface open", Second->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8,
+                                                                                  D3DPOOL_DEFAULT, &Opened, &Again));
+    TrRelease(Opened);
+    TrRelease(Target);
+    Opened = nullptr;
+    Target = nullptr;
+    Handle = NULL;
+    TrApi("CreateTexture shared", First->CreateTexture(16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture,
+                                                       &Handle));
+    Again = Handle;
+    TrApi("CreateTexture open", Second->CreateTexture(16, 8, 3, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &OpenedTexture,
+                                                      &Again));
+    TrRelease(OpenedTexture);
+    TrRelease(Texture);
+    Texture = nullptr;
+    Handle = NULL;
+    TrApi("CreateCubeTexture shared", First->CreateCubeTexture(8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube,
+                                                               &Handle));
+    Again = Handle;
+    TrApi("CreateCubeTexture open", Second->CreateCubeTexture(8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &OpenedCube,
+                                                              &Again));
+    TrRelease(OpenedCube);
+    TrRelease(Cube);
+    Cube = nullptr;
+    Handle = NULL;
+    TrApi("CreateVolumeTexture shared", First->CreateVolumeTexture(8, 8, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                                                   &Volume, &Handle));
+    Again = Handle;
+    TrApi("CreateVolumeTexture open", Second->CreateVolumeTexture(8, 8, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                                                                  &OpenedVolume, &Again));
+    TrRelease(OpenedVolume);
+    TrRelease(Volume);
+    Volume = nullptr;
+    Handle = NULL;
+    TrApi("CreateVertexBuffer shared", First->CreateVertexBuffer(64, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT,
+                                                                 &Vertices, &Handle));
+    Again = Handle;
+    TrApi("CreateVertexBuffer open", Second->CreateVertexBuffer(64, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT,
+                                                                &OpenedVertices, &Again));
+    TrRelease(OpenedVertices);
+    TrRelease(Vertices);
+    Vertices = nullptr;
+    Handle = NULL;
+    TrApi("CreateIndexBuffer shared", First->CreateIndexBuffer(64, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                               D3DPOOL_DEFAULT, &Indices, &Handle));
+    TrRelease(Indices);
+    Indices = nullptr;
+
+    TrPhase("shared kinds");
+    {
+        static const DWORD Usages[] = { 0, D3DUSAGE_RESTRICT_SHARED_RESOURCE, D3DUSAGE_NONSECURE };
+
+        for (DWORD Usage : Usages)
+        {
+            Handle = NULL;
+            TrApi("CreateRenderTargetEx", First->CreateRenderTargetEx(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                      TRUE, &Target, &Handle, Usage));
+            TrRelease(Target);
+            Target = nullptr;
+            Handle = NULL;
+            TrApi("CreateOffscreenPlainSurfaceEx", First->CreateOffscreenPlainSurfaceEx(16, 8, D3DFMT_X8R8G8B8,
+                                                                                        D3DPOOL_DEFAULT, &Target,
+                                                                                        &Handle, Usage));
+            TrRelease(Target);
+            Target = nullptr;
+            Handle = NULL;
+            TrApi("CreateDepthStencilSurfaceEx", First->CreateDepthStencilSurfaceEx(16, 8, D3DFMT_D16_LOCKABLE,
+                                                                                    D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                                                    &Target, &Handle, Usage));
+            TrRelease(Target);
+            Target = nullptr;
+            Handle = NULL;
+            TrApi("CreateTexture", First->CreateTexture(16, 8, 1, Usage, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture,
+                                                        &Handle));
+            TrRelease(Texture);
+            Texture = nullptr;
+        }
+        Handle = NULL;
+        TrApi("CreateTexture target", First->CreateTexture(16, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8,
+                                                           D3DPOOL_DEFAULT, &Texture, &Handle));
+        TrRelease(Texture);
+        Texture = nullptr;
+        Handle = NULL;
+        TrApi("CreateTexture dynamic", First->CreateTexture(16, 8, 2, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8,
+                                                            D3DPOOL_DEFAULT, &Texture, &Handle));
+        TrRelease(Texture);
+        Texture = nullptr;
+        Handle = NULL;
+        TrApi("CreateTexture autogen", First->CreateTexture(16, 8, 0, D3DUSAGE_RENDERTARGET | D3DUSAGE_AUTOGENMIPMAP,
+                                                            D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, &Handle));
+        TrRelease(Texture);
+        Texture = nullptr;
+        Handle = NULL;
+        TrApi("CreateTexture depth", First->CreateTexture(16, 8, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D24S8,
+                                                          D3DPOOL_DEFAULT, &Texture, &Handle));
+        TrRelease(Texture);
+        Texture = nullptr;
+        Handle = NULL;
+        TrApi("CreateCubeTexture levels", First->CreateCubeTexture(8, 2, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                                                                   D3DPOOL_DEFAULT, &Cube, &Handle));
+        TrRelease(Cube);
+        Cube = nullptr;
+        Handle = NULL;
+        TrApi("CreateVertexBuffer dynamic", First->CreateVertexBuffer(96, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY,
+                                                                      D3DFVF_XYZ | D3DFVF_DIFFUSE, D3DPOOL_DEFAULT,
+                                                                      &Vertices, &Handle));
+        TrRelease(Vertices);
+        Vertices = nullptr;
+        Handle = NULL;
+        TrApi("CreateIndexBuffer 32", First->CreateIndexBuffer(64, 0, D3DFMT_INDEX32, D3DPOOL_DEFAULT, &Indices,
+                                                               &Handle));
+        TrRelease(Indices);
+        Indices = nullptr;
+    }
+
+    TrPhase("shared memory");
+    Handle = Pixels;
+    Texture = nullptr;
+    TrApi("CreateTexture memory", First->CreateTexture(16, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Texture,
+                                                       &Handle));
+    TrRelease(Texture);
+}
+
+/* Sharing between two windowed extended devices */
+static
+VOID
+TrScenarioShared(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    HWND Other = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* First = nullptr;
+    IDirect3DDevice9Ex* Second = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("shared devices");
+    Made = Parameters;
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                     &First);
+    TrApi("CreateDeviceEx", hr);
+    Made = Parameters;
+    Made.hDeviceWindow = Other;
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Other, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                     &Second);
+    TrApi("CreateDeviceEx", hr);
+    if (First != nullptr && Second != nullptr)
+        TrSharedWork(First, Second);
+    TrPhase("shared release");
+    TrRelease(Second);
+    TrRelease(First);
+    DestroyWindow(Other);
+    DestroyWindow(Window);
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -3353,6 +3681,7 @@ static const TrScenario TrScenarios[] =
     { "resources_plain", TrScenarioResourcesPlain },
     { "copies", TrScenarioCopies },
     { "copies_plain", TrScenarioCopiesPlain },
+    { "shared", TrScenarioShared },
 };
 
 static
