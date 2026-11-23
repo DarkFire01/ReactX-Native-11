@@ -730,4 +730,181 @@ static const ScCase ScCorpus[] =
         { }, 0
     },
 
+    {
+        "ps11_arith", TRUE, 0,
+        "ps_1_1\n"
+        "def c0, 0.5, 0.25, 1, -0.5\n"
+        "def c3, 2, -3, 0.75, 0\n"
+        "tex t0\n"
+        "tex t1\n"
+        "texcoord t2\n"
+        "texkill t3\n"
+        "mul r0, t0, v0\n"
+        "mad r1, t1, c0, v1_bias\n"
+        "add_x2 r0, r0, -r1\n"
+        "mul_sat r0.rgb, r0, c1\n"
+        "+mov r0.a, t2.a\n"
+        "sub_d2 r1, r0, c3\n"
+        "dp3_x4 r1.rgb, t2_bx2, v1_bx2\n"
+        "+add_sat r1.a, 1-v0, c2\n"
+        "lrp r0, v0.a, r0, r1\n",
+        { }, 0
+    },
+    {
+        "ps12_arith", TRUE, 0,
+        "ps_1_2\n"
+        "def c2, 0.5, 0.25, 1, -0.5\n"
+        "tex t0\n"
+        "texcoord t1\n"
+        "mov r0, t1_bx2\n"
+        "cnd r1.rgb, r0.a, t0, c2\n"
+        "+cnd r1.a, r0.a, c1, t0\n"
+        "mad_x4 r0, r1, c4, -t0\n"
+        "dp3_sat r1, r0, c5\n"
+        "mul_d2 r0.rgb, r0, r1.a\n"
+        "+sub_x2 r0.a, 1-r1, v1_bias\n"
+        "add r0, r0, c6\n",
+        { }, 0
+    },
+    {
+        "ps14_shift", TRUE, 0,
+        "ps_1_4\n"
+        "def c0, 0.5, 0.25, 1, -0.5\n"
+        "texcrd r0.rgb, t0\n"
+        "texld r1, t1\n"
+        "mul_d4 r2, r1, c0\n"
+        "add_d8 r3.rgb, r2, r0_x2\n"
+        "+mad_sat r3.a, r1.b, c1, -r2\n"
+        "sub_x8 r4, r3, r1_bias\n"
+        "lrp r0, r4, r1, 1-r3\n"
+        "cnd r0.rgb, r4, r0, c2\n"
+        "+mov_x4 r0.a, r4_bx2\n",
+        { }, 0
+    },
+
+
+    {
+        "ps11_bem", TRUE, 0,
+        "ps_1_1\n"
+        "tex t0\n"
+        "texbem t1, t0\n"
+        "texbeml t2, t0\n"
+        "tex t3\n"
+        "add r0, t1, t2\n"
+        "mul r0, r0, t3\n",
+        { }, 0
+    },
+    {
+        "ps11_m3x2", TRUE, 0,
+        "ps_1_1\n"
+        "tex t0\n"
+        "texm3x2pad t1, t0_bx2\n"
+        "texm3x2tex t2, t0_bx2\n"
+        "mov r0, t2\n",
+        { }, 0
+    },
+    {
+        "ps11_m3x3", TRUE, 0,
+        "ps_1_1\n"
+        "tex t0\n"
+        "texm3x3pad t1, t0_bx2\n"
+        "texm3x3pad t2, t0_bx2\n"
+        "texm3x3tex t3, t0_bx2\n"
+        "mov r0, t3\n",
+        { }, 0
+    },
+    {
+        "ps11_m3x3spec", TRUE, 0,
+        "ps_1_1\n"
+        "tex t0\n"
+        "texm3x3pad t1, t0_bx2\n"
+        "texm3x3pad t2, t0_bx2\n"
+        "texm3x3spec t3, t0_bx2, c0\n"
+        "mov r0, t3\n",
+        { }, 0
+    },
+    {
+        "ps11_m3x3vspec", TRUE, 0,
+        "ps_1_1\n"
+        "tex t0\n"
+        "texm3x3pad t1, t0\n"
+        "texm3x3pad t2, t0\n"
+        "texm3x3vspec t3, t0\n"
+        "mov r0, t3\n",
+        { }, 0
+    },
+    {
+        "ps11_reg2", TRUE, 0,
+        "ps_1_1\n"
+        "tex t0\n"
+        "texreg2ar t1, t0\n"
+        "texreg2gb t2, t0\n"
+        "mul r0, t1, t2\n",
+        { }, 0
+    },
+    {
+        "ps12_ops", TRUE, 0,
+        "ps_1_2\n"
+        "tex t0\n"
+        "texreg2rgb t1, t0\n"
+        "texdp3tex t2, t0\n"
+        "texdp3 t3, t0\n"
+        "mul r0, t1, t2\n"
+        "add r0, r0, t3\n",
+        { }, 0
+    },
+    {
+        "ps12_m3x3", TRUE, 0,
+        "ps_1_2\n"
+        "tex t0\n"
+        "texm3x3pad t1, t0\n"
+        "texm3x3pad t2, t0\n"
+        "texm3x3 t3, t0\n"
+        "mov r0, t3\n",
+        { }, 0
+    },
+    {
+        "ps13_depth", TRUE, 0,
+        "ps_1_3\n"
+        "tex t0\n"
+        "texm3x2pad t1, t0\n"
+        "texm3x2depth t2, t0\n"
+        "cmp r0, t0, c0, c1\n",
+        { }, 0
+    },
+    {
+        "ps14_phases", TRUE, 0,
+        "ps_1_4\n"
+        "def c0, 0.5, 0.25, 1, -0.5\n"
+        "texld r0, t0\n"
+        "texcrd r1.rgb, t1\n"
+        "texcrd r3.rgb, t3\n"
+        "texcrd r2.rg, t2_dw.xyw\n"
+        "texcrd r5.rgb, t5\n"
+        "mul r1.rgb, r0, r1\n"
+        "+mov r1.a, c0.b\n"
+        "phase\n"
+        "texld r4, r1\n"
+        "texld r2, r3_dz\n"
+        "texld r0, t4\n"
+        "texdepth r5\n"
+        "cmp r0, r0, r4, c1\n"
+
+        "cnd r1, r0, r4, c0\n"
+        "add_sat r0.rgb, r0, r1\n"
+        "+mul r0.a, r2.a, c0.r\n",
+        { }, 0
+    },
+    {
+        "ps14_bem", TRUE, 0,
+        "ps_1_4\n"
+        "texld r1, t1\n"
+        "texcrd r2.rgb, t0\n"
+        "bem r2.rg, r2, r1\n"
+        "phase\n"
+        "texld r0, r2\n"
+        "texkill t1\n"
+        "mov r0, r0\n",
+        { }, 0
+    },
 };
