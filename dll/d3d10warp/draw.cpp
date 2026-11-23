@@ -155,6 +155,16 @@ RxWarpAlphaCoverage(
     return Mask;
 }
 
+/* Edge test in 24.8: inside is non negative, and only top and left edges keep their exact zeros */
+typedef struct _RX_WARP_EDGE
+{
+    INT64 Dx;
+    INT64 Dy;
+    INT64 X0;
+    INT64 Y0;
+    INT64 Bias;
+} RX_WARP_EDGE;
+
 class RxWarpDraw
 {
 public:
@@ -307,6 +317,11 @@ private:
         _In_ BOOLEAN PerSample,
         _In_ Test Inside);
 
+    BOOLEAN
+    ReachesQuad(
+        _In_ INT X,
+        _In_ INT Y);
+
     VOID
     ShadeQuad(
         _In_ INT X,
@@ -411,6 +426,8 @@ private:
     UINT PixelCoverage[RxWarpLanes] = {};   /* every sample a pixel covers, while its samples shade one at a time */
     FLOAT CentroidAt[RxWarpLanes][2] = {};
     BOOLEAN Triangle = FALSE;           /* the primitive being shaded has three distinct corners */
+    const RX_WARP_EDGE *QuadEdges = nullptr;    /* a filled triangle's edges, which decide the empty quads it still shades */
+    INT64 QuadBounds[4] = {};           /* that triangle's corner extents in 24.8: left, top, right, bottom */
     D3DWDDM2_0DDI_RASTERIZER_DESC Raster = {};
     D3D10_DDI_DEPTH_STENCIL_DESC DepthState = {};
     const D3D11_1_DDI_BLEND_DESC *BlendState = nullptr;
@@ -1063,16 +1080,6 @@ RxWarpEvaluate(
     return Partial + Plane.A * X;
 }
 
-/* Edge test in 24.8: inside is non negative, and only top and left edges keep their exact zeros */
-typedef struct _RX_WARP_EDGE
-{
-    INT64 Dx;
-    INT64 Dy;
-    INT64 X0;
-    INT64 Y0;
-    INT64 Bias;
-} RX_WARP_EDGE;
-
 /* The magnitude of whichever value is larger, compared as bits */
 static
 FLOAT
@@ -1211,8 +1218,37 @@ RxWarpDraw::Cover(
             }
             if (Covered != 0)
                 ShadeQuad(X, Y, Covered, Samples);
+            else if (PixelShader != nullptr && ReachesQuad(X, Y))
+                Device->Counters[RxWarpCountPsInvocations] += RxWarpLanes;
         }
     }
+}
+
+/*
+ * The reference walks a triangle's quads by edge and shades a quad unless one edge has all four
+ * pixel centers outside, so quads near corners and along thin triangles run with no pixel covered.
+ */
+BOOLEAN
+RxWarpDraw::ReachesQuad(
+    _In_ INT X,
+    _In_ INT Y)
+{
+    INT64 Left = ((INT64)X << 8) + 128;
+    INT64 Top = ((INT64)Y << 8) + 128;
+
+    if (QuadEdges == nullptr || SampleCount > 1)
+        return FALSE;
+    if (Left + 256 < QuadBounds[0] || Left > QuadBounds[2] || Top + 256 < QuadBounds[1] || Top > QuadBounds[3])
+        return FALSE;
+    for (UINT Index = 0; Index < 3; Index++)
+    {
+        if (!RxWarpInsideEdge(QuadEdges[Index], Left, Top) && !RxWarpInsideEdge(QuadEdges[Index], Left + 256, Top) &&
+            !RxWarpInsideEdge(QuadEdges[Index], Left, Top + 256) && !RxWarpInsideEdge(QuadEdges[Index], Left + 256, Top + 256))
+        {
+            return FALSE;
+        }
+    }
+    return TRUE;
 }
 
 VOID
@@ -1323,11 +1359,17 @@ RxWarpDraw::SetupTriangle(
     }
     PointSprite = FALSE;
     Triangle = TRUE;
+    QuadEdges = FromLine ? nullptr : Edges;
+    QuadBounds[0] = MinX;
+    QuadBounds[1] = MinY;
+    QuadBounds[2] = MaxX;
+    QuadBounds[3] = MaxY;
     Cover((MinX >> 8) - 1, (MinY >> 8) - 1, (MaxX + 255) >> 8, (MaxY + 255) >> 8, !AlphaLine,
           [&Edges](INT64 Sx, INT64 Sy)
           {
               return RxWarpInsideEdge(Edges[0], Sx, Sy) && RxWarpInsideEdge(Edges[1], Sx, Sy) && RxWarpInsideEdge(Edges[2], Sx, Sy);
           });
+    QuadEdges = nullptr;
 }
 
 /* A line plane follows the major axis only, as the reference sets lines up */
