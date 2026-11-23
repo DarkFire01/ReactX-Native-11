@@ -94,13 +94,13 @@ NineFillDeviceFuncs(
 {
     constexpr HRESULT NotDone = E_NOTIMPL;
 
-    NINE_MISSING(pfnSetRenderState, 0);
-    NINE_MISSING(pfnUpdateWInfo, 1);
+    Functions->pfnSetRenderState = NineSetRenderState;
+    Functions->pfnUpdateWInfo = NineUpdateWInfo;
     Functions->pfnValidateDevice = NineValidateDevice;
-    NINE_MISSING(pfnSetTextureStageState, 3);
+    Functions->pfnSetTextureStageState = NineSetTextureStageState;
     NINE_MISSING(pfnSetTexture, 4);
     NINE_MISSING(pfnSetPixelShader, 5);
-    NINE_MISSING(pfnSetPixelShaderConst, 6);
+    Functions->pfnSetPixelShaderConst = NineSetPixelShaderConst;
     NINE_MISSING(pfnSetStreamSourceUm, 7);
     NINE_MISSING(pfnSetIndices, 8);
     NINE_MISSING(pfnSetIndicesUm, 9);
@@ -118,16 +118,16 @@ NineFillDeviceFuncs(
     NINE_MISSING(pfnClear, 21);
     Functions->pfnUpdatePalette = NineFixedAnswer<NotDone>;
     Functions->pfnSetPalette = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnSetVertexShaderConst, 24);
+    Functions->pfnSetVertexShaderConst = NineSetVertexShaderConst;
     Functions->pfnMultiplyTransform = NineFixedAnswer<S_OK>;
     Functions->pfnSetTransform = NineFixedAnswer<S_OK>;
-    NINE_MISSING(pfnSetViewport, 27);
-    NINE_MISSING(pfnSetZRange, 28);
+    Functions->pfnSetViewport = NineSetViewport;
+    Functions->pfnSetZRange = NineSetZRange;
     Functions->pfnSetMaterial = NineFixedAnswer<S_OK>;
     Functions->pfnSetLight = NineFixedAnswer<S_OK>;
     Functions->pfnCreateLight = NineFixedAnswer<S_OK>;
     Functions->pfnDestroyLight = NineFixedAnswer<S_OK>;
-    NINE_MISSING(pfnSetClipPlane, 33);
+    Functions->pfnSetClipPlane = NineSetClipPlane;
     Functions->pfnGetInfo = NineFixedAnswer<NotDone>;
     NINE_MISSING(pfnLock, 35);
     NINE_MISSING(pfnUnlock, 36);
@@ -142,9 +142,9 @@ NineFillDeviceFuncs(
     NINE_MISSING(pfnCreateVertexShaderDecl, 45);
     NINE_MISSING(pfnDeleteVertexShaderDecl, 46);
     NINE_MISSING(pfnSetVertexShaderDecl, 47);
-    NINE_MISSING(pfnSetVertexShaderConstI, 48);
-    NINE_MISSING(pfnSetVertexShaderConstB, 49);
-    NINE_MISSING(pfnSetScissorRect, 50);
+    Functions->pfnSetVertexShaderConstI = NineSetVertexShaderConstI;
+    Functions->pfnSetVertexShaderConstB = NineSetVertexShaderConstB;
+    Functions->pfnSetScissorRect = NineSetScissorRect;
     NINE_MISSING(pfnSetStreamSource, 51);
     NINE_MISSING(pfnSetStreamSourceFreq, 52);
     Functions->pfnSetConvolutionKernelMono = NineFixedAnswer<NotDone>;
@@ -159,8 +159,8 @@ NineFillDeviceFuncs(
     NINE_MISSING(pfnSetRenderTarget, 62);
     NINE_MISSING(pfnSetDepthStencil, 63);
     NINE_MISSING(pfnGenerateMipSubLevels, 64);
-    NINE_MISSING(pfnSetPixelShaderConstI, 65);
-    NINE_MISSING(pfnSetPixelShaderConstB, 66);
+    Functions->pfnSetPixelShaderConstI = NineSetPixelShaderConstI;
+    Functions->pfnSetPixelShaderConstB = NineSetPixelShaderConstB;
     NINE_MISSING(pfnCreatePixelShader, 67);
     NINE_MISSING(pfnDeletePixelShader, 68);
     NINE_MISSING(pfnCreateDecodeDevice, 69);
@@ -226,7 +226,7 @@ NineFillDeviceFuncs(
     Functions->pfnCheckMultiPlaneOverlaySupport = NineFixedAnswer<NotDone>;
     Functions->pfnPresentMultiPlaneOverlay = NineFixedAnswer<NotDone>;
     Functions->pfnReserved1 = nullptr;
-    NINE_MISSING(pfnFlush1, 132);
+    Functions->pfnFlush1 = NineFlush1;
     Functions->pfnCheckCounterInfo = NineCheckCounterInfo;
     Functions->pfnCheckCounter = NineAlwaysDone<>;
     NINE_MISSING(pfnUpdateSubresourceUP, 135);
