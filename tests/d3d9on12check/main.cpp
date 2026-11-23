@@ -245,6 +245,7 @@ CkWrapTable(
             Missing += 1;
     }
     printf("  slots %u empty %u\n", Count, Missing);
+    CkWrapPrivateTable(Slots, Count);
 
     Ck.Open = reinterpret_cast<PFN_CK_OPEN_ADAPTER>(Slots[CkOpenSlot]);
     Slots[CkOpenSlot] = reinterpret_cast<PVOID>(CkOpenAdapter);

@@ -12,6 +12,12 @@ VOID
 CkWrapDeviceTable(
     _Inout_ D3DDDI_DEVICEFUNCS* Functions);
 
+/* Wraps the private table entries other than the adapter opens */
+VOID
+CkWrapPrivateTable(
+    _Inout_updates_(Count) PVOID* Slots,
+    _In_ UINT Count);
+
 /* Points the Direct3D 12 device and queue methods of this process at printing wrappers */
 BOOLEAN
 CkHookD3D12(VOID);

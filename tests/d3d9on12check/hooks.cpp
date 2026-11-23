@@ -38,6 +38,7 @@ enum CkFamily
     CkFamilyDdi,
     CkFamilyDevice,
     CkFamilyQueue,
+    CkFamilyPrivate,
     CkFamilyCount
 };
 
@@ -98,6 +99,18 @@ static const PCSTR CkDeviceNames[] =
     "CreateCommittedResource2", "CreatePlacedResource1", "CreateSamplerFeedbackUnorderedAccessView",
     "GetCopyableFootprints1", "CreateShaderCacheSession", "ShaderCacheControl", "CreateCommandQueue1",
     "CreateCommittedResource3", "CreatePlacedResource2", "CreateReservedResource2",
+};
+
+/* The private table d3d9.dll looks up; the opens are wrapped apart */
+static const PCSTR CkPrivateNames[] =
+{
+    nullptr, "GetSharedGdiHandle", "CreateSharedNtHandle", "GetExecutionState", "KernelPresent", "CreateFence",
+    "OpenFence", "ShareFence", "WaitForFence", "SignalFence", "GetCompletedFenceValue", "DestroyTrackedFence",
+    "QueryResourceDriverDataSize", "OpenResource", "CreateKmtHandle", "QueryResourceFromKmtHandle",
+    "DestroyKmtHandle", "CreateWrappingHandle", "DestroyWrappingHandle", "GetD3D12Device", "TransitionResource",
+    "SetResourceState", "SetMaximumFrameLatency", "IsMaximumFrameLatencyReached", "GetD3D12Resource",
+    "AddResourceWaitsToQueue", "AddDeferredWaitsToResource", nullptr, "SubmitForPresent", "PreExecuteCommandList",
+    "PostExecuteCommandList",
 };
 
 static const PCSTR CkQueueNames[] =
@@ -519,6 +532,58 @@ CkDescribeDdiResult(
     }
 }
 
+/* Private entries that hand back nothing */
+static
+BOOLEAN
+CkPrivateHasResult(
+    _In_ UINT Slot)
+{
+    return Slot != 11 && Slot != 18 && Slot != 20 && Slot != 21;
+}
+
+/* The arguments of a private entry the runtime called */
+static
+VOID
+CkDescribePrivateCall(
+    _Inout_ std::string* Text,
+    _In_ UINT Slot,
+    _In_reads_(CkArgumentCount) const UINT_PTR* A)
+{
+    switch (Slot)
+    {
+        case 13:
+        {
+            const D3DDDIARG_OPENRESOURCE* Args = reinterpret_cast<const D3DDDIARG_OPENRESOURCE*>(A[1]);
+
+            CkAppend(Text, " allocations %u kmt %u data %u rotation %u flags %X", Args->NumAllocations,
+                     Args->hKMResource, Args->PrivateDriverDataSize, Args->Rotation, Args->Flags.Value);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+/* What a private entry handed back */
+static
+VOID
+CkDescribePrivateResult(
+    _Inout_ std::string* Text,
+    _In_ UINT Slot,
+    _In_reads_(CkArgumentCount) const UINT_PTR* A,
+    _In_ UINT_PTR Result)
+{
+    if (Slot == 13 && SUCCEEDED(static_cast<HRESULT>(Result)))
+    {
+        const D3DDDIARG_OPENRESOURCE* Args = reinterpret_cast<const D3DDDIARG_OPENRESOURCE*>(A[1]);
+
+        AcquireSRWLockExclusive(&CkHooks.Lock);
+        CkHooks.Ids.erase(Args->hResource);
+        ReleaseSRWLockExclusive(&CkHooks.Lock);
+        CkAppend(Text, " -> %s", CkName(Args->hResource).c_str());
+    }
+}
+
 /* Device DDI entries that only record state and make no Direct3D 12 calls */
 static
 BOOLEAN
@@ -567,10 +632,15 @@ CkDispatch(
         CkAppend(&Text, "d3d12 %s", CkDeviceNames[Slot]);
         CkDescribeDeviceCall(&Text, Slot, A);
     }
-    else
+    else if (Family == CkFamilyQueue)
     {
         CkAppend(&Text, "queue %s %s", CkName(reinterpret_cast<VOID*>(A[0])).c_str(), CkQueueNames[Slot]);
         CkDescribeQueueCall(&Text, Slot, A);
+    }
+    else
+    {
+        CkAppend(&Text, "private %s", CkPrivateNames[Slot]);
+        CkDescribePrivateCall(&Text, Slot, A);
     }
 
     CkDepth += 1;
@@ -579,6 +649,9 @@ CkDispatch(
 
     if (Family == CkFamilyDdi && SUCCEEDED(static_cast<HRESULT>(Result)))
         CkDescribeDdiResult(&Text, Slot, A);
+
+    if (Family == CkFamilyPrivate)
+        CkDescribePrivateResult(&Text, Slot, A, Result);
 
     if (Family == CkFamilyDevice)
     {
@@ -594,7 +667,7 @@ CkDispatch(
     /* Methods without a result print none */
     if (!((Family == CkFamilyDevice && ((Slot >= 17 && Slot <= 24) || Slot == 38 || Slot == 42 || Slot == 63 ||
                                         Slot == 72)) ||
-          (Family == CkFamilyQueue && Slot >= 8 && Slot <= 13)))
+          (Family == CkFamilyQueue && Slot >= 8 && Slot <= 13) || (Family == CkFamilyPrivate && !CkPrivateHasResult(Slot))))
     {
         CkAppend(&Line, " = %08lX", static_cast<ULONG>(Result));
     }
@@ -660,6 +733,7 @@ CkThunks(
         CkThunkTable<CkFamilyDdi>(std::make_integer_sequence<UINT, CkSlotLimit>()),
         CkThunkTable<CkFamilyDevice>(std::make_integer_sequence<UINT, CkSlotLimit>()),
         CkThunkTable<CkFamilyQueue>(std::make_integer_sequence<UINT, CkSlotLimit>()),
+        CkThunkTable<CkFamilyPrivate>(std::make_integer_sequence<UINT, CkSlotLimit>()),
     };
     return Tables[Family];
 }
@@ -685,6 +759,24 @@ CkWrapDeviceTable(
         Slots[Slot] = Thunks[Slot];
     }
     printf("  device functions empty:%s\n", Empty.c_str());
+}
+
+VOID
+CkWrapPrivateTable(
+    _Inout_updates_(Count) PVOID* Slots,
+    _In_ UINT Count)
+{
+    const PFN_CK_FORWARD* Thunks = CkThunks(CkFamilyPrivate);
+
+    for (UINT Slot = 0; Slot < Count && Slot < _countof(CkPrivateNames); Slot++)
+    {
+        if (CkPrivateNames[Slot] == nullptr || Slots[Slot] == nullptr)
+            continue;
+        if (Slots[Slot] == reinterpret_cast<PVOID>(Thunks[Slot]))
+            continue;
+        CkHooks.Originals[CkFamilyPrivate][Slot] = reinterpret_cast<PFN_CK_FORWARD>(Slots[Slot]);
+        Slots[Slot] = reinterpret_cast<PVOID>(Thunks[Slot]);
+    }
 }
 
 /* Rewrites the named slots of a vtable shared by every object of its class */
