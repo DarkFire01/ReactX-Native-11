@@ -31,19 +31,6 @@ RxDevice12::CreateComputePipelineState(
     return E_NOTIMPL;
 }
 
-HRESULT
-STDMETHODCALLTYPE
-RxDevice12::CreateRootSignature(
-    _In_ UINT nodeMask,
-    _In_reads_(blobLengthInBytes) const void* pBlobWithRootSignature,
-    _In_ SIZE_T blobLengthInBytes,
-    REFIID riid,
-    _COM_Outptr_ void** ppvRootSignature)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
 VOID
 STDMETHODCALLTYPE
 RxDevice12::CreateConstantBufferView(

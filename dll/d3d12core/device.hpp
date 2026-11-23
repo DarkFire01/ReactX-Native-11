@@ -14,6 +14,7 @@
 
 class RxDevice12;
 class RxSchedulingGroup;
+class RxRootSignature;
 struct RxFormatContext12;
 
 /* The one DDI revision this runtime drives: release 8, build 118 */
@@ -483,6 +484,42 @@ public:
         return Scheduling.ComputeQueuesPer3DQueue;
     }
 
+    /* An API node mask in the driver's numbering; Single demands exactly one node */
+    HRESULT
+    TranslateNodeMask(
+        _In_ UINT Mask,
+        _In_ BOOLEAN Single,
+        _Out_ UINT* Translated) const;
+
+    /* Every API node, as internal objects use */
+    UINT
+    GetAllNodesMask() const
+    {
+        return ApiNodeCount >= 32 ? ~0u : (1u << ApiNodeCount) - 1;
+    }
+
+    UINT
+    GetDdiBuild() const
+    {
+        return DdiBuild;
+    }
+
+    /* A root signature already made from this RTS0 part for these nodes, with a reference added */
+    _Ret_maybenull_
+    RxRootSignature*
+    FindRootSignature(
+        _In_reads_bytes_(Size) const BYTE* Part,
+        _In_ UINT Size,
+        _In_ UINT NodeMask);
+
+    VOID
+    RememberRootSignature(
+        _In_ RxRootSignature* Signature);
+
+    VOID
+    ForgetRootSignature(
+        _In_ RxRootSignature* Signature);
+
 private:
     RxDevice12() = default;
     ~RxDevice12();
@@ -532,13 +569,6 @@ private:
 
     HRESULT
     QuerySessionCaps();
-
-    /* An API node mask in the driver's numbering; Single demands exactly one node */
-    HRESULT
-    TranslateNodeMask(
-        _In_ UINT Mask,
-        _In_ BOOLEAN Single,
-        _Out_ UINT* Translated) const;
 
     /* The physical node an API node index answers for */
     HRESULT
@@ -619,6 +649,8 @@ private:
     SRWLOCK GroupLock = SRWLOCK_INIT;
     RxSchedulingGroup* OpenGroups = nullptr;
     RxValidationCaps12 ValidationCaps = {};
+    SRWLOCK RootCacheLock = SRWLOCK_INIT;
+    RxRootSignature* RootCache = nullptr;
     RxPrivateDataStore PrivateData;
 };
 
@@ -634,9 +666,38 @@ public:
         Owner.AddRef();
     }
 
+    /* Objects the device makes for itself do not keep it alive */
+    RxDeviceChild12(
+        _In_ RxDevice12& Owner,
+        _In_ BOOLEAN Internal)
+        : Device(Owner),
+          HoldsDevice(!Internal)
+    {
+        if (HoldsDevice)
+            Owner.AddRef();
+    }
+
     virtual ~RxDeviceChild12()
     {
-        Device.Release();
+        if (HoldsDevice)
+            Device.Release();
+    }
+
+    /* A reference taken only while the object is still alive, for caches that hold none */
+    BOOLEAN
+    TryAddRef()
+    {
+        LONG Count = RefCount;
+
+        while (Count != 0)
+        {
+            LONG Seen = InterlockedCompareExchange(&RefCount, Count + 1, Count);
+
+            if (Seen == Count)
+                return TRUE;
+            Count = Seen;
+        }
+        return FALSE;
     }
 
     ULONG
@@ -712,12 +773,57 @@ public:
         return Device;
     }
 
+    /* What QueryInterface hands out for IUnknown: an identity apart from the API interfaces, as on Windows */
+    IUnknown*
+    Identity()
+    {
+        return &Unknown;
+    }
+
 protected:
     RxDevice12& Device;
     RxPrivateDataStore PrivateData;
 
 private:
+    class RxIdentity final : public IUnknown
+    {
+    public:
+        explicit RxIdentity(
+            _In_ RxDeviceChild12* Owner)
+            : Object(Owner)
+        {
+        }
+
+        HRESULT
+        STDMETHODCALLTYPE
+        QueryInterface(
+            _In_ REFIID riid,
+            _COM_Outptr_ void** ppvObject) override
+        {
+            return Object->QueryInterface(riid, ppvObject);
+        }
+
+        ULONG
+        STDMETHODCALLTYPE
+        AddRef(VOID) override
+        {
+            return Object->AddRef();
+        }
+
+        ULONG
+        STDMETHODCALLTYPE
+        Release(VOID) override
+        {
+            return Object->Release();
+        }
+
+    private:
+        RxDeviceChild12* Object;
+    };
+
+    BOOLEAN HoldsDevice = TRUE;
     LONG RefCount = 1;
+    RxIdentity Unknown{ this };
 };
 
 /* Hands back the interface asked for, as creation methods do: NULL output only checks */

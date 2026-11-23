@@ -8,6 +8,7 @@
 #pragma once
 
 #include "device.hpp"
+#include "rootsignature.hpp"
 
 class RxCommandAllocator;
 class RxResource;
@@ -533,6 +534,77 @@ private:
     SRWLOCK MapLock = SRWLOCK_INIT;
     UINT MapCount = 0;
     BYTE* MappedBase = nullptr;
+};
+
+/* A root signature as the driver holds it; one per RTS0 part and node mask */
+class RxRootSignature final : public RxDeviceChild12<ID3D12RootSignature>
+{
+public:
+    static constexpr GUID PrivateId = {0x3a8c6d15, 0xe24b, 0x4f90, {0x9c, 0x61, 0x0b, 0x7e, 0x45, 0xd2, 0x18, 0xa3}};
+
+    /* Part is the RTS0 part already found in the blob; the node mask is in API numbering */
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ UINT NodeMask,
+        _In_reads_bytes_(PartSize) const BYTE* Part,
+        _In_ UINT PartSize,
+        _In_ BOOLEAN Internal,
+        _Outptr_ RxRootSignature** Signature);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    D3D12DDI_HROOTSIGNATURE
+    GetDriverHandle() const
+    {
+        return DriverRoot;
+    }
+
+    BOOLEAN
+    Matches(
+        _In_reads_bytes_(Size) const BYTE* Part,
+        _In_ UINT Size,
+        _In_ UINT NodeMask) const
+    {
+        return Size == SerializedSize && NodeMask == Mask && memcmp(Part, Serialized, Size) == 0;
+    }
+
+    /* The desc the driver was given, in 1.2 form */
+    const D3D12_ROOT_SIGNATURE_DESC2&
+    GetLayout() const
+    {
+        return Layout;
+    }
+
+    /* Link in the device's cache */
+    RxRootSignature* NextCached = nullptr;
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxRootSignature() override;
+
+    HRESULT
+    Initialize(
+        _In_ UINT NodeMask,
+        _In_reads_bytes_(PartSize) const BYTE* Part,
+        _In_ UINT PartSize);
+
+    BYTE* Serialized = nullptr;
+    UINT SerializedSize = 0;
+    UINT Mask = 0;
+    BOOLEAN IsCached = FALSE;
+    RxRootSignatureDesc Reader;
+    D3D12_ROOT_SIGNATURE_DESC2 Layout = {};
+    RxDriverMemory12 Memory;
+    D3D12DDI_HROOTSIGNATURE DriverRoot = {};
+    BOOLEAN IsDriverRootCreated = FALSE;
+
+    friend class RxDevice12;
 };
 
 /* Descriptor and footprint helpers shared by the device and command lists */

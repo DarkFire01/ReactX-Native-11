@@ -9,6 +9,7 @@
 #include "core.hpp"
 #include "blob.hpp"
 #include "dxbchash.hpp"
+#include "rootsignature.hpp"
 
 #include <stdio.h>
 
@@ -458,6 +459,20 @@ struct RxValidator
     }
 };
 
+BOOLEAN
+RxVerifyRootSignature(
+    _In_ const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Desc)
+{
+    RxRootView View = { Desc };
+    RxValidator Validator;
+
+    if (Validator.Check(View))
+        return TRUE;
+
+    RX_TRACE(L"root signature rejected: %S", Validator.Message);
+    return FALSE;
+}
+
 /* Writing */
 
 struct RxWriter
@@ -706,8 +721,6 @@ RxSerializeVersionedRootSignature(
 
 /* Reading */
 
-/* The RTS0 part inside a container, which may also hold a whole shader */
-static
 BOOLEAN
 RxFindRootPart(
     _In_reads_bytes_(Size) const BYTE* Data,
@@ -760,49 +773,13 @@ RxFindRootPart(
     return FALSE;
 }
 
-/* A root signature held as every version, each built from the one the blob carries */
-class RxRootSignatureDesc
+RxRootSignatureDesc::~RxRootSignatureDesc()
 {
-public:
-    ~RxRootSignatureDesc()
-    {
-        UINT Index;
+    UINT Index;
 
-        for (Index = 0; Index < _countof(Descs); Index++)
-            Release(Index);
-    }
-
-    HRESULT
-    Parse(
-        _In_reads_bytes_(Size) const BYTE* Part,
-        _In_ UINT Size);
-
-    _Ret_maybenull_
-    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*
-    At(
-        _In_ D3D_ROOT_SIGNATURE_VERSION Version);
-
-    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC*
-    Unconverted() const
-    {
-        return &Descs[Original - 1];
-    }
-
-private:
-    VOID
-    Release(
-        _In_ UINT Index);
-
-    HRESULT
-    Build(
-        _In_ D3D_ROOT_SIGNATURE_VERSION Version,
-        _In_ const RxRootView& From);
-
-    /* Indexed by version - 1 */
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC Descs[3] = {};
-    BOOLEAN Built[3] = {};
-    D3D_ROOT_SIGNATURE_VERSION Original = D3D_ROOT_SIGNATURE_VERSION_1_0;
-};
+    for (Index = 0; Index < _countof(Descs); Index++)
+        Release(Index);
+}
 
 VOID
 RxRootSignatureDesc::Release(
@@ -995,10 +972,104 @@ RxRootSignatureDesc::Build(
     return S_OK;
 }
 
+/* The data flag a range without one behaves as, in 1.1 terms */
+static
+UINT
+RxDefaultRangeData(
+    _In_ UINT Flags,
+    _In_ D3D12_DESCRIPTOR_RANGE_TYPE Type)
+{
+    BOOLEAN IsVolatile = (Flags & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE) != 0;
+
+    switch (Type)
+    {
+        case D3D12_DESCRIPTOR_RANGE_TYPE_SRV:
+        case D3D12_DESCRIPTOR_RANGE_TYPE_CBV:
+            return IsVolatile ? D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE
+                              : D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
+        case D3D12_DESCRIPTOR_RANGE_TYPE_UAV:
+            return D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+        default:
+            return 0;
+    }
+}
+
+/* Static descriptors turned volatile; static data then only holds while set at execute */
+static
+UINT
+RxMakeDescriptorsVolatile(
+    _In_ UINT Flags)
+{
+    UINT Result = (Flags & ~D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS) |
+                  D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+
+    if ((Flags & D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC) != 0)
+    {
+        Result &= ~(D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+        Result |= D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
+    }
+    return Result;
+}
+
+static
+UINT
+RxReadRangeFlags(
+    _In_ UINT Flags,
+    _In_ D3D12_DESCRIPTOR_RANGE_TYPE Type,
+    _In_ UINT NumDescriptors,
+    _In_ const RxRootReadRules& Rules)
+{
+    const UINT DataFlags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE |
+                           D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE |
+                           D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
+    UINT Result = Flags & ~Rules.RangeMask;
+
+    if ((Rules.Options & RxRootFillDefaults) != 0 && (Result & DataFlags) == 0)
+        Result |= RxDefaultRangeData(Result, Type);
+
+    if ((Rules.Options & RxRootFillBoundsChecks) != 0 &&
+        (Result & D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS) != 0)
+    {
+        Result = RxMakeDescriptorsVolatile(Result);
+    }
+
+    /* Purely volatile ranges are the only unbounded ones left alone */
+    if ((Rules.Options & RxRootFillUnbounded) != 0 && NumDescriptors == UINT_MAX &&
+        (Result & (D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                   D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS)) !=
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE)
+    {
+        Result = RxMakeDescriptorsVolatile(Result);
+    }
+
+    return Result;
+}
+
+static
+UINT
+RxReadDescriptorFlags(
+    _In_ UINT Flags,
+    _In_ D3D12_ROOT_PARAMETER_TYPE Type,
+    _In_ const RxRootReadRules& Rules)
+{
+    const UINT DataFlags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE |
+                           D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE |
+                           D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC;
+    UINT Result = Flags & ~Rules.DescriptorMask;
+
+    if ((Rules.Options & RxRootFillDefaults) == 0 || (Result & DataFlags) != 0)
+        return Result;
+
+    if (Type == D3D12_ROOT_PARAMETER_TYPE_UAV)
+        return Result | D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+    return Result | D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
+}
+
 HRESULT
 RxRootSignatureDesc::Parse(
     _In_reads_bytes_(Size) const BYTE* Part,
-    _In_ UINT Size)
+    _In_ UINT Size,
+    _In_ const RxRootReadRules& Rules)
 {
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC& Desc = Descs[0];
     UINT Header[6];
@@ -1039,7 +1110,7 @@ RxRootSignatureDesc::Parse(
         Wide.Desc_1_2.pParameters = Parameters;
         Wide.Desc_1_2.NumStaticSamplers = Header[3];
         Wide.Desc_1_2.pStaticSamplers = Samplers;
-        Wide.Desc_1_2.Flags = (D3D12_ROOT_SIGNATURE_FLAGS)Header[5];
+        Wide.Desc_1_2.Flags = (D3D12_ROOT_SIGNATURE_FLAGS)(Header[5] & ~Rules.SignatureMask);
 
         hr = S_OK;
         if ((Header[1] && Parameters == nullptr) || (Header[3] && Samplers == nullptr))
@@ -1099,7 +1170,8 @@ RxRootSignatureDesc::Parse(
                     }
                     else
                     {
-                        Ranges[RangeIndex].Flags = (D3D12_DESCRIPTOR_RANGE_FLAGS)Range[4];
+                        Ranges[RangeIndex].Flags = (D3D12_DESCRIPTOR_RANGE_FLAGS)RxReadRangeFlags(
+                            Range[4], Ranges[RangeIndex].RangeType, Range[1], Rules);
                         Ranges[RangeIndex].OffsetInDescriptorsFromTableStart = Range[5];
                     }
                 }
@@ -1112,7 +1184,14 @@ RxRootSignatureDesc::Parse(
             else
             {
                 if (!Read(Entry[2], DescriptorSize, &Parameter.Descriptor))
+                {
                     hr = E_INVALIDARG;
+                }
+                else if (Original != D3D_ROOT_SIGNATURE_VERSION_1_0)
+                {
+                    Parameter.Descriptor.Flags = (D3D12_ROOT_DESCRIPTOR_FLAGS)RxReadDescriptorFlags(
+                        Parameter.Descriptor.Flags, Parameter.ParameterType, Rules);
+                }
             }
         }
 
@@ -1200,7 +1279,7 @@ public:
         if (Object == nullptr)
             return E_OUTOFMEMORY;
 
-        hr = Object->Desc.Parse(Part, PartSize);
+        hr = Object->Desc.Parse(Part, PartSize, RxPublicReadRules);
         if (SUCCEEDED(hr))
             hr = Object->QueryInterface(riid, ppObject);
 
