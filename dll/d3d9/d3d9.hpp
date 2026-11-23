@@ -544,6 +544,10 @@ D9IsDesktopFormat(
     _In_ BOOLEAN IsEx);
 
 /* validate.cpp */
+HRESULT
+D9CheckFlipExFlags(
+    _In_ const D3DPRESENT_PARAMETERS* Parameters);
+
 BOOLEAN
 D9IsFlipExFormat(
     _In_ D3DFORMAT Format);

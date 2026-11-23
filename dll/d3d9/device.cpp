@@ -768,6 +768,9 @@ D9Device::Initialize(
         D9Trace(L"the driver of %S is being updated", Adapter->DeviceName);
         return D3DERR_NOTAVAILABLE;
     }
+    hr = D9CheckFlipExFlags(Parameters);
+    if (FAILED(hr))
+        return hr;
     hr = CreateKernelDevice();
     if (FAILED(hr))
         return hr;

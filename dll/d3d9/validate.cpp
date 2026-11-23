@@ -71,6 +71,21 @@ D9IsFlipExFormat(
            Format == D3DFMT_A16B16G16R16F;
 }
 
+/* Flip model buffers are neither lockable nor clipped; the device checks this once its driver is known to be
+   usable */
+HRESULT
+D9CheckFlipExFlags(
+    _In_ const D3DPRESENT_PARAMETERS* Parameters)
+{
+    if (Parameters->SwapEffect == D3DSWAPEFFECT_FLIPEX &&
+        (Parameters->Flags & (D3DPRESENTFLAG_LOCKABLE_BACKBUFFER | D3DPRESENTFLAG_DEVICECLIP)) != 0)
+    {
+        D9_TRACE_ONCE(L"CreateDevice: a flip model back buffer cannot be lockable or clipped");
+        return D3DERR_INVALIDCALL;
+    }
+    return S_OK;
+}
+
 /* How many displays a device made with these flags drives */
 UINT
 D9Enum::HeadCount(
@@ -338,13 +353,6 @@ D9Enum::ValidatePresentation(
             D9_TRACE_ONCE(L"CreateDevice: a discarded depth buffer needs an automatic one");
             return D3DERR_INVALIDCALL;
         }
-        if (Swap == D3DSWAPEFFECT_FLIPEX &&
-            (Present->Flags & (D3DPRESENTFLAG_LOCKABLE_BACKBUFFER | D3DPRESENTFLAG_DEVICECLIP)) != 0)
-        {
-            D9_TRACE_ONCE(L"CreateDevice: a flip model back buffer cannot be lockable or clipped");
-            return D3DERR_INVALIDCALL;
-        }
-
         if (Present->EnableAutoDepthStencil)
         {
             hr = CheckDeviceFormat(Display, DeviceType, DisplayFormat, D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_SURFACE,
@@ -452,8 +460,12 @@ D9Enum::ValidateReset(
     _In_opt_ const D3DDISPLAYMODEEX* FullscreenMode)
 {
     D9LockScope Scope(&Lock);
+    HRESULT hr;
 
-    return ValidatePresentation(Adapter, 1, DeviceType, BehaviorFlags, Parameters, FullscreenMode);
+    hr = ValidatePresentation(Adapter, 1, DeviceType, BehaviorFlags, Parameters, FullscreenMode);
+    if (SUCCEEDED(hr))
+        hr = D9CheckFlipExFlags(Parameters);
+    return hr;
 }
 
 /* The adapter, device type and behavior flag rules, then the presentation rules */
