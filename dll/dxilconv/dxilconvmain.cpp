@@ -183,20 +183,37 @@ CDxbcConverter::ConvertInDriver(
     _Out_ IDxcBlob** Blob,
     _Outptr_opt_result_maybenull_z_ LPWSTR* Diag)
 {
+    HRESULT hr;
+
     if (Bytecode == nullptr || Blob == nullptr)
-        return E_INVALIDARG;
+    {
+        hr = E_INVALIDARG;
+    }
+    else if (Bytecode[1] < 2)
+    {
+        hr = DXC_STATUS_BAD_BYTECODE;
+    }
+    else
+    {
+        *Blob = nullptr;
+        if (Diag != nullptr)
+            *Diag = nullptr;
 
-    if (Bytecode[1] < 2)
-        return DXC_STATUS_BAD_BYTECODE;
+        ApplyOptions(ExtraOptions);
+        DxcTrace(L"ConvertInDriver is not implemented yet");
+        hr = E_NOTIMPL;
+    }
 
-    *Blob = nullptr;
-    if (Diag != nullptr)
-        *Diag = nullptr;
+    /* The result record fingerprints the token stream by its own length word */
+    if (FAILED(hr))
+    {
+        ULONG Length = *reinterpret_cast<const volatile UINT32*>(Bytecode + 1);
+        ULONG Input = DxcFingerprint(Bytecode, Length * sizeof(UINT32));
 
-    ApplyOptions(ExtraOptions);
+        DxcTrace(L"ConvertInDriver failed 0x%08lX (input %08lX)", hr, Input);
+    }
 
-    DxcTrace(L"ConvertInDriver is not implemented yet");
-    return E_NOTIMPL;
+    return hr;
 }
 
 extern "C"
