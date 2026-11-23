@@ -7,6 +7,8 @@
 
 #include "pipeline.hpp"
 #include "core.hpp"
+#include "formatlayout12.hpp"
+#include "formatsupport12.hpp"
 #include "internalshaders.h"
 
 static
@@ -221,6 +223,13 @@ RxPipelinePart::~RxPipelinePart()
                 D3D12DDI_HRASTERIZERSTATE Raster = { Handle };
 
                 Ddi.pfnDestroyRasterizerState(Device.Handle(), Raster);
+                break;
+            }
+            case Kind::ElementLayout:
+            {
+                D3D12DDI_HELEMENTLAYOUT Layout = { Handle };
+
+                Ddi.pfnDestroyElementLayout(Device.Handle(), Layout);
                 break;
             }
         }
@@ -545,6 +554,313 @@ RxBuildShader(
 
     Part->MarkCreated(Build.Stage);
     return S_OK;
+}
+
+/* Input layouts */
+
+/* The register a vertex shader reads a semantic from, by the first input of that name and index */
+static
+BOOLEAN
+RxFindInputRegister(
+    _In_reads_bytes_(Size) const BYTE* Part,
+    _In_ UINT Size,
+    _In_ RxSignatureForm Form,
+    _In_z_ LPCSTR Name,
+    _In_ UINT Index,
+    _Out_ UINT* Register)
+{
+    const UINT Stride = Form == RxSignatureForm::Plain ? 24 : (Form == RxSignatureForm::Streams ? 28 : 32);
+    const UINT Lead = Form == RxSignatureForm::Plain ? 0 : 4;
+    UINT Count = RxSignatureCount(Part, Size);
+    UINT First = RxReadWord(Part, Size, 4);
+
+    for (UINT Entry = 0; Entry < Count; Entry++)
+    {
+        UINT Element = First + Entry * Stride;
+        UINT NameOffset = RxReadWord(Part, Size, Element + Lead);
+        const CHAR* EntryName;
+
+        if (RxReadWord(Part, Size, Element + Lead + 4) != Index || NameOffset >= Size)
+            continue;
+        EntryName = reinterpret_cast<const CHAR*>(Part + NameOffset);
+        if (strnlen(EntryName, Size - NameOffset) == Size - NameOffset || _stricmp(EntryName, Name) != 0)
+            continue;
+
+        *Register = RxReadWord(Part, Size, Element + Lead + 16);
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Bytes a vertex element of the format takes, and the alignment an element of that size needs */
+static
+UINT
+RxElementBytes(
+    _In_ DXGI_FORMAT Format,
+    _Out_ UINT* Align)
+{
+    UINT BlockWidth = 1;
+    UINT BlockHeight = 1;
+    UINT BlockBytes = 0;
+    UINT Bytes;
+
+    RxFormatBlock(Format, &BlockWidth, &BlockHeight, &BlockBytes);
+    Bytes = BlockBytes / (BlockWidth * BlockHeight);
+    *Align = Bytes == 1 ? 1 : (Bytes == 2 ? 2 : 4);
+    return Bytes;
+}
+
+/*
+ * The rules an input layout meets on its own and against the vertex shader: formats vertex buffers
+ * take, slots that agree on how they step, unique semantics, and every shader input fed.
+ */
+static
+HRESULT
+RxCheckLayout(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_INPUT_LAYOUT_DESC& Layout,
+    _In_ const D3D12_SHADER_BYTECODE& VertexShader)
+{
+    const UINT Limit = Device.GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0 ? D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT
+                                                                          : D3D10_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT;
+    const BYTE* Data = static_cast<const BYTE*>(VertexShader.pShaderBytecode);
+    RxSignatureForm Form = RxSignatureForm::Precise;
+    BOOLEAN SlotSeen[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    UINT SlotClass[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    UINT SlotRate[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    const BYTE* Inputs = nullptr;
+    UINT InputSize = 0;
+    UINT Count = Layout.NumElements;
+    UINT Errors = 0;
+
+    if (Count > Limit)
+        return E_INVALIDARG;
+
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        const D3D12_INPUT_ELEMENT_DESC& Element = Layout.pInputElementDescs[Index];
+        RxFormatRule12 Rule = RxFormatCapRule12(Device.GetFeatureLevel(), Element.Format, RxCapVertexBuffer);
+        SIZE_T NameLength;
+        UINT Align;
+
+        if (!RxFormatInHeader(Element.Format) || Rule == RxRuleNone)
+        {
+            Errors += 1;
+        }
+        else if (Rule == RxRuleDriver)
+        {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT Support = {};
+
+            Support.Format = Element.Format;
+            Device.CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &Support, sizeof(Support));
+            if ((Support.Support1 & D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER) == 0)
+                Errors += 1;
+        }
+
+        RxElementBytes(Element.Format, &Align);
+        if (!Device.UnrestrictedElementAlignment() && Element.AlignedByteOffset != D3D12_APPEND_ALIGNED_ELEMENT &&
+            (Element.AlignedByteOffset % Align) != 0)
+        {
+            Errors += 1;
+        }
+
+        if (Element.InputSlot >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
+            return E_INVALIDARG;
+        if (Element.InputSlotClass > D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA)
+            Errors += 1;
+        if (Element.InputSlotClass == D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA && Element.InstanceDataStepRate != 0)
+            Errors += 1;
+
+        /* Semantic indices go in their own field, so a name may not end in a digit */
+        NameLength = Element.SemanticName != nullptr ? strlen(Element.SemanticName) : 0;
+        if (NameLength == 0 || (Element.SemanticName[NameLength - 1] >= '0' && Element.SemanticName[NameLength - 1] <= '9'))
+            Errors += 1;
+
+        /* Every element of a slot steps alike */
+        if (SlotSeen[Element.InputSlot])
+        {
+            if (SlotClass[Element.InputSlot] != (UINT)Element.InputSlotClass)
+                Errors += 1;
+            if (SlotRate[Element.InputSlot] != Element.InstanceDataStepRate)
+                Errors += 1;
+        }
+        else
+        {
+            SlotSeen[Element.InputSlot] = TRUE;
+            SlotClass[Element.InputSlot] = Element.InputSlotClass;
+            SlotRate[Element.InputSlot] = Element.InstanceDataStepRate;
+        }
+
+        for (UINT Earlier = 0; Element.SemanticName != nullptr && Earlier < Index; Earlier++)
+        {
+            const D3D12_INPUT_ELEMENT_DESC& Other = Layout.pInputElementDescs[Earlier];
+
+            if (Other.SemanticName != nullptr && Other.SemanticIndex == Element.SemanticIndex &&
+                _stricmp(Other.SemanticName, Element.SemanticName) == 0)
+            {
+                Errors += 1;
+                break;
+            }
+        }
+    }
+    if (Errors != 0)
+        return E_INVALIDARG;
+
+    /* Each input the shader reads, other than the vertex and instance ids, needs an element */
+    if (Data == nullptr || VertexShader.BytecodeLength < 32 || RxReadWord(Data, 32, 24) != VertexShader.BytecodeLength)
+        return E_INVALIDARG;
+    if (!RxFindContainerPart(Data, VertexShader.BytecodeLength, RxFourCcOf('I', 'S', 'G', '1'), &Inputs, &InputSize))
+    {
+        Form = RxSignatureForm::Plain;
+        if (!RxFindContainerPart(Data, VertexShader.BytecodeLength, RxFourCcOf('I', 'S', 'G', 'N'), &Inputs, &InputSize))
+            return E_INVALIDARG;
+    }
+
+    {
+        const UINT Stride = Form == RxSignatureForm::Plain ? 24 : 32;
+        const UINT Lead = Form == RxSignatureForm::Plain ? 0 : 4;
+        UINT Entries = RxSignatureCount(Inputs, InputSize);
+        UINT First = RxReadWord(Inputs, InputSize, 4);
+
+        for (UINT Entry = 0; Entry < Entries; Entry++)
+        {
+            UINT Element = First + Entry * Stride;
+            UINT NameOffset = RxReadWord(Inputs, InputSize, Element + Lead);
+            UINT SemanticIndex = RxReadWord(Inputs, InputSize, Element + Lead + 4);
+            const CHAR* Name = NameOffset < InputSize ? reinterpret_cast<const CHAR*>(Inputs + NameOffset) : "";
+            BOOLEAN Fed = FALSE;
+
+            if (SemanticIndex == 0 && (_stricmp(Name, "SV_VertexID") == 0 || _stricmp(Name, "SV_InstanceID") == 0))
+                continue;
+
+            for (UINT Index = 0; Index < Count && !Fed; Index++)
+            {
+                const D3D12_INPUT_ELEMENT_DESC& Each = Layout.pInputElementDescs[Index];
+
+                Fed = Each.SemanticName != nullptr && Each.SemanticIndex == SemanticIndex &&
+                      _stricmp(Each.SemanticName, Name) == 0;
+            }
+            if (!Fed)
+                Errors += 1;
+        }
+    }
+
+    return Errors != 0 ? E_INVALIDARG : S_OK;
+}
+
+/*
+ * The layout as the driver takes it: offsets resolved, per vertex step rates cleared, and only the
+ * elements the vertex shader reads, in register order.
+ */
+static
+HRESULT
+RxTranslateLayout(
+    _In_ const D3D12_INPUT_LAYOUT_DESC& Layout,
+    _In_ const D3D12_SHADER_BYTECODE& VertexShader,
+    _Out_writes_(D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT) D3D12DDIARG_INPUT_ELEMENT_DESC* Elements,
+    _Out_ UINT* Count)
+{
+    const BYTE* Data = static_cast<const BYTE*>(VertexShader.pShaderBytecode);
+    UINT Cursor[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    RxSignatureForm Form = RxSignatureForm::Precise;
+    const BYTE* Inputs = nullptr;
+    UINT InputSize = 0;
+    UINT Kept = 0;
+
+    *Count = 0;
+    if (Data == nullptr)
+        return E_FAIL;
+    if (!RxFindContainerPart(Data, VertexShader.BytecodeLength, RxFourCcOf('I', 'S', 'G', '1'), &Inputs, &InputSize))
+    {
+        Form = RxSignatureForm::Plain;
+        if (!RxFindContainerPart(Data, VertexShader.BytecodeLength, RxFourCcOf('I', 'S', 'G', 'N'), &Inputs, &InputSize))
+            return E_FAIL;
+    }
+
+    for (UINT Index = 0; Index < Layout.NumElements && Index < D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT; Index++)
+    {
+        const D3D12_INPUT_ELEMENT_DESC& Element = Layout.pInputElementDescs[Index];
+        UINT Slot = Element.InputSlot % D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
+        UINT Align;
+        UINT Bytes = RxElementBytes(Element.Format, &Align);
+        UINT Offset;
+        UINT Register;
+
+        /* Appended elements start at the slot's end, aligned to their own size up to four bytes */
+        if (Element.AlignedByteOffset == D3D12_APPEND_ALIGNED_ELEMENT)
+        {
+            Offset = (Cursor[Slot] + Align - 1) / Align * Align;
+            if (Offset < Cursor[Slot])
+                Offset = UINT_MAX & ~3u;
+        }
+        else
+        {
+            Offset = Element.AlignedByteOffset;
+        }
+        Cursor[Slot] = Offset + Bytes < Offset ? UINT_MAX : Offset + Bytes;
+
+        if (!RxFindInputRegister(Inputs, InputSize, Form, Element.SemanticName, Element.SemanticIndex, &Register))
+            continue;
+
+        Elements[Kept].InputSlot = Element.InputSlot & 0x1F;
+        Elements[Kept].AlignedByteOffset = Offset;
+        Elements[Kept].Format = Element.Format;
+        Elements[Kept].InputSlotClass = Element.InputSlotClass != D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA
+                                            ? D3D12DDI_INPUT_CLASSIFICIATION_PER_INSTANCE_DATA
+                                            : D3D12DDI_INPUT_CLASSIFICIATION_PER_VERTEX_DATA;
+        Elements[Kept].InstanceDataStepRate =
+            Elements[Kept].InputSlotClass == D3D12DDI_INPUT_CLASSIFICIATION_PER_VERTEX_DATA ? 0 : Element.InstanceDataStepRate;
+        Elements[Kept].InputRegister = Register & 0x1F;
+        Kept += 1;
+    }
+
+    /* Register order; equal registers keep the order they came in */
+    for (UINT Index = 1; Index < Kept; Index++)
+    {
+        D3D12DDIARG_INPUT_ELEMENT_DESC Moving = Elements[Index];
+        UINT Place = Index;
+
+        while (Place > 0 && Elements[Place - 1].InputRegister > Moving.InputRegister)
+        {
+            Elements[Place] = Elements[Place - 1];
+            Place -= 1;
+        }
+        Elements[Place] = Moving;
+    }
+
+    *Count = Kept;
+    return S_OK;
+}
+
+struct RxLayoutBuild
+{
+    const D3D12DDIARG_INPUT_ELEMENT_DESC* Elements;
+    UINT Count;
+};
+
+/* A layout of no element the shader reads still makes an object, but no driver layout */
+static
+HRESULT
+RxBuildElementLayout(
+    _In_ RxPipelinePart* Part,
+    _In_ const VOID* Context)
+{
+    const RxLayoutBuild& Build = *static_cast<const RxLayoutBuild*>(Context);
+    RxDevice12& Device = Part->GetDevice();
+    D3D12DDIARG_CREATEELEMENTLAYOUT_0010 Args = {};
+    D3D12DDI_HELEMENTLAYOUT Layout;
+
+    Args.pVertexElements = Build.Count != 0 ? Build.Elements : nullptr;
+    Args.NumElements = Build.Count;
+    Layout.pDrvPrivate = Part->AllocateDriverMemory(Device.Ddi().pfnCalcPrivateElementLayoutSize(Device.Handle(), &Args));
+    if (Layout.pDrvPrivate == nullptr)
+        return E_OUTOFMEMORY;
+    if (Build.Count == 0)
+        return S_OK;
+    Device.Ddi().pfnCreateElementLayout(Device.Handle(), &Args, Layout);
+    Part->MarkCreated(RxStageVertex);
+    return RxDevice12::TakeDriverError();
 }
 
 /* Fixed function states, keyed by the driver form so equal states share a driver object */
@@ -1109,6 +1425,43 @@ RxPipelineState::AcquireShader(
     return hr;
 }
 
+/* Equal translated layouts share one element layout */
+HRESULT
+RxPipelineState::AcquireElementLayout(
+    _In_ const RxPipelineDesc& Desc)
+{
+    D3D12DDIARG_INPUT_ELEMENT_DESC Elements[D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT];
+    RxLayoutBuild Build;
+    HRESULT hr;
+
+    /* Without a layout the vertex shader may only read the system generated ids */
+    if (Desc.InputLayout.NumElements == 0)
+    {
+        D3D12_INPUT_LAYOUT_DESC None = {};
+
+        return Desc.Shaders[RxStageVertex].pShaderBytecode != nullptr
+                   ? RxCheckLayout(Device, None, Desc.Shaders[RxStageVertex])
+                   : S_OK;
+    }
+
+    if ((Root->GetLayout().Flags & D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT) == 0)
+        return E_INVALIDARG;
+    if (Desc.InputLayout.pInputElementDescs == nullptr)
+        return E_INVALIDARG;
+
+    hr = RxCheckLayout(Device, Desc.InputLayout, Desc.Shaders[RxStageVertex]);
+    if (FAILED(hr))
+        return hr;
+
+    hr = RxTranslateLayout(Desc.InputLayout, Desc.Shaders[RxStageVertex], Elements, &Build.Count);
+    if (FAILED(hr))
+        return hr;
+
+    Build.Elements = Elements;
+    return RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::ElementLayout, reinterpret_cast<const BYTE*>(Elements),
+                                   Build.Count * sizeof(Elements[0]), RxBuildElementLayout, &Build, &ElementLayout);
+}
+
 HRESULT
 RxPipelineState::Initialize(
     _In_ const RxPipelineDesc& Desc)
@@ -1139,6 +1492,10 @@ RxPipelineState::Initialize(
         D3D12DDI_BLEND_DESC_0010 Blend;
         D3D12DDI_DEPTH_STENCIL_DESC_0095 Depth;
         D3D12DDI_RASTERIZER_DESC_0102 Raster;
+
+        hr = AcquireElementLayout(Desc);
+        if (FAILED(hr))
+            return hr;
 
         for (RxShaderStage Stage : Order)
         {
@@ -1188,6 +1545,8 @@ RxPipelineState::Initialize(
         Args.SampleMask = Desc.SampleMask;
         Args.hRasterizerState.pDrvPrivate = RasterizerState->GetDriverHandle();
         Args.hDepthStencilState.pDrvPrivate = DepthStencilState->GetDriverHandle();
+        if (ElementLayout != nullptr && ElementLayout->HasDriverObject())
+            Args.hElementLayout.pDrvPrivate = ElementLayout->GetDriverHandle();
         Args.IBStripCutValue = (D3D12DDI_INDEX_BUFFER_STRIP_CUT_VALUE)Desc.StripCut;
         Args.PrimitiveTopologyType = (D3D12DDI_PRIMITIVE_TOPOLOGY_TYPE)Desc.Topology;
         Args.NumRenderTargets = Desc.Targets.NumRenderTargets;
@@ -1233,6 +1592,8 @@ RxPipelineState::~RxPipelineState()
         RasterizerState->ReleaseUse();
     if (BlendState != nullptr)
         BlendState->ReleaseUse();
+    if (ElementLayout != nullptr)
+        ElementLayout->ReleaseUse();
     for (RxPipelinePart* Shader : Shaders)
     {
         if (Shader != nullptr)

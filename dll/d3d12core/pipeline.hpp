@@ -67,6 +67,7 @@ public:
         Blend,
         DepthStencil,
         Rasterizer,
+        ElementLayout,
     };
 
     /* The part for this key, found in the device's cache or made through Build */
@@ -94,6 +95,13 @@ public:
     GetDriverHandle() const
     {
         return Handle;
+    }
+
+    /* A layout no element of which the shader reads has memory but no driver object */
+    BOOLEAN
+    HasDriverObject() const
+    {
+        return IsCreated;
     }
 
     RxDevice12&
@@ -215,12 +223,17 @@ private:
         _In_ const RxPipelineDesc& Desc,
         _In_ RxShaderStage Stage);
 
+    HRESULT
+    AcquireElementLayout(
+        _In_ const RxPipelineDesc& Desc);
+
     BOOLEAN IsCompute = FALSE;
     RxRootSignature* Root = nullptr;
     RxPipelinePart* Shaders[RxStageCount] = {};
     RxPipelinePart* BlendState = nullptr;
     RxPipelinePart* DepthStencilState = nullptr;
     RxPipelinePart* RasterizerState = nullptr;
+    RxPipelinePart* ElementLayout = nullptr;
     RxDriverMemory12 Memory;
     D3D12DDI_HPIPELINESTATE DriverState = {};
     D3D12DDI_RUNTIME_BYPASS_HEADER Bypass = {};

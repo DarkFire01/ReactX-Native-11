@@ -479,6 +479,13 @@ public:
         return ValidationCaps;
     }
 
+    /* Vertex elements may then start at any byte */
+    BOOLEAN
+    UnrestrictedElementAlignment() const
+    {
+        return CopyAndViewport.UnrestrictedVertexElementAlignmentSupported != FALSE;
+    }
+
     /* Buffer footprints of copies may then start and step at any multiple of a texel */
     BOOLEAN
     UnrestrictedCopyPitch() const
