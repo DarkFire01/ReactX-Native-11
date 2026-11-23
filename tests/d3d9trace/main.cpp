@@ -690,6 +690,28 @@ TrDeviceInputs(
                  Lock->Box.Bottom, Lock->Box.Front, Lock->Box.Back);
         break;
     }
+    case TR_DEVICE_SLOT(pfnLockAsync):
+    {
+        const D3DDDIARG_LOCKASYNC* Lock = static_cast<const D3DDDIARG_LOCKASYNC*>(Args);
+        TrAppend(Text, " %s sub %u flags %08X box %u %u %u %u %u %u", TrDriver(Lock->hResource).c_str(),
+                 Lock->SubResourceIndex, Lock->Flags.Value, Lock->Box.Left, Lock->Box.Top, Lock->Box.Right,
+                 Lock->Box.Bottom, Lock->Box.Front, Lock->Box.Back);
+        break;
+    }
+    case TR_DEVICE_SLOT(pfnUnlockAsync):
+    {
+        const D3DDDIARG_UNLOCKASYNC* Unlock = static_cast<const D3DDDIARG_UNLOCKASYNC*>(Args);
+        TrAppend(Text, " %s sub %u flags %08X", TrDriver(Unlock->hResource).c_str(), Unlock->SubResourceIndex,
+                 Unlock->Flags.Value);
+        break;
+    }
+    case TR_DEVICE_SLOT(pfnRename):
+    {
+        const D3DDDIARG_RENAME* Rename = static_cast<const D3DDDIARG_RENAME*>(Args);
+        TrAppend(Text, " %s sub %u cookie %s", TrDriver(Rename->hResource).c_str(), Rename->SubResourceIndex,
+                 Rename->hCookie != NULL ? "set" : "none");
+        break;
+    }
     case TR_DEVICE_SLOT(pfnUnlock):
     {
         const D3DDDIARG_UNLOCK* Unlock = static_cast<const D3DDDIARG_UNLOCK*>(Args);
@@ -897,6 +919,14 @@ TrDeviceOutputs(
         if (SUCCEEDED(Result))
             TrAppend(Text, " %s pitch %u %u", Lock->pSurfData != nullptr ? "mem" : "nomem", Lock->Pitch,
                      Lock->SlicePitch);
+        break;
+    }
+    case TR_DEVICE_SLOT(pfnLockAsync):
+    {
+        const D3DDDIARG_LOCKASYNC* Lock = static_cast<const D3DDDIARG_LOCKASYNC*>(Args);
+        if (SUCCEEDED(Result))
+            TrAppend(Text, " %s pitch %u %u cookie %s", Lock->pSurfData != nullptr ? "mem" : "nomem", Lock->Pitch,
+                     Lock->SlicePitch, Lock->hCookie != NULL ? "set" : "none");
         break;
     }
     case TR_DEVICE_SLOT(pfnCreateResource):
