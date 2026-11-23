@@ -767,7 +767,8 @@ DdCreateSurfaceObject(
     _In_ DdInterface* This,
     _In_ const DDSURFACEDESC2* Desc,
     _Out_ VOID** Result,
-    _In_opt_ IUnknown* Outer);
+    _In_opt_ IUnknown* Outer,
+    _In_ BOOLEAN NeedsCooperation);
 
 VOID
 DdReleaseLocalSurfaces(

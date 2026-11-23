@@ -7,6 +7,8 @@
 
 #include "ddraw.hpp"
 
+#include <vector>
+
 static const GUID DdIidVideoPortContainer = { 0x6C142760, 0xA733, 0x11CE, { 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60 } };
 
 /* Surface caps that never name a memory pool */
@@ -172,7 +174,7 @@ DdCreateSurface(
 {
     DdLockScope Lock;
 
-    return DdCreateSurfaceObject(DdFromCom(Com), static_cast<const DDSURFACEDESC2*>(Desc), Surface, Outer);
+    return DdCreateSurfaceObject(DdFromCom(Com), static_cast<const DDSURFACEDESC2*>(Desc), Surface, Outer, TRUE);
 }
 
 static
@@ -313,6 +315,162 @@ DdEnumExistingSurfaces(
     }
 }
 
+/* One size and one pixel format a creatable surface is tried with */
+struct DdTrySize
+{
+    DWORD Width;
+    DWORD Height;
+};
+
+struct DdTryFormat
+{
+    BOOLEAN IsFourCC;
+    BOOLEAN IsRgb;
+    DWORD FourCC;
+    DWORD BitCount;
+    DWORD Masks[4];
+};
+
+/* The RGB layout a display depth stands for when surfaces are tried at it */
+static
+VOID
+DdDepthFormat(
+    _In_ DWORD BitCount,
+    _Out_ DdTryFormat* Format)
+{
+    static const DWORD Masks8[] = { 0xE0, 0x1C, 0x03, 0 };
+    static const DWORD Masks16[] = { 0xF800, 0x07E0, 0x1F, 0 };
+    static const DWORD Masks32[] = { 0xFF0000, 0xFF00, 0xFF, 0 };
+    const DWORD* Masks = BitCount == 8 ? Masks8 : BitCount == 16 ? Masks16 : Masks32;
+
+    ZeroMemory(Format, sizeof(*Format));
+    Format->IsRgb = TRUE;
+    Format->BitCount = BitCount;
+    memcpy(Format->Masks, Masks, sizeof(Format->Masks));
+}
+
+static
+VOID
+DdAddTrySize(
+    _Inout_ std::vector<DdTrySize>& Sizes,
+    _In_ DWORD Width,
+    _In_ DWORD Height)
+{
+    for (const DdTrySize& Size : Sizes)
+    {
+        if (Size.Width == Width && Size.Height == Height)
+            return;
+    }
+    Sizes.push_back({ Width, Height });
+}
+
+/* Tries the description at every display size and depth it leaves open and reports each surface that could be made */
+static
+HRESULT
+DdEnumCreatableSurfaces(
+    _In_ DdInterface* This,
+    _Inout_ DDSURFACEDESC2* Desc,
+    _In_opt_ VOID* Context,
+    _In_ LPDDENUMSURFACESCALLBACK7 Callback)
+{
+    DdDriver* Driver = This->Local->Driver;
+    PCSTR Name = _stricmp(Driver->Name, "DISPLAY") == 0 ? nullptr : Driver->Name;
+    BOOLEAN Primary = (Desc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0;
+    BOOLEAN EverySize = (Desc->dwFlags & DDSD_HEIGHT) == 0 && !Primary;
+    BOOLEAN WantRgb = FALSE;
+    BOOLEAN WantFourCC = FALSE;
+    std::vector<DdTrySize> Sizes;
+    std::vector<DdTryFormat> Formats;
+    DdTryFormat Format;
+    DDSURFACEDESC2 Found;
+    DEVMODEA Mode;
+    VOID* Created;
+
+    if ((Desc->dwFlags & DDSD_PIXELFORMAT) != 0)
+    {
+        WantFourCC = (Desc->ddpfPixelFormat.dwFlags & DDPF_YUV) != 0;
+        WantRgb = (Desc->ddpfPixelFormat.dwFlags & DDPF_RGB) != 0;
+    }
+
+    /* Every mode offers its size at each of the four depths; the depths are tried once per mode, repeats included */
+    if (EverySize || WantRgb)
+    {
+        for (DWORD Index = 0;; Index += 1)
+        {
+            ZeroMemory(&Mode, sizeof(Mode));
+            Mode.dmSize = sizeof(Mode);
+            if (!EnumDisplaySettingsA(Name, Index, &Mode))
+                break;
+            if (EverySize)
+                DdAddTrySize(Sizes, Mode.dmPelsWidth, Mode.dmPelsHeight);
+            for (DWORD Depth = 8; WantRgb && Depth <= 32; Depth += 8)
+            {
+                DdDepthFormat(Depth, &Format);
+                Formats.push_back(Format);
+            }
+        }
+    }
+    if (!EverySize)
+        Sizes.push_back({ Desc->dwWidth, Desc->dwHeight });
+
+    for (DWORD Index = 0; WantFourCC && Index < Driver->FourCCCount; Index += 1)
+    {
+        ZeroMemory(&Format, sizeof(Format));
+        Format.IsFourCC = TRUE;
+        Format.FourCC = Driver->FourCC[Index];
+        Formats.push_back(Format);
+    }
+
+    /* Without a format to try the description's own is used */
+    if (Formats.empty())
+    {
+        ZeroMemory(&Format, sizeof(Format));
+        Formats.push_back(Format);
+    }
+
+    if (!Primary)
+        Desc->dwFlags |= DDSD_WIDTH | DDSD_HEIGHT;
+
+    for (const DdTrySize& Size : Sizes)
+    {
+        Desc->dwWidth = Size.Width;
+        Desc->dwHeight = Size.Height;
+        for (const DdTryFormat& Try : Formats)
+        {
+            if (Try.IsFourCC)
+            {
+                Desc->ddpfPixelFormat.dwFlags = DDPF_YUV;
+                Desc->ddpfPixelFormat.dwFourCC = Try.FourCC;
+            }
+            else if (Try.IsRgb)
+            {
+                Desc->ddpfPixelFormat.dwFlags = Try.BitCount == 8 ? DDPF_RGB | DDPF_PALETTEINDEXED8 : DDPF_RGB;
+                Desc->ddpfPixelFormat.dwRGBBitCount = Try.BitCount;
+                Desc->ddpfPixelFormat.dwRBitMask = Try.Masks[0];
+                Desc->ddpfPixelFormat.dwGBitMask = Try.Masks[1];
+                Desc->ddpfPixelFormat.dwBBitMask = Try.Masks[2];
+                Desc->ddpfPixelFormat.dwRGBAlphaBitMask = Try.Masks[3];
+            }
+
+            /* The old interfaces create from the short description they were given */
+            if (DdIsOldDraw(This))
+                Desc->dwSize = sizeof(DDSURFACEDESC);
+            Created = nullptr;
+            HRESULT hr = DdCreateSurfaceObject(This, Desc, &Created, nullptr, FALSE);
+            Desc->dwSize = sizeof(*Desc);
+            if (FAILED(hr))
+                continue;
+
+            DdDescribeSurface(DdSurfaceFromCom(Created), &Found);
+            if (DdIsOldDraw(This))
+                Found.dwSize = sizeof(DDSURFACEDESC);
+            Callback(nullptr, &Found, Context);
+            static_cast<IUnknown*>(Created)->Release();
+        }
+    }
+    return S_OK;
+}
+
 static
 HRESULT
 STDMETHODCALLTYPE
@@ -387,10 +545,11 @@ DdEnumSurfaces(
             return E_INVALIDARG;
     }
 
+    /* The tries write their sizes and formats into the description the caller passed */
     if ((Flags & DDENUMSURFACES_CANBECREATED) != 0)
     {
-        DD_TRACE_ONCE(L"EnumSurfaces for surfaces that can be created is not implemented yet");
-        return DDERR_UNSUPPORTED;
+        return DdEnumCreatableSurfaces(This, const_cast<DDSURFACEDESC2*>(Wanted), Context,
+                                       reinterpret_cast<LPDDENUMSURFACESCALLBACK7>(Callback));
     }
 
     if ((Flags & DDENUMSURFACES_DOESEXIST) == 0)

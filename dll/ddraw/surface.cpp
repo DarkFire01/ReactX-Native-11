@@ -768,7 +768,8 @@ DdCreateSurfaceObject(
     _In_ DdInterface* This,
     _In_ const DDSURFACEDESC2* Desc,
     _Out_ VOID** Result,
-    _In_opt_ IUnknown* Outer)
+    _In_opt_ IUnknown* Outer,
+    _In_ BOOLEAN NeedsCooperation)
 {
     DdLocal* Local = This->Local;
     DdDriver* Driver = Local->Driver;
@@ -798,7 +799,7 @@ DdCreateSurfaceObject(
     {
         return E_INVALIDARG;
     }
-    if ((Local->Flags & DDRAWILCL_SETCOOPCALLED) == 0)
+    if (NeedsCooperation && (Local->Flags & DDRAWILCL_SETCOOPCALLED) == 0)
         return DDERR_NOCOOPERATIVELEVELSET;
 
     if ((Desc->dwFlags & DDSD_CAPS) != 0)
