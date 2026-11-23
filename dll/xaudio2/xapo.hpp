@@ -203,6 +203,10 @@ XaCreateLimiterObject(
     _Outptr_ IUnknown** Apo);
 
 HRESULT
+XaCreateFxReverbObject(
+    _Outptr_ IUnknown** Apo);
+
+HRESULT
 XaCreateEchoObject(
     _Outptr_ IUnknown** Apo,
     _In_opt_ const VOID* InitData,

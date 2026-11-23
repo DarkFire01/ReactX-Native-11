@@ -38,6 +38,8 @@ XaCreateFx(
         return XaCreateEqObject(Effect);
     if (IsEqualCLSID(Clsid, __uuidof(FXMasteringLimiter)))
         return XaCreateLimiterObject(Effect);
+    if (IsEqualCLSID(Clsid, __uuidof(FXReverb)))
+        return XaCreateFxReverbObject(Effect);
     if (IsEqualCLSID(Clsid, __uuidof(FXEcho)))
         return XaCreateEchoObject(Effect, InitData, InitDataByteSize);
 
