@@ -13,6 +13,9 @@
 /* The view volume's six planes and up to eight from the shader */
 static constexpr UINT RxWarpClipPlanes = 14;
 
+/* Primitive vertex slots shaded together; repeats of an index inside a batch reuse its result */
+static constexpr UINT RxWarpBatchSlots = 512;
+
 /* A shaded vertex: every output register of the vertex shader */
 typedef struct _RX_WARP_VERTEX
 {
@@ -230,6 +233,14 @@ private:
         _In_ UINT Count);
 
     VOID
+    CountShared(
+        _In_reads_(Count) const RX_WARP_VERTEX *const *Points,
+        _In_ UINT Count);
+
+    VOID
+    FlushShared(VOID);
+
+    VOID
     FlushStrip(
         _In_ UINT Stream);
 
@@ -414,6 +425,13 @@ private:
     UINT PositionRegister = 0;
     UINT Primitive = 0;
     std::vector<RX_WARP_VERTEX> Vertices;
+
+    /* Vertex shader invocations count once per distinct index in each batch of primitive slots */
+    const UINT *BatchIndices = nullptr;
+    UINT BatchSlots = 0;
+    UINT BatchDistinct = 0;
+    UINT BatchKeys[RxWarpBatchSlots] = {};
+    BOOLEAN BatchUsed[RxWarpBatchSlots] = {};
     RxWarpInvocation Invocation;
 
     /* Per triangle state used while shading quads */
@@ -697,7 +715,6 @@ RxWarpDraw::ShadeVertices(
         for (UINT Lane = 0; Lane < Lanes; Lane++)
             FetchVertex((UINT)((INT)Indices[First + Lane] + BaseVertex), Instance, StartInstance, Lane);
         Invocation.Run(VertexShader, &VertexBindings);
-        Device->Counters[RxWarpCountVsInvocations] += Lanes;
 
         for (UINT Lane = 0; Lane < Lanes; Lane++)
         {
@@ -2801,6 +2818,40 @@ RxWarpDraw::StreamOut(
         Device->Counters[RxWarpCountSoWritten]++;
 }
 
+/* Adds a primitive's vertices to the batch, flushing first when they do not fit */
+VOID
+RxWarpDraw::CountShared(
+    _In_reads_(Count) const RX_WARP_VERTEX *const *Points,
+    _In_ UINT Count)
+{
+    if (Count > RxWarpBatchSlots - BatchSlots)
+        FlushShared();
+    for (UINT Point = 0; Point < Count; Point++)
+    {
+        UINT Key = BatchIndices[Points[Point] - Vertices.data()];
+        UINT Slot = Key % RxWarpBatchSlots;
+
+        while (BatchUsed[Slot] && BatchKeys[Slot] != Key)
+            Slot = (Slot + 1) % RxWarpBatchSlots;
+        if (!BatchUsed[Slot])
+        {
+            BatchUsed[Slot] = TRUE;
+            BatchKeys[Slot] = Key;
+            BatchDistinct += 1;
+        }
+    }
+    BatchSlots += Count;
+}
+
+VOID
+RxWarpDraw::FlushShared(VOID)
+{
+    Device->Counters[RxWarpCountVsInvocations] += BatchDistinct;
+    BatchDistinct = 0;
+    BatchSlots = 0;
+    memset(BatchUsed, 0, sizeof(BatchUsed));
+}
+
 VOID
 RxWarpDraw::Run(
     _In_ UINT VertexCount,
@@ -2841,6 +2892,7 @@ RxWarpDraw::Run(
         Primitive = 0;
         Device->Counters[RxWarpCountIaVertices] += VertexCount;
         ShadeVertices(Indices.data(), VertexCount, Indexed ? BaseVertex : 0, Instance, StartInstance);
+        BatchIndices = Indices.data();
 
         /* Patches need both tessellation stages; without them nothing is drawn */
         if (PatchPoints != 0)
@@ -2852,9 +2904,11 @@ RxWarpDraw::Run(
                 for (UINT Index = 0; Index < PatchPoints; Index++)
                     Points[Index] = &Vertices[First + Index];
                 Device->Counters[RxWarpCountIaPrimitives]++;
+                CountShared(Points, PatchPoints);
                 RunPatch(Points, PatchPoints);
                 Primitive++;
             }
+            FlushShared();
             continue;
         }
 
@@ -2884,6 +2938,7 @@ RxWarpDraw::Run(
                     for (UINT Index = 0; Index < Width; Index++)
                         Full[Index] = &Vertices[Run[Index]];
                     Device->Counters[RxWarpCountIaPrimitives]++;
+                    CountShared(Full, Width);
                     Assemble(Corners, Shape.Size, Full, Width);
                     Primitive++;
                 }
@@ -2906,10 +2961,12 @@ RxWarpDraw::Run(
                     {
                         const RX_WARP_VERTEX *Full[4] = { &Vertices[Run[Index - 1]], Corners[0], Corners[1], &Vertices[Run[Index + 2]] };
 
+                        CountShared(Full, 4);
                         Assemble(Corners, 2, Full, 4);
                     }
                     else
                     {
+                        CountShared(Corners, 2);
                         Assemble(Corners, 2, Corners, 2);
                     }
                     Primitive++;
@@ -2924,6 +2981,7 @@ RxWarpDraw::Run(
                                                          &Vertices[Run[Index + ((Index & 1) ? 1 : 2)]] };
 
                     Device->Counters[RxWarpCountIaPrimitives]++;
+                    CountShared(Corners, 3);
                     Assemble(Corners, 3, Corners, 3);
                     Primitive++;
                 }
@@ -2987,12 +3045,14 @@ RxWarpDraw::Run(
                         Full[Slot] = &Vertices[Run[(Order[Slot] < Count) ? Order[Slot] : Count - 1]];
 
                     Device->Counters[RxWarpCountIaPrimitives]++;
+                    CountShared(Full, 6);
                     Assemble(Corners, 3, Full, 6);
                     Primitive++;
                 }
             }
             Run.clear();
         }
+        FlushShared();
     }
 }
 
