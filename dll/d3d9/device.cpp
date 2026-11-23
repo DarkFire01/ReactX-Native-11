@@ -570,6 +570,9 @@ D9Device::SendPixelConstant(
     D3DDDIARG_SETPIXELSHADERCONST Args = {};
     const FLOAT Values[4] = { X, Y, Z, W };
 
+    /* The application's pixel shader owns the registers while it is bound */
+    if (Switch.HasPixelConverter && Switch.PixelMode == 0)
+        return;
     Args.Register = Register;
     Args.Count = 1;
     DdiPixelShaderConst(&Args, Values);

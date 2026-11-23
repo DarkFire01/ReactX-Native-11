@@ -219,6 +219,8 @@ D9Device::SendStageValue(
     }
 
     /* These keep their raw bits in a constant and still reach the driver */
+    if (Pass && Switch.HasPixelConverter && Switch.PixelMode == 0)
+        Pass = FALSE;
     if (Pass)
     {
         Constant.Count = 1;
