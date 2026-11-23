@@ -537,6 +537,92 @@ DcCheckArguments(
     Converter->Release();
 }
 
+/* Calls ConvertInDriver and turns a fault inside it into a printable code */
+static
+HRESULT
+DcGuardedDriverConvert(
+    _In_ IDxbcConverter* Converter,
+    _In_opt_ const UINT32* Bytecode,
+    _Out_opt_ IDxcBlob** Blob,
+    _Out_opt_ LPWSTR* Diag,
+    _Out_ PULONG Fault)
+{
+    *Fault = 0;
+    __try
+    {
+        return Converter->ConvertInDriver(Bytecode, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, Blob, Diag);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        *Fault = GetExceptionCode();
+    }
+
+    return E_UNEXPECTED;
+}
+
+/* The driver entry point takes a bare token stream and signature arrays */
+static
+VOID
+DcCheckDriverArguments(
+    _In_ ID3DBlob* Good)
+{
+    const BYTE* Source = static_cast<const BYTE*>(Good->GetBufferPointer());
+    ULONG Parts = *reinterpret_cast<const ULONG*>(Source + 28);
+    const UINT32* Program = nullptr;
+    UINT32 Short[2] = { 0, 1 };
+    const struct
+    {
+        PCSTR Name;
+        const UINT32* Bytecode;
+        BOOLEAN WantBlob;
+    } Cases[] =
+    {
+        { "driver null bytecode", nullptr, TRUE },
+        { "driver null blob", Short, FALSE },
+        { "driver length one", Short, TRUE },
+    };
+
+    for (ULONG Part = 0; Part < Parts; Part++)
+    {
+        ULONG Offset = *reinterpret_cast<const ULONG*>(Source + 32 + Part * 4);
+        ULONG Code = *reinterpret_cast<const ULONG*>(Source + Offset);
+
+        if (Code == DXC_FOURCC('S', 'H', 'D', 'R') || Code == DXC_FOURCC('S', 'H', 'E', 'X'))
+            Program = reinterpret_cast<const UINT32*>(Source + Offset + 8);
+    }
+
+    for (ULONG Index = 0; Index < _countof(Cases) + 1; Index++)
+    {
+        IDxbcConverter* Converter = DcNewConverter();
+        IDxcBlob* Blob = reinterpret_cast<IDxcBlob*>(1);
+        LPWSTR Diag = reinterpret_cast<LPWSTR>(1);
+        PCSTR Name = Index < _countof(Cases) ? Cases[Index].Name : "driver no signatures";
+        const UINT32* Bytecode = Index < _countof(Cases) ? Cases[Index].Bytecode : Program;
+        BOOLEAN WantBlob = Index < _countof(Cases) ? Cases[Index].WantBlob : TRUE;
+        ULONG Fault;
+        HRESULT hr;
+
+        if (Converter == nullptr)
+            return;
+
+        hr = DcGuardedDriverConvert(Converter, Bytecode, WantBlob ? &Blob : nullptr, &Diag, &Fault);
+        printf("%s: hr=%08lX fault=%08lX blob=%s diag=%s\n",
+               Name,
+               hr,
+               Fault,
+               Blob == nullptr ? "null" : (Blob == reinterpret_cast<IDxcBlob*>(1) ? "untouched" : "set"),
+               Diag == nullptr ? "null" : (Diag == reinterpret_cast<LPWSTR>(1) ? "untouched" : "set"));
+
+        if (Fault == 0 && SUCCEEDED(hr) && Blob != nullptr && Blob != reinterpret_cast<IDxcBlob*>(1))
+        {
+            printf("  blob size=%zu fnv=%08lX\n", Blob->GetBufferSize(), DcHash(Blob->GetBufferPointer(), Blob->GetBufferSize()));
+            Blob->Release();
+        }
+
+        Converter->Release();
+    }
+}
+
 static
 std::wstring
 DcRuntimePath(
@@ -625,6 +711,7 @@ wmain(
     if (First != nullptr)
     {
         DcCheckArguments(First);
+        DcCheckDriverArguments(First);
         First->Release();
     }
 
