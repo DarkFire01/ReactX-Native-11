@@ -404,4 +404,60 @@ static const ScCase ScCorpus[] =
         "mov o3, r3\n",
         { ScInput(0, 0, 0, 0), ScInput(5, 0, 1, 0) }, 2
     },
+    {
+        "vs11_patch", FALSE, 1,
+        "vs_1_1\n"
+        "dcl_position v0\n"
+        "dcl_normal v1\n"
+        "dcl_blendindices v2\n"
+        "def c20, 0, 1, 2, 3\n"
+        "def c21, 2, 0, 0, 0\n"
+        "mul r0, v0, c0\n"
+        "mul r1, r0, r0\n"
+        "mul r1, r1, c20\n"
+        "mul r2, c21, v1\n"
+        "mad r3, v0, -c1, r1\n"
+        "mad r3, -r3, r2.yzxw, c20\n"
+        "dp3 r4.x, v1, c2\n"
+        "dp4 r4.y, r3, r3\n"
+        "dp4 r4.z, -r3, r3\n"
+        "mov a0.x, v2.x\n"
+        "dp4 r4.w, v0, c[a0.x + 5]\n"
+        "m4x4 r5, v0, c8\n"
+        "m3x3 r6.xyz, v1, c12\n"
+        "lit r7, r4\n"
+        "dst r8, r4, r5\n"
+        "mov oPos, r5\n"
+        "mov oD0.xyz, r6\n"
+        "mov oD0.w, r7.x\n"
+        "mov oD1, r7\n"
+        "mov oT0, r8\n"
+        "mov oT1, r3\n",
+        { ScInput(0, 0, 0, 0), ScInput(3, 0, 1, 0), ScInput(2, 0, 2, 1) }, 3
+    },
+    {
+        "vs20_patch", FALSE, 1,
+        "vs_2_0\n"
+        "dcl_position v0\n"
+        "dcl_normal v1\n"
+        "dcl_texcoord v2\n"
+        "defi i0, 2, 0, 1, 0\n"
+        "mov r0, v0\n"
+        "loop aL, i0\n"
+        "mad r0, r0, c[aL], v2\n"
+        "endloop\n"
+        "nrm r1, v1\n"
+        "crs r2.xyz, r1, r0\n"
+        "pow r3, r0.x, r1.y\n"
+        "lrp r4, r0, r1, r2\n"
+        "sincos r5.xy, r0.x, c5, c6\n"
+        "m3x2 r6.xy, r4, c7\n"
+        "mul r6.zw, v2, r5.y\n"
+        "mov oPos, r0\n"
+        "mov oT0, r2\n"
+        "mov oT1, r3\n"
+        "mov oT2, r4\n"
+        "mov oT3, r6\n",
+        { ScInput(0, 0, 0, 0), ScInput(3, 0, 1, 0), ScInput(5, 0, 2, 1) }, 3
+    },
 };
