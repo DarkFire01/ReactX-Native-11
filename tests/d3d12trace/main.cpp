@@ -382,6 +382,109 @@ TrDescribe(
 
 static
 VOID
+TrDescribeSignature(
+    _Inout_ std::string* Text,
+    _In_reads_(Count) const D3D12DDIARG_SIGNATURE_ENTRY_0012* Entries,
+    _In_ UINT Count)
+{
+    TrAppend(Text, "[");
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        const D3D12DDIARG_SIGNATURE_ENTRY_0012& Entry = Entries[Index];
+
+        TrAppend(Text, "%s%u:%u:%X:%u:%u:%u", Index != 0 ? " " : "", Entry.SystemValue, Entry.Register, Entry.Mask,
+                 Entry.Stream, Entry.RegisterComponentType, Entry.MinPrecision);
+    }
+    TrAppend(Text, "]");
+}
+
+/* Shader code as the driver gets it: the token stream or DXIL program, sized by its second word */
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_SHADER_0026* Args,
+    _In_ SIZE_T Size)
+{
+    const D3D12DDIARG_STAGE_IO_SIGNATURES* Io = Args->IOSignatures.Standard;
+
+    TrAppend(Text, "{root %s", TrId(TrKindDriver, (ULONG_PTR)Args->hRootSignature.pDrvPrivate).c_str());
+    if (Args->pShaderCode != nullptr)
+        TrAppend(Text, " code %08X %u #%08X", Args->pShaderCode[0], Args->pShaderCode[1],
+                 TrHash(Args->pShaderCode, (SIZE_T)Args->pShaderCode[1] * sizeof(UINT)));
+    else
+        TrAppend(Text, " code 0");
+    if (Io != nullptr)
+    {
+        TrAppend(Text, " in ");
+        TrDescribeSignature(Text, Io->pInputSignature, Io->NumInputSignatureEntries);
+        TrAppend(Text, " out ");
+        TrDescribeSignature(Text, Io->pOutputSignature, Io->NumOutputSignatureEntries);
+    }
+    else
+    {
+        TrAppend(Text, " io 0");
+    }
+    TrAppend(Text, " flags %08X library %s %u hash ", Args->Flags,
+             TrId(TrKindDriver, (ULONG_PTR)Args->LibraryReference.hLibrary.pDrvPrivate).c_str(),
+             Args->LibraryReference.PipelineIndex);
+    TrAppendBytes(Text, &Args->ShaderCodeHash, sizeof(Args->ShaderCodeHash));
+    TrAppend(Text, "}");
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_PIPELINE_STATE_0119* Newest,
+    _In_ SIZE_T Size)
+{
+    /* The core drives DDI build 118, which passes the shorter 0099 form */
+    const D3D12DDIARG_CREATE_PIPELINE_STATE_0099* Args =
+        reinterpret_cast<const D3D12DDIARG_CREATE_PIPELINE_STATE_0099*>(Newest);
+    const VOID* const Handles[] = {
+        Args->hComputeShader.pDrvPrivate, Args->hVertexShader.pDrvPrivate, Args->hPixelShader.pDrvPrivate,
+        Args->hDomainShader.pDrvPrivate, Args->hHullShader.pDrvPrivate, Args->hGeometryShader.pDrvPrivate,
+        Args->hMeshShader.pDrvPrivate, Args->hAmplificationShader.pDrvPrivate,
+    };
+
+    TrAppend(Text, "{shaders");
+    for (const VOID* Handle : Handles)
+        TrAppend(Text, " %s", TrId(TrKindDriver, (ULONG_PTR)Handle).c_str());
+    TrAppend(Text, " root %s blend %s mask %08X raster %s depth %s layout %s cut %u topology %u rts %u [",
+             TrId(TrKindDriver, (ULONG_PTR)Args->hRootSignature.pDrvPrivate).c_str(),
+             TrId(TrKindDriver, (ULONG_PTR)Args->hBlendState.pDrvPrivate).c_str(), Args->SampleMask,
+             TrId(TrKindDriver, (ULONG_PTR)Args->hRasterizerState.pDrvPrivate).c_str(),
+             TrId(TrKindDriver, (ULONG_PTR)Args->hDepthStencilState.pDrvPrivate).c_str(),
+             TrId(TrKindDriver, (ULONG_PTR)Args->hElementLayout.pDrvPrivate).c_str(), Args->IBStripCutValue,
+             Args->PrimitiveTopologyType, Args->NumRenderTargets);
+    for (UINT Index = 0; Index < 8; Index++)
+        TrAppend(Text, "%s%u", Index != 0 ? " " : "", Args->RTVFormats[Index]);
+    TrAppend(Text, "] dsv %u samples %u:%u node %u library %s %u views %u %s %08X flags %08X}", Args->DSVFormat,
+             Args->SampleDesc.Count, Args->SampleDesc.Quality, Args->NodeMask,
+             TrId(TrKindDriver, (ULONG_PTR)Args->LibraryReference.hLibrary.pDrvPrivate).c_str(),
+             Args->LibraryReference.PipelineIndex, Args->ViewInstancingDesc.ViewInstanceCount,
+             Args->ViewInstancingDesc.pViewInstanceLocations != nullptr ? "p" : "0", Args->ViewInstancingDesc.Flags,
+             Args->Flags);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_MAKERESIDENT_0001* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{adapters %u queue %s objects %u %s [", Args->NumAdapters, Args->pRTPagingQueue != nullptr ? "p" : "0",
+             Args->NumObjects, Args->pObjects != nullptr ? "p" : "0");
+    for (UINT Index = 0; Index < Args->NumObjects; Index++)
+        TrAppend(Text, "%s%s:%u", Index != 0 ? " " : "", TrId(TrKindDriver, (ULONG_PTR)Args->pObjects[Index].Handle).c_str(),
+                 Args->pObjects[Index].Type);
+    TrAppend(Text, "] flags %08X fence %s}", Args->Flags.Value, Args->pPagingFenceValue != nullptr ? "p" : "0");
+}
+
+static
+VOID
 TrDescribe(
     _Inout_ std::string* Text,
     _In_ const D3DKMT_QUERYADAPTERINFO* Args,
@@ -712,6 +815,52 @@ struct TrAround
     }
 };
 
+/*
+ * Once an adapter closes, every handle of its devices is gone, so later handles get new ids even when
+ * the heap hands back the same addresses. Both runtimes then number a second device alike.
+ */
+static
+VOID
+TrForgetAfter(
+    _In_ TrFamily Family,
+    _In_ UINT Slot)
+{
+    if (Family != TrFamilyAdapter || strcmp(TrName(Family, Slot), "CloseAdapter") != 0)
+        return;
+
+    AcquireSRWLockExclusive(&Tr.IdLock);
+    for (std::map<ULONG_PTR, UINT>& Ids : Tr.Ids)
+        Ids.clear();
+    ReleaseSRWLockExclusive(&Tr.IdLock);
+}
+
+/* A destroyed driver object's address may come back for a new one, which then gets a new id */
+template <typename T>
+static
+VOID
+TrForgetHandle(
+    _In_ const T& Arg)
+{
+    if constexpr (TrIsDriverHandle<T>::value && !std::is_same_v<T, D3D12DDI_HDEVICE>)
+    {
+        AcquireSRWLockExclusive(&Tr.IdLock);
+        Tr.Ids[TrKindDriver].erase((ULONG_PTR)Arg.pDrvPrivate);
+        ReleaseSRWLockExclusive(&Tr.IdLock);
+    }
+}
+
+template <typename... A>
+static
+VOID
+TrForgetDestroyed(
+    _In_ TrFamily Family,
+    _In_ UINT Slot,
+    _In_ const A&... Args)
+{
+    if (Family == TrFamilyDevice && strncmp(TrName(Family, Slot), "Destroy", 7) == 0)
+        (TrForgetHandle(Args), ...);
+}
+
 template <TrFamily Family, UINT Slot, typename Pfn>
 struct TrHook;
 
@@ -753,6 +902,8 @@ struct TrHook<Family, Slot, R (APIENTRY*)(A...)>
             TrAround<Family, Slot>::After(Args...);
             if (Log)
                 TrEnd("");
+            TrForgetAfter(Family, Slot);
+            TrForgetDestroyed(Family, Slot, Args...);
             TrQuiet = WasQuiet;
             if (Callback)
                 TrCallbackDepth -= 1;
@@ -764,6 +915,8 @@ struct TrHook<Family, Slot, R (APIENTRY*)(A...)>
             TrAround<Family, Slot>::After(Args...);
             if (Log)
                 TrEnd(TrResult(Result));
+            TrForgetAfter(Family, Slot);
+            TrForgetDestroyed(Family, Slot, Args...);
             TrQuiet = WasQuiet;
             if (Callback)
                 TrCallbackDepth -= 1;
