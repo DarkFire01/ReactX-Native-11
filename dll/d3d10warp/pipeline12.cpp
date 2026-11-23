@@ -521,13 +521,29 @@ RxWarp12CreateQueryHeap(
 {
     RxWarpLock Lock;
     RxWarp12QueryHeap *Object = new (std::nothrow) RxWarp12QueryHeap();
+    RX_WARP_ALLOCATION_DATA Data = {};
+    UINT Bytes;
 
-    UNREFERENCED_PARAMETER(Device);
     RxWarpBind(Heap, Object);
     if (Object == nullptr)
         return E_OUTOFMEMORY;
+    Object->Device = RxWarpObject<RxWarp12Device>(Device);
     Object->Type = Args->Type;
     Object->Count = Args->Count;
+
+    /* Every query heap takes whole pages of kernel memory */
+    Bytes = (UINT)(((SIZE_T)Args->Count * sizeof(D3D12DDI_QUERY_DATA_PIPELINE_STATISTICS) + 4095) & ~(SIZE_T)4095);
+    Data.Dimension = D3D10DDIRESOURCE_BUFFER;
+    Data.Width = Bytes;
+    Data.Height = 1;
+    Data.Depth = 1;
+    Data.RowPitch = Bytes;
+    Data.Size = Bytes;
+    Data.ArraySize = 1;
+    Data.MipLevels = 1;
+    Data.Flags = RX_WARP_ALLOCATION_LINEAR;
+    if (Object->Device->Callbacks != nullptr && FAILED(RxWarp12AllocateKernel(Object->Device, &Data, nullptr, FALSE, &Object->Allocation, &Object->Memory)))
+        return E_OUTOFMEMORY;
     Object->Values.resize((SIZE_T)Args->Count * RxWarpCountTotal);
     Object->Results.resize((SIZE_T)Args->Count * RxWarpCountTotal);
     return S_OK;
@@ -542,8 +558,12 @@ RxWarp12DestroyQueryHeap(
 {
     RxWarpLock Lock;
 
+    RxWarp12QueryHeap *Object = RxWarpObject<RxWarp12QueryHeap>(Heap);
+
     UNREFERENCED_PARAMETER(Device);
-    delete RxWarpObject<RxWarp12QueryHeap>(Heap);
+    if (Object != nullptr && Object->Allocation != 0)
+        RxWarp12FreeKernel(Object->Device, nullptr, Object->Allocation, Object->Memory != nullptr);
+    delete Object;
 }
 
 static

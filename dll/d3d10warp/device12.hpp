@@ -302,6 +302,9 @@ public:
 class RxWarp12QueryHeap
 {
 public:
+    RxWarp12Device *Device = nullptr;
+    D3DKMT_HANDLE Allocation = 0;   /* kernel pages the reference keeps its query data in */
+    VOID *Memory = nullptr;
     D3D12DDI_QUERY_HEAP_TYPE Type = D3D12DDI_QUERY_HEAP_TYPE_OCCLUSION;
     UINT Count = 0;
     std::vector<UINT64> Values;     /* RxWarpCountTotal counters per query, sampled at begin */
