@@ -187,6 +187,132 @@ DdDuplicateSurface(
     return DDERR_UNSUPPORTED;
 }
 
+/* Caps bits with no public meaning that EnumSurfaces refuses in a description */
+static constexpr DWORD DdEnumUnnamedCaps = 0x03000000;
+
+/* The DDSCAPS2 and DDSCAPS3 bits a description may not ask for */
+static constexpr DWORD DdEnumBadCaps2 = 0x00000001;
+static constexpr DWORD DdEnumBadCaps3 = 0xFFFFE000;
+
+static constexpr DWORD DdEnumKnownFlags = DDENUMSURFACES_ALL | DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH |
+                                          DDENUMSURFACES_CANBECREATED | DDENUMSURFACES_DOESEXIST;
+
+static constexpr DWORD DdDescColorKeys = DDSD_CKDESTOVERLAY | DDSD_CKDESTBLT | DDSD_CKSRCOVERLAY | DDSD_CKSRCBLT;
+
+static
+BOOLEAN
+DdSameKey(
+    _In_ const DDCOLORKEY* Mine,
+    _In_ const DDCOLORKEY* Wanted)
+{
+    return memcmp(Mine, Wanted, sizeof(*Mine)) == 0;
+}
+
+/* Whether a surface agrees with every field the description names */
+static
+BOOLEAN
+DdSurfaceMatches(
+    _In_ const DdSurface* Surface,
+    _In_ const DDSURFACEDESC2* Desc)
+{
+    DWORD Flags = Desc->dwFlags;
+
+    if ((Flags & DDSD_CAPS) != 0 && memcmp(&Surface->Caps, &Desc->ddsCaps, sizeof(Surface->Caps)) != 0)
+        return FALSE;
+    if ((Flags & DDSD_HEIGHT) != 0 && Surface->Height != Desc->dwHeight)
+        return FALSE;
+    if ((Flags & DDSD_WIDTH) != 0 && Surface->Width != Desc->dwWidth)
+        return FALSE;
+    if ((Flags & DDSD_CKDESTBLT) != 0 && !DdSameKey(&Surface->DestKey, &Desc->ddckCKDestBlt))
+        return FALSE;
+    if ((Flags & DDSD_CKSRCBLT) != 0 && !DdSameKey(&Surface->SourceKey, &Desc->ddckCKSrcBlt))
+        return FALSE;
+    if ((Flags & DDSD_BACKBUFFERCOUNT) != 0 && Surface->BackBufferCount != Desc->dwBackBufferCount)
+        return FALSE;
+    if ((Flags & DDSD_MIPMAPCOUNT) != 0 && Desc->dwMipMapCount != 0)
+        return FALSE;
+    if ((Flags & DDSD_PIXELFORMAT) != 0 &&
+        (!Surface->KeepsFormat || memcmp(&Surface->Format, &Desc->ddpfPixelFormat, sizeof(Surface->Format)) != 0))
+    {
+        return FALSE;
+    }
+
+    /* Overlay keys only exist on overlays */
+    if ((Surface->Caps.dwCaps & DDSCAPS_OVERLAY) == 0)
+        return (Flags & (DDSD_CKDESTOVERLAY | DDSD_CKSRCOVERLAY)) == 0;
+    if ((Flags & DDSD_CKDESTOVERLAY) != 0 && !DdSameKey(&Surface->DestOverlayKey, &Desc->ddckCKDestOverlay))
+        return FALSE;
+    if ((Flags & DDSD_CKSRCOVERLAY) != 0 && !DdSameKey(&Surface->SourceOverlayKey, &Desc->ddckCKSrcOverlay))
+        return FALSE;
+    return TRUE;
+}
+
+/* The live surface interface this object made that was created just before the given stamp */
+_Ret_maybenull_
+static
+DdSurfaceInterface*
+DdOlderSurfaceInterface(
+    _In_ DdLocal* Local,
+    _In_ ULONG Below)
+{
+    DdSurfaceInterface* Best = nullptr;
+
+    for (DdSurface* Surface = Local->Driver->Surfaces; Surface != nullptr; Surface = Surface->Next)
+    {
+        if (Surface->Creator != Local)
+            continue;
+        for (DdSurfaceInterface* Interface = Surface->Interfaces; Interface != nullptr; Interface = Interface->Next)
+        {
+            if (Interface->RefCount == 0 || Interface->Stamp >= Below)
+                continue;
+            if (Best == nullptr || Interface->Stamp > Best->Stamp)
+                Best = Interface;
+        }
+    }
+    return Best;
+}
+
+static
+HRESULT
+DdEnumExistingSurfaces(
+    _In_ DdInterface* This,
+    _In_ DWORD Flags,
+    _In_opt_ const DDSURFACEDESC2* Desc,
+    _In_opt_ VOID* Context,
+    _In_ LPDDENUMSURFACESCALLBACK7 Callback)
+{
+    UCHAR Version = DdIsOldDraw(This) ? 1 : This->Kind == DdKind::Draw4 ? 4 : 7;
+    DdSurfaceInterface* Interface;
+    DDSURFACEDESC2 Found;
+    BOOLEAN Matches;
+    VOID* Handed;
+    ULONG Below = ULONG_MAX;
+
+    for (;;)
+    {
+        Interface = DdOlderSurfaceInterface(This->Local, Below);
+        if (Interface == nullptr)
+            return S_OK;
+        Below = Interface->Stamp;
+
+        if ((Interface->Surface->Caps.dwCaps & DDSCAPS_RESERVED2) != 0)
+            continue;
+        if ((Flags & DDENUMSURFACES_ALL) == 0)
+        {
+            Matches = DdSurfaceMatches(Interface->Surface, Desc);
+            if (Matches == ((Flags & DDENUMSURFACES_NOMATCH) != 0))
+                continue;
+        }
+
+        DdDescribeSurface(Interface->Surface, &Found);
+        if (Version == 1)
+            Found.dwSize = sizeof(DDSURFACEDESC);
+        Handed = DdHandOutSurface(Interface->Surface, Version);
+        if (Callback(static_cast<LPDIRECTDRAWSURFACE7>(Handed), &Found, Context) == DDENUMRET_CANCEL)
+            return S_OK;
+    }
+}
+
 static
 HRESULT
 STDMETHODCALLTYPE
@@ -195,10 +321,81 @@ DdEnumSurfaces(
     _In_ DWORD Flags,
     _In_opt_ VOID* Desc,
     _In_opt_ VOID* Context,
-    _In_ VOID* Callback)
+    _In_opt_ VOID* Callback)
 {
-    DD_TRACE_ONCE(L"EnumSurfaces is not implemented yet");
-    return DDERR_UNSUPPORTED;
+    DdInterface* This = DdFromCom(Com);
+    const DDSURFACEDESC2* Wanted = nullptr;
+    DDSURFACEDESC2 Widened;
+
+    DdLockScope Lock;
+
+    /* The old interfaces widen their short description into the long one */
+    if (Desc != nullptr)
+    {
+        if (DdIsOldDraw(This))
+        {
+            if (static_cast<const DDSURFACEDESC*>(Desc)->dwSize != sizeof(DDSURFACEDESC))
+                return E_INVALIDARG;
+            ZeroMemory(&Widened, sizeof(Widened));
+            memcpy(&Widened, Desc, sizeof(DDSURFACEDESC));
+            Widened.dwSize = sizeof(Widened);
+            Wanted = &Widened;
+        }
+        else
+        {
+            Wanted = static_cast<const DDSURFACEDESC2*>(Desc);
+        }
+    }
+
+    if (Callback == nullptr || (Flags & ~DdEnumKnownFlags) != 0)
+        return E_INVALIDARG;
+    if (Wanted != nullptr && Wanted->dwSize != sizeof(DDSURFACEDESC2))
+        return E_INVALIDARG;
+
+    if ((Flags & DDENUMSURFACES_ALL) != 0)
+    {
+        if ((Flags & (DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH)) != 0)
+            return E_INVALIDARG;
+    }
+    else if (Wanted == nullptr ||
+             (Flags & (DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH)) == (DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH))
+    {
+        return E_INVALIDARG;
+    }
+    if ((Flags & DDENUMSURFACES_CANBECREATED) != 0 &&
+        ((Flags & DDENUMSURFACES_MATCH) == 0 || (Flags & (DDENUMSURFACES_ALL | DDENUMSURFACES_NOMATCH)) != 0))
+    {
+        return E_INVALIDARG;
+    }
+
+    if (Wanted != nullptr)
+    {
+        if ((Wanted->dwFlags & DDSD_LPSURFACE) != 0 || (Wanted->ddsCaps.dwCaps & DdEnumUnnamedCaps) != 0)
+            return E_INVALIDARG;
+        if ((Wanted->ddsCaps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+            return S_OK;
+        if ((Wanted->ddsCaps.dwCaps2 & DdEnumBadCaps2) != 0 || (Wanted->ddsCaps.dwCaps3 & DdEnumBadCaps3) != 0 ||
+            Wanted->ddsCaps.dwCaps4 != 0)
+        {
+            return DDERR_INVALIDCAPS;
+        }
+        if ((Wanted->ddsCaps.dwCaps & DDSCAPS_RESERVED2) != 0)
+            return E_INVALIDARG;
+        if (((Wanted->dwFlags & DDSD_HEIGHT) != 0) != ((Wanted->dwFlags & DDSD_WIDTH) != 0))
+            return E_INVALIDARG;
+        if ((Flags & DDENUMSURFACES_CANBECREATED) != 0 && (Wanted->dwFlags & DdDescColorKeys) != 0)
+            return E_INVALIDARG;
+    }
+
+    if ((Flags & DDENUMSURFACES_CANBECREATED) != 0)
+    {
+        DD_TRACE_ONCE(L"EnumSurfaces for surfaces that can be created is not implemented yet");
+        return DDERR_UNSUPPORTED;
+    }
+
+    if ((Flags & DDENUMSURFACES_DOESEXIST) == 0)
+        return E_INVALIDARG;
+    return DdEnumExistingSurfaces(This, Flags, Wanted, Context, reinterpret_cast<LPDDENUMSURFACESCALLBACK7>(Callback));
 }
 
 static

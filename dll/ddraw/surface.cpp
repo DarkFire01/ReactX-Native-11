@@ -102,6 +102,8 @@ DdSurfaceInterfaceFor(
     Interface->RefCount = 0;
     Interface->Version = Version;
     Interface->Next = Surface->Interfaces;
+    DdState.InterfaceStamp += 1;
+    Interface->Stamp = DdState.InterfaceStamp;
     Surface->Interfaces = Interface;
     return Interface;
 }
@@ -706,9 +708,12 @@ DdCreateSurfaceObject(
     DdLocal* Local = This->Local;
     DdDriver* Driver = Local->Driver;
     DdSurface* Surface;
+    DdSurface* Member;
     DDSCAPS2 Caps = {};
     DDSCAPS2 Checked;
     DDPIXELFORMAT Format;
+    DDPIXELFORMAT Display;
+    BOOLEAN KeepsFormat;
     BOOLEAN Primary;
     BOOLEAN Chain;
     BOOLEAN Depth;
@@ -846,6 +851,24 @@ DdCreateSurfaceObject(
         hr = DdNewSurface(This, &Caps, &Format, Width, Height, Version, SysMemRequested, &Surface);
     if (FAILED(hr))
         return hr;
+
+    /* System memory surfaces always keep their format; video memory ones only when it is not the display's */
+    KeepsFormat = (Surface->Caps.dwCaps & DDSCAPS_SYSTEMMEMORY) != 0;
+    if (!KeepsFormat && !Primary)
+    {
+        HDC Dc = DdCreateDisplayDc(Driver->Name);
+
+        DdFillPixelFormat(&Display, Dc, 0);
+        if (Dc != NULL)
+            DeleteDC(Dc);
+        KeepsFormat = memcmp(&Display, &Format, sizeof(Format)) != 0;
+    }
+    Member = Surface;
+    do
+    {
+        Member->KeepsFormat = KeepsFormat;
+        Member = Member->FlipNext;
+    } while (Member != nullptr && Member != Surface);
 
     if (Primary)
         Driver->Primary = Surface;

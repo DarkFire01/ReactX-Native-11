@@ -267,6 +267,9 @@ struct DdSurfaceInterface
     ULONG RefCount;
     UCHAR Version;
     DdSurfaceInterface* Next;
+
+    /* Creation order across every surface; enumeration hands out the newest first */
+    ULONG Stamp;
 };
 
 /* A user mode driver resource behind a video memory surface */
@@ -371,6 +374,9 @@ struct DdSurface
     BOOLEAN ClientMemory;
     DWORD FillBitCount;
     DdModeKey CreatedMode;
+
+    /* The pixel format is the surface's own rather than the display's, so descriptions can match it */
+    BOOLEAN KeepsFormat;
 };
 
 /* Process wide runtime state */
@@ -408,6 +414,7 @@ struct DdGlobals
     DWORD ShadowBufferColor;
 
     DWORD BlankToggle;
+    ULONG InterfaceStamp;
 };
 
 extern DdGlobals DdState;
