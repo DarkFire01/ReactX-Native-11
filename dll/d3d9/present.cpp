@@ -12,7 +12,6 @@
 
 /* dwmapi hands out a window's redirection surface by ordinal only */
 typedef HRESULT (WINAPI* PD9_GET_WINDOW_SURFACE)(HWND, LUID, HMONITOR, DWORD, DXGI_FORMAT*, HANDLE*, UINT64*);
-typedef NTSTATUS (APIENTRY* PD9_OPEN_RESOURCE2)(D3DKMT_OPENRESOURCE*);
 typedef NTSTATUS (APIENTRY* PD9_CHECK_OCCLUSION)(const D3DKMT_CHECKOCCLUSION*);
 
 static constexpr WORD D9GetWindowSurfaceOrdinal = 100;
@@ -137,16 +136,14 @@ D9Device::ReleaseWindowSurface(VOID)
     WindowShare = 0;
 }
 
-/* The window's redirection surface, opened once for each share handle DWM gives out */
+/* The window's redirection surface, opened once for each share handle DWM gives out; native drivers take
+   the first open with its first allocation records */
 HRESULT
 D9Device::OpenWindowSurface(
     _In_ D3DKMT_HANDLE Share,
     _In_ D3DDDIFORMAT Format)
 {
-    static PD9_OPEN_RESOURCE2 OpenResource2 =
-        reinterpret_cast<PD9_OPEN_RESOURCE2>(GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTOpenResource2"));
     const KmtThunks* Kmt = RxGetKmtThunks();
-    BOOLEAN Virtual = RuntimeVersion >= D3D_UMD_INTERFACE_VERSION_WDDM2_0 && OpenResource2 != nullptr;
     D3DKMT_QUERYRESOURCEINFO Query = {};
     D3DKMT_OPENRESOURCE Open = {};
     D3DKMT_DESTROYALLOCATION Destroy = {};
@@ -177,7 +174,7 @@ D9Device::OpenWindowSurface(
     Runtime.resize(Query.PrivateRuntimeDataSize);
     Driver.resize(Query.ResourcePrivateDriverDataSize);
     Total.resize(Query.TotalPrivateDriverDataSize);
-    Infos.resize(Query.NumAllocations * (Virtual ? sizeof(D3DDDI_OPENALLOCATIONINFO2) : sizeof(D3DDDI_OPENALLOCATIONINFO)));
+    Infos.resize(Query.NumAllocations * sizeof(D3DDDI_OPENALLOCATIONINFO));
 
     Open.hDevice = DeviceHandle;
     Open.hGlobalShare = Share;
@@ -189,7 +186,7 @@ D9Device::OpenWindowSurface(
     Open.ResourcePrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
     Open.pTotalPrivateDriverDataBuffer = Total.data();
     Open.TotalPrivateDriverDataBufferSize = Query.TotalPrivateDriverDataSize;
-    Status = Virtual ? OpenResource2(&Open) : Kmt->OpenResource(&Open);
+    Status = Kmt->OpenResource(&Open);
     if (!NT_SUCCESS(Status))
     {
         D9Trace(L"D3DKMTOpenResource failed 0x%08lX for the window surface", Status);
