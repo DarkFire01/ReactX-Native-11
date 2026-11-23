@@ -1031,6 +1031,12 @@ private:
     UINT BackBufferCount = 0;
     D3DGAMMARAMP Gamma;
     D9Cursor Cursor;
+
+    /* Present statistics of a windowed flip chain: presents made, the count last reported, and whether the
+       next report must say the statistics broke off */
+    UINT FlipPresents = 0;
+    UINT StatsReported = 0;
+    BOOLEAN StatsDisjoint = FALSE;
 };
 
 /* Vertex and index buffers share everything but their description */
@@ -1276,6 +1282,13 @@ public:
     IsExtended() const
     {
         return IsEx;
+    }
+
+    /* Present statistics need the extended object and a device made to keep them, that a failed reset did not stop */
+    BOOLEAN
+    KeepsPresentStats() const
+    {
+        return !NotReset && Enum->IsExtended() && (BehaviorFlags & D3DCREATE_ENABLE_PRESENTSTATS) != 0;
     }
 
     D9Enum*

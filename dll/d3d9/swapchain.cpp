@@ -140,6 +140,9 @@ D9SwapChain::Reset(
     }
 
     Parameters = *Requested;
+    FlipPresents = 0;
+    StatsReported = 0;
+    StatsDisjoint = FALSE;
 
     /* The cursor starts in the middle of the back buffers, or of the display a fullscreen chain takes */
     if (Parameters.Windowed)
@@ -261,6 +264,14 @@ D9SwapChain::PresentWindowed(
     hr = Device->PresentToWindow(BackBuffers[0]->DriverResource(), Target, &From, &To);
     if (SUCCEEDED(hr) && Parameters.SwapEffect == D3DSWAPEFFECT_FLIP)
         RotateBuffers();
+
+    /* Statistics of a flip chain break off at its first present */
+    if (SUCCEEDED(hr) && Parameters.SwapEffect == D3DSWAPEFFECT_FLIPEX)
+    {
+        if (FlipPresents == 0)
+            StatsDisjoint = TRUE;
+        FlipPresents += 1;
+    }
     return hr;
 }
 
@@ -424,33 +435,57 @@ D9SwapChain::GetPresentParameters(
     return S_OK;
 }
 
+/* A windowed chain counts only the presents of the flip model; others report none */
 STDMETHODIMP
 D9SwapChain::GetLastPresentCount(
     _Out_ UINT* Count)
 {
-    D3DDEVICE_CREATION_PARAMETERS Creation = {};
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
 
-    Device->GetCreationParameters(&Creation);
-    if (Count == nullptr || (Creation.BehaviorFlags & D3DCREATE_ENABLE_PRESENTSTATS) == 0)
+    if (!Device->KeepsPresentStats())
+    {
+        D9_TRACE_ONCE(L"GetLastPresentCount: the device keeps no present statistics");
         return D3DERR_INVALIDCALL;
-
-    RX_UNIMPLEMENTED();
-    *Count = 0;
-    return D3DERR_INVALIDCALL;
+    }
+    if (!Parameters.Windowed)
+    {
+        D9_TRACE_ONCE(L"GetLastPresentCount: fullscreen present counts are not kept");
+        *Count = 0;
+        return S_OK;
+    }
+    *Count = Parameters.SwapEffect == D3DSWAPEFFECT_FLIPEX ? FlipPresents : 0;
+    return S_OK;
 }
 
+/* Windowed chains have statistics only in the flip model, where the compositor keeps them */
 STDMETHODIMP
 D9SwapChain::GetPresentStats(
     _Out_ D3DPRESENTSTATS* Stats)
 {
-    D3DDEVICE_CREATION_PARAMETERS Creation = {};
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+    HRESULT hr = S_OK;
 
-    Device->GetCreationParameters(&Creation);
-    if (Stats == nullptr || (Creation.BehaviorFlags & D3DCREATE_ENABLE_PRESENTSTATS) == 0)
+    if (!Device->KeepsPresentStats())
+    {
+        D9_TRACE_ONCE(L"GetPresentStats: the device keeps no present statistics");
         return D3DERR_INVALIDCALL;
-
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    }
+    ZeroMemory(Stats, sizeof(*Stats));
+    if (!Parameters.Windowed)
+    {
+        D9_TRACE_ONCE(L"GetPresentStats: fullscreen statistics are not kept");
+        return D3DERR_NOTAVAILABLE;
+    }
+    if (Parameters.SwapEffect != D3DSWAPEFFECT_FLIPEX)
+        return D3DERR_NOTAVAILABLE;
+    if (StatsReported == FlipPresents)
+        return S_OK;
+    if (StatsDisjoint)
+    {
+        StatsDisjoint = FALSE;
+        hr = D3DERR_PRESENT_STATISTICS_DISJOINT;
+    }
+    return hr;
 }
 
 STDMETHODIMP
