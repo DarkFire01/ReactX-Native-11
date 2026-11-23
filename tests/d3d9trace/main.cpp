@@ -2237,6 +2237,191 @@ TrScenarioSurfacesPlain(
     Plain->Release();
 }
 
+/* Locks part of a buffer, writes into it when it may, and prints what the lock answered */
+template <class Buffer>
+static
+VOID
+TrLockBuffer(
+    _In_z_ PCSTR Name,
+    _In_ Buffer* Target,
+    _In_ UINT Offset,
+    _In_ UINT Size,
+    _In_ DWORD Flags)
+{
+    VOID* Data = nullptr;
+    HRESULT hr = Target->Lock(Offset, Size, &Data, Flags);
+
+    TrCloseLine();
+    printf("api Lock %s = %08lX %s\n", Name, hr, Data != nullptr ? "mem" : "nomem");
+    if (FAILED(hr))
+        return;
+    if ((Flags & D3DLOCK_READONLY) == 0 && Data != nullptr)
+        *static_cast<BYTE*>(Data) = 0x7E;
+    TrApi("Unlock", Target->Unlock());
+}
+
+/* Vertex and index buffers across pools and usages, and their locks */
+static
+VOID
+TrBufferWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Length;
+        DWORD Usage;
+        DWORD Fvf;
+        D3DPOOL Pool;
+    } Vertices[] =
+    {
+        { "vb default", 256, 0, 0, D3DPOOL_DEFAULT },
+        { "vb default writeonly", 256, D3DUSAGE_WRITEONLY, D3DFVF_XYZ, D3DPOOL_DEFAULT },
+        { "vb dynamic", 256, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFVF_XYZRHW | D3DFVF_DIFFUSE, D3DPOOL_DEFAULT },
+        { "vb dynamic read", 256, D3DUSAGE_DYNAMIC, 0, D3DPOOL_DEFAULT },
+        { "vb points", 256, D3DUSAGE_POINTS | D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT },
+        { "vb software", 256, D3DUSAGE_SOFTWAREPROCESSING, 0, D3DPOOL_DEFAULT },
+        { "vb donotclip", 256, D3DUSAGE_DONOTCLIP, 0, D3DPOOL_DEFAULT },
+        { "vb npatches", 256, D3DUSAGE_NPATCHES, 0, D3DPOOL_DEFAULT },
+        { "vb rtpatches", 256, D3DUSAGE_RTPATCHES, 0, D3DPOOL_DEFAULT },
+        { "vb sysmem", 256, 0, D3DFVF_XYZ, D3DPOOL_SYSTEMMEM },
+        { "vb sysmem dynamic", 256, D3DUSAGE_DYNAMIC, 0, D3DPOOL_SYSTEMMEM },
+        { "vb managed", 256, 0, 0, D3DPOOL_MANAGED },
+        { "vb managed writeonly", 256, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED },
+        { "vb scratch", 256, 0, 0, D3DPOOL_SCRATCH },
+        { "vb small fvf", 8, 0, D3DFVF_XYZ, D3DPOOL_DEFAULT },
+        { "vb zero", 0, 0, 0, D3DPOOL_DEFAULT },
+        { "vb odd", 7, 0, 0, D3DPOOL_DEFAULT },
+        { "vb rendertarget", 256, D3DUSAGE_RENDERTARGET, 0, D3DPOOL_DEFAULT },
+    };
+    static const struct
+    {
+        PCSTR Name;
+        UINT Length;
+        DWORD Usage;
+        D3DFORMAT Format;
+        D3DPOOL Pool;
+    } Indices[] =
+    {
+        { "ib 16", 128, 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT },
+        { "ib 32", 128, D3DUSAGE_WRITEONLY, D3DFMT_INDEX32, D3DPOOL_DEFAULT },
+        { "ib dynamic", 128, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT },
+        { "ib sysmem", 128, 0, D3DFMT_INDEX16, D3DPOOL_SYSTEMMEM },
+        { "ib managed", 128, 0, D3DFMT_INDEX32, D3DPOOL_MANAGED },
+        { "ib scratch", 128, 0, D3DFMT_INDEX16, D3DPOOL_SCRATCH },
+        { "ib bad format", 128, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT },
+        { "ib zero", 0, 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT },
+        { "ib software", 128, D3DUSAGE_SOFTWAREPROCESSING, D3DFMT_INDEX16, D3DPOOL_DEFAULT },
+    };
+    IDirect3DVertexBuffer9* Vertex;
+    IDirect3DIndexBuffer9* Index;
+    HRESULT hr;
+
+    TrPhase("buffers vertex");
+    for (const auto& Case : Vertices)
+    {
+        D3DVERTEXBUFFER_DESC Desc = {};
+
+        Vertex = nullptr;
+        hr = Device->CreateVertexBuffer(Case.Length, Case.Usage, Case.Fvf, Case.Pool, &Vertex, nullptr);
+        TrCloseLine();
+        if (Vertex != nullptr)
+            Vertex->GetDesc(&Desc);
+        printf("api %s = %08lX %s fmt %u usage %08lX pool %u size %u fvf %08lX\n", Case.Name, hr,
+               Vertex != nullptr ? "buffer" : "null", Desc.Format, Desc.Usage, Desc.Pool, Desc.Size, Desc.FVF);
+        if (Vertex == nullptr)
+            continue;
+        TrLockBuffer("whole", Vertex, 0, 0, 0);
+        TrLockBuffer("part", Vertex, 16, 32, 0);
+        TrLockBuffer("readonly", Vertex, 0, 64, D3DLOCK_READONLY);
+        TrLockBuffer("discard", Vertex, 0, 0, D3DLOCK_DISCARD);
+        TrLockBuffer("nooverwrite", Vertex, 64, 64, D3DLOCK_NOOVERWRITE);
+        TrLockBuffer("past end", Vertex, 200, 100, 0);
+        TrCloseLine();
+        printf("api Release = %lu\n", Vertex->Release());
+    }
+
+    TrPhase("buffers index");
+    for (const auto& Case : Indices)
+    {
+        D3DINDEXBUFFER_DESC Desc = {};
+
+        Index = nullptr;
+        hr = Device->CreateIndexBuffer(Case.Length, Case.Usage, Case.Format, Case.Pool, &Index, nullptr);
+        TrCloseLine();
+        if (Index != nullptr)
+            Index->GetDesc(&Desc);
+        printf("api %s = %08lX %s fmt %u usage %08lX pool %u size %u\n", Case.Name, hr,
+               Index != nullptr ? "buffer" : "null", Desc.Format, Desc.Usage, Desc.Pool, Desc.Size);
+        if (Index == nullptr)
+            continue;
+        TrLockBuffer("whole", Index, 0, 0, 0);
+        TrLockBuffer("part", Index, 8, 16, D3DLOCK_READONLY);
+        TrLockBuffer("discard", Index, 0, 0, D3DLOCK_DISCARD);
+        TrCloseLine();
+        printf("api Release = %lu\n", Index->Release());
+    }
+}
+
+/* Vertex and index buffers on a windowed extended device */
+static
+VOID
+TrScenarioBuffers(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("buffers create");
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                     nullptr, &Device);
+    TrApi("CreateDeviceEx", hr);
+    if (Device != nullptr)
+    {
+        TrBufferWork(Device);
+        TrPhase("buffers release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+}
+
+/* The same buffers on a mixed vertex processing device of the plain object */
+static
+VOID
+TrScenarioBuffersPlain(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("buffers create");
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_MIXED_VERTEXPROCESSING, &Parameters, &Device);
+    TrApi("CreateDevice", hr);
+    if (Device != nullptr)
+    {
+        TrBufferWork(Device);
+        TrPhase("buffers release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -2251,6 +2436,8 @@ static const TrScenario TrScenarios[] =
     { "device_flip", TrScenarioDeviceFlip },
     { "surfaces", TrScenarioSurfaces },
     { "surfaces_plain", TrScenarioSurfacesPlain },
+    { "buffers", TrScenarioBuffers },
+    { "buffers_plain", TrScenarioBuffersPlain },
 };
 
 static
