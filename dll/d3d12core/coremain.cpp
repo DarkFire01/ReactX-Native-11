@@ -11,7 +11,7 @@
 extern const WCHAR RxTraceModule[] = L"d3d12core";
 
 /* The SDK this core implements, read by the loader the same way an application's is */
-extern "C" const UINT D3D12SDKVersion = 616;
+extern "C" const UINT D3D12SDKVersion = 617;
 
 static
 HRESULT
