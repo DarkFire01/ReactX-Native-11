@@ -192,8 +192,28 @@ D9LockFlagsAllowed(
     return (Flags & ~AllowedFlags) == 0 || ((Flags & D3DLOCK_DISCARD) != 0 && (Flags & D3DLOCK_READONLY) == 0);
 }
 
+VOID
+D9Surface::Abandon(VOID)
+{
+    if (RefCount == 0)
+    {
+        delete this;
+        return;
+    }
+    Standalone = TRUE;
+}
+
+VOID
+D9Surface::CountAsDefault(VOID)
+{
+    CountedDefault = TRUE;
+    Device->NoteDefaultResource(TRUE);
+}
+
 D9Surface::~D9Surface()
 {
+    if (CountedDefault)
+        Device->NoteDefaultResource(FALSE);
     if (Resource != nullptr)
     {
         Device->DestroyDriverSurface(Resource);

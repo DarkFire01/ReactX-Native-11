@@ -248,6 +248,20 @@ public:
     ExchangeResource(
         _Inout_ D9Resource** Held);
 
+    /* The swap chain or device lets go; a surface the application still holds lives on by itself */
+    VOID
+    Abandon(VOID);
+
+    BOOLEAN
+    IsHeld() const
+    {
+        return RefCount > 0;
+    }
+
+    /* Default pool surfaces the application made keep the plain object's devices from resetting */
+    VOID
+    CountAsDefault(VOID);
+
     /* IUnknown */
     STDMETHOD(QueryInterface)(
         _In_ REFIID Iid,
@@ -330,6 +344,8 @@ private:
     /* Set for the levels and faces of a texture */
     D9TextureCore* Texture = nullptr;
     UINT Subresource = 0;
+
+    BOOLEAN CountedDefault = FALSE;
 };
 
 /* A level of a volume texture */
@@ -701,6 +717,9 @@ public:
     VOID
     ReleaseBuffers(VOID);
 
+    BOOLEAN
+    BuffersHeld(VOID) const;
+
 private:
     VOID
     RotateBuffers(VOID);
@@ -1032,6 +1051,17 @@ public:
     IsMultithreaded() const
     {
         return (BehaviorFlags & D3DCREATE_MULTITHREADED) != 0;
+    }
+
+    /* Counts the default pool resources the application made */
+    VOID
+    NoteDefaultResource(
+        _In_ BOOLEAN Made)
+    {
+        if (Made)
+            InterlockedIncrement(&DefaultResources);
+        else
+            InterlockedDecrement(&DefaultResources);
     }
 
     VOID
@@ -2070,4 +2100,8 @@ private:
 
     /* Managed textures, which EvictManagedResources walks */
     D9TextureCore* ManagedTextures = nullptr;
+
+    /* Default pool resources the application holds, and a failed reset the device waits to see undone */
+    LONG DefaultResources = 0;
+    BOOLEAN NotReset = FALSE;
 };

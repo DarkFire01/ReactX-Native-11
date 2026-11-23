@@ -33,9 +33,21 @@ D9SwapChain::ReleaseBuffers(VOID)
     while (BackBufferCount > 0)
     {
         BackBufferCount -= 1;
-        delete BackBuffers[BackBufferCount];
+        BackBuffers[BackBufferCount]->Abandon();
         BackBuffers[BackBufferCount] = nullptr;
     }
+}
+
+/* Whether the application holds any buffer of the chain */
+BOOLEAN
+D9SwapChain::BuffersHeld(VOID) const
+{
+    for (UINT Buffer = 0; Buffer < BackBufferCount; Buffer++)
+    {
+        if (BackBuffers[Buffer]->IsHeld())
+            return TRUE;
+    }
+    return FALSE;
 }
 
 /* A flip hands each buffer the surface of the one after it; the first one's surface moves to the last */

@@ -390,10 +390,14 @@ D9TextureCore::D9TextureCore(
     Filter = (FilterCaps & D3DPTFILTERCAPS_MINFLINEAR) != 0 ? D3DTEXF_LINEAR : D3DTEXF_POINT;
     for (UINT& Count : DirtyCount)
         Count = D9DirtyWhole;
+    if (Pool == D3DPOOL_DEFAULT)
+        Owner->NoteDefaultResource(TRUE);
 }
 
 D9TextureCore::~D9TextureCore()
 {
+    if (Pool == D3DPOOL_DEFAULT)
+        Device->NoteDefaultResource(FALSE);
     DestroyLevelObjects();
     if (IsManaged())
         Device->ForgetManaged(this);

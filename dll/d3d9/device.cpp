@@ -256,7 +256,8 @@ D9Device::CreateAutoDepthStencil(
     D3DSURFACE_DESC Desc = {};
     HRESULT hr;
 
-    delete AutoDepthStencil;
+    if (AutoDepthStencil != nullptr)
+        AutoDepthStencil->Abandon();
     AutoDepthStencil = nullptr;
     if (!Parameters->EnableAutoDepthStencil)
         return S_OK;
@@ -647,6 +648,8 @@ D9Device::TestCooperativeLevel()
 
     if (Lost && !IsEx)
         return D3DERR_DEVICELOST;
+    if (NotReset)
+        return D3DERR_DEVICENOTRESET;
     return S_OK;
 }
 
@@ -820,6 +823,9 @@ D9Device::Clear(
     _In_ DWORD Stencil)
 {
     D9_DEVICE_LOCK();
+
+    if (NotReset)
+        return D3DERR_INVALIDCALL;
     const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
     D3DDDIARG_CLEAR Args = {};
     RECT Viewport;
@@ -994,6 +1000,16 @@ D9Device::ResetCommon(
         return D3DERR_NOTAVAILABLE;
     }
 
+    /* The plain object's devices cannot reset while the application holds default pool resources or the buffers
+       of the swap chain; the device then waits for a reset that succeeds */
+    if (!IsEx && (DefaultResources > 0 || ImplicitChain->BuffersHeld() ||
+                  (AutoDepthStencil != nullptr && AutoDepthStencil->IsHeld())))
+    {
+        D9Trace(L"Reset: default pool resources are still alive");
+        NotReset = TRUE;
+        return D3DERR_INVALIDCALL;
+    }
+
     /* The depth buffer goes before the back buffers, then the device gives up any display it owned; the plain
        object's device also starts over with its batch and drawing buffers */
     if (!IsEx)
@@ -1001,7 +1017,8 @@ D9Device::ResetCommon(
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     DepthStencil = nullptr;
-    delete AutoDepthStencil;
+    if (AutoDepthStencil != nullptr)
+        AutoDepthStencil->Abandon();
     AutoDepthStencil = nullptr;
     ImplicitChain->ReleaseBuffers();
     if (!IsEx)
@@ -1019,6 +1036,7 @@ D9Device::ResetCommon(
         return hr;
     }
 
+    NotReset = FALSE;
     BindRenderTargets();
     if (IsEx)
     {
@@ -1463,6 +1481,8 @@ D9Device::AddSurface(
         delete Made;
         return hr;
     }
+    if (Desc->Pool == D3DPOOL_DEFAULT)
+        Made->CountAsDefault();
     Made->AddRef();
     *Surface = Made;
     return S_OK;

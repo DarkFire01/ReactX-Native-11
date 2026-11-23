@@ -42,11 +42,15 @@ D9Buffer<Interface, Description>::D9Buffer(
       Fvf(Fvf),
       Pool(Pool)
 {
+    if (Pool == D3DPOOL_DEFAULT)
+        Owner->NoteDefaultResource(TRUE);
 }
 
 template <class Interface, class Description>
 D9Buffer<Interface, Description>::~D9Buffer()
 {
+    if (Pool == D3DPOOL_DEFAULT)
+        Device->NoteDefaultResource(FALSE);
     if (Resource != nullptr)
     {
         Device->DestroyDriverSurface(Resource);
