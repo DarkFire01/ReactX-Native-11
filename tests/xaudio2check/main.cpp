@@ -4859,7 +4859,7 @@ XcEncodeWma(
 {
     IMediaObject* Encoder = nullptr;
     DMO_MEDIA_TYPE Type = {};
-    WAVEFORMATEX Input = *PcmFormat;
+    WAVEFORMATEXTENSIBLE Input = {};
     BOOLEAN Chosen = FALSE;
     UINT32 Capacity = 256;
     REFERENCE_TIME Elapsed = 0;
@@ -4869,13 +4869,24 @@ XcEncodeWma(
     hr = CoCreateInstance(XcWmaEncoder, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Encoder));
     if (FAILED(hr))
         return hr;
-    Input.cbSize = 0;
+    Input.Format = *PcmFormat;
+    Input.Format.cbSize = 0;
+
+    /* The encoder only takes more than two channels with a speaker layout */
+    if (PcmFormat->nChannels > 2)
+    {
+        Input.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        Input.Format.cbSize = sizeof(Input) - sizeof(Input.Format);
+        Input.Samples.wValidBitsPerSample = PcmFormat->wBitsPerSample;
+        Input.dwChannelMask = PcmFormat->nChannels == 6 ? KSAUDIO_SPEAKER_5POINT1 : 0;
+        Input.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    }
     Type.majortype = XcAudioMajor;
     Type.subtype = XcPcmSubtype;
     Type.bFixedSizeSamples = TRUE;
     Type.lSampleSize = PcmFormat->nBlockAlign;
     Type.formattype = XcWaveFormatType;
-    Type.cbFormat = sizeof(Input);
+    Type.cbFormat = sizeof(Input.Format) + Input.Format.cbSize;
     Type.pbFormat = reinterpret_cast<BYTE*>(&Input);
     hr = Encoder->SetInputType(0, &Type, 0);
     for (DWORD Index = 0; SUCCEEDED(hr) && !Chosen; Index++)
@@ -4978,8 +4989,12 @@ XcCheckWma(VOID)
         { 0x0161, 3998, 1485, 44100, 2 }, { 0x0161, 5000, 1920, 32000, 2 },
         /* LPC weighting with and without noise substitution; the system hangs on the 16 byte rate without superframes */
         { 0x0161, 2000, 640, 16000, 1 }, { 0x0161, 1000, 640, 8000, 1 },
+        /* Higher WMA Pro rates; the 48000 and 55000 rates only come coded at 24 bits */
+        { 0x0162, 32000, 11889, 44100, 2 }, { 0x0162, 48000, 17833, 44100, 2 }, { 0x0162, 55000, 20434, 44100, 2 },
+        /* WMA Pro 5.1 */
+        { 0x0162, 48000, 8917, 44100, 6 }, { 0x0162, 16000, 2973, 44100, 6 },
     };
-    static BYTE Pcm[44100 * 4 / 2];
+    static BYTE Pcm[44100 * 12 / 2];
 
     for (UINT Index = 0; Index < ARRAYSIZE(Rates); Index++)
     {
@@ -5033,6 +5048,7 @@ XcCheckWma(VOID)
             Buffer.Flags = XAUDIO2_END_OF_STREAM;
             Table.pDecodedPacketCumulativeBytes = Stream.Cumulative;
             Table.PacketCount = Stream.PacketCount;
+            XcResetEvents();
             hr = Source->SubmitSourceBuffer(&Buffer, &Table);
             printf("  submit = %08lX\n", hr);
         }
@@ -5050,6 +5066,7 @@ XcCheckWma(VOID)
                 XAUDIO2_VOICE_STATE State;
 
                 Source->GetState(&State);
+                XcPrintEvents("  ");
                 printf("  played %llu\n", State.SamplesPlayed);
             }
             Recorder.Recording = FALSE;
@@ -5061,7 +5078,12 @@ XcCheckWma(VOID)
                     Onset += 1;
                 Onset -= Onset % 2;
                 Frames = (Recorder.RecordedCount - Onset) / 2;
-                printf("  onset %zu hash %08X\n", Onset / 2, XcHash(Recorder.Recorded + Onset, Frames * 2));
+
+                /* How much silence was recorded depends on when the engine stopped */
+                if (Frames == 0)
+                    printf("  silent\n");
+                else
+                    printf("  onset %zu hash %08X\n", Onset / 2, XcHash(Recorder.Recorded + Onset, Frames * 2));
                 for (SIZE_T Frame = 0; Frame < Frames && Frame < 2048; Frame++)
                 {
                     if (Frame >= 8 && !(Frame >= 1024 && Frame < 1032) && Frame < 2040)
