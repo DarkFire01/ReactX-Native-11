@@ -4389,7 +4389,7 @@ NcCheckCursor(
     Plain->Release();
 }
 
-/* Present statistics of a windowed chain; times vary from run to run, so only the counts print */
+/* Present statistics of a windowed chain; times vary from run to run, so only whether they are set prints */
 static
 VOID
 NcCheckPresentStatsOn(
@@ -4419,6 +4419,9 @@ NcCheckPresentStatsOn(
         hr = ChainEx->GetPresentStats(&Stats);
         printf("%s_stats[%u] = %08lX count %u %s\n", Prefix, Round, hr, Stats.PresentCount,
                Stats.PresentCount == 0xCCCCCCCC ? "untouched" : "written");
+        printf("%s_refresh[%u] = %u %u qpc %s gpu %s\n", Prefix, Round, Stats.PresentRefreshCount,
+               Stats.SyncRefreshCount, Stats.SyncQPCTime.QuadPart == 0 ? "zero" : "set",
+               Stats.SyncGPUTime.QuadPart == 0 ? "zero" : "set");
         Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0);
         printf("%s_present[%u] = %08lX\n", Prefix, Round, Device->Present(nullptr, nullptr, nullptr, nullptr));
     }
