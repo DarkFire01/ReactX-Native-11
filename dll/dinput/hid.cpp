@@ -1063,6 +1063,13 @@ typedef struct _RX_DI_USAGE_SLOT
 #define DI_HID_PEDALS_RZ_BRAKES     0x00800000
 #define DI_HID_Z_IS_SLIDER          0x00200000
 
+/* Flags2 bits that hide a device from DirectInput 8, the first one turning the class bits on */
+#define DI_HID_HIDE_BY_CLASS        0x00100000
+#define DI_HID_HIDE_DEVICE          0x00010000
+#define DI_HID_HIDE_MOUSE           0x00020000
+#define DI_HID_HIDE_KEYBOARD        0x00040000
+#define DI_HID_HIDE_OTHER           0x00080000
+
 /* X, Y, Z and the three rotations */
 #define DI_HID_SIX_AXES         0x0000003F
 
@@ -1702,6 +1709,10 @@ public:
         }
         if (Polled)
             Result->dwFlags |= DIDC_POLLEDDEVICE;
+#if DIRECTINPUT_VERSION >= 0x0800
+        if (IsHidden())
+            Result->dwFlags |= DIDC_HIDDEN;
+#endif
 
         Result->dwDevType = DevType;
         Result->dwAxes = AxisCount;
@@ -2095,6 +2106,85 @@ public:
     }
 
 private:
+#if DIRECTINPUT_VERSION >= 0x0800
+    /* Mice and keyboards a HID game controller exposes are hidden, so they are not read twice */
+    ULONG
+    DetectHideFlags(VOID)
+    {
+        SP_DEVINFO_DATA Device = { sizeof(Device) };
+        WCHAR ParentId[MAX_PATH];
+        DEVINST Parent = 0;
+        ULONG Hide = 0;
+        HDEVINFO Set;
+
+        Set = SetupDiCreateDeviceInfoList(nullptr, nullptr);
+        if (Set == INVALID_HANDLE_VALUE)
+            return 0;
+
+        if (SetupDiOpenDeviceInfoW(Set, Start.InstanceId, nullptr, 0, &Device) &&
+            CM_Get_Parent(&Parent, Device.DevInst, 0) == CR_SUCCESS &&
+            CM_Get_Device_IDW(Parent, ParentId, _countof(ParentId), 0) == CR_SUCCESS)
+        {
+            EnterCriticalSection(&DiLock);
+            for (ULONG Index = 0; Index < DiHidCount; Index++)
+            {
+                const RX_DI_HID_ENTRY* Entry = &DiHidEntries[Index];
+
+                if (Entry->Detail == nullptr || lstrcmpiW(Entry->InstanceId, ParentId) != 0)
+                    continue;
+                if ((Entry->DevType & DIDEVTYPE_HID) && LOBYTE(Entry->DevType) >= DI8DEVTYPE_JOYSTICK)
+                {
+                    Hide = DI_HID_HIDE_BY_CLASS;
+                    if (LOBYTE(DevType) == DI8DEVTYPE_MOUSE)
+                        Hide |= DI_HID_HIDE_MOUSE;
+                    else if (LOBYTE(DevType) == DI8DEVTYPE_KEYBOARD)
+                        Hide |= DI_HID_HIDE_KEYBOARD;
+                }
+                break;
+            }
+            LeaveCriticalSection(&DiLock);
+        }
+
+        SetupDiDestroyDeviceInfoList(Set);
+        return Hide;
+    }
+
+    /* Flags2 under the device's DirectInput key names the classes to hide, read again each time */
+    BOOLEAN
+    IsHidden(VOID)
+    {
+        ULONG Flags2 = 0;
+        ULONG Wanted;
+
+        if (PropKey != nullptr)
+            DiReadValue(PropKey, L"Flags2", &Flags2, sizeof(Flags2));
+        if ((Flags2 & DI_HID_HIDE_BY_CLASS) == 0 &&
+            (LOBYTE(DevType) == DI8DEVTYPE_MOUSE || LOBYTE(DevType) == DI8DEVTYPE_KEYBOARD))
+        {
+            Flags2 = DetectHideFlags();
+        }
+        if ((Flags2 & DI_HID_HIDE_BY_CLASS) == 0)
+            return FALSE;
+
+        switch (LOBYTE(DevType))
+        {
+            case DI8DEVTYPE_DEVICE:
+                Wanted = DI_HID_HIDE_DEVICE;
+                break;
+            case DI8DEVTYPE_MOUSE:
+                Wanted = DI_HID_HIDE_MOUSE;
+                break;
+            case DI8DEVTYPE_KEYBOARD:
+                Wanted = DI_HID_HIDE_KEYBOARD;
+                break;
+            default:
+                Wanted = DI_HID_HIDE_OTHER;
+                break;
+        }
+        return (Flags2 & Wanted) != 0;
+    }
+#endif
+
     VOID
     OpenTypeKey(VOID)
     {
