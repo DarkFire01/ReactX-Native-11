@@ -254,46 +254,62 @@ D9Device::StartPixelConverter(VOID)
     PixelShaders.SetSpecular(RenderStates[D3DRS_SPECULARENABLE] != 0);
 }
 
-/* Copies the adapter's caps and applies what this device's vertex processing changes */
+/* Software vertex processing reports what the runtime's pipeline can do, whatever the driver says */
+static
+VOID
+D9ApplySoftwareCaps(
+    _Inout_ D3DCAPS9* Caps);
+
+/* Copies the adapter's caps and applies what this device's vertex processing changes; a mixed device also
+   keeps the caps its software mode reports */
 VOID
 D9Device::ComputeCaps(VOID)
 {
     Enum->GetDeviceCaps(Adapter->Ordinal, DeviceType, &Caps);
-    /* Hardware vertex processing runs the fixed function vertex pipeline as the runtime's own shaders */
-    if ((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) == 0)
+    SoftwareCaps = Caps;
+    D9ApplySoftwareCaps(&SoftwareCaps);
+    if ((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0)
     {
-        Caps.VertexProcessingCaps = D9PipelineVertexCaps;
-        Caps.MaxActiveLights = D9ShaderPipelineLights;
-        Caps.MaxVertexBlendMatrices = 4;
-        Caps.MaxVertexBlendMatrixIndex = D9ShaderPipelineBlendIndex;
+        Caps = SoftwareCaps;
         return;
     }
 
-    /* Software vertex processing reports what the runtime's pipeline can do, whatever the driver says */
-    Caps.DevCaps &= ~D9SoftwareDevCapsCleared;
-    Caps.DevCaps2 |= D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET;
-    Caps.PrimitiveMiscCaps = (Caps.PrimitiveMiscCaps & ~(D9MiscCapsFogInFvf | D3DPMISCCAPS_CLIPPLANESCALEDPOINTS)) |
-                             D3DPMISCCAPS_CLIPTLVERTS;
-    Caps.RasterCaps |= D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGRANGE;
-    Caps.FVFCaps |= D3DFVFCAPS_PSIZE;
-    if (Caps.MaxPointSize == 0.0f)
-        Caps.MaxPointSize = 64.0f;
+    /* Hardware vertex processing runs the fixed function vertex pipeline as the runtime's own shaders */
     Caps.VertexProcessingCaps = D9PipelineVertexCaps;
-    Caps.MaxActiveLights = D9SoftwarePipelineLights;
-    Caps.MaxUserClipPlanes = 6;
+    Caps.MaxActiveLights = D9ShaderPipelineLights;
     Caps.MaxVertexBlendMatrices = 4;
-    Caps.MaxVertexBlendMatrixIndex = D9SoftwarePipelineBlendIndex;
-    Caps.MaxStreams = 16;
-    Caps.VertexShaderVersion = D3DVS_VERSION(3, 0);
-    Caps.MaxVertexShaderConst = 8192;
-    Caps.DeclTypes |= 0x000003FF;
-    Caps.VS20Caps.Caps = D3DVS20CAPS_PREDICATION;
-    Caps.VS20Caps.DynamicFlowControlDepth = D3DVS20_MAX_DYNAMICFLOWCONTROLDEPTH;
-    Caps.VS20Caps.NumTemps = D3DVS20_MAX_NUMTEMPS;
-    Caps.VS20Caps.StaticFlowControlDepth = D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
-    Caps.VertexTextureFilterCaps = 0x1B031B00;
-    Caps.MaxVShaderInstructionsExecuted = 0xFFFFFFFF;
-    Caps.MaxVertexShader30InstructionSlots = D3DMAX30SHADERINSTRUCTIONS;
+    Caps.MaxVertexBlendMatrixIndex = D9ShaderPipelineBlendIndex;
+}
+
+static
+VOID
+D9ApplySoftwareCaps(
+    _Inout_ D3DCAPS9* Caps)
+{
+    Caps->DevCaps &= ~D9SoftwareDevCapsCleared;
+    Caps->DevCaps2 |= D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_VERTEXELEMENTSCANSHARESTREAMOFFSET;
+    Caps->PrimitiveMiscCaps = (Caps->PrimitiveMiscCaps & ~(D9MiscCapsFogInFvf | D3DPMISCCAPS_CLIPPLANESCALEDPOINTS)) |
+                              D3DPMISCCAPS_CLIPTLVERTS;
+    Caps->RasterCaps |= D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGRANGE;
+    Caps->FVFCaps |= D3DFVFCAPS_PSIZE;
+    if (Caps->MaxPointSize == 0.0f)
+        Caps->MaxPointSize = 64.0f;
+    Caps->VertexProcessingCaps = D9PipelineVertexCaps;
+    Caps->MaxActiveLights = D9SoftwarePipelineLights;
+    Caps->MaxUserClipPlanes = 6;
+    Caps->MaxVertexBlendMatrices = 4;
+    Caps->MaxVertexBlendMatrixIndex = D9SoftwarePipelineBlendIndex;
+    Caps->MaxStreams = 16;
+    Caps->VertexShaderVersion = D3DVS_VERSION(3, 0);
+    Caps->MaxVertexShaderConst = 8192;
+    Caps->DeclTypes |= 0x000003FF;
+    Caps->VS20Caps.Caps = D3DVS20CAPS_PREDICATION;
+    Caps->VS20Caps.DynamicFlowControlDepth = D3DVS20_MAX_DYNAMICFLOWCONTROLDEPTH;
+    Caps->VS20Caps.NumTemps = D3DVS20_MAX_NUMTEMPS;
+    Caps->VS20Caps.StaticFlowControlDepth = D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
+    Caps->VertexTextureFilterCaps = 0x1B031B00;
+    Caps->MaxVShaderInstructionsExecuted = 0xFFFFFFFF;
+    Caps->MaxVertexShader30InstructionSlots = D3DMAX30SHADERINSTRUCTIONS;
 }
 
 HRESULT
@@ -884,7 +900,7 @@ D9Device::GetDeviceCaps(
     if (Result == nullptr)
         return D3DERR_INVALIDCALL;
 
-    *Result = Caps;
+    *Result = *CurrentCaps();
     return S_OK;
 }
 

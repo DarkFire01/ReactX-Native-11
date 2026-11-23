@@ -3639,6 +3639,16 @@ private:
     /* Vertices go through the runtime's software pipeline; a mixed device switches this */
     BOOLEAN SoftwareVertices;
 
+    /* What a mixed device reports while it processes vertices in software */
+    D3DCAPS9 SoftwareCaps = {};
+
+    /* The caps the application sees in the current vertex processing mode */
+    const D3DCAPS9*
+    CurrentCaps(VOID) const
+    {
+        return SoftwareVertices ? &SoftwareCaps : &Caps;
+    }
+
     /* Streams a scene binds again at its first draw; the software pipeline hands the driver one */
     UINT SceneStreams;
     INT GpuPriority = 0;
