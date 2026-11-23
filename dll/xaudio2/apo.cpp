@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "xaudio2.hpp"
+#include "xapo.hpp"
 
 HRESULT
 XaCreateReverb(
@@ -23,10 +23,7 @@ HRESULT
 XaCreateVolumeMeter(
     _Outptr_ IUnknown** Apo)
 {
-    if (Apo != nullptr)
-        *Apo = nullptr;
-    XA_TRACE_ONCE(L"CreateAudioVolumeMeter: not available yet");
-    return E_NOTIMPL;
+    return XaCreateMeterObject(Apo);
 }
 
 HRESULT

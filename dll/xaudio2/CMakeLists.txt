@@ -9,13 +9,15 @@ nt_add_usermode_dll(xaudio2_9
         format.cpp
         main.cpp
         matrix.cpp
+        meter.cpp
         mixer.cpp
         mixmatrix.cpp
         output.cpp
         resample.cpp
         source.cpp
         voice.cpp
-        x3daudio.cpp)
+        x3daudio.cpp
+        xapobase.cpp)
 
 target_link_libraries(xaudio2_9 PRIVATE ole32 uuid)
 
