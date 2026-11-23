@@ -718,9 +718,10 @@ ULONGLONG
 DdChargeFor(
     _In_ const DdSurface* Surface)
 {
-    ULONGLONG Row = ((static_cast<ULONGLONG>(Surface->Width) * Surface->Format.dwRGBBitCount + 7) / 8 + 3) & ~3ull;
+    ULONGLONG Row =
+        ((static_cast<ULONGLONG>(Surface->Shared->Width) * Surface->Shared->Format.dwRGBBitCount + 7) / 8 + 3) & ~3ull;
 
-    return Row * Surface->Height;
+    return Row * Surface->Shared->Height;
 }
 
 /* Asks the driver for a resource of one level; the newer entry point when the interface has it */
@@ -776,7 +777,7 @@ DdCreateSurfaceResource(
         return E_OUTOFMEMORY;
     ZeroMemory(Resource, sizeof(*Resource));
 
-    Resource->Format = DdDriverFormat(&Surface->Format);
+    Resource->Format = DdDriverFormat(&Surface->Shared->Format);
     Resource->Pool = DdDriverPool(Surface->Caps.dwCaps);
     Resource->Flags = DdDriverFlags(&Surface->Caps);
     Resource->SurfaceCount = 1;
@@ -808,14 +809,14 @@ DdCreateSurfaceResource(
         return DDERR_OUTOFVIDEOMEMORY;
     }
 
-    Level.Width = Surface->Width;
-    Level.Height = Surface->Height;
+    Level.Width = Surface->Shared->Width;
+    Level.Height = Surface->Shared->Height;
 
     hr = DdDriverCreateResource(Hardware, Resource, &Level);
     if (FAILED(hr))
     {
-        DdTrace(L"UMD CreateResource failed 0x%08lX for a %lux%lu surface of format %u", hr, Surface->Width,
-                Surface->Height, Resource->Format);
+        DdTrace(L"UMD CreateResource failed 0x%08lX for a %lux%lu surface of format %u", hr, Surface->Shared->Width,
+                Surface->Shared->Height, Resource->Format);
         delete Resource;
         return hr;
     }
@@ -831,7 +832,7 @@ DdCreateSurfaceResource(
     }
 
     Surface->Resource = Resource;
-    Surface->Pitch = 0;
+    Surface->Shared->Pitch = 0;
     return S_OK;
 }
 
@@ -895,7 +896,7 @@ DdLockSurfaceResource(
         return hr;
     }
 
-    Surface->Pitch = static_cast<LONG>(Lock.Pitch);
+    Surface->Shared->Pitch = static_cast<LONG>(Lock.Pitch);
     Resource->LockCount += 1;
     *Bits = static_cast<BYTE*>(Lock.pSurfData);
     return S_OK;
@@ -959,9 +960,9 @@ DdCreateSystemResource(
     DdResource* Resource;
     HRESULT hr;
 
-    if (Surface->SystemResource != nullptr)
+    if (Surface->Shared->SystemResource != nullptr)
         return S_OK;
-    if (!DdDriverCanCreate(Hardware, &Surface->Caps, &Surface->Format))
+    if (!DdDriverCanCreate(Hardware, &Surface->Caps, &Surface->Shared->Format))
         return E_FAIL;
 
     Resource = new (std::nothrow) DdResource;
@@ -969,26 +970,26 @@ DdCreateSystemResource(
         return E_OUTOFMEMORY;
     ZeroMemory(Resource, sizeof(*Resource));
 
-    Resource->Format = DdDriverFormat(&Surface->Format);
+    Resource->Format = DdDriverFormat(&Surface->Shared->Format);
     Resource->Pool = D3DDDIPOOL_SYSTEMMEM;
     Resource->Flags = DdDriverFlags(&Surface->Caps);
     Resource->SurfaceCount = 1;
 
-    Level.Width = Surface->Width;
-    Level.Height = Surface->Height;
-    Level.pSysMem = Surface->Bits;
-    Level.SysMemPitch = static_cast<UINT>(Surface->Pitch);
+    Level.Width = Surface->Shared->Width;
+    Level.Height = Surface->Shared->Height;
+    Level.pSysMem = Surface->Shared->Bits;
+    Level.SysMemPitch = static_cast<UINT>(Surface->Shared->Pitch);
 
     hr = DdDriverCreateResource(Hardware, Resource, &Level);
     if (FAILED(hr) || Resource->DriverResource == NULL)
     {
-        DdTrace(L"UMD CreateResource failed 0x%08lX over a %lux%lu system memory surface", hr, Surface->Width,
-                Surface->Height);
+        DdTrace(L"UMD CreateResource failed 0x%08lX over a %lux%lu system memory surface", hr, Surface->Shared->Width,
+                Surface->Shared->Height);
         delete Resource;
         return E_FAIL;
     }
 
-    Surface->SystemResource = Resource;
+    Surface->Shared->SystemResource = Resource;
     return S_OK;
 }
 
@@ -997,7 +998,7 @@ DdDestroySystemResource(
     _In_ DdHardware* Hardware,
     _Inout_ DdSurface* Surface)
 {
-    DdResource* Resource = Surface->SystemResource;
+    DdResource* Resource = Surface->Shared->SystemResource;
 
     if (Resource == nullptr)
         return;
@@ -1005,7 +1006,7 @@ DdDestroySystemResource(
     DdWaitForDriver(Hardware, Surface);
     Hardware->DeviceFunctions.pfnDestroyResource(Hardware->DriverDevice, Resource->DriverResource);
     delete Resource;
-    Surface->SystemResource = nullptr;
+    Surface->Shared->SystemResource = nullptr;
 }
 
 /* A driver lock waits for the copies queued on a system memory surface; nothing else does */
@@ -1017,11 +1018,11 @@ DdWaitForDriver(
     D3DDDIARG_UNLOCK Unlock = {};
     D3DDDIARG_LOCK Lock = {};
 
-    if (!Surface->DriverPending || Surface->SystemResource == nullptr)
+    if (!Surface->Shared->DriverPending || Surface->Shared->SystemResource == nullptr)
         return;
 
-    Surface->DriverPending = FALSE;
-    Lock.hResource = Surface->SystemResource->DriverResource;
+    Surface->Shared->DriverPending = FALSE;
+    Lock.hResource = Surface->Shared->SystemResource->DriverResource;
     if (FAILED(Hardware->DeviceFunctions.pfnLock(Hardware->DriverDevice, &Lock)))
         return;
     Unlock.hResource = Lock.hResource;

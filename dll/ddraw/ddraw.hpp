@@ -326,7 +326,34 @@ struct DdLink
     DdLink* NextIn;
 };
 
-/* A DirectDraw surface; video memory surfaces keep their pixels in a driver resource */
+/* What a surface shares with its duplicates: size, format, system memory pixels, lock state and contents stamp */
+struct DdSurfaceShared
+{
+    ULONG Users;
+    DDPIXELFORMAT Format;
+    DWORD Width;
+    DWORD Height;
+    LONG Pitch;
+    BYTE* Bits;
+    HANDLE Section;
+    DdResource* SystemResource;
+    BOOLEAN DriverPending;
+    BOOLEAN SysMemRequested;
+    BOOLEAN ClientMemory;
+    DWORD FillBitCount;
+    DWORD Uniqueness;
+
+    /* Locks and DCs held through any of the surfaces */
+    ULONG Busy;
+
+    /* The pixel format is the surface's own rather than the display's, so descriptions can match it */
+    BOOLEAN KeepsFormat;
+
+    /* A primary reports no pitch until a description asks for it on a working device */
+    BOOLEAN PitchPending;
+};
+
+/* A DirectDraw surface; video memory surfaces keep their pixels in a driver resource of their own */
 struct DdSurface
 {
     ULONG RefCount;
@@ -336,15 +363,8 @@ struct DdSurface
     DdKind MakerKind;
     DWORD ProcessId;
     DDSCAPS2 Caps;
-    DDPIXELFORMAT Format;
-    DWORD Width;
-    DWORD Height;
-    LONG Pitch;
-    BYTE* Bits;
-    HANDLE Section;
+    DdSurfaceShared* Shared;
     DdResource* Resource;
-    DdResource* SystemResource;
-    BOOLEAN DriverPending;
     DWORD KeyFlags;
     DDCOLORKEY SourceKey;
     DDCOLORKEY DestKey;
@@ -360,7 +380,6 @@ struct DdSurface
     DdClipper* Clipper;
     DdSurface* FlipNext;
     DdSurface* Next;
-    DWORD Uniqueness;
     DWORD Priority;
     DWORD Lod;
     DdSurfaceInterface* Interfaces;
@@ -372,16 +391,10 @@ struct DdSurface
 
     /* Lost surfaces keep their identity until Restore gives them memory again */
     BOOLEAN Lost;
-    BOOLEAN SysMemRequested;
-    BOOLEAN ClientMemory;
-    DWORD FillBitCount;
     DdModeKey CreatedMode;
 
-    /* The pixel format is the surface's own rather than the display's, so descriptions can match it */
-    BOOLEAN KeepsFormat;
-
-    /* A primary reports no pitch until a description asks for it on a working device */
-    BOOLEAN PitchPending;
+    /* DuplicateSurface made this surface over another's shared state */
+    BOOLEAN IsDuplicate;
 
     /* The display allocation the kernel shares, opened while the primary exists if there was one */
     DdResource* SharedPrimary;
@@ -770,6 +783,12 @@ DdCreateSurfaceObject(
     _In_opt_ IUnknown* Outer,
     _In_ BOOLEAN NeedsCooperation);
 
+HRESULT
+DdDuplicateSurfaceObject(
+    _In_ DdInterface* This,
+    _In_ VOID* Source,
+    _Out_ VOID** Result);
+
 VOID
 DdReleaseLocalSurfaces(
     _In_ DdLocal* Local);
@@ -781,6 +800,10 @@ DdSurfaceFromCom(
 
 BOOLEAN
 DdSurfaceBusy(
+    _In_ const DdSurface* Surface);
+
+BOOLEAN
+DdSurfaceUnbacked(
     _In_ const DdSurface* Surface);
 
 HRESULT

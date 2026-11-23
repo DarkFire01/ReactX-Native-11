@@ -185,8 +185,9 @@ DdDuplicateSurface(
     _In_ VOID* Source,
     _Out_ VOID** Duplicate)
 {
-    DD_TRACE_ONCE(L"DuplicateSurface is not implemented yet");
-    return DDERR_UNSUPPORTED;
+    DdLockScope Lock;
+
+    return DdDuplicateSurfaceObject(DdFromCom(Com), Source, Duplicate);
 }
 
 /* Caps bits with no public meaning that EnumSurfaces refuses in a description */
@@ -221,9 +222,9 @@ DdSurfaceMatches(
 
     if ((Flags & DDSD_CAPS) != 0 && memcmp(&Surface->Caps, &Desc->ddsCaps, sizeof(Surface->Caps)) != 0)
         return FALSE;
-    if ((Flags & DDSD_HEIGHT) != 0 && Surface->Height != Desc->dwHeight)
+    if ((Flags & DDSD_HEIGHT) != 0 && Surface->Shared->Height != Desc->dwHeight)
         return FALSE;
-    if ((Flags & DDSD_WIDTH) != 0 && Surface->Width != Desc->dwWidth)
+    if ((Flags & DDSD_WIDTH) != 0 && Surface->Shared->Width != Desc->dwWidth)
         return FALSE;
     if ((Flags & DDSD_CKDESTBLT) != 0 && !DdSameKey(&Surface->DestKey, &Desc->ddckCKDestBlt))
         return FALSE;
@@ -234,7 +235,8 @@ DdSurfaceMatches(
     if ((Flags & DDSD_MIPMAPCOUNT) != 0 && Desc->dwMipMapCount != 0)
         return FALSE;
     if ((Flags & DDSD_PIXELFORMAT) != 0 &&
-        (!Surface->KeepsFormat || memcmp(&Surface->Format, &Desc->ddpfPixelFormat, sizeof(Surface->Format)) != 0))
+        (!Surface->Shared->KeepsFormat ||
+         memcmp(&Surface->Shared->Format, &Desc->ddpfPixelFormat, sizeof(Surface->Shared->Format)) != 0))
     {
         return FALSE;
     }

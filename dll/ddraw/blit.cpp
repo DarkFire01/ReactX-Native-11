@@ -33,7 +33,7 @@ DWORD
 DdBytesPerPixel(
     _In_ const DdSurface* Surface)
 {
-    return Surface->Format.dwRGBBitCount / 8;
+    return Surface->Shared->Format.dwRGBBitCount / 8;
 }
 
 static
@@ -64,8 +64,9 @@ DdRectInside(
     _In_ const RECT* Rect,
     _In_ const DdSurface* Surface)
 {
-    return Rect->left >= 0 && Rect->top >= 0 && Rect->right <= static_cast<LONG>(Surface->Width) &&
-           Rect->bottom <= static_cast<LONG>(Surface->Height) && Rect->left < Rect->right && Rect->top < Rect->bottom;
+    return Rect->left >= 0 && Rect->top >= 0 && Rect->right <= static_cast<LONG>(Surface->Shared->Width) &&
+           Rect->bottom <= static_cast<LONG>(Surface->Shared->Height) && Rect->left < Rect->right &&
+           Rect->top < Rect->bottom;
 }
 
 /* Bits a color key compares: the color channels, or the whole index for palettized pixels */
@@ -74,7 +75,7 @@ DWORD
 DdKeyMask(
     _In_ const DdSurface* Surface)
 {
-    const DDPIXELFORMAT* Format = &Surface->Format;
+    const DDPIXELFORMAT* Format = &Surface->Shared->Format;
     DWORD Mask = Format->dwRBitMask | Format->dwGBitMask | Format->dwBBitMask;
 
     if (Mask == 0)
@@ -88,7 +89,7 @@ DWORD
 DdWhiteFor(
     _In_ const DdSurface* Surface)
 {
-    DWORD Bits = Surface->Format.dwRGBBitCount;
+    DWORD Bits = Surface->Shared->Format.dwRGBBitCount;
 
     return Bits >= 32 ? 0x00FFFFFF : (1u << Bits) - 1;
 }
@@ -108,7 +109,7 @@ DdFillRect(
 
     for (Y = To->top; Y < To->bottom; Y++)
     {
-        Row = Bits + Y * Target->Pitch + To->left * Size;
+        Row = Bits + Y * Target->Shared->Pitch + To->left * Size;
         for (X = To->left; X < To->right; X++, Row += Size)
             DdWritePixel(Row, Size, Value);
     }
@@ -127,20 +128,20 @@ DdFillRectStale(
     _In_ DWORD Value)
 {
     DWORD Size = DdBytesPerPixel(Target);
-    DWORD Masked = Value & ((1u << Target->Format.dwRGBBitCount) - 1);
+    DWORD Masked = Value & ((1u << Target->Shared->Format.dwRGBBitCount) - 1);
     DWORD Pattern = Masked;
     BYTE* Row;
     DWORD Count;
     LONG Y;
 
-    if (Target->FillBitCount == 8)
+    if (Target->Shared->FillBitCount == 8)
         Pattern = Masked * 0x01010101;
-    else if (Target->FillBitCount == 16)
+    else if (Target->Shared->FillBitCount == 16)
         Pattern = Masked | (Masked << 16);
 
     for (Y = To->top; Y < To->bottom; Y++)
     {
-        Row = Bits + Y * Target->Pitch + To->left * Size;
+        Row = Bits + Y * Target->Shared->Pitch + To->left * Size;
         Count = (To->right - To->left) * Size;
         for (DWORD Index = 0; Index < Count; Index++)
             Row[Index] = static_cast<BYTE>(Pattern >> ((Index % 4) * 8));
@@ -161,7 +162,7 @@ DdCopyRect(
     LONG SourceHeight = Job.From.bottom - Job.From.top;
     BYTE* Copy = nullptr;
     const BYTE* SourceBits = Job.SourceBits;
-    LONG SourcePitch = Job.Source->Pitch;
+    LONG SourcePitch = Job.Source->Shared->Pitch;
     const BYTE* SourceRow;
     BYTE* TargetRow;
     DWORD Pixel;
@@ -173,10 +174,11 @@ DdCopyRect(
     /* Blits within one surface read from a copy so overlapping rectangles behave like a move */
     if (Job.Source == Job.Target)
     {
-        Copy = static_cast<BYTE*>(LocalAlloc(LMEM_FIXED, static_cast<SIZE_T>(Job.Source->Pitch) * Job.Source->Height));
+        Copy = static_cast<BYTE*>(LocalAlloc(LMEM_FIXED,
+                                             static_cast<SIZE_T>(Job.Source->Shared->Pitch) * Job.Source->Shared->Height));
         if (Copy == nullptr)
             return;
-        memcpy(Copy, Job.SourceBits, static_cast<SIZE_T>(Job.Source->Pitch) * Job.Source->Height);
+        memcpy(Copy, Job.SourceBits, static_cast<SIZE_T>(Job.Source->Shared->Pitch) * Job.Source->Shared->Height);
         SourceBits = Copy;
     }
 
@@ -186,7 +188,7 @@ DdCopyRect(
         if (Job.MirrorY)
             SourceY = SourceHeight - 1 - SourceY;
         SourceRow = SourceBits + (Job.From.top + SourceY) * SourcePitch;
-        TargetRow = Job.TargetBits + (Job.To.top + Y) * Job.Target->Pitch;
+        TargetRow = Job.TargetBits + (Job.To.top + Y) * Job.Target->Shared->Pitch;
 
         for (X = Clip->left - Job.To.left; X < Clip->right - Job.To.left; X++)
         {
@@ -295,7 +297,7 @@ DdPresentToPrimary(
 
     if (Fill)
     {
-        Brush = CreateSolidBrush(DdPixelToColor(&Primary->Format, FillValue));
+        Brush = CreateSolidBrush(DdPixelToColor(&Primary->Shared->Format, FillValue));
         FillRect(Dc, &Local, Brush);
         DeleteObject(Brush);
         ReleaseDC(Window, Dc);
@@ -303,17 +305,17 @@ DdPresentToPrimary(
     }
 
     Info.Header.biSize = sizeof(Info.Header);
-    Info.Header.biWidth = static_cast<LONG>(Source->Pitch * 8 / Source->Format.dwRGBBitCount);
-    Info.Header.biHeight = -static_cast<LONG>(Source->Height);
+    Info.Header.biWidth = static_cast<LONG>(Source->Shared->Pitch * 8 / Source->Shared->Format.dwRGBBitCount);
+    Info.Header.biHeight = -static_cast<LONG>(Source->Shared->Height);
     Info.Header.biPlanes = 1;
-    Info.Header.biBitCount = static_cast<WORD>(Source->Format.dwRGBBitCount);
+    Info.Header.biBitCount = static_cast<WORD>(Source->Shared->Format.dwRGBBitCount);
     Info.Header.biCompression = BI_RGB;
-    if (Source->Format.dwRGBBitCount == 16 || Source->Format.dwRGBBitCount == 32)
+    if (Source->Shared->Format.dwRGBBitCount == 16 || Source->Shared->Format.dwRGBBitCount == 32)
     {
         Info.Header.biCompression = BI_BITFIELDS;
-        Info.Masks[0] = Source->Format.dwRBitMask;
-        Info.Masks[1] = Source->Format.dwGBitMask;
-        Info.Masks[2] = Source->Format.dwBBitMask;
+        Info.Masks[0] = Source->Shared->Format.dwRBitMask;
+        Info.Masks[1] = Source->Shared->Format.dwGBitMask;
+        Info.Masks[2] = Source->Shared->Format.dwBBitMask;
     }
 
     SetStretchBltMode(Dc, COLORONCOLOR);
@@ -406,7 +408,7 @@ DdDriverHandle(
 {
     if (Surface->Resource != nullptr)
         return Surface->Resource->DriverResource;
-    return Surface->SystemResource->DriverResource;
+    return Surface->Shared->SystemResource->DriverResource;
 }
 
 /* Hands a copy between two driver resources to the driver, keys and mirroring included */
@@ -475,10 +477,10 @@ DdDriverCopy(
         return hr;
     }
 
-    if (Target->SystemResource != nullptr)
-        Target->DriverPending = TRUE;
-    if (Source->SystemResource != nullptr)
-        Source->DriverPending = TRUE;
+    if (Target->Shared->SystemResource != nullptr)
+        Target->Shared->DriverPending = TRUE;
+    if (Source->Shared->SystemResource != nullptr)
+        Source->Shared->DriverPending = TRUE;
     return S_OK;
 }
 
@@ -631,12 +633,14 @@ DdFillSurface(
     _In_ DWORD Value,
     _In_ BOOLEAN ColorFill)
 {
+    DWORD BitCount = Target->Shared->Format.dwRGBBitCount;
+    BOOLEAN Stale = Target->Shared->FillBitCount != BitCount && BitCount < 24;
     DdClipPieces Pieces;
     BYTE* Bits;
     DWORD Index;
     HRESULT hr;
 
-    if (Target->Format.dwRGBBitCount < 8)
+    if (BitCount < 8)
         return DDERR_UNSUPPORTED;
     if (!DdClipTarget(Target, To, &Pieces))
         return E_OUTOFMEMORY;
@@ -653,7 +657,7 @@ DdFillSurface(
     {
         for (Index = 0; Index < Pieces.Count; Index++)
         {
-            if (Target->FillBitCount != Target->Format.dwRGBBitCount && Target->Format.dwRGBBitCount < 24)
+            if (Stale)
                 DdFillRectStale(Target, Bits, &Pieces.Rects[Index], Value);
             else
                 DdFillRect(Target, Bits, &Pieces.Rects[Index], Value);
@@ -769,12 +773,15 @@ DdBlt(
     if (TargetRect != nullptr)
         Job.To = *TargetRect;
     else
-        SetRect(&Job.To, 0, 0, Target->Width, Target->Height);
+        SetRect(&Job.To, 0, 0, Target->Shared->Width, Target->Shared->Height);
     if (!DdRectInside(&Job.To, Target))
         return DDERR_INVALIDRECT;
 
     if (DdSurfaceBusy(Target) || (Source != nullptr && DdSurfaceBusy(Source)))
         return DDERR_SURFACEBUSY;
+
+    if (DdSurfaceUnbacked(Target) || (Source != nullptr && DdSurfaceUnbacked(Source)))
+        return E_FAIL;
     DdTouchSurface(Target);
 
     if ((Flags & DDBLT_COLORFILL) != 0)
@@ -806,7 +813,7 @@ DdBlt(
     if (SourceRect != nullptr)
         Job.From = *SourceRect;
     else
-        SetRect(&Job.From, 0, 0, Source->Width, Source->Height);
+        SetRect(&Job.From, 0, 0, Source->Shared->Width, Source->Shared->Height);
     if (!DdRectInside(&Job.From, Source))
         return DDERR_INVALIDRECT;
 
@@ -822,7 +829,8 @@ DdBlt(
         return DdBusCopy(Target, &Job.To, Source, &Job.From, Flags, Fx);
     }
 
-    if (Source->Format.dwRGBBitCount != Target->Format.dwRGBBitCount || Target->Format.dwRGBBitCount < 8)
+    if (Source->Shared->Format.dwRGBBitCount != Target->Shared->Format.dwRGBBitCount ||
+        Target->Shared->Format.dwRGBBitCount < 8)
     {
         DD_TRACE_ONCE(L"blits that convert pixel formats are not implemented yet");
         return DDERR_UNSUPPORTED;
@@ -903,7 +911,7 @@ DdBltFast(
     if (SourceRect != nullptr)
         From = *SourceRect;
     else
-        SetRect(&From, 0, 0, Source->Width, Source->Height);
+        SetRect(&From, 0, 0, Source->Shared->Width, Source->Shared->Height);
     SetRect(&To, X, Y, X + (From.right - From.left), Y + (From.bottom - From.top));
 
     if ((Flags & DDBLTFAST_SRCCOLORKEY) != 0)

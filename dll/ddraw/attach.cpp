@@ -332,10 +332,11 @@ DdSurfaceAddAttached(
     /* Mip levels shrink; anything else of the same kind must match in size */
     if ((Mine & Theirs & DdMipTexture) == DdMipTexture)
     {
-        if (Surface->Width < Other->Width || Surface->Height < Other->Height)
+        if (Surface->Shared->Width < Other->Shared->Width || Surface->Shared->Height < Other->Shared->Height)
             return DDERR_CANNOTATTACHSURFACE;
     }
-    else if (((Mine ^ Theirs) & DDSCAPS_TEXTURE) == 0 && (Surface->Width != Other->Width || Surface->Height != Other->Height))
+    else if (((Mine ^ Theirs) & DDSCAPS_TEXTURE) == 0 &&
+             (Surface->Shared->Width != Other->Shared->Width || Surface->Shared->Height != Other->Shared->Height))
     {
         return DDERR_CANNOTATTACHSURFACE;
     }
@@ -489,11 +490,11 @@ DdTradeMemory(
     _Inout_ DdSurface* First,
     _Inout_ DdSurface* Second)
 {
-    DdTrade(First->Bits, Second->Bits);
-    DdTrade(First->Section, Second->Section);
+    DdTrade(First->Shared->Bits, Second->Shared->Bits);
+    DdTrade(First->Shared->Section, Second->Shared->Section);
     DdTrade(First->Resource, Second->Resource);
-    DdTrade(First->SystemResource, Second->SystemResource);
-    DdTrade(First->DriverPending, Second->DriverPending);
+    DdTrade(First->Shared->SystemResource, Second->Shared->SystemResource);
+    DdTrade(First->Shared->DriverPending, Second->Shared->DriverPending);
 }
 
 HRESULT

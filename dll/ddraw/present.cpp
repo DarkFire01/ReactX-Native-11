@@ -292,7 +292,7 @@ DdOpenDisplayPrimary(
     if (Resource == nullptr)
         return E_OUTOFMEMORY;
     ZeroMemory(Resource, sizeof(*Resource));
-    Resource->Format = DdDriverFormat(&Primary->Format);
+    Resource->Format = DdDriverFormat(&Primary->Shared->Format);
     Resource->Pool = D3DDDIPOOL_VIDEOMEMORY;
     Resource->Flags.Primary = TRUE;
     Resource->Flags.SharedResource = TRUE;
@@ -347,12 +347,12 @@ DdStageInVideoMemory(
     D3DDDIARG_BLT Blt = {};
     HRESULT hr;
 
-    hr = DdCreateStagingResource(Hardware, Source->SystemResource->Format, To->right - To->left,
+    hr = DdCreateStagingResource(Hardware, Source->Shared->SystemResource->Format, To->right - To->left,
                                  To->bottom - To->top, Staging);
     if (FAILED(hr))
         return hr;
 
-    Blt.hSrcResource = Source->SystemResource->DriverResource;
+    Blt.hSrcResource = Source->Shared->SystemResource->DriverResource;
     Blt.SrcRect = *From;
     Blt.hDstResource = Staging->DriverResource;
     SetRect(&Blt.DstRect, 0, 0, To->right - To->left, To->bottom - To->top);
@@ -527,7 +527,7 @@ DdPresentThroughDwm(
     PDD_GET_WINDOW_SURFACE GetWindowSurface = DdWindowSurfaceExport();
     DdHardware* Hardware = Primary->Driver->Hardware;
     D3DKMT_PRESENT* Present = &Hardware->Present;
-    DXGI_FORMAT Format = DdDxgiFromDirect3D(DdDriverFormat(&Primary->Format));
+    DXGI_FORMAT Format = DdDxgiFromDirect3D(DdDriverFormat(&Primary->Shared->Format));
     WINDOWINFO Info = {};
     HANDLE Share = NULL;
     UINT64 UpdateId = 0;
@@ -598,14 +598,14 @@ DdPresentThroughDwm(
     if (Fill)
     {
         Present->Flags.ColorFill = TRUE;
-        Present->Color = DdPixelToArgb(&Primary->Format, FillValue);
+        Present->Color = DdPixelToArgb(&Primary->Shared->Format, FillValue);
         Present->pSrcSubRects = &Present->DstRect;
         hr = DdDriverPresent(Hardware, NULL, TargetResource, 0);
     }
     else
     {
         SourceResource = Source->Resource != nullptr ? Source->Resource->DriverResource
-                                                     : Source->SystemResource->DriverResource;
+                                                     : Source->Shared->SystemResource->DriverResource;
         Present->Flags.Blt = TRUE;
         Present->Flags.SrcRectValid = TRUE;
         Present->SrcRect = *From;
