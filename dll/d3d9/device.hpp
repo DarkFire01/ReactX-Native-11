@@ -199,6 +199,9 @@ public:
         _In_ UINT Slot,
         _In_opt_ HANDLE Resource);
 
+    VOID
+    WaitForWorker(VOID);
+
 private:
     VOID
     Advance(VOID);
@@ -208,9 +211,6 @@ private:
     WINAPI
     WorkerMain(
         _In_ VOID* Context);
-
-    VOID
-    WaitForWorker(VOID);
 
     VOID
     Run(

@@ -1311,7 +1311,14 @@ D9Device::DestroyDriverSurface(
     if (Resource->DriverResource == NULL)
         return;
 
-    DrainBatch();
+    /* Only a resource the batch still uses waits for the batch to run; any other waits for the worker alone */
+    if (Batch != nullptr)
+    {
+        if (Batch->IsReferenced(Resource->DriverResource))
+            Batch->Drain();
+        else
+            Batch->WaitForWorker();
+    }
     DeviceFunctions.pfnDestroyResource(DriverDevice, Resource->DriverResource);
     Resource->DriverResource = NULL;
 }
