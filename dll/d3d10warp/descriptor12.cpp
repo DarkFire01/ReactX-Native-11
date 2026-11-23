@@ -230,7 +230,7 @@ RxWarp12CreateDepthStencilView(
         View.FirstSlice = Args->Tex2D.FirstArraySlice;
         View.SliceCount = Args->Tex2D.ArraySize;
     }
-    View.Flags = Args->Flags;
+    View.Flags = (UINT16)Args->Flags;
     *RxWarp12TargetView(Descriptor) = View;
 }
 
@@ -248,13 +248,13 @@ RxWarp12CreateShaderResourceView(
 
     UNREFERENCED_PARAMETER(Device);
     Target->Stride = 0;
-    View.Mapping = Args->Shader4ComponentMapping & 0xFFF;
+    View.Mapping = (UINT16)(Args->Shader4ComponentMapping & 0xFFF);
     switch (Args->ResourceDimension)
     {
         case D3D12DDI_RD_BUFFER:
             View.FirstElement = (UINT)Args->Buffer.FirstElement;
             View.ElementCount = Args->Buffer.NumElements;
-            View.Flags = Args->Buffer.Flags;
+            View.Flags = (UINT16)Args->Buffer.Flags;
             Target->Stride = Args->Buffer.StructureByteStride;
             break;
         case D3D12DDI_RD_TEXTURE1D:
@@ -303,8 +303,17 @@ RxWarp12CreateUnorderedAccessView(
         case D3D12DDI_RD_BUFFER:
             View.FirstElement = (UINT)Args->Buffer.FirstElement;
             View.ElementCount = Args->Buffer.NumElements;
-            View.Flags = Args->Buffer.Flags;
+            View.Flags = (UINT16)Args->Buffer.Flags;
             Target->Stride = Args->Buffer.StructureByteStride;
+
+            /* The counter is four bytes of the counter resource */
+            if (Args->Buffer.hDrvCounterResource.pDrvPrivate != nullptr)
+            {
+                RxWarp12Resource *Counter = RxWarp12GetResource(Args->Buffer.hDrvCounterResource);
+
+                if (Counter->Storage.Memory != nullptr && Args->Buffer.CounterOffsetInBytes + 4 <= Counter->Storage.MemorySize)
+                    View.CounterMemory = reinterpret_cast<UINT *>(Counter->Storage.Memory + Args->Buffer.CounterOffsetInBytes);
+            }
             break;
         case D3D12DDI_RD_TEXTURE1D:
             View.MipSlice = Args->Tex1D.MipSlice;

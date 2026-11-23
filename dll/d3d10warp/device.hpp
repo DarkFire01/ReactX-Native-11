@@ -72,6 +72,7 @@ class RxWarpView
 {
 public:
     RxWarpResource *Resource = nullptr;
+    UINT *CounterMemory = nullptr;  /* Direct3D 12 keeps the counter in a resource of its own */
     DXGI_FORMAT Format = DXGI_FORMAT_UNKNOWN;
     D3D10DDIRESOURCE_TYPE Dimension = D3D10DDIRESOURCE_BUFFER;
     UINT MipSlice = 0;
@@ -80,9 +81,9 @@ public:
     UINT SliceCount = 1;
     UINT FirstElement = 0;
     UINT ElementCount = 0;
-    UINT Flags = 0;
     UINT Counter = 0;           /* append and consume, and counter buffers */
-    UINT Mapping = 0x1688;      /* Direct3D 12 component mapping, three bits per component: 0 to 3 pick, 4 and 5 force zero and one */
+    UINT16 Flags = 0;
+    UINT16 Mapping = 0x1688;    /* Direct3D 12 component mapping, three bits per component: 0 to 3 pick, 4 and 5 force zero and one */
 };
 
 class RxWarpBlendState

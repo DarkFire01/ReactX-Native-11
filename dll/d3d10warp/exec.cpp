@@ -2307,14 +2307,17 @@ RxWarpMachine::Access(
             {
                 if (!(Writers & (1u << Lane)))
                     continue;
+                UINT *Count = (Memory.View->CounterMemory != nullptr) ? Memory.View->CounterMemory : &Memory.View->Counter;
+
                 if (Opcode == D3D11_SB_OPCODE_IMM_ATOMIC_ALLOC)
                 {
-                    Result[Lane][0] = Memory.View->Counter++;
+                    Result[Lane][0] = *Count;
+                    *Count += 1;
                 }
                 else
                 {
-                    Memory.View->Counter--;
-                    Result[Lane][0] = Memory.View->Counter;
+                    *Count -= 1;
+                    Result[Lane][0] = *Count;
                 }
                 Result[Lane][1] = Result[Lane][2] = Result[Lane][3] = Result[Lane][0];
             }
