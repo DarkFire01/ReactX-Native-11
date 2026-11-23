@@ -8,6 +8,8 @@
 #include "dsound.hpp"
 
 #include <functiondiscoverykeys_devpkey.h>
+#include <mmsystem.h>
+#include <mmddk.h>
 #include <stdlib.h>
 
 /* The endpoint GUID DirectSound names a device by */
@@ -271,6 +273,180 @@ DsEnumerateEndpoints(
 
     CoTaskMemFree(DefaultId);
     Collection->Release();
+    return S_OK;
+}
+
+/* The kernel streaming interface behind an endpoint, without the property's "{N}." prefix */
+static
+WCHAR*
+DsEndpointInterface(
+    _In_ IMMDevice* Endpoint)
+{
+    static const PROPERTYKEY InterfaceKey = { { 0x233164C8, 0x1B2C, 0x4C7D, { 0xBC, 0x68, 0xB6, 0x71, 0x68, 0x7A, 0x25, 0x67 } }, 1 };
+    IPropertyStore* Store = nullptr;
+    WCHAR* Copy = nullptr;
+    PROPVARIANT Value;
+
+    if (FAILED(Endpoint->OpenPropertyStore(STGM_READ, &Store)))
+        return nullptr;
+    PropVariantInit(&Value);
+    if (SUCCEEDED(Store->GetValue(InterfaceKey, &Value)) && Value.vt == VT_LPWSTR)
+    {
+        const WCHAR* Path = Value.pwszVal;
+        const WCHAR* Brace = wcschr(Path, L'}');
+        SIZE_T Length;
+
+        if (Path[0] == L'{' && Brace != nullptr && Brace[1] == L'.')
+            Path = Brace + 2;
+        Length = wcslen(Path) + 1;
+        Copy = static_cast<WCHAR*>(HeapAlloc(GetProcessHeap(), 0, Length * sizeof(*Copy)));
+        if (Copy != nullptr)
+            memcpy(Copy, Path, Length * sizeof(*Copy));
+    }
+    PropVariantClear(&Value);
+    Store->Release();
+    return Copy;
+}
+
+/* The waveOut or waveIn index whose function instance is this endpoint, or all ones */
+static
+ULONG
+DsEndpointWaveId(
+    _In_ BOOLEAN Capture,
+    _In_z_ const WCHAR* EndpointId)
+{
+    UINT Count = Capture ? waveInGetNumDevs() : waveOutGetNumDevs();
+
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        ULONG Size = 0;
+        WCHAR* Instance;
+        BOOLEAN Same;
+
+        if (Capture)
+        {
+            if (waveInMessage(reinterpret_cast<HWAVEIN>(static_cast<UINT_PTR>(Index)), DRV_QUERYFUNCTIONINSTANCEIDSIZE,
+                              reinterpret_cast<DWORD_PTR>(&Size), 0) != MMSYSERR_NOERROR)
+            {
+                continue;
+            }
+        }
+        else if (waveOutMessage(reinterpret_cast<HWAVEOUT>(static_cast<UINT_PTR>(Index)), DRV_QUERYFUNCTIONINSTANCEIDSIZE,
+                                reinterpret_cast<DWORD_PTR>(&Size), 0) != MMSYSERR_NOERROR)
+        {
+            continue;
+        }
+        if (Size == 0)
+            continue;
+        Instance = static_cast<WCHAR*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size));
+        if (Instance == nullptr)
+            return 0xFFFFFFFF;
+        if (Capture)
+            waveInMessage(reinterpret_cast<HWAVEIN>(static_cast<UINT_PTR>(Index)), DRV_QUERYFUNCTIONINSTANCEID,
+                          reinterpret_cast<DWORD_PTR>(Instance), Size);
+        else
+            waveOutMessage(reinterpret_cast<HWAVEOUT>(static_cast<UINT_PTR>(Index)), DRV_QUERYFUNCTIONINSTANCEID,
+                           reinterpret_cast<DWORD_PTR>(Instance), Size);
+        Same = wcscmp(Instance, EndpointId) == 0;
+        HeapFree(GetProcessHeap(), 0, Instance);
+        if (Same)
+            return Index;
+    }
+    return 0xFFFFFFFF;
+}
+
+VOID
+DsFreeDeviceRecords(
+    _In_reads_opt_(Count) DsDeviceRecord* Records,
+    _In_ ULONG Count)
+{
+    if (Records == nullptr)
+        return;
+    for (ULONG Index = 0; Index < Count; Index++)
+    {
+        CoTaskMemFree(Records[Index].Module);
+        HeapFree(GetProcessHeap(), 0, Records[Index].Interface);
+    }
+    HeapFree(GetProcessHeap(), 0, Records);
+}
+
+/* Every active render endpoint, then every active capture endpoint, as the device property set describes them */
+HRESULT
+DsListDeviceRecords(
+    _Outptr_result_buffer_(*Count) DsDeviceRecord** Records,
+    _Out_ ULONG* Count)
+{
+    IMMDeviceEnumerator* Enumerator = nullptr;
+    DsDeviceRecord* List = nullptr;
+    ULONG Used = 0;
+    ULONG Room = 0;
+    HRESULT hr;
+
+    *Records = nullptr;
+    *Count = 0;
+    hr = DsEnumerator(&Enumerator);
+    if (FAILED(hr))
+        return hr;
+
+    for (UINT Pass = 0; Pass < 2 && SUCCEEDED(hr); Pass++)
+    {
+        IMMDeviceCollection* Collection = nullptr;
+        UINT Total = 0;
+
+        if (FAILED(Enumerator->EnumAudioEndpoints(Pass == 0 ? eRender : eCapture, DEVICE_STATE_ACTIVE, &Collection)))
+            continue;
+        Collection->GetCount(&Total);
+        for (UINT Index = 0; Index < Total && SUCCEEDED(hr); Index++)
+        {
+            IMMDevice* Endpoint = nullptr;
+            DsDeviceRecord* Record;
+
+            if (FAILED(Collection->Item(Index, &Endpoint)))
+                continue;
+            if (Used == Room)
+            {
+                ULONG Grown = Room == 0 ? 4 : Room * 2;
+                VOID* Bigger = List == nullptr ?
+                    HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Grown * sizeof(*List)) :
+                    HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, List, Grown * sizeof(*List));
+
+                if (Bigger == nullptr)
+                {
+                    Endpoint->Release();
+                    hr = E_OUTOFMEMORY;
+                    break;
+                }
+                List = static_cast<DsDeviceRecord*>(Bigger);
+                Room = Grown;
+            }
+            Record = &List[Used];
+            Record->Capture = Pass != 0;
+            if (SUCCEEDED(DsEndpointGuid(Endpoint, &Record->Id)) && SUCCEEDED(Endpoint->GetId(&Record->Module)))
+            {
+                DsEndpointName(Endpoint, Record->Name, _countof(Record->Name));
+                Record->Interface = DsEndpointInterface(Endpoint);
+                if (Record->Interface != nullptr && !Record->Capture)
+                    CharUpperW(Record->Interface);
+                Record->WaveId = DsEndpointWaveId(Record->Capture, Record->Module);
+                Used++;
+            }
+            else
+            {
+                CoTaskMemFree(Record->Module);
+                ZeroMemory(Record, sizeof(*Record));
+            }
+            Endpoint->Release();
+        }
+        Collection->Release();
+    }
+    Enumerator->Release();
+    if (FAILED(hr))
+    {
+        DsFreeDeviceRecords(List, Used);
+        return hr;
+    }
+    *Records = List;
+    *Count = Used;
     return S_OK;
 }
 

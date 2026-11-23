@@ -715,6 +715,37 @@ DsEnumerateEndpoints(
     _In_opt_ LPDSENUMCALLBACKW CallbackW,
     _In_opt_ PVOID Context);
 
+/* One endpoint as the DirectSoundPrivate device set describes it */
+struct DsDeviceRecord
+{
+    GUID Id;
+    BOOLEAN Capture;
+    WCHAR Name[256];
+    WCHAR* Module;
+    WCHAR* Interface;
+    ULONG WaveId;
+};
+
+HRESULT
+DsListDeviceRecords(
+    _Outptr_result_buffer_(*Count) DsDeviceRecord** Records,
+    _Out_ ULONG* Count);
+
+VOID
+DsFreeDeviceRecords(
+    _In_reads_opt_(Count) DsDeviceRecord* Records,
+    _In_ ULONG Count);
+
+/* private.cpp */
+
+/* The class that hands out the device configuration property sets */
+extern const CLSID DsPrivateClass;
+
+HRESULT
+DsCreatePrivate(
+    _In_ REFIID Iid,
+    _COM_Outptr_ void** Object);
+
 HRESULT
 DsResolveDeviceId(
     _In_ LPCGUID Source,
