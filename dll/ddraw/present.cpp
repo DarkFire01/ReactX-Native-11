@@ -329,28 +329,27 @@ DdFlushDriver(
         Hardware->DeviceFunctions.pfnFlush(Hardware->DriverDevice);
 }
 
-/* Copies the source rectangle into a video memory resource the size of the target rectangle */
+/* Copies the source rectangle unscaled into a video memory resource of its size, which the present then stretches */
 static
 HRESULT
 DdStageInVideoMemory(
     _In_ DdHardware* Hardware,
     _In_ DdSurface* Source,
     _In_ const RECT* From,
-    _In_ const RECT* To,
     _Out_ DdResource* Staging)
 {
     D3DDDIARG_BLT Blt = {};
     HRESULT hr;
 
-    hr = DdCreateStagingResource(Hardware, Source->Shared->SystemResource->Format, To->right - To->left,
-                                 To->bottom - To->top, Staging);
+    hr = DdCreateStagingResource(Hardware, Source->Shared->SystemResource->Format, From->right - From->left,
+                                 From->bottom - From->top, Staging);
     if (FAILED(hr))
         return hr;
 
     Blt.hSrcResource = Source->Shared->SystemResource->DriverResource;
     Blt.SrcRect = *From;
     Blt.hDstResource = Staging->DriverResource;
-    SetRect(&Blt.DstRect, 0, 0, To->right - To->left, To->bottom - To->top);
+    SetRect(&Blt.DstRect, 0, 0, From->right - From->left, From->bottom - From->top);
     hr = Hardware->DeviceFunctions.pfnBlt(Hardware->DriverDevice, &Blt);
     if (SUCCEEDED(hr))
         DdFlushDriver(Hardware);
@@ -610,13 +609,13 @@ DdPresentThroughDwm(
         Stretched = To->right - To->left != From->right - From->left || To->bottom - To->top != From->bottom - From->top;
         if (Source->Resource == nullptr && Stretched)
         {
-            hr = DdStageInVideoMemory(Hardware, Source, From, To, &Staging);
+            hr = DdStageInVideoMemory(Hardware, Source, From, &Staging);
             if (FAILED(hr))
             {
                 ZeroMemory(Present, sizeof(*Present));
                 return hr;
             }
-            SetRect(&Present->SrcRect, 0, 0, To->right - To->left, To->bottom - To->top);
+            SetRect(&Present->SrcRect, 0, 0, From->right - From->left, From->bottom - From->top);
             SourceResource = Staging.DriverResource;
         }
 
