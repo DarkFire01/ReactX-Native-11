@@ -211,8 +211,23 @@ DiDevice::DefaultGetProperty(
         case 7:
             Value->dwData = Gain;
             return DI_OK;
+        case 8:
+        {
+            DIDEVICESTATE Status;
+
+            Result = CreateEffectDriver();
+            if (FAILED(Result))
+                return Result;
+            EnterCriticalSection(&Lock);
+            ZeroMemory(&Status, sizeof(Status));
+            Status.dwSize = sizeof(Status);
+            Result = EffectDriver->GetForceFeedbackState(&DriverId, &Status);
+            Value->dwData = Status.dwLoad;
+            LeaveCriticalSection(&Lock);
+            return Result;
+        }
         case 9:
-            if (CapsFlags & DIDC_FORCEFEEDBACK)
+            if (ForceFeedbackCaps & DIDC_FORCEFEEDBACK)
             {
                 Value->dwData = AutoCenter;
                 return DI_OK;
@@ -299,12 +314,21 @@ DiDevice::DefaultSetProperty(
             if (Data & 0xFFFF0000)
                 return E_INVALIDARG;
             Gain = Data;
+            RefreshGain();
             return DI_OK;
         case 9:
             if (Data & ~1u)
                 return E_INVALIDARG;
-            if (!(CapsFlags & DIDC_FORCEFEEDBACK))
+            if (!(ForceFeedbackCaps & DIDC_FORCEFEEDBACK))
                 return E_NOTIMPL;
+
+            /* Turning centering off needs the driver to hear it at the next acquire */
+            if (Data == DIPROPAUTOCENTER_OFF)
+            {
+                Result = CreateEffectDriver();
+                if (FAILED(Result))
+                    return Result;
+            }
             AutoCenter = Data;
             return DI_OK;
         case 22:

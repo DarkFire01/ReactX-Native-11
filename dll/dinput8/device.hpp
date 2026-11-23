@@ -34,7 +34,7 @@ enum DI_STATE_COPY
     DiCopyWhole,
 };
 
-class DiDevice : public DiObject, public IDirectInputDevice8W
+class DiDevice : public DiObject, public IDirectInputDevice8W, public RxDiEffectHost
 {
 public:
     class AnsiFace : public IDirectInputDevice8A
@@ -302,6 +302,16 @@ public:
     DWORD Gain;
     DWORD AutoCenter;
 
+    /* Force feedback: what the driver offers, the driver itself and the effects made on it */
+    RX_DI_EFFECT_ENTRY* EffectList;
+    ULONG EffectCount;
+    DWORD ForceFeedbackCaps;
+    DIFFDEVICEATTRIBUTES FFAttributes;
+    RxDiShepherd* EffectDriver;
+    RX_DI_FF_HANDLE DriverId;
+    PVOID* CreatedEffects;
+    ULONG CreatedEffectCount;
+
     DiDevice(
         _In_opt_ IUnknown* Outer);
 
@@ -487,6 +497,76 @@ public:
     HRESULT
     InternalUnacquire(VOID);
 
+    /* RxDiEffectHost */
+
+    VOID
+    EnterHost(VOID) override
+    {
+        EnterCriticalSection(&Lock);
+    }
+
+    VOID
+    LeaveHost(VOID) override
+    {
+        LeaveCriticalSection(&Lock);
+    }
+
+    VOID
+    HoldHost(VOID) override
+    {
+        Hold();
+    }
+
+    VOID
+    UnholdHost(VOID) override
+    {
+        Unhold();
+    }
+
+    DWORD
+    HostVersion(VOID) override
+    {
+        return Version;
+    }
+
+    HRESULT
+    CheckExclusive(VOID) override;
+
+    RxDiShepherd*
+    HostDriver(VOID) override
+    {
+        return EffectDriver;
+    }
+
+    DWORD
+    HostDriverTag(VOID) override
+    {
+        return DriverId.Tag;
+    }
+
+    BOOLEAN
+    FindEffect(
+        _In_ REFGUID Guid,
+        _Out_ RX_DI_EFFECT_ENTRY* Entry) override;
+
+    HRESULT
+    ListEffect(
+        _In_ PVOID Effect) override;
+
+    BOOLEAN
+    UnlistEffect(
+        _In_ PVOID Effect) override;
+
+    HRESULT
+    ConvertObjects(
+        _In_ ULONG Count,
+        _Inout_updates_(Count) PDWORD Values,
+        _In_ DWORD How) override;
+
+protected:
+    VOID
+    OnFinalRelease(VOID) override;
+
 private:
     VOID
     Reset(VOID);
@@ -571,6 +651,20 @@ private:
     HRESULT
     GetImageInfoCore(
         _Inout_ LPDIDEVICEIMAGEINFOHEADERW Header);
+
+    /* Reads the effects the driver lists, run once the device is initialized */
+    HRESULT
+    LoadEffects(VOID);
+
+    HRESULT
+    CreateEffectDriver(VOID);
+
+    /* Tells the driver the device is acquired exclusively and restores its settings */
+    HRESULT
+    AcquireForceFeedback(VOID);
+
+    VOID
+    RefreshGain(VOID);
 
     friend class AnsiFace;
 };

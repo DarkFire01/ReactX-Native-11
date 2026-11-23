@@ -54,6 +54,14 @@ DiDevice::DiDevice(
     MaxBufferSize = DI_DEFAULT_MAX_BUFFER;
     Gain = DI_DEFAULT_GAIN;
     AutoCenter = 1;
+    EffectList = nullptr;
+    EffectCount = 0;
+    ForceFeedbackCaps = 0;
+    ZeroMemory(&FFAttributes, sizeof(FFAttributes));
+    EffectDriver = nullptr;
+    ZeroMemory(&DriverId, sizeof(DriverId));
+    CreatedEffects = nullptr;
+    CreatedEffectCount = 0;
 }
 
 DiDevice::~DiDevice()
@@ -61,6 +69,7 @@ DiDevice::~DiDevice()
     if (Flags & DI_DEV_ACQUIRED)
         InternalUnacquire();
     Reset();
+    free(CreatedEffects);
     DeleteCriticalSection(&Lock);
 }
 
@@ -97,6 +106,8 @@ DiDevice::Reset(VOID)
         CloseHandle(Event);
     Event = nullptr;
     Emulation = nullptr;
+    delete EffectDriver;
+    EffectDriver = nullptr;
     delete Backend;
     Backend = nullptr;
     free(NativeState);
@@ -118,6 +129,12 @@ DiDevice::Reset(VOID)
     MaxBufferSize = DI_DEFAULT_MAX_BUFFER;
     Gain = DI_DEFAULT_GAIN;
     AutoCenter = 1;
+    free(EffectList);
+    EffectList = nullptr;
+    EffectCount = 0;
+    ForceFeedbackCaps = 0;
+    ZeroMemory(&FFAttributes, sizeof(FFAttributes));
+    ZeroMemory(&DriverId, sizeof(DriverId));
 }
 
 STDMETHODIMP
@@ -157,6 +174,11 @@ DiDevice::Initialize(
         Result = DIERR_ACQUIRED;
         goto Exit;
     }
+    if (CreatedEffectCount != 0)
+    {
+        Result = DIERR_HASEFFECTS;
+        goto Exit;
+    }
 
     Reset();
     Result = Create(Guid, &Created);
@@ -194,6 +216,9 @@ DiDevice::Initialize(
     CapsFlags = Emulation != nullptr && (Emulation->Flags & DI_EM_ACTIVE) ? DIDC_EMULATED : 0;
     Instance = Guid;
     Version = NewVersion;
+
+    /* A device without a force feedback driver simply lists no effects */
+    LoadEffects();
     Result = DI_OK;
 
 Exit:
@@ -225,11 +250,17 @@ DiDevice::GetCapabilities(
     Caps->dwFlags |= CapsFlags;
     if (Flags & DI_DEV_POLLED_FORMAT)
         Caps->dwFlags |= DIDC_POLLEDDATAFORMAT;
+    Caps->dwFlags |= ForceFeedbackCaps;
     if (Caps->dwSize >= sizeof(DIDEVCAPS))
     {
         DIDRIVERVERSIONS Versions = { sizeof(Versions) };
 
-        Backend->GetVersions(&Versions);
+        Caps->dwFFSamplePeriod = FFAttributes.dwFFSamplePeriod;
+        Caps->dwFFMinTimeResolution = FFAttributes.dwFFMinTimeResolution;
+
+        /* The effect driver knows the versions better than the device does */
+        if (FAILED(CreateEffectDriver()) || FAILED(EffectDriver->GetVersions(&Versions)))
+            Backend->GetVersions(&Versions);
         Caps->dwFirmwareRevision = Versions.dwFirmwareRevision;
         Caps->dwHardwareRevision = Versions.dwHardwareRevision;
         Caps->dwFFDriverVersion = Versions.dwFFDriverVersion;
@@ -537,127 +568,6 @@ DiDevice::AnsiFace::EnumObjects(
     Enum.Callback = Callback;
     Enum.Context = Context;
     return Owner->EnumObjects(DiAnsiObjectThunk, &Enum, Flags);
-}
-
-/* Force feedback answers for devices without an effect driver */
-
-STDMETHODIMP
-DiDevice::CreateEffect(
-    _In_ REFGUID Effect,
-    _In_opt_ LPCDIEFFECT Params,
-    _Out_ LPDIRECTINPUTEFFECT* Created,
-    _In_opt_ LPUNKNOWN Outer)
-{
-    UNREFERENCED_PARAMETER(Effect);
-    UNREFERENCED_PARAMETER(Params);
-    UNREFERENCED_PARAMETER(Outer);
-    if (Created == nullptr)
-        return E_POINTER;
-    *Created = nullptr;
-    if (Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DIERR_UNSUPPORTED;
-}
-
-STDMETHODIMP
-DiDevice::EnumEffects(
-    _In_ LPDIENUMEFFECTSCALLBACKW Callback,
-    _In_opt_ VOID* Context,
-    _In_ DWORD Type)
-{
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Type);
-    if (Callback == nullptr)
-        return E_INVALIDARG;
-    if (Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DI_OK;
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::EnumEffects(
-    _In_ LPDIENUMEFFECTSCALLBACKA Callback,
-    _In_opt_ VOID* Context,
-    _In_ DWORD Type)
-{
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Type);
-    if (Callback == nullptr)
-        return E_INVALIDARG;
-    if (Owner->Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DI_OK;
-}
-
-STDMETHODIMP
-DiDevice::GetEffectInfo(
-    _Inout_ LPDIEFFECTINFOW Info,
-    _In_ REFGUID Effect)
-{
-    UNREFERENCED_PARAMETER(Effect);
-    if (Info == nullptr)
-        return E_POINTER;
-    if (Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DIERR_DEVICENOTREG;
-}
-
-STDMETHODIMP
-DiDevice::AnsiFace::GetEffectInfo(
-    _Inout_ LPDIEFFECTINFOA Info,
-    _In_ REFGUID Effect)
-{
-    UNREFERENCED_PARAMETER(Effect);
-    if (Info == nullptr)
-        return E_POINTER;
-    if (Owner->Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DIERR_DEVICENOTREG;
-}
-
-STDMETHODIMP
-DiDevice::GetForceFeedbackState(
-    _Out_ LPDWORD State)
-{
-    if (State == nullptr)
-        return E_POINTER;
-    *State = 0;
-    if (Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DIERR_UNSUPPORTED;
-}
-
-STDMETHODIMP
-DiDevice::SendForceFeedbackCommand(
-    _In_ DWORD Command)
-{
-    UNREFERENCED_PARAMETER(Command);
-    if (Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DIERR_UNSUPPORTED;
-}
-
-STDMETHODIMP
-DiDevice::EnumCreatedEffectObjects(
-    _In_ LPDIENUMCREATEDEFFECTOBJECTSCALLBACK Callback,
-    _In_opt_ VOID* Context,
-    _In_ DWORD EnumFlags)
-{
-    UNREFERENCED_PARAMETER(Context);
-    if (Callback == nullptr || EnumFlags != 0)
-        return E_INVALIDARG;
-    return DI_OK;
-}
-
-STDMETHODIMP
-DiDevice::Escape(
-    _Inout_ LPDIEFFESCAPE Escape)
-{
-    if (Escape == nullptr)
-        return E_POINTER;
-    if (Backend == nullptr)
-        return DIERR_NOTINITIALIZED;
-    return DIERR_UNSUPPORTED;
 }
 
 HRESULT

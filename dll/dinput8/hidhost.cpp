@@ -392,6 +392,30 @@ public:
         return Inner->RunControlPanel(Window, Flags);
     }
 
+    HRESULT
+    CreateEffectDriver(
+        _Outptr_result_maybenull_ RxDiShepherd** Driver) override
+    {
+        return Inner->CreateEffectDriver(Driver);
+    }
+
+    HRESULT
+    GetFFConfigKey(
+        _In_ REGSAM Access,
+        _Out_ HKEY* Key) override
+    {
+        return Inner->GetFFConfigKey(Access, Key);
+    }
+
+    HRESULT
+    SendDeviceData(
+        _In_reads_(*Count) LPCDIDEVICEOBJECTDATA Data,
+        _Inout_ LPDWORD Count,
+        _In_ DWORD Flags) override
+    {
+        return Inner->SendDeviceData(Data, Count, Flags);
+    }
+
     /*
      * Plain HID devices have nothing to map and HID keyboards and mice map like the system ones.
      * Game controllers list their axes, hats and buttons with the kind of axis each one is.

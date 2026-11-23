@@ -14,6 +14,8 @@
 #include <dinput.h>
 #include <dinputd.h>
 
+#include "../dinput/effecthost.hpp"
+
 /* One device object as a backend describes it */
 struct DI_OBJECT
 {
@@ -181,6 +183,42 @@ public:
     RunControlPanel(
         _In_opt_ HWND Window,
         _In_ DWORD Flags) = 0;
+
+    /* The force feedback driver of the device, created on first use */
+    virtual
+    HRESULT
+    CreateEffectDriver(
+        _Outptr_result_maybenull_ RxDiShepherd** Driver)
+    {
+        *Driver = nullptr;
+        return E_NOTIMPL;
+    }
+
+    /* The registry key listing the effects; S_FALSE asks for the driver to be created first */
+    virtual
+    HRESULT
+    GetFFConfigKey(
+        _In_ REGSAM Access,
+        _Out_ HKEY* Key)
+    {
+        UNREFERENCED_PARAMETER(Access);
+        *Key = nullptr;
+        return E_NOTIMPL;
+    }
+
+    /* Output data, with object ids where the application wrote offsets */
+    virtual
+    HRESULT
+    SendDeviceData(
+        _In_reads_(*Count) LPCDIDEVICEOBJECTDATA Data,
+        _Inout_ LPDWORD Count,
+        _In_ DWORD Flags)
+    {
+        UNREFERENCED_PARAMETER(Data);
+        UNREFERENCED_PARAMETER(Flags);
+        *Count = 0;
+        return E_NOTIMPL;
+    }
 
     /* Maps the actions no stored map covered to the device's own idea of them */
     virtual

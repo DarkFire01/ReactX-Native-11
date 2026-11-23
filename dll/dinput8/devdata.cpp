@@ -677,6 +677,11 @@ DiDevice::Acquire()
     if (FAILED(Result))
         goto Exit;
 
+    /* The system keeps the exclusive claim when the effect driver refuses */
+    Result = AcquireForceFeedback();
+    if (FAILED(Result))
+        goto Exit;
+
     Result = Backend->Acquire();
     if (FAILED(Result))
         goto Undo;
@@ -739,6 +744,13 @@ DiDevice::InternalUnacquire(VOID)
     Foreground = (Cooperation & DISCL_FOREGROUND) != 0;
     if (Foreground && IsIconic(Window))
         Flags |= DI_DEV_ICONIC;
+
+    /* Effects downloaded under this acquisition are gone, a new tag makes them download again */
+    if (EffectDriver != nullptr && (Cooperation & DISCL_EXCLUSIVE))
+    {
+        EffectDriver->SetForceFeedbackState(&DriverId, DISFFC_RESET);
+        DriverId.Tag = 0;
+    }
     Result = ReleaseEmulation();
     if (LostResult == DIERR_INPUTLOST && Event != nullptr)
         SetEvent(Event);
@@ -946,22 +958,52 @@ DiDevice::SendDeviceData(
     _Inout_ LPDWORD Count,
     _In_ DWORD SendFlags)
 {
+    LPDIDEVICEOBJECTDATA Records = nullptr;
+    const DI_FORMAT* Native;
     HRESULT Result;
 
-    UNREFERENCED_PARAMETER(ObjectSize);
-    UNREFERENCED_PARAMETER(Data);
-    UNREFERENCED_PARAMETER(SendFlags);
     EnterCriticalSection(&Lock);
+    if (SendFlags & ~DISDD_CONTINUE)
+    {
+        Result = E_INVALIDARG;
+        goto Exit;
+    }
+
+    /* Other record sizes are quietly accepted and nothing is sent */
+    if (ObjectSize != sizeof(DIDEVICEOBJECTDATA))
+    {
+        Result = DI_OK;
+        goto Exit;
+    }
     if (!(Flags & DI_DEV_ACQUIRED))
     {
         Result = LostResult;
+        goto Exit;
     }
-    else
+
+    /* The device gets a copy naming objects by type, the caller's records stay as they were */
+    if (*Count != 0)
     {
-        if (Count != nullptr)
-            *Count = 0;
-        Result = E_NOTIMPL;
+        Records = static_cast<LPDIDEVICEOBJECTDATA>(malloc(*Count * sizeof(*Records)));
+        if (Records == nullptr)
+        {
+            Result = E_OUTOFMEMORY;
+            goto Exit;
+        }
+        CopyMemory(Records, Data, *Count * sizeof(*Records));
     }
+    Native = Backend->Format();
+    for (DWORD Index = 0; Index < *Count; Index++)
+    {
+        DWORD Offset = Records[Index].dwOfs;
+        LONG Object = (ObjectByOffset != nullptr && Offset < AppDataSize) ? ObjectByOffset[Offset] : -1;
+
+        Records[Index].dwOfs = Object >= 0 ? Native->Objects[Object].Type : 0;
+    }
+    Result = Backend->SendDeviceData(Records, Count, SendFlags);
+    free(Records);
+
+Exit:
     LeaveCriticalSection(&Lock);
     return Result;
 }

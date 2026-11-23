@@ -4,6 +4,7 @@ nt_add_usermode_dll(dinput8
         actionmap.cpp
         apps.cpp
         devdata.cpp
+        devff.cpp
         devmap.cpp
         device.cpp
         devprop.cpp
@@ -17,6 +18,7 @@ nt_add_usermode_dll(dinput8
         main.cpp
         mouse.cpp
         dinput8.rc
+        ../dinput/effect.cpp
         ../dinput/helpers.cpp
         ../dinput/hid.cpp
         ../dinput/joycfg.cpp

@@ -150,6 +150,20 @@ public:
         return Controller->Release();
     }
 
+    /* Keeps the memory of the object while something inside the library still points at it */
+    VOID
+    Hold(VOID)
+    {
+        InterlockedIncrement(&Holds);
+    }
+
+    VOID
+    Unhold(VOID)
+    {
+        if (InterlockedDecrement(&Holds) == 0)
+            delete this;
+    }
+
 protected:
     class Unknown : public IUnknown
     {
@@ -171,6 +185,14 @@ protected:
     Unknown Inner;
     IUnknown* Controller;
     LONG Refs;
+    LONG Holds;
+
+    /* Runs once when the last application reference goes away, before the hold of those references drops */
+    virtual
+    VOID
+    OnFinalRelease(VOID)
+    {
+    }
 
     /* An IID no static face answers, for objects created on demand */
     virtual

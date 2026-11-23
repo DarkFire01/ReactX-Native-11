@@ -203,6 +203,7 @@ DiObject::DiObject(
     Inner.Owner = this;
     Controller = Outer != nullptr ? Outer : &Inner;
     Refs = 1;
+    Holds = 1;
     DiModuleAddRef();
 }
 
@@ -234,17 +235,28 @@ DiObject::Unknown::QueryInterface(
 STDMETHODIMP_(ULONG)
 DiObject::Unknown::AddRef()
 {
+    /* An object past its final release stays there */
+    if (Owner->Refs == 0)
+        return 0;
     return InterlockedIncrement(&Owner->Refs);
 }
 
 STDMETHODIMP_(ULONG)
 DiObject::Unknown::Release()
 {
-    ULONG Count = InterlockedDecrement(&Owner->Refs);
+    DiObject* Self = Owner;
+    LONG Count = InterlockedDecrement(&Self->Refs);
 
-    if (Count == 0)
-        delete Owner;
-    return Count;
+    if (Count > 0)
+        return Count;
+    if (Count < 0)
+    {
+        InterlockedIncrement(&Self->Refs);
+        return 0;
+    }
+    Self->OnFinalRelease();
+    Self->Unhold();
+    return 0;
 }
 
 HRESULT
