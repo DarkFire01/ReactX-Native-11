@@ -1165,10 +1165,14 @@ D9Device::ResetCommon(
         return D3DERR_INVALIDCALL;
     }
 
-    /* The depth buffer goes before the back buffers, then the device gives up any display it owned; the plain
-       object's device also starts over with its batch and drawing buffers */
+    /* The plain object's device starts over with its batch and drops the video copies of its managed resources;
+       the depth buffer goes before the back buffers, then the device gives up any display it owned */
     if (!IsEx)
+    {
         StopBatch();
+        for (D9ManagedResource* Resource = ManagedResources; Resource != nullptr; Resource = Resource->NextManaged)
+            Resource->Evict();
+    }
     UnpinTargets();
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
