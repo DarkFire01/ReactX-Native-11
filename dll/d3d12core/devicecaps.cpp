@@ -8,6 +8,8 @@
 #include "objects.hpp"
 #include "formatsupport12.hpp"
 
+#include <dxcore_interface.h>
+
 /* Feature numbers the runtime asks the driver to enable */
 constexpr UINT RxFeatureVideo12 = D3D12DDI_FEATURE_0020_VIDEO;
 constexpr UINT RxFeatureSessions12 = D3D12DDI_FEATURE_0030_CONTENT_PROTECTION_RESOURCES;
@@ -887,11 +889,75 @@ RxDevice12::QueryHeapCaps()
     return S_OK;
 }
 
+/* The DXCore beside this module, or the system one */
+static
+HMODULE
+RxLoadCoreAdapterModule(VOID)
+{
+    WCHAR Path[MAX_PATH];
+    HMODULE Self = NULL;
+    HMODULE Module;
+    PWSTR Slash;
+
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&RxLoadCoreAdapterModule), &Self) &&
+        GetModuleFileNameW(Self, Path, _countof(Path)) != 0 && (Slash = wcsrchr(Path, L'\\')) != nullptr &&
+        wcscpy_s(Slash + 1, _countof(Path) - (Slash + 1 - Path), L"dxcore.dll") == 0)
+    {
+        Module = LoadLibraryExW(Path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (Module != NULL)
+            return Module;
+    }
+
+    return LoadLibraryExW(L"dxcore.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
+
+/* Whether the DXCore adapter for a LUID preempts both compute and graphics finer than DMA buffers */
+static
+BOOLEAN
+RxCorePreemptsFinely(
+    _In_ const LUID& Luid)
+{
+    using PFN_RX_CREATE_ADAPTER_FACTORY = HRESULT (WINAPI*)(REFIID, void**);
+    PFN_RX_CREATE_ADAPTER_FACTORY CreateFactory;
+    IDXCoreAdapterFactory* Factory = nullptr;
+    IDXCoreAdapter* CoreAdapter = nullptr;
+    UINT32 Compute = 0;
+    UINT32 Graphics = 0;
+    BOOLEAN Fine = FALSE;
+    HMODULE Module;
+
+    Module = RxLoadCoreAdapterModule();
+    if (Module == NULL)
+        return FALSE;
+
+    CreateFactory = reinterpret_cast<PFN_RX_CREATE_ADAPTER_FACTORY>(GetProcAddress(Module, "DXCoreCreateAdapterFactory"));
+    if (CreateFactory != nullptr && SUCCEEDED(CreateFactory(__uuidof(IDXCoreAdapterFactory),
+                                                            reinterpret_cast<void**>(&Factory))))
+    {
+        if (SUCCEEDED(Factory->GetAdapterByLuid(Luid, __uuidof(IDXCoreAdapter), reinterpret_cast<void**>(&CoreAdapter))))
+        {
+            if (SUCCEEDED(CoreAdapter->GetProperty(DXCoreAdapterProperty::ComputePreemptionGranularity, sizeof(Compute),
+                                                   &Compute)) &&
+                SUCCEEDED(CoreAdapter->GetProperty(DXCoreAdapterProperty::GraphicsPreemptionGranularity,
+                                                   sizeof(Graphics), &Graphics)))
+            {
+                Fine = Compute > D3DKMDT_COMPUTE_PREEMPTION_DMA_BUFFER_BOUNDARY &&
+                       Graphics > D3DKMDT_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
+            }
+            CoreAdapter->Release();
+        }
+        Factory->Release();
+    }
+
+    FreeLibrary(Module);
+    return Fine;
+}
+
 /* The answers that follow the driver tables and come before the runtime's own objects */
 HRESULT
 RxDevice12::QueryLateCaps()
 {
-    D3DKMT_WDDM_1_2_CAPS Preemption = {};
     HRESULT hr;
 
     if (Level >= D3D_FEATURE_LEVEL_12_0 &&
@@ -1003,13 +1069,8 @@ RxDevice12::QueryLateCaps()
         return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
     }
 
-    /* Global realtime priority needs the kernel to preempt finer than whole DMA buffers */
-    if (SUCCEEDED(Adapter->QueryKernel(KMTQAITYPE_WDDM_1_2_CAPS, &Preemption, sizeof(Preemption))))
-    {
-        GlobalPriorityAvailable =
-            Preemption.PreemptionCaps.ComputePreemptionGranularity > D3DKMDT_COMPUTE_PREEMPTION_DMA_BUFFER_BOUNDARY &&
-            Preemption.PreemptionCaps.GraphicsPreemptionGranularity > D3DKMDT_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
-    }
+    /* Global realtime priority needs preemption finer than whole DMA buffers, as DXCore reports it */
+    GlobalPriorityAvailable = RxCorePreemptsFinely(Adapter->GetLuid());
 
     {
         const KmtThunks* Kmt = RxGetKmtThunks();
