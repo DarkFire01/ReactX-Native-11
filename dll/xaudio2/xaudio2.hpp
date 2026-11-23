@@ -48,6 +48,9 @@
 /* Operation set that applies a change at once */
 #define XA_OPSET_NOW            0
 
+/* How long an idle engine keeps running before XAUDIO2_STOP_ENGINE_WHEN_IDLE stops it, in 100 ns units */
+#define XA_IDLE_STOP_DELAY      20000000
+
 #define XA_MAX_CHANNELS         64
 #define XA_MIN_RATE             1000
 #define XA_MAX_RATE             384000
@@ -1249,6 +1252,25 @@ public:
     RenderThread(
         _In_ LPVOID Parameter);
 
+    /* Wakes the idle watcher when the active source voice count leaves or reaches zero */
+    VOID
+    NoteActiveChange(
+        _In_ UINT32 Before);
+
+    /* A new mastering voice also has the watcher look at the count, so an unused engine stops too */
+    VOID
+    WakeIdleWatch(VOID)
+    {
+        if (IdleThread != nullptr)
+            SetEvent(IdleSignal);
+    }
+
+    static
+    DWORD
+    WINAPI
+    IdleWatch(
+        _In_ LPVOID Parameter);
+
     ExtensionFace Extension;
     UnknownFace Unknown;
     LONG References;
@@ -1283,4 +1305,10 @@ public:
     HANDLE ThreadStop;
     HANDLE RenderReady;
     DWORD RenderThreadId;
+
+    /* XAUDIO2_STOP_ENGINE_WHEN_IDLE: a watcher thread starts and stops the engine with source voice activity */
+    HANDLE IdleThread;
+    HANDLE IdleQuit;
+    HANDLE IdleSignal;
+    HANDLE IdleTimer;
 };

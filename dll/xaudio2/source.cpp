@@ -158,6 +158,7 @@ XaSourceVoice::Transition(
 {
     UINT32 Resamplers = NewState == XaPlayRunning && HasConverter ? 1 : 0;
     UINT32 Matrices = 0;
+    UINT32 Active = Engine->ActiveSources;
 
     if (NewState == XaPlayRunning)
         Matrices = SendCount + (Passthrough ? 1 : 0);
@@ -169,6 +170,7 @@ XaSourceVoice::Transition(
             Engine->ActiveSources += 1;
         else
             Engine->ActiveSources -= 1;
+        Engine->NoteActiveChange(Active);
     }
     Engine->ActiveResamplers = Engine->ActiveResamplers - CountedResamplers + Resamplers;
     Engine->ActiveMatrices = Engine->ActiveMatrices - CountedMatrices + Matrices;

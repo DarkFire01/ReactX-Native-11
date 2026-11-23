@@ -35,10 +35,26 @@ XaEngine::XaEngine()
     ThreadStop = nullptr;
     RenderReady = nullptr;
     RenderThreadId = 0;
+    IdleThread = nullptr;
+    IdleQuit = nullptr;
+    IdleSignal = nullptr;
+    IdleTimer = nullptr;
 }
 
 XaEngine::~XaEngine()
 {
+    if (IdleThread != nullptr)
+    {
+        SetEvent(IdleQuit);
+        WaitForSingleObject(IdleThread, INFINITE);
+        CloseHandle(IdleThread);
+    }
+    if (IdleTimer != nullptr)
+        CloseHandle(IdleTimer);
+    if (IdleSignal != nullptr)
+        CloseHandle(IdleSignal);
+    if (IdleQuit != nullptr)
+        CloseHandle(IdleQuit);
     StopRendering();
 
     /* Whatever the application left behind goes with the engine, senders first */
@@ -82,9 +98,77 @@ XaEngine::Initialize(
     ThreadStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (ThreadStop == nullptr)
         return HRESULT_FROM_WIN32(GetLastError());
+
+    /* Without the watcher the engine just keeps running, so a failure here is not fatal */
+    if ((Flags & XAUDIO2_STOP_ENGINE_WHEN_IDLE) != 0)
+    {
+        IdleQuit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        IdleSignal = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        IdleTimer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        if (IdleQuit != nullptr && IdleSignal != nullptr && IdleTimer != nullptr)
+            IdleThread = CreateThread(nullptr, 0, IdleWatch, this, 0, nullptr);
+        if (IdleThread == nullptr)
+            XaTrace(L"engine: no idle watcher (%lu)", GetLastError());
+        else
+            SetThreadPriority(IdleThread, THREAD_PRIORITY_BELOW_NORMAL);
+    }
     Initialized = TRUE;
     Started = TRUE;
     return S_OK;
+}
+
+VOID
+XaEngine::NoteActiveChange(
+    _In_ UINT32 Before)
+{
+    if (IdleThread != nullptr && (Before == 0) != (ActiveSources == 0))
+        SetEvent(IdleSignal);
+}
+
+DWORD
+WINAPI
+XaEngine::IdleWatch(
+    _In_ LPVOID Parameter)
+{
+    XaEngine* Engine = static_cast<XaEngine*>(Parameter);
+    HANDLE Waits[3] = { Engine->IdleQuit, Engine->IdleSignal, Engine->IdleTimer };
+    LARGE_INTEGER Delay;
+    BOOLEAN Armed = FALSE;
+
+    Delay.QuadPart = -static_cast<LONGLONG>(XA_IDLE_STOP_DELAY);
+    for (;;)
+    {
+        DWORD Wait = WaitForMultipleObjects(ARRAYSIZE(Waits), Waits, FALSE, INFINITE);
+
+        if (Wait == WAIT_OBJECT_0 + 1)
+        {
+            if (Armed)
+            {
+                CancelWaitableTimer(Engine->IdleTimer);
+                Armed = FALSE;
+            }
+            if (Engine->ActiveSources != 0)
+            {
+                Engine->StartEngine();
+            }
+            else
+            {
+                SetWaitableTimer(Engine->IdleTimer, &Delay, 0, nullptr, nullptr, FALSE);
+                Armed = TRUE;
+            }
+        }
+        else if (Wait == WAIT_OBJECT_0 + 2)
+        {
+            if (Armed && Engine->ActiveSources == 0)
+                Engine->StopEngine();
+            Armed = FALSE;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return 0;
 }
 
 HRESULT
@@ -496,6 +580,7 @@ XaEngine::CreateMasteringVoice(
         XaTrace(L"CreateMasteringVoice: endpoint unavailable (%08lX)", hr);
         CoTaskMemFree(Endpoint);
         Unlock();
+        WakeIdleWatch();
         return hr;
     }
     Rate = XaQuantumRate(Rate, QuantumDenominator);
@@ -505,6 +590,7 @@ XaEngine::CreateMasteringVoice(
     {
         CoTaskMemFree(Endpoint);
         Unlock();
+        WakeIdleWatch();
         return E_OUTOFMEMORY;
     }
     hr = NewMaster->Initialize(Flags & ~XAUDIO2_NO_VIRTUAL_AUDIO_CLIENT, Channels, Rate, Chain);
@@ -516,6 +602,7 @@ XaEngine::CreateMasteringVoice(
         NewMaster->Teardown();
         delete NewMaster;
         Unlock();
+        WakeIdleWatch();
         return hr;
     }
     LinkVoice(NewMaster);
@@ -525,6 +612,7 @@ XaEngine::CreateMasteringVoice(
     XaTrace(L"mastering voice %u channels at %u Hz, endpoint %u channels at %u Hz", Channels, Rate,
             NewMaster->Endpoint->Format.Format.nChannels, NewMaster->Endpoint->Format.Format.nSamplesPerSec);
     Unlock();
+    WakeIdleWatch();
     return S_OK;
 }
 
