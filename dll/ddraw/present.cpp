@@ -151,6 +151,7 @@ HRESULT
 DdOpenSharedResource(
     _In_ DdHardware* Hardware,
     _In_ D3DKMT_HANDLE Share,
+    _In_ BOOLEAN NeedsRuntimeData,
     _Inout_ DdResource* Resource)
 {
     static PDD_OPEN_RESOURCE2 OpenResource2 =
@@ -177,8 +178,8 @@ DdOpenSharedResource(
         return DdHresultFromStatus(Status);
     }
 
-    /* Only a resource some runtime described can be adopted */
-    if (Query.PrivateRuntimeDataSize < 56)
+    /* Only a resource some runtime described can be adopted; the display allocation carries no such data */
+    if (NeedsRuntimeData && Query.PrivateRuntimeDataSize < 56)
         return E_FAIL;
 
     Runtime.resize(Query.PrivateRuntimeDataSize);
@@ -255,7 +256,7 @@ DdOpenWindowSurface(
     Resource->SurfaceCount = 1;
     Resource->MipLevels = 1;
 
-    hr = DdOpenSharedResource(Hardware, Share, Resource);
+    hr = DdOpenSharedResource(Hardware, Share, TRUE, Resource);
     if (FAILED(hr))
     {
         delete Resource;
@@ -265,6 +266,61 @@ DdOpenWindowSurface(
     Hardware->WindowSurface = Resource;
     Hardware->WindowShare = Share;
     return S_OK;
+}
+
+/* Opens the display allocation when the kernel shares one; a composed desktop usually has none and the primary waits */
+HRESULT
+DdOpenDisplayPrimary(
+    _Inout_ DdSurface* Primary)
+{
+    static PFND3DKMT_GETSHAREDPRIMARYHANDLE GetShared = reinterpret_cast<PFND3DKMT_GETSHAREDPRIMARYHANDLE>(
+        GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTGetSharedPrimaryHandle"));
+    DdHardware* Hardware = Primary->Driver->Hardware;
+    D3DKMT_GETSHAREDPRIMARYHANDLE Query = {};
+    DdResource* Resource;
+    HRESULT hr;
+
+    if (Hardware == nullptr || GetShared == nullptr || Primary->SharedPrimary != nullptr)
+        return S_OK;
+
+    Query.hAdapter = Hardware->AdapterHandle;
+    Query.VidPnSourceId = Hardware->VidPnSourceId;
+    if (!NT_SUCCESS(GetShared(&Query)) || Query.hSharedPrimary == 0)
+        return S_OK;
+
+    Resource = new (std::nothrow) DdResource;
+    if (Resource == nullptr)
+        return E_OUTOFMEMORY;
+    ZeroMemory(Resource, sizeof(*Resource));
+    Resource->Format = DdDriverFormat(&Primary->Format);
+    Resource->Pool = D3DDDIPOOL_VIDEOMEMORY;
+    Resource->Flags.Primary = TRUE;
+    Resource->Flags.SharedResource = TRUE;
+    Resource->SurfaceCount = 1;
+    Resource->MipLevels = 1;
+
+    hr = DdOpenSharedResource(Hardware, Query.hSharedPrimary, FALSE, Resource);
+    if (FAILED(hr))
+    {
+        delete Resource;
+        return hr;
+    }
+    Primary->SharedPrimary = Resource;
+    return S_OK;
+}
+
+VOID
+DdCloseDisplayPrimary(
+    _Inout_ DdSurface* Primary)
+{
+    DdHardware* Hardware = Primary->Driver->Hardware;
+
+    if (Primary->SharedPrimary == nullptr)
+        return;
+    if (Primary->SharedPrimary->DriverResource != NULL)
+        Hardware->DeviceFunctions.pfnDestroyResource(Hardware->DriverDevice, Primary->SharedPrimary->DriverResource);
+    delete Primary->SharedPrimary;
+    Primary->SharedPrimary = nullptr;
 }
 
 static

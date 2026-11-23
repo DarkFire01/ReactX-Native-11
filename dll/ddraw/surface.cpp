@@ -310,6 +310,7 @@ VOID
 DdFreeSurfaceMemory(
     _Inout_ DdSurface* Surface)
 {
+    DdCloseDisplayPrimary(Surface);
     if (Surface->Resource != nullptr)
         DdDestroySurfaceResource(Surface->Driver->Hardware, Surface);
     if (Surface->SystemResource != nullptr)
@@ -608,11 +609,18 @@ DdNewSurface(
     Surface->SysMemRequested = SysMemRequested;
     Surface->FillBitCount = Format->dwRGBBitCount;
     Surface->CreatedMode = Driver->ModeKey;
+    Surface->PitchPending = (Caps->dwCaps & DDSCAPS_PRIMARYSURFACE) != 0 && Driver->Hardware != nullptr;
 
     if ((Caps->dwCaps & DDSCAPS_PRIMARYSURFACE) == 0 && (Caps->dwCaps & DDSCAPS_VIDEOMEMORY) != 0)
         hr = DdCreateSurfaceResource(Driver->Hardware, Surface);
     else
         hr = DdAllocateSystemBits(Surface);
+    if (SUCCEEDED(hr) && (Caps->dwCaps & DDSCAPS_PRIMARYSURFACE) != 0)
+    {
+        hr = DdOpenDisplayPrimary(Surface);
+        if (FAILED(hr))
+            DdFreeSurfaceMemory(Surface);
+    }
     if (FAILED(hr))
     {
         delete Surface;
@@ -1073,7 +1081,7 @@ DdDescribe(
     Desc->dwFlags = DdDescFlags;
     Desc->dwWidth = Surface->Width;
     Desc->dwHeight = Surface->Height;
-    Desc->lPitch = Surface->Pitch;
+    Desc->lPitch = Surface->PitchPending ? 0 : Surface->Pitch;
     Desc->ddpfPixelFormat = Surface->Format;
 
     /* The short description carries a Z buffer's depth in its own field */
@@ -1107,7 +1115,7 @@ DdDescribe(
     }
 }
 
-/* The driver decides a resource's pitch; the first lock tells */
+/* The driver decides a resource's pitch and the first lock tells; nothing is learned while the device is lost */
 static
 VOID
 DdLearnPitch(
@@ -1116,7 +1124,14 @@ DdLearnPitch(
     DdHardware* Hardware = Surface->Driver->Hardware;
     BYTE* Bits;
 
-    if (Surface->Pitch != 0 || Surface->Resource == nullptr)
+    /* An opened display allocation would need a lock, and a windowed primary cannot be locked */
+    if (Surface->PitchPending)
+    {
+        if (!Hardware->Lost && Surface->SharedPrimary == nullptr)
+            Surface->PitchPending = FALSE;
+        return;
+    }
+    if (Surface->Pitch != 0 || Surface->Resource == nullptr || Hardware->Lost)
         return;
     if (SUCCEEDED(DdLockSurfaceResource(Hardware, Surface, nullptr, 0, &Bits)))
         DdUnlockSurfaceResource(Hardware, Surface);
@@ -1370,8 +1385,13 @@ DdGiveBackMemory(
     {
         hr = DdCreateSurfaceResource(Surface->Driver->Hardware, Surface);
     }
+    if (SUCCEEDED(hr) && (Surface->Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0)
+        hr = DdOpenDisplayPrimary(Surface);
     if (SUCCEEDED(hr))
+    {
         Surface->Lost = FALSE;
+        Surface->PitchPending = (Surface->Caps.dwCaps & DDSCAPS_PRIMARYSURFACE) != 0 && Surface->Driver->Hardware != nullptr;
+    }
     return hr;
 }
 
@@ -1437,6 +1457,7 @@ DdInvalidateSurfaces(
     {
         if (Surface->Lost)
             continue;
+        DdCloseDisplayPrimary(Surface);
         if (Surface->Resource != nullptr)
         {
             if (Surface->Dc != NULL)

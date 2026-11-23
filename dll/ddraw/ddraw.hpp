@@ -379,6 +379,12 @@ struct DdSurface
 
     /* The pixel format is the surface's own rather than the display's, so descriptions can match it */
     BOOLEAN KeepsFormat;
+
+    /* A primary reports no pitch until a description asks for it on a working device */
+    BOOLEAN PitchPending;
+
+    /* The display allocation the kernel shares, opened while the primary exists if there was one */
+    DdResource* SharedPrimary;
 };
 
 /* Process wide runtime state */
@@ -610,6 +616,14 @@ DdSubmitPresentToHwQueueCb(
 VOID
 DdReleaseWindowSurface(
     _Inout_ DdHardware* Hardware);
+
+HRESULT
+DdOpenDisplayPrimary(
+    _Inout_ DdSurface* Primary);
+
+VOID
+DdCloseDisplayPrimary(
+    _Inout_ DdSurface* Primary);
 
 HRESULT
 DdPresentThroughDwm(
