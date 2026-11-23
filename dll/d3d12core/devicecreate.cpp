@@ -82,7 +82,7 @@ RxDefaultAdapterLuid(
     return S_OK;
 }
 
-/* An adapter from DXGI or from DXCore */
+/* An adapter from DXCore or from DXGI, tried in that order */
 static
 HRESULT
 RxAdapterLuid(
@@ -94,19 +94,19 @@ RxAdapterLuid(
     DXGI_ADAPTER_DESC Desc;
     HRESULT hr;
 
+    if (SUCCEEDED(Unknown->QueryInterface(__uuidof(IDXCoreAdapter), reinterpret_cast<void**>(&CoreAdapter))))
+    {
+        hr = CoreAdapter->GetProperty(DXCoreAdapterProperty::InstanceLuid, sizeof(*Luid), Luid);
+        CoreAdapter->Release();
+        return hr;
+    }
+
     if (SUCCEEDED(Unknown->QueryInterface(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&DxgiAdapter))))
     {
         hr = DxgiAdapter->GetDesc(&Desc);
         DxgiAdapter->Release();
         if (SUCCEEDED(hr))
             *Luid = Desc.AdapterLuid;
-        return hr;
-    }
-
-    if (SUCCEEDED(Unknown->QueryInterface(__uuidof(IDXCoreAdapter), reinterpret_cast<void**>(&CoreAdapter))))
-    {
-        hr = CoreAdapter->GetProperty(DXCoreAdapterProperty::InstanceLuid, sizeof(*Luid), Luid);
-        CoreAdapter->Release();
         return hr;
     }
 
