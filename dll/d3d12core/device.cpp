@@ -310,6 +310,7 @@ RxDevice12::QueryShaderModels()
     UINT Count = 0;
     UINT Index;
     UINT Best = 0;
+    BOOLEAN HasModel51 = FALSE;
     HRESULT hr;
 
     Query.pNumShaderModelsSupported = &Count;
@@ -332,12 +333,19 @@ RxDevice12::QueryShaderModels()
             continue;
 
         Model = ((Model >> 16) << 4) | ((Model >> 4) & 0xF);
-        if (Model > Best)
+        if (Model == D3D_SHADER_MODEL_5_1)
+            HasModel51 = TRUE;
+
+        /* Releases newer than this runtime knows do not count */
+        if ((Model == D3D_SHADER_MODEL_5_1 || (Model >= D3D_SHADER_MODEL_6_0 && Model <= D3D_SHADER_MODEL_6_8)) &&
+            Model > Best)
+        {
             Best = Model;
+        }
     }
     delete[] Models;
 
-    if (FAILED(hr) || Best == 0)
+    if (FAILED(hr) || !HasModel51 || Best == 0)
         return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
 
     HighestShaderModel = (D3D_SHADER_MODEL)Best;
