@@ -363,6 +363,10 @@ public:
     FlushDriver(VOID);
 
     HRESULT
+    SetDisplayModeCallback(
+        _Inout_ D3DDDICB_SETDISPLAYMODE* Args);
+
+    HRESULT
     PresentCallback(
         _Inout_ D3DDDICB_PRESENT* Args);
 

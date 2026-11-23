@@ -218,6 +218,41 @@ D9SubmitPresentToHwQueueCb(
 static
 HRESULT
 APIENTRY
+D9SetDisplayModeCb(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDICB_SETDISPLAYMODE* Args)
+{
+    return static_cast<D9Device*>(hDevice)->SetDisplayModeCallback(Args);
+}
+
+/* The runtime hands out no synchronization tokens yet, so every token a driver names is unknown */
+static
+HRESULT
+APIENTRY
+D9AcquireResourceCb(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDICB_SYNCTOKEN* Args)
+{
+    UNREFERENCED_PARAMETER(hDevice);
+    UNREFERENCED_PARAMETER(Args);
+    return E_INVALIDARG;
+}
+
+static
+HRESULT
+APIENTRY
+D9ReleaseResourceCb(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDICB_SYNCTOKEN* Args)
+{
+    UNREFERENCED_PARAMETER(hDevice);
+    UNREFERENCED_PARAMETER(Args);
+    return E_INVALIDARG;
+}
+
+static
+HRESULT
+APIENTRY
 D9EscapeCb(
     _In_ HANDLE hAdapter,
     _Inout_ const D3DDDICB_ESCAPE* Args)
@@ -329,6 +364,7 @@ D9FillDeviceCallbacks(
     Callbacks->pfnDeallocateCb = D9DeallocateCb;
     Callbacks->pfnSetPriorityCb = RxSetPriorityCb;
     Callbacks->pfnQueryResidencyCb = RxQueryResidencyCb;
+    Callbacks->pfnSetDisplayModeCb = D9SetDisplayModeCb;
     Callbacks->pfnPresentCb = D9PresentCb;
     Callbacks->pfnRenderCb = RxRenderCb;
     Callbacks->pfnLockCb = RxLockCb;
@@ -375,6 +411,8 @@ D9FillDeviceCallbacks(
     Callbacks->pfnUpdateAllocationPropertyCb = RxUpdateAllocationPropertyCb;
     Callbacks->pfnOfferAllocations2Cb = D9OfferAllocations2Cb;
     Callbacks->pfnReclaimAllocations3Cb = RxReclaimAllocations3Cb;
+    Callbacks->pfnAcquireResourceCb = D9AcquireResourceCb;
+    Callbacks->pfnReleaseResourceCb = D9ReleaseResourceCb;
     Callbacks->pfnCreateHwQueueCb = RxCreateHwQueueCb;
     Callbacks->pfnDestroyHwQueueCb = RxDestroyHwQueueCb;
     Callbacks->pfnSubmitCommandToHwQueueCb = RxSubmitCommandToHwQueueCb;

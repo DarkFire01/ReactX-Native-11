@@ -378,6 +378,32 @@ D9Device::NotePresentStatus(
     return S_OK;
 }
 
+/* Scans a primary out through the kernel; windowed devices never set a mode, so the mode fields stay zero */
+HRESULT
+D9Device::SetDisplayModeCallback(
+    _Inout_ D3DDDICB_SETDISPLAYMODE* Args)
+{
+    D3DKMT_SETDISPLAYMODE Mode = {};
+    NTSTATUS Status;
+
+    if (Lost)
+        return S_OK;
+
+    Mode.hDevice = DeviceHandle;
+    Mode.hPrimaryAllocation = Args->hPrimaryAllocation;
+    Status = RxGetKmtThunks()->SetDisplayMode(&Mode);
+    if (NT_SUCCESS(Status))
+        return S_OK;
+
+    D9Trace(L"D3DKMTSetDisplayMode failed 0x%08lX", Status);
+    if (Status == STATUS_GRAPHICS_INCOMPATIBLE_PRIVATE_FORMAT && DriverVersion >= 6)
+    {
+        Args->PrivateDriverFormatAttribute = Mode.PrivateDriverFormatAttribute;
+        return D3DDDIERR_INCOMPATIBLEPRIVATEFORMAT;
+    }
+    return S_OK;
+}
+
 HRESULT
 D9Device::PresentCallback(
     _Inout_ D3DDDICB_PRESENT* Args)
