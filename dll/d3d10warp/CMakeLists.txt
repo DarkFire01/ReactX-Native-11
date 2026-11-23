@@ -10,10 +10,12 @@ nt_add_usermode_dll(d3d10warp
         descriptor12.cpp
         device12.cpp
         draw.cpp
+        draw12.cpp
         exec.cpp
         format.cpp
         list12.cpp
         mips.cpp
+        pipeline12.cpp
         query.cpp
         queue12.cpp
         resource.cpp

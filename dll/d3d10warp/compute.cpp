@@ -136,7 +136,6 @@ RxWarpDdi::CsSetUnorderedAccessViews(
 }
 
 /* Runs every thread group; threads go four at a time, and a group barrier waits for all of a group's batches */
-static
 VOID
 RxWarpDispatch(
     _In_ RxWarpDevice *Device,
@@ -156,7 +155,10 @@ RxWarpDispatch(
     if (Shader == nullptr || Device->Predicated())
         return;
 
-    RxWarpBindStage(State, &Bindings);
+    if (Device->Bound[RxWarpStageCompute] != nullptr)
+        Bindings = *Device->Bound[RxWarpStageCompute];
+    else
+        RxWarpBindStage(State, &Bindings);
     Threads = Shader->GroupSize[0] * Shader->GroupSize[1] * Shader->GroupSize[2];
     if (Threads == 0)
         return;

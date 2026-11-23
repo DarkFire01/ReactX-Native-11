@@ -454,6 +454,13 @@ RxWarpShader::Decode(
             }
             case D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER:
             case D3D10_SB_OPCODE_DCL_SAMPLER:
+                if (!RxWarpDecodeOperand(Code, End, &Cursor, &Operand))
+                    return E_INVALIDARG;
+                if (Operand.Index[0].Immediate < 32 && Opcode == D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER)
+                    ConstantMask |= 1u << Operand.Index[0].Immediate;
+                else if (Operand.Index[0].Immediate < 32)
+                    SamplerMask |= 1u << Operand.Index[0].Immediate;
+                break;
             case D3D10_SB_OPCODE_DCL_GLOBAL_FLAGS:
             case D3D10_SB_OPCODE_DCL_INDEX_RANGE:
             case D3D11_SB_OPCODE_DCL_STREAM:

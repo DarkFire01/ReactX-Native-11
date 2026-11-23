@@ -171,16 +171,25 @@ RxWarp12ExecuteCommandLists(
     _In_reads_(Count) const D3D12DDI_HCOMMANDLIST *Lists)
 {
     RxWarpLock Lock;
+    RxWarp12CommandQueue *Object = RxWarp12GetQueue(Queue);
 
-    UNREFERENCED_PARAMETER(Queue);
+    /* Every list starts from default state */
     for (UINT Index = 0; Index < Count; Index++)
     {
         RxWarp12CommandList *List = RxWarpObject<RxWarp12CommandList>(Lists[Index]);
+        RxWarp12Replay *State;
 
         if (List == nullptr)
             continue;
-        for (const std::function<VOID()> &Command : List->Commands)
-            Command();
+        State = new (std::nothrow) RxWarp12Replay();
+        if (State == nullptr)
+        {
+            RX_WARP_TRACE("D3D12 command list replay out of memory\n");
+            continue;
+        }
+        State->Device = Object->Device;
+        RxWarp12RunList(List, State);
+        delete State;
     }
 }
 

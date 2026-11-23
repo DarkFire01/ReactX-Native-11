@@ -172,6 +172,7 @@ typedef struct _RX_WARP_PIPELINE
     UINT RenderTargetCount;
     RxWarpView *DepthStencilView;
     RxWarpResource *StreamTargets[4];
+    BOOLEAN NoStripCut;         /* Direct3D 12 pipelines may turn the strip cut index off */
 } RX_WARP_PIPELINE;
 
 /* Running totals the queries sample, in the order of the pipeline statistics */
@@ -235,6 +236,7 @@ public:
     UINT Interface = 0;
     UINT Version = 0;
     RX_WARP_PIPELINE Pipeline = {};
+    const RX_WARP_STAGE_BINDINGS *Bound[RxWarpStageCount] = {};    /* bindings gathered elsewhere, in place of the stage state */
     UINT64 Counters[RxWarpCountTotal] = {};
     RxWarpQuery *Predicate = nullptr;
     BOOL PredicateValue = FALSE;
@@ -322,6 +324,24 @@ VOID
 RxWarpBindStage(
     _In_ const RX_WARP_STAGE_STATE *State,
     _Out_ RX_WARP_STAGE_BINDINGS *Bindings);
+
+/* Draws and dispatches over whatever the device's pipeline holds */
+VOID
+RxWarpRunDraw(
+    _In_ RxWarpDevice *Device,
+    _In_ UINT VertexCount,
+    _In_ UINT StartVertex,
+    _In_ BOOLEAN Indexed,
+    _In_ INT BaseVertex,
+    _In_ UINT InstanceCount,
+    _In_ UINT StartInstance);
+
+VOID
+RxWarpDispatch(
+    _In_ RxWarpDevice *Device,
+    _In_ UINT GroupsX,
+    _In_ UINT GroupsY,
+    _In_ UINT GroupsZ);
 
 VOID
 RxWarpBindUavs(

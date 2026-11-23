@@ -20,12 +20,10 @@ RxWarp12GetList(
 static constexpr UINT RxWarp12PoolSize = 16384;
 
 /* Records a command; the queue runs them in order */
-template <typename Work>
-static
 VOID
-RxWarp12Record(
+RxWarp12Append(
     _In_ D3D12DDI_HCOMMANDLIST List,
-    _In_ Work &&Command)
+    _Inout_ RX_WARP12_COMMAND &&Command)
 {
     RxWarp12CommandList *Object = RxWarp12GetList(List);
     RxWarp12CommandPool *Pool = Object->Recorder ? Object->Recorder->Pool : nullptr;
@@ -49,13 +47,39 @@ RxWarp12Record(
 
     try
     {
-        Object->Commands.emplace_back(std::forward<Work>(Command));
+        Object->Commands.emplace_back(std::move(Command));
     }
     catch (...)
     {
         RX_WARP_TRACE("D3D12 command list out of memory\n");
         Object->Device->Callbacks->pfnSetCommandListErrorCb(Object->RuntimeList, E_OUTOFMEMORY);
     }
+}
+
+/* Copies and clears do not read the list's state */
+template <typename Work>
+static
+VOID
+RxWarp12Record(
+    _In_ D3D12DDI_HCOMMANDLIST List,
+    _In_ Work &&Command)
+{
+    RxWarp12Append(List, [Run = std::forward<Work>(Command)](RxWarp12Replay *State) mutable
+    {
+        if (!State->Skipped())
+            Run();
+    });
+}
+
+VOID
+RxWarp12RunList(
+    _In_ RxWarp12CommandList *List,
+    _Inout_ RxWarp12Replay *State)
+{
+    if (List == nullptr)
+        return;
+    for (const std::function<VOID(RxWarp12Replay *)> &Command : List->Commands)
+        Command(State);
 }
 
 /* Newer tables pass the application's object; its bypass header leads to ours */
@@ -670,28 +694,14 @@ RxWarp12FillListTable(
     }
     if (List == nullptr)
         return;
-    RxWarp12State(&List->pfnIaSetTopology);
-    RxWarp12State(&List->pfnRsSetViewports);
-    RxWarp12State(&List->pfnRsSetScissorRects);
-    RxWarp12State(&List->pfnOmSetBlendFactor);
-    RxWarp12State(&List->pfnOmSetStencilRef);
-    RxWarp12State(&List->pfnSetPipelineState);
-    RxWarp12State(&List->pfnSetDescriptorHeaps);
-    RxWarp12State(&List->pfnSetComputeRootSignature);
-    RxWarp12State(&List->pfnSetGraphicsRootSignature);
-    RxWarp12State(&List->pfnIASetIndexBuffer);
-    RxWarp12State(&List->pfnIASetVertexBuffers);
-    RxWarp12State(&List->pfnSOSetTargets);
-    RxWarp12State(&List->pfnOMSetRenderTargets);
     RxWarp12State(&List->pfnOMSetDepthBounds);
-    RxWarp12State(&List->pfnSetPredication);
     RxWarp12State(&List->pfnRSSetShadingRate);
     RxWarp12State(&List->pfnRSSetShadingRateImage);
     RxWarp12State(&List->pfnSetViewInstanceMask);
     RxWarp12State(&List->pfnSetSamplePositions);
     RxWarp12State(&List->pfnIASetIndexBufferStripCutValue);
     RxWarp12State(&List->pfnRSSetDepthBias);
-    RxWarp12State(&List->pfnOmSetFrontAndBackStencilRef);
+    RxWarp12FillDrawTable(List);
     List->pfnCloseCommandList = RxWarp12CloseCommandList;
     List->pfnResetCommandList = RxWarp12ResetCommandList;
     List->pfnCopyTextureRegion = RxWarp12CopyTextureRegion;

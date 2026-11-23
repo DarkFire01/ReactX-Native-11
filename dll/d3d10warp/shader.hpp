@@ -153,6 +153,8 @@ public:
     UINT ResourceStride[128] = {};
     UINT UavDimension[64] = {};
     UINT UavStride[64] = {};
+    UINT ConstantMask = 0;              /* declared cb# slots, a bit each */
+    UINT SamplerMask = 0;               /* declared s# slots */
     UINT GroupSize[3] = { 1, 1, 1 };
     std::vector<RX_WARP_SHARED> Shared;
     UINT SharedBytes = 0;

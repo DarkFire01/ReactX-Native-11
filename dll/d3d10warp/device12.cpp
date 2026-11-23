@@ -125,6 +125,16 @@ RxWarp12Device::Create(
     Device->Callbacks = Args->p12UMCallbacks;
     RxWarpBind(Args->hDrvDevice, Device);
 
+    /* Recorded work runs on a Direct3D 11 executor of the device's own */
+    Device->Executor = new (std::nothrow) RxWarpDevice();
+    if (Device->Executor == nullptr)
+    {
+        delete Device;
+        RxWarpBind(Args->hDrvDevice, static_cast<RxWarp12Device *>(nullptr));
+        return E_OUTOFMEMORY;
+    }
+    Device->Executor->Adapter = Adapter;
+
     /* A page of kernel memory the device keeps for its own bookkeeping */
     if (Args->p12UMCallbacks != nullptr)
     {
@@ -156,6 +166,7 @@ RxWarp12Device::Destroy(
 
     if (This->PageAllocation != 0)
         RxWarp12FreeKernel(This, nullptr, This->PageAllocation, This->Page != nullptr);
+    delete This->Executor;
     delete This;
 }
 
@@ -237,44 +248,6 @@ RxWarp12ResetCommandPool(
     UNREFERENCED_PARAMETER(Pool);
 }
 
-static
-HRESULT
-APIENTRY
-RxWarp12CreatePipelineState(
-    _In_ D3D12DDI_HDEVICE Device,
-    _In_ const D3D12DDIARG_CREATE_PIPELINE_STATE_0099 *Args,
-    _In_ D3D12DDI_HPIPELINESTATE State,
-    _In_ D3D12DDI_HRTPIPELINESTATE RuntimeState)
-{
-    RxWarpLock Lock;
-    RxWarp12PipelineState *Object;
-
-    UNREFERENCED_PARAMETER(Args);
-    UNREFERENCED_PARAMETER(RuntimeState);
-    Object = new (std::nothrow) RxWarp12PipelineState();
-    RxWarpBind(State, Object);
-    if (Object == nullptr)
-    {
-        RX_WARP_TRACE("D3D12 pipeline state allocation failed\n");
-        return E_OUTOFMEMORY;
-    }
-    Object->Device = RxWarp12GetDevice(Device);
-    return S_OK;
-}
-
-static
-VOID
-APIENTRY
-RxWarp12DestroyPipelineState(
-    _In_ D3D12DDI_HDEVICE Device,
-    _In_ D3D12DDI_HPIPELINESTATE State)
-{
-    RxWarpLock Lock;
-
-    UNREFERENCED_PARAMETER(Device);
-    delete RxWarpObject<RxWarp12PipelineState>(State);
-}
-
 /* One node: physical adapter i is node i */
 static
 VOID
@@ -300,43 +273,6 @@ RxWarp12CalcPrivateRootSignatureSize(
     UNREFERENCED_PARAMETER(Device);
     UNREFERENCED_PARAMETER(Args);
     return 0x90;
-}
-
-static
-HRESULT
-APIENTRY
-RxWarp12CreateRootSignature(
-    _In_ D3D12DDI_HDEVICE Device,
-    _In_ const D3D12DDIARG_CREATE_ROOT_SIGNATURE_0100 *Args,
-    _In_ D3D12DDI_HROOTSIGNATURE Signature)
-{
-    RxWarpLock Lock;
-    RxWarp12RootSignature *Object;
-
-    UNREFERENCED_PARAMETER(Args);
-    Object = new (std::nothrow) RxWarp12RootSignature();
-    RxWarpBind(Signature, Object);
-    if (Object == nullptr)
-    {
-        RX_WARP_TRACE("D3D12 root signature allocation failed\n");
-        RxWarp12GetDevice(Device)->Callbacks->pfnSetErrorCb(RxWarp12GetDevice(Device)->RuntimeDevice, E_OUTOFMEMORY);
-        return E_OUTOFMEMORY;
-    }
-    Object->Device = RxWarp12GetDevice(Device);
-    return S_OK;
-}
-
-static
-VOID
-APIENTRY
-RxWarp12DestroyRootSignature(
-    _In_ D3D12DDI_HDEVICE Device,
-    _In_ D3D12DDI_HROOTSIGNATURE Signature)
-{
-    RxWarpLock Lock;
-
-    UNREFERENCED_PARAMETER(Device);
-    delete RxWarpObject<RxWarp12RootSignature>(Signature);
 }
 
 /* Video and content protection are the only extended features, and both are off */
@@ -576,13 +512,10 @@ RxWarp12BuildDeviceTable(VOID)
     Device.pfnCreateCommandPool = RxWarp12CreateCommandPool;
     Device.pfnDestroyCommandPool = RxWarp12DestroyCommandPool;
     Device.pfnResetCommandPool = RxWarp12ResetCommandPool;
-    Device.pfnCreatePipelineState = RxWarp12CreatePipelineState;
-    Device.pfnDestroyPipelineState = RxWarp12DestroyPipelineState;
     Device.pfnQueryNodeMap = RxWarp12QueryNodeMap;
     Device.pfnCalcPrivateRootSignatureSize = RxWarp12CalcPrivateRootSignatureSize;
-    Device.pfnCreateRootSignature = RxWarp12CreateRootSignature;
-    Device.pfnDestroyRootSignature = RxWarp12DestroyRootSignature;
     RxWarp12FillResourceTable(&Device);
+    RxWarp12FillPipelineTable(&Device);
     RxWarp12FillDescriptorTable(&Device);
     RxWarp12FillListTable(&Device, nullptr);
     RxWarp12FillQueueTables(&Device, nullptr, nullptr);

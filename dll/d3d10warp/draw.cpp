@@ -434,7 +434,10 @@ RxWarpDraw::BindStage(
     _In_ RX_WARP_STAGE Stage,
     _Out_ RX_WARP_STAGE_BINDINGS *Bindings)
 {
-    RxWarpBindStage(&Pipeline->Stages[Stage], Bindings);
+    if (Device->Bound[Stage] != nullptr)
+        *Bindings = *Device->Bound[Stage];
+    else
+        RxWarpBindStage(&Pipeline->Stages[Stage], Bindings);
 }
 
 /* Gathers state for the draw; FALSE when there is nothing to run at all */
@@ -2806,7 +2809,7 @@ RxWarpDraw::Run(
             UINT Width = Shape.Adjacency ? Shape.Size * 2 : Shape.Size;
             SIZE_T Count;
 
-            if (Position < VertexCount && !(Shape.Strip && Indexed && Indices[Position] == Restart))
+            if (Position < VertexCount && !(Shape.Strip && Indexed && !Pipeline->NoStripCut && Indices[Position] == Restart))
             {
                 Run.push_back(Position);
                 if (Shape.Strip || Run.size() < Width)
@@ -2944,6 +2947,21 @@ RxWarpGetDevice(
     _In_ D3D10DDI_HDEVICE Device)
 {
     return RxWarpObject<RxWarpDevice>(Device);
+}
+
+VOID
+RxWarpRunDraw(
+    _In_ RxWarpDevice *Device,
+    _In_ UINT VertexCount,
+    _In_ UINT StartVertex,
+    _In_ BOOLEAN Indexed,
+    _In_ INT BaseVertex,
+    _In_ UINT InstanceCount,
+    _In_ UINT StartInstance)
+{
+    RxWarpDraw Work(Device);
+
+    Work.Run(VertexCount, StartVertex, Indexed, BaseVertex, InstanceCount, StartInstance);
 }
 
 VOID
