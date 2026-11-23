@@ -5734,6 +5734,193 @@ NcCheckFixedPixel(
     Plain->Release();
 }
 
+/* Untransformed vertices with a position, normal, colors and a coordinate set */
+struct NcLitVertex
+{
+    FLOAT Position[3];
+    FLOAT Normal[3];
+    DWORD Diffuse;
+    DWORD Specular;
+    FLOAT Uv[2];
+};
+
+static const NcLitVertex NcLitQuad[4] =
+{
+    { { -0.8f, -0.6f, 0.25f }, { -0.3f, 0.4f, -0.8f }, 0xC0FF2040, 0x40102030, { 0.0f, 1.0f } },
+    { { 0.8f, -0.6f, 0.375f }, { 0.3f, 0.4f, -0.8f }, 0x8040FF20, 0x20302010, { 1.0f, 1.0f } },
+    { { -0.8f, 0.6f, 0.5f }, { -0.3f, -0.4f, -0.8f }, 0x402040FF, 0x60203040, { 0.0f, 0.0f } },
+    { { 0.8f, 0.6f, 0.625f }, { 0.3f, -0.4f, -0.8f }, 0xFFFFFFFF, 0x10101010, { 1.0f, 0.0f } },
+};
+
+/* Vertex pipeline setups; stage 0xFE sets a matrix from the table and 0xFD turns the light on */
+static const NcFixedCase NcVertexCases[] =
+{
+    { "unlit", {} },
+    { "matrices", { { 0xFE, D3DTS_WORLD, 1 }, { 0xFE, D3DTS_VIEW, 2 }, { 0xFE, D3DTS_PROJECTION, 3 } } },
+    { "lit", { { 0xFF, D3DRS_LIGHTING, TRUE }, { 0xFD, 1, 0 } } },
+    { "lit_specular", { { 0xFF, D3DRS_LIGHTING, TRUE }, { 0xFD, 1, 0 }, { 0xFF, D3DRS_SPECULARENABLE, TRUE },
+                        { 0xFE, D3DTS_VIEW, 2 } } },
+    { "texgen", { { 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEREFLECTIONVECTOR },
+                  { 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2 }, { 0xFE, D3DTS_TEXTURE0, 1 } } },
+    { "sphere", { { 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_SPHEREMAP } } },
+    { "fog", { { 0xFF, D3DRS_FOGENABLE, TRUE }, { 0xFF, D3DRS_FOGVERTEXMODE, D3DFOG_LINEAR },
+               { 0xFF, D3DRS_FOGSTART, 0x3E800000 }, { 0xFF, D3DRS_FOGEND, 0x3F400000 },
+               { 0xFF, D3DRS_FOGCOLOR, 0x0000FF80 } } },
+};
+
+static const D3DMATRIX NcVertexMatrices[] =
+{
+    { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f },
+    { 0.8f, 0.6f, 0.0f, 0.0f, -0.6f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.125f, -0.25f, 0.5f, 1.0f },
+    { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.96f, 0.28f, 0.0f, 0.0f, -0.28f, 0.96f, 0.0f, 0.0f, 0.0f, 2.0f, 1.0f },
+    { 1.5f, 0.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0101f, 1.0f, 0.0f, 0.0f, -0.10101f, 0.0f },
+};
+
+/* Untransformed vertices through the fixed function vertex pipeline, every pixel read back for each setup */
+static
+VOID
+NcCheckFixedVertexOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Texels[4] = { 0x80FF0000, 0xFF00FF00, 0x400000FF, 0xC0FFFFFF };
+    D3DLIGHT9 Light = {};
+    D3DMATERIAL9 Material = {};
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    char Name[64];
+
+    printf("%s_texture = %08lX\n", Prefix,
+           Device->CreateTexture(2, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr));
+    if (Texture != nullptr && SUCCEEDED(Texture->LockRect(0, &Locked, nullptr, 0)))
+    {
+        CopyMemory(Locked.pBits, Texels, 8);
+        CopyMemory(static_cast<BYTE*>(Locked.pBits) + Locked.Pitch, Texels + 2, 8);
+        Texture->UnlockRect(0);
+    }
+    printf("%s_target = %08lX\n", Prefix, Device->CreateRenderTarget(8, 4, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                     FALSE, &Target, nullptr));
+    printf("%s_original = %08lX\n", Prefix, Device->GetRenderTarget(0, &Original));
+    if (Texture == nullptr || Target == nullptr || Original == nullptr)
+        goto Done;
+
+    Light.Type = D3DLIGHT_POINT;
+    Light.Diffuse.r = Light.Diffuse.g = Light.Diffuse.b = 1.0f;
+    Light.Specular.r = Light.Specular.g = 0.5f;
+    Light.Position.z = -1.5f;
+    Light.Range = 8.0f;
+    Light.Attenuation0 = 0.5f;
+    Light.Attenuation1 = 0.25f;
+    Material.Diffuse.r = Material.Diffuse.g = Material.Diffuse.b = Material.Diffuse.a = 0.75f;
+    Material.Ambient.r = 0.25f;
+    Material.Specular.g = Material.Specular.b = 0.5f;
+    Material.Power = 8.0f;
+    Device->SetLight(0, &Light);
+    Device->SetMaterial(&Material);
+    Device->SetRenderTarget(0, Target);
+    Device->SetTexture(0, Texture);
+    Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    printf("%s_fvf = %08lX\n", Prefix,
+           Device->SetFVF(D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX1));
+    for (const NcFixedCase& Case : NcVertexCases)
+    {
+        Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0);
+        Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+        Device->SetRenderState(D3DRS_SPECULARENABLE, FALSE);
+        Device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        Device->LightEnable(0, FALSE);
+        Device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+        Device->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        Device->SetTransform(D3DTS_WORLD, &NcVertexMatrices[0]);
+        Device->SetTransform(D3DTS_VIEW, &NcVertexMatrices[0]);
+        Device->SetTransform(D3DTS_PROJECTION, &NcVertexMatrices[0]);
+        Device->SetTransform(D3DTS_TEXTURE0, &NcVertexMatrices[0]);
+        for (UINT Index = 0; Index < _countof(Case.States) && Case.States[Index].Type != 0; Index++)
+        {
+            const NcFixedState& State = Case.States[Index];
+
+            if (State.Stage == 0xFE)
+                Device->SetTransform(static_cast<D3DTRANSFORMSTATETYPE>(State.Type), &NcVertexMatrices[State.Value]);
+            else if (State.Stage == 0xFD)
+                Device->LightEnable(0, TRUE);
+            else
+                NcFixedSet(Device, &State, 1);
+        }
+        Device->BeginScene();
+        printf("%s_%s_draw = %08lX\n", Prefix, Case.Name,
+               Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, NcLitQuad, sizeof(*NcLitQuad)));
+        Device->EndScene();
+        sprintf_s(Name, "vertex_%s", Case.Name);
+        NcPrintPixels(Prefix, Name, Device, Target, FALSE);
+    }
+
+Done:
+    if (Original != nullptr)
+    {
+        Device->SetRenderTarget(0, Original);
+        Original->Release();
+    }
+    Device->SetTexture(0, nullptr);
+    if (Texture != nullptr)
+        Texture->Release();
+    if (Target != nullptr)
+        Target->Release();
+}
+
+/* The fixed function vertex pipeline on an extended device and on hardware and pure plain devices */
+static
+VOID
+NcCheckFixedVertex(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "ffvertex_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "ffvertex_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "ffvertex_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, nullptr,
+                                           &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckFixedVertexOn(Case.Name, Device);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -5767,6 +5954,7 @@ static const NineCheckInfo NcChecks[] =
     { "shaders", NcCheckShaders },
     { "draws", NcCheckDraws },
     { "ffpixel", NcCheckFixedPixel },
+    { "ffvertex", NcCheckFixedVertex },
 };
 
 static
