@@ -28,11 +28,16 @@
 typedef HRESULT (WINAPI* PFN_SC_ASSEMBLE)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, UINT,
                                           ID3DBlob**, ID3DBlob**);
 typedef HRESULT (*PFN_SC_CONVERT)(PVOID*, NineScArgs*);
+typedef HRESULT (*PFN_SC_CONVERT_TL)(PVOID*, NineScTlArgs*);
 
-/* The system driver build the converter address belongs to */
+/* The system driver build the converter addresses belong to */
 static constexpr DWORD ScSystemTimeStamp = 0x8FECDEF1;
 static constexpr DWORD ScSystemImageSize = 0x196000;
 static constexpr ULONG ScConvertOffset = 0x434D8;
+static constexpr ULONG ScConvertTlOffset = 0x789B0;
+
+/* A runtime version below 9, for the paths older runtimes take */
+static constexpr UINT ScOldRuntimeVersion = 8;
 
 /* The device's runtime version the converter is created with */
 static constexpr UINT ScRuntimeVersion = 0x11001;
@@ -41,8 +46,11 @@ struct ScContext
 {
     PFN_SC_ASSEMBLE Assemble;
     PFN_SC_CONVERT SystemConvert;
+    PFN_SC_CONVERT_TL SystemConvertTl;
     PVOID SystemState[4];
+    PVOID SystemOldState[4];
     NineScTranslator* Translator;
+    NineScTranslator* OldTranslator;
     BOOL Dump;
     UINT Cases;
     UINT Failures;
@@ -108,6 +116,7 @@ ScLoad(
         return FALSE;
     }
     Context->SystemConvert = reinterpret_cast<PFN_SC_CONVERT>(reinterpret_cast<PBYTE>(System) + ScConvertOffset);
+    Context->SystemConvertTl = reinterpret_cast<PFN_SC_CONVERT_TL>(reinterpret_cast<PBYTE>(System) + ScConvertTlOffset);
     return TRUE;
 }
 
@@ -116,10 +125,11 @@ static
 VOID
 ScPrintTokens(
     _In_z_ PCSTR Label,
-    _In_ const ScRun* Run)
+    _In_opt_ const VOID* Tokens,
+    _In_ SIZE_T Size)
 {
-    const UINT* Words = static_cast<const UINT*>(Run->Args.Tokens);
-    SIZE_T Count = Run->Args.TokenSize / 4;
+    const UINT* Words = static_cast<const UINT*>(Tokens);
+    SIZE_T Count = Size / 4;
     SIZE_T Index = 2;
 
     printf("  %s:\n", Label);
@@ -311,14 +321,14 @@ ScRunCase(
         if (Context->Dump)
         {
             printf("%s%s: same\n", Case->Name, Label);
-            ScPrintTokens("tokens", &System);
+            ScPrintTokens("tokens", System.Args.Tokens, System.Args.TokenSize);
         }
     }
     else
     {
         printf("%s%s: differs\n", Case->Name, Label);
-        ScPrintTokens("system", &System);
-        ScPrintTokens("reactx", &ReactX);
+        ScPrintTokens("system", System.Args.Tokens, System.Args.TokenSize);
+        ScPrintTokens("reactx", ReactX.Args.Tokens, ReactX.Args.TokenSize);
         Context->Failures += 1;
     }
 
@@ -432,6 +442,198 @@ ScPixelInputs(
     }
 }
 
+/* One pretransformed vertex shader run: the declaration it is built from and what came back */
+struct ScTlRun
+{
+    HRESULT Result;
+    NineScTlArgs Args;
+    NineScInputs Inputs;
+    NineScOutputs Outputs;
+};
+
+static
+VOID
+ScPrepareTl(
+    _Out_ ScTlRun* Run,
+    _In_ const NineScInputs* Inputs,
+    _In_ UINT Version,
+    _In_ UINT Flags)
+{
+    Run->Result = E_FAIL;
+    ZeroMemory(&Run->Args, sizeof(Run->Args));
+    Run->Inputs = *Inputs;
+    memset(&Run->Outputs, 0xA5, sizeof(Run->Outputs));
+    Run->Args.Version = Version;
+    Run->Args.Flags = Flags;
+    Run->Args.Inputs = &Run->Inputs;
+    Run->Args.Outputs = &Run->Outputs;
+}
+
+static
+BOOL
+ScCompareTl(
+    _In_ const ScTlRun* System,
+    _In_ const ScTlRun* ReactX)
+{
+    BOOL Same = TRUE;
+
+    if (System->Result != ReactX->Result)
+    {
+        printf("  result %08lX, reactx %08lX\n", System->Result, ReactX->Result);
+        Same = FALSE;
+    }
+    if (System->Args.TokenSize != ReactX->Args.TokenSize ||
+        (System->Args.TokenSize && memcmp(System->Args.Tokens, ReactX->Args.Tokens, System->Args.TokenSize) != 0))
+    {
+        printf("  tokens differ: size %Iu, reactx %Iu\n", System->Args.TokenSize, ReactX->Args.TokenSize);
+        Same = FALSE;
+    }
+    if (System->Args.Emitted != ReactX->Args.Emitted || System->Args.Patched != ReactX->Args.Patched)
+    {
+        printf("  counters %u %u, reactx %u %u\n", System->Args.Emitted, System->Args.Patched, ReactX->Args.Emitted,
+               ReactX->Args.Patched);
+        Same = FALSE;
+    }
+    if (memcmp(&System->Outputs, &ReactX->Outputs, sizeof(System->Outputs)) != 0)
+    {
+        printf("  outputs differ: flags %08X indexed %llX count %u, reactx %08X %llX %u\n", System->Outputs.Flags,
+               System->Outputs.Indexed, System->Outputs.Count, ReactX->Outputs.Flags, ReactX->Outputs.Indexed,
+               ReactX->Outputs.Count);
+        Same = FALSE;
+    }
+    return Same;
+}
+
+static
+VOID
+ScRunTl(
+    _Inout_ ScContext* Context,
+    _In_ const NineScInputs* Inputs,
+    _In_ BOOL Old,
+    _In_ UINT Flags,
+    _In_z_ PCSTR Label)
+{
+    static ScTlRun System;
+    static ScTlRun ReactX;
+    UINT Version = Old ? ScOldRuntimeVersion : ScRuntimeVersion;
+
+    ScPrepareTl(&System, Inputs, Version, Flags);
+    ScPrepareTl(&ReactX, Inputs, Version, Flags);
+
+    System.Result = Context->SystemConvertTl(Old ? Context->SystemOldState : Context->SystemState, &System.Args);
+    try
+    {
+        ReactX.Result = NineScConvertTlShader(Old ? &Context->OldTranslator : &Context->Translator, &ReactX.Args);
+    }
+    catch (...)
+    {
+        ReactX.Result = E_UNEXPECTED;
+    }
+
+    Context->Cases += 1;
+    if (ScCompareTl(&System, &ReactX))
+    {
+        if (Context->Dump)
+        {
+            printf("%s: same\n", Label);
+            ScPrintTokens("tokens", System.Args.Tokens, System.Args.TokenSize);
+        }
+    }
+    else
+    {
+        printf("%s: differs\n", Label);
+        ScPrintTokens("system", System.Args.Tokens, System.Args.TokenSize);
+        ScPrintTokens("reactx", ReactX.Args.Tokens, ReactX.Args.TokenSize);
+        Context->Failures += 1;
+    }
+    free(System.Args.Tokens);
+    free(ReactX.Args.Tokens);
+}
+
+static
+VOID
+ScAddTlInput(
+    _Inout_ NineScInputs* Inputs,
+    _In_ UINT Usage,
+    _In_ UINT Index,
+    _In_ UINT Register,
+    _In_ UINT Flag)
+{
+    Inputs->Inputs.push_back(static_cast<NineScInput>(Usage | (Index << 4) | (Register << 8) | (Flag << 12)));
+    Inputs->UsageMask |= 1u << Usage;
+}
+
+/* Declarations of pretransformed and plain vertices, then random ones */
+static
+VOID
+ScRunTlCases(
+    _Inout_ ScContext* Context,
+    _In_ UINT Fuzz)
+{
+    NineScInputs Inputs;
+    char Label[48];
+
+    for (UINT Set = 0; Set < 4; Set += 1)
+    {
+        Inputs = NineScInputs();
+        Inputs.Limit = 16;
+        switch (Set)
+        {
+            case 0:
+                /* XYZRHW, diffuse, specular and two coordinates */
+                ScAddTlInput(&Inputs, 0, 0, 0, 1);
+                ScAddTlInput(&Inputs, 10, 0, 1, 0);
+                ScAddTlInput(&Inputs, 10, 1, 2, 0);
+                ScAddTlInput(&Inputs, 5, 0, 3, 0);
+                ScAddTlInput(&Inputs, 5, 1, 4, 0);
+                break;
+            case 1:
+                /* The position not in screen space, fog and point size */
+                ScAddTlInput(&Inputs, 0, 0, 0, 0);
+                ScAddTlInput(&Inputs, 11, 0, 1, 0);
+                ScAddTlInput(&Inputs, 4, 0, 2, 0);
+                break;
+            case 2:
+                /* POSITIONT is left out, the second position is passed through */
+                ScAddTlInput(&Inputs, 9, 0, 0, 0);
+                ScAddTlInput(&Inputs, 0, 1, 1, 1);
+                ScAddTlInput(&Inputs, 9, 1, 2, 0);
+                ScAddTlInput(&Inputs, 10, 0, 3, 0);
+                break;
+            default:
+                /* Nothing declared */
+                break;
+        }
+        for (UINT Variant = 0; Variant < 4; Variant += 1)
+        {
+            sprintf_s(Label, "tl set %u%s%s", Set, Variant & 1 ? " old" : "", Variant & 2 ? " patched" : "");
+            ScRunTl(Context, &Inputs, Variant & 1, Variant & 2 ? 1 : 0, Label);
+        }
+    }
+
+    for (UINT Round = 0; Round < Fuzz * 8; Round += 1)
+    {
+        UINT Count = ScRandom(Context) % 17;
+        UINT Used = 0;
+
+        Inputs = NineScInputs();
+        Inputs.Limit = 16;
+        for (UINT Element = 0; Element < Count; Element += 1)
+        {
+            UINT Register = ScRandom(Context) % 16;
+
+            /* Registers are unique within a declaration */
+            while (Used & (1u << Register))
+                Register = (Register + 1) % 16;
+            Used |= 1u << Register;
+            ScAddTlInput(&Inputs, ScRandom(Context) % 14, ScRandom(Context) % 4 ? 0 : ScRandom(Context) % 8, Register,
+                         ScRandom(Context) & 1);
+        }
+        sprintf_s(Label, "tl random %u", Round);
+        ScRunTl(Context, &Inputs, Round & 1, (Round >> 1) & 1, Label);
+    }
+}
+
 int
 __cdecl
 main(
@@ -503,7 +705,11 @@ main(
         }
     }
 
+    if (!Only || strcmp(Only, "tl") == 0)
+        ScRunTlCases(&Context, Fuzz);
+
     printf("%u cases, %u differ\n", Context.Cases, Context.Failures);
     NineScDestroyTranslator(Context.Translator);
+    NineScDestroyTranslator(Context.OldTranslator);
     return Context.Failures ? 1 : 0;
 }
