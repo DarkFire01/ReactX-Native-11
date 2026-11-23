@@ -2774,6 +2774,7 @@ XcCheckMix(VOID)
         XcRouteSubmixSlow,
         XcRouteMasterSlow,
         XcRouteMasterWide,
+        XcRouteMasterSix,
     };
     static const struct
     {
@@ -2820,6 +2821,15 @@ XcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 6, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
         { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteMasterWide, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
         { WAVE_FORMAT_ADPCM, 1, 22050, 4, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRouteMasterSix, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteMasterSix, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 4, 48000, 16, XcRouteMasterSix, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRouteMasterWide, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 6, 48000, 16, XcRouteMasterWide, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 48000, 16, XcRouteMasterSix, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteMasterWide, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 6, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 3, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
     };
     static BYTE Data[48000 * 6 * 4];
 
@@ -2846,7 +2856,7 @@ XcCheckMix(VOID)
 
         if (FAILED(XcCreate(&Engine, 0)))
             return;
-        hr = Engine->CreateMasteringVoice(&Master, Cases[Case].Route == XcRouteMasterWide ? 0 : 2,
+        hr = Engine->CreateMasteringVoice(&Master, Cases[Case].Route == XcRouteMasterWide ? 8 : Cases[Case].Route == XcRouteMasterSix ? 6 : 2,
                                           Cases[Case].Route == XcRouteMasterSlow ? 44100 : 48000);
         if (FAILED(hr))
         {
