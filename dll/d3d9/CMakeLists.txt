@@ -26,6 +26,7 @@ nt_add_usermode_dll(d3d9
         shadercheck.cpp
         shadervalidator.cpp
         shadervalidatorps.cpp
+        shadervalidatorps1.cpp
         shadervalidatorvs.cpp
         state.cpp
         surface.cpp
