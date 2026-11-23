@@ -779,6 +779,118 @@ CkQueries(
 }
 
 /* Clears, fills, copies and presents the back buffer, reading the results back */
+/* vs_2_0: position and diffuse color passed through */
+static const DWORD CkVertexCode[] =
+{
+    0xFFFE0200,
+    0x0200001F, 0x80000000, 0x900F0000,
+    0x0200001F, 0x8000000A, 0x900F0001,
+    0x02000001, 0xC00F0000, 0x90E40000,
+    0x02000001, 0xD00F0000, 0x90E40001,
+    0x0000FFFF,
+};
+
+/* ps_2_0: the interpolated color */
+static const DWORD CkPixelCode[] =
+{
+    0xFFFF0200,
+    0x0200001F, 0x80000000, 0x900F0000,
+    0x02000001, 0x800F0800, 0x90E40000,
+    0x0000FFFF,
+};
+
+/* Shaders, declarations, streams and indices: creating, sharing, binding and letting go */
+static
+VOID
+CkShaders(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Flush)
+{
+    static const D3DVERTEXELEMENT9 Plain[] =
+    {
+        { 0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
+        D3DDECL_END(),
+    };
+    static const D3DVERTEXELEMENT9 Transformed[] =
+    {
+        { 0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITIONT, 0 },
+        { 0, 16, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
+        { 0, 20, D3DDECLTYPE_SHORT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
+        D3DDECL_END(),
+    };
+    IDirect3DVertexShader9* Vertex[2] = {};
+    IDirect3DPixelShader9* Pixel = nullptr;
+    IDirect3DVertexDeclaration9* Decls[2] = {};
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    HRESULT hr;
+
+    printf("== shaders\n");
+    for (UINT Index = 0; Index < _countof(Vertex); Index += 1)
+    {
+        hr = Device->CreateVertexShader(CkVertexCode, &Vertex[Index]);
+        printf("CreateVertexShader %u hr %08lX\n", Index, hr);
+    }
+    hr = Device->CreatePixelShader(CkPixelCode, &Pixel);
+    printf("CreatePixelShader hr %08lX\n", hr);
+    hr = Device->CreateVertexDeclaration(Plain, &Decls[0]);
+    printf("CreateVertexDeclaration plain hr %08lX\n", hr);
+    hr = Device->CreateVertexDeclaration(Transformed, &Decls[1]);
+    printf("CreateVertexDeclaration transformed hr %08lX\n", hr);
+    hr = Device->CreateVertexBuffer(256, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &Buffer, nullptr);
+    printf("CreateVertexBuffer hr %08lX\n", hr);
+    hr = Device->CreateIndexBuffer(64, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &Indices, nullptr);
+    printf("CreateIndexBuffer hr %08lX\n", hr);
+
+    for (UINT Index = 0; Index < _countof(Decls); Index += 1)
+    {
+        hr = Device->SetVertexDeclaration(Decls[Index]);
+        printf("SetVertexDeclaration %u hr %08lX\n", Index, hr);
+    }
+    hr = Device->SetVertexShader(Vertex[1]);
+    printf("SetVertexShader hr %08lX\n", hr);
+    hr = Device->SetPixelShader(Pixel);
+    printf("SetPixelShader hr %08lX\n", hr);
+    hr = Device->SetStreamSource(0, Buffer, 16, 16);
+    printf("SetStreamSource 0 hr %08lX\n", hr);
+    hr = Device->SetStreamSource(3, Buffer, 0, 8);
+    printf("SetStreamSource 3 hr %08lX\n", hr);
+    hr = Device->SetStreamSourceFreq(0, D3DSTREAMSOURCE_INDEXEDDATA | 2);
+    printf("SetStreamSourceFreq 0 hr %08lX\n", hr);
+    hr = Device->SetStreamSourceFreq(3, D3DSTREAMSOURCE_INSTANCEDATA | 1);
+    printf("SetStreamSourceFreq 3 hr %08lX\n", hr);
+    hr = Device->SetIndices(Indices);
+    printf("SetIndices hr %08lX\n", hr);
+    CkFlushBatch(Device, Flush, "shaders bound");
+    CkFlushState();
+
+    Device->SetStreamSourceFreq(0, 1);
+    Device->SetStreamSourceFreq(3, 1);
+    Device->SetStreamSource(3, nullptr, 0, 0);
+    if (Buffer != nullptr)
+        printf("vertex buffer released %lu\n", Buffer->Release());
+    if (Indices != nullptr)
+        printf("index buffer released %lu\n", Indices->Release());
+    Device->SetVertexShader(nullptr);
+    Device->SetPixelShader(nullptr);
+    Device->SetVertexDeclaration(nullptr);
+    for (UINT Index = 0; Index < _countof(Vertex); Index += 1)
+    {
+        if (Vertex[Index] != nullptr)
+            printf("vertex shader %u released %lu\n", Index, Vertex[Index]->Release());
+    }
+    if (Pixel != nullptr)
+        printf("pixel shader released %lu\n", Pixel->Release());
+    for (UINT Index = 0; Index < _countof(Decls); Index += 1)
+    {
+        if (Decls[Index] != nullptr)
+            printf("declaration %u released %lu\n", Index, Decls[Index]->Release());
+    }
+    CkFlushBatch(Device, Flush, "shaders released");
+    CkFlushState();
+}
+
 static
 VOID
 CkScene(
@@ -832,6 +944,8 @@ CkScene(
     hr = Device->Present(nullptr, nullptr, nullptr, nullptr);
     printf("Present hr %08lX\n", hr);
 
+    if (Flush != nullptr)
+        CkShaders(Device, Flush);
     CkQueries(Device);
 
     if (Target != nullptr)
