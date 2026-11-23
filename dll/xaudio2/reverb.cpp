@@ -650,12 +650,184 @@ struct XaRvbBranch
     XaRvbPair Tail;
 };
 
-/* The mono reverb network, with surround feeds for 5.1 and 7.1 */
-class XaRvbMono
+/* Reflections and their diffusion for one side, and the two all passes it leaves through */
+struct XaRvbEarly
+{
+    float Main;
+    float Side;
+    XaRvbTapLine<512, 3> Reflect;
+    XaRvbAllPass<128> SpreadA;
+    XaRvbTapLine<2048, 3> Echo;
+    XaRvbAllPass<256> SpreadB;
+    XaRvbAllPass<512> SpreadC;
+    XaRvbTapLine<1024, 2> Feed;
+    XaRvbAllPass<512> Outlet1;
+    XaRvbAllPass<512> Outlet2;
+
+    /* What one sample hands the late field and the outlets */
+    float Sum;
+    float EchoThird;
+    float FeedFar;
+    float FeedNear;
+
+    VOID
+    Step(
+        _In_ float Input)
+    {
+        float Taps = Reflect.Out[0] + Reflect.Out[1];
+        float Third = Reflect.Out[2];
+        float First;
+        float EchoTaps;
+        float Second;
+
+        Reflect.Out[1] = Reflect.Read(1);
+        Reflect.Out[0] = Reflect.Read(0);
+        Reflect.Out[2] = Reflect.Read(2);
+        Reflect.Push(Input);
+        First = SpreadA.Step(Taps);
+        EchoTaps = Echo.Out[0] + Echo.Out[1];
+        EchoThird = Echo.Out[2];
+        Echo.Out[1] = Echo.Read(1);
+        Echo.Out[0] = Echo.Read(0);
+        Echo.Out[2] = Echo.Read(2);
+        Echo.Push(First);
+        Second = SpreadB.Step(EchoTaps);
+        FeedFar = Feed.Out[1];
+        FeedNear = Feed.Out[0];
+        Feed.Out[0] = Feed.Read(0);
+        Feed.Out[1] = Feed.Read(1);
+        Feed.Push(SpreadC.Step(Second));
+        Sum = fmaf(Side, Second, fmaf(Main, First, Third));
+    }
+
+    float
+    Finish(
+        _In_ float Tail,
+        _In_ float Reflections)
+    {
+        return Outlet2.Step(Outlet1.Step(fmaf(Sum, Reflections + Reflections, Tail + Tail)));
+    }
+
+    VOID
+    Clear(VOID)
+    {
+        Reflect.Clear();
+        SpreadA.Clear();
+        Echo.Clear();
+        SpreadB.Clear();
+        SpreadC.Clear();
+        Feed.Clear();
+        Outlet1.Clear();
+        Outlet2.Clear();
+    }
+};
+
+/* Interleaved stereo reflections delay; the counts are in floats, so twice the frames */
+struct XaRvbPairDelay
+{
+    float Line[XA_RVB_PRE_LINE * 2];
+    UINT32 Write;
+    UINT32 Delay;
+    UINT32 Previous;
+    UINT32 Target;
+    float Rate;
+    float Fade;
+    float Last[2];
+
+    VOID
+    SetDelay(
+        _In_ UINT32 Floats)
+    {
+        if (Previous == Delay)
+        {
+            Delay = Floats;
+            Fade = 1.0f;
+        }
+        Target = Floats;
+    }
+
+    VOID
+    Run(
+        _In_reads_(Frames * 2) const float* Input,
+        _Out_writes_((Frames + 1) * 2) float* Output,
+        _In_ UINT32 Frames)
+    {
+        const UINT32 Mask = XA_RVB_PRE_LINE * 2 - 1;
+
+        Output[0] = Last[0];
+        Output[1] = Last[1];
+        for (UINT32 Frame = 0; Frame < Frames; Frame++)
+        {
+            float Keep = 1.0f - Fade;
+            float OldLeft = Line[(Write - Previous) & Mask] * Fade;
+            float OldRight = Line[(Write - Previous - 1) & Mask] * Fade;
+
+            Last[0] = fmaf(Keep, Line[(Write - Delay) & Mask], OldLeft);
+            Last[1] = fmaf(Keep, Line[(Write - Delay - 1) & Mask], OldRight);
+            Output[Frame * 2 + 2] = Last[0];
+            Output[Frame * 2 + 3] = Last[1];
+            if (Fade > 0.0f)
+            {
+                Fade = Fade - 0.000199999995f;
+            }
+            else
+            {
+                UINT32 Reached = Delay;
+
+                Previous = Reached;
+                Delay = Target;
+                Fade = Target == Reached ? 0.0f : 1.0f;
+            }
+            Line[Write] = Input[Frame * 2];
+            Write = (Write + 1) & Mask;
+            Line[Write] = Input[Frame * 2 + 1];
+            Write = (Write + 1) & Mask;
+        }
+    }
+};
+
+/* The room filter run on both channels of an interleaved buffer */
+struct XaRvbPairRoom
+{
+    XaRvbRoom Shape;
+    float StageA[2];
+    float StageB[2];
+
+    VOID
+    Run(
+        _Inout_updates_(Frames * 2) float* Samples,
+        _In_ UINT32 Frames)
+    {
+        float Pole = Shape.Pole;
+        float Scale = (1.0f - Pole) * Shape.Gain;
+
+        for (UINT32 Frame = 0; Frame < Frames; Frame++)
+        {
+            for (UINT32 Channel = 0; Channel < 2; Channel++)
+            {
+                float Input = Samples[Frame * 2 + Channel];
+                float NextA = fmaf(Input, Scale, StageA[Channel] * Pole);
+                float NextB = fmaf(StageA[Channel], Scale, StageB[Channel] * Pole);
+
+                Samples[Frame * 2 + Channel] = StageB[Channel];
+                StageA[Channel] = NextA;
+                StageB[Channel] = NextB;
+            }
+        }
+    }
+};
+
+/*
+ * The reverb network. Mono runs one early section into the late field; stereo adds a second
+ * early section for the right channel with its own reflections delay and room filter, and the
+ * late field then takes each side's taps where the mono one takes the single set.
+ */
+class XaRvbNetwork
 {
 public:
     VOID
     Construct(
+        _In_ BOOLEAN NewStereo,
         _In_ UINT32 NewChannels);
 
     VOID
@@ -671,25 +843,19 @@ public:
 
     VOID
     Process(
-        _In_reads_(Frames) const float* Input,
+        _In_ const float* Input,
         _Out_writes_(Frames * Channels) float* Output,
-        _Inout_updates_(Frames + 1) float* Scratch,
+        _Inout_ float* Scratch,
         _In_ UINT32 Frames,
         _In_ float Step);
 
+    BOOLEAN Stereo;
     UINT32 Channels;
 
 private:
     XaRvbPreDelay Pre;
     XaRvbRoom Room;
-    float EarlyMain;
-    float EarlySide;
-    XaRvbTapLine<512, 3> Reflect;
-    XaRvbAllPass<128> SpreadA;
-    XaRvbTapLine<2048, 3> Echo;
-    XaRvbAllPass<256> SpreadB;
-    XaRvbAllPass<512> SpreadC;
-    XaRvbTapLine<1024, 2> Feed;
+    XaRvbEarly Left;
 
     XaRvbAllPass<512> InletA;
     XaRvbAllPass<512> InletB;
@@ -708,17 +874,20 @@ private:
     XaRvbTapLine<4096, 2> ChainBLoop;
     XaRvbPair ChainBTail;
 
-    XaRvbAllPass<512> Outlet1;
-    XaRvbAllPass<512> Outlet2;
     float Wet;
     float Reflections;
     BOOL LateOff;
     XaRvbRear<256> Side;
     XaRvbRear<1024> Back;
+
+    XaRvbPairDelay PairPre;
+    XaRvbPairRoom PairRoom;
+    XaRvbEarly Right;
 };
 
 VOID
-XaRvbMono::Construct(
+XaRvbNetwork::Construct(
+    _In_ BOOLEAN NewStereo,
     _In_ UINT32 NewChannels)
 {
     XaRvbBranch* Branches[2] = { &BranchA, &BranchB };
@@ -749,6 +918,7 @@ XaRvbMono::Construct(
     ChainB2.SetGain(0.617999971f);
     Wet = 1.0f;
     Reflections = 1.0f;
+    Stereo = NewStereo;
     Channels = NewChannels;
     Side.Delay = 20;
     Side.Previous = 20;
@@ -758,10 +928,17 @@ XaRvbMono::Construct(
     Back.Previous = 80;
     Back.Target = 80;
     Back.Rate = 48000.0f;
+    PairPre.Delay = 80;
+    PairPre.Previous = 80;
+    PairPre.Target = 80;
+    PairPre.Rate = 48000.0f;
+    PairRoom.Shape.Rate = 48000.0f;
+    PairRoom.Shape.Frequency = 24000.0f;
+    PairRoom.Shape.Update();
 }
 
 VOID
-XaRvbMono::Tune(
+XaRvbNetwork::Tune(
     _In_ float NewRate)
 {
     float Ratio = NewRate / Pre.Rate;
@@ -777,17 +954,17 @@ XaRvbMono::Tune(
     Room.Rate = NewRate;
     Room.Update();
 
-    Reflect.Delay[0] = XaRvbPrimeOf(fmaf(NewRate, 0.0106041664f, 0.5f));
-    Reflect.Delay[1] = Reflect.Delay[0] - 1;
-    Reflect.Delay[2] = Pick;
-    SpreadA.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0017291666f, 0.5f)));
-    Echo.Delay[0] = XaRvbPrimeOf(fmaf(NewRate, 0.0424791649f, 0.5f));
-    Echo.Delay[1] = Echo.Delay[0] - 1;
-    Echo.Delay[2] = XaRvbPrimeOf(fmaf(NewRate, 0.0125000002f, 0.5f));
-    SpreadB.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00439583324f, 0.5f)));
-    SpreadC.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00647916645f, 0.5f)));
-    Feed.Delay[0] = XaRvbCount(fmaf(NewRate, 0.0212500002f, 0.5f));
-    Feed.Delay[1] = Pick;
+    Left.Reflect.Delay[0] = XaRvbPrimeOf(fmaf(NewRate, 0.0106041664f, 0.5f));
+    Left.Reflect.Delay[1] = Left.Reflect.Delay[0] - 1;
+    Left.Reflect.Delay[2] = Pick;
+    Left.SpreadA.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0017291666f, 0.5f)));
+    Left.Echo.Delay[0] = XaRvbPrimeOf(fmaf(NewRate, 0.0424791649f, 0.5f));
+    Left.Echo.Delay[1] = Left.Echo.Delay[0] - 1;
+    Left.Echo.Delay[2] = XaRvbPrimeOf(fmaf(NewRate, 0.0125000002f, 0.5f));
+    Left.SpreadB.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00439583324f, 0.5f)));
+    Left.SpreadC.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00647916645f, 0.5f)));
+    Left.Feed.Delay[0] = XaRvbCount(fmaf(NewRate, 0.0212500002f, 0.5f));
+    Left.Feed.Delay[1] = Pick;
 
     InletA.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00852083322f, 0.5f)));
     BranchA.Smear.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0053541665f, 0.5f)));
@@ -820,48 +997,69 @@ XaRvbMono::Tune(
     ChainB1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0229791664f, 0.5f)));
     ChainB2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0184791666f, 0.5f)));
     ChainB3.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0102291666f, 0.5f)));
-    Outlet1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00272916653f, 0.5f)));
-    Outlet2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0023541667f, 0.5f)));
-    if (Channels != 1)
+    Left.Outlet1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00272916653f, 0.5f)));
+    Left.Outlet2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0023541667f, 0.5f)));
+    if (Channels > 2)
         Side.Retime(NewRate);
     if (Channels == 8)
         Back.Retime(NewRate);
+    if (!Stereo)
+        return;
+
+    /* The stereo delay rescales its float count and doubles it once more */
+    Ratio = NewRate / PairPre.Rate;
+    PairPre.Rate = NewRate;
+    PairPre.Delay = 2 * XaRvbCount(fmaf(Ratio, static_cast<float>(PairPre.Delay), 0.5f));
+    PairPre.Previous = PairPre.Delay;
+    PairRoom.Shape.Rate = NewRate;
+    PairRoom.Shape.Update();
+    Right.Reflect.Delay[0] = XaRvbPrimeOf(fmaf(NewRate, 0.0106041664f, 0.5f));
+    Right.Reflect.Delay[1] = Right.Reflect.Delay[0] - 1;
+    Right.Reflect.Delay[2] = Pick;
+    Right.SpreadA.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00202083332f, 0.5f)));
+    Right.Echo.Delay[0] = XaRvbPrimeOf(fmaf(NewRate, 0.0270208325f, 0.5f));
+    Right.Echo.Delay[1] = Right.Echo.Delay[0] - 1;
+    Right.Echo.Delay[2] = XaRvbPrimeOf(fmaf(NewRate, 0.0125000002f, 0.5f));
+    Right.SpreadB.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00464583328f, 0.5f)));
+    Right.SpreadC.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00610416662f, 0.5f)));
+    Right.Feed.Delay[0] = XaRvbCount(fmaf(NewRate, 0.0212500002f, 0.5f));
+    Right.Feed.Delay[1] = Pick;
+    Right.Outlet1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00222916668f, 0.5f)));
+    Right.Outlet2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00264583342f, 0.5f)));
 }
 
 VOID
-XaRvbMono::Configure(
+XaRvbNetwork::Configure(
     _In_ const XAUDIO2FX_REVERB_PARAMETERS* Parameters)
 {
     XaRvbShape Shape;
-    UINT32 Gap = 1;
-    UINT32 Delay = 1;
+    UINT32 Gap;
     UINT32 Total;
     UINT32 Low = Parameters->LowEQGain * 10u + Parameters->LowEQCutoff;
     UINT32 High = Parameters->HighEQGain * 15u + Parameters->HighEQCutoff;
+    UINT32 MatrixLeft = Parameters->PositionMatrixLeft;
     float Loss;
     float Bright;
     float Dark;
     float Early;
     float Late;
-    float Spread;
-    float Matrix;
     float Level;
+    float FeedGap;
     XaRvbBranch* Branches[2] = { &BranchA, &BranchB };
 
-    if (Parameters->ReverbDelay != 0)
-        Gap = XaRvbCount(static_cast<float>(Parameters->ReverbDelay) * 48.0f);
-    Gap = XaMin(XaReverbPrime(Gap), static_cast<UINT32>(XA_RVB_LONGEST_GAP));
+    Gap = XaMin(XaReverbPrime(XaRvbMilliseconds(Parameters->ReverbDelay)), static_cast<UINT32>(XA_RVB_LONGEST_GAP));
     BranchA.Loop.Delay[1] = Gap;
     BranchB.Loop.Delay[1] = Gap;
     ChainALoop.Delay[1] = Gap;
     ChainBLoop.Delay[1] = Gap;
 
     XaRvbMeasure(&Shape, Parameters);
-    Reflect.Delay[0] = XaRvbPrimeOf(Shape.Far * 509.0f);
-    Reflect.Delay[1] = Reflect.Delay[0] - 1;
-    Echo.Delay[0] = XaRvbPrimeOf(Shape.Far * 2039.0f);
-    Echo.Delay[1] = Echo.Delay[0] - 1;
-    Feed.Delay[0] = XaRvbPrimeOf((Parameters->ReverbDelay != 0 ? 9.0f : 1020.0f) * Shape.Far);
+    FeedGap = Parameters->ReverbDelay != 0 ? 9.0f : 1020.0f;
+    Left.Reflect.Delay[0] = XaRvbPrimeOf(Shape.Far * 509.0f);
+    Left.Reflect.Delay[1] = Left.Reflect.Delay[0] - 1;
+    Left.Echo.Delay[0] = XaRvbPrimeOf(Shape.Far * 2039.0f);
+    Left.Echo.Delay[1] = Left.Echo.Delay[0] - 1;
+    Left.Feed.Delay[0] = XaRvbPrimeOf(FeedGap * Shape.Far);
     InletA.SetLength(XaRvbAtLeastOne(XaRvbPrimeOf(Shape.Far * Shape.Lengths[0])));
     BranchA.Smear.SetLength(XaRvbPrimeOf(Shape.Far * 257.0f));
     BranchA.Loop.Delay[0] = XaRvbAtLeastOne(XaRvbPrimeOf(Shape.Near * Shape.Lengths[1]));
@@ -886,31 +1084,25 @@ XaRvbMono::Configure(
             CrossB.Length + ChainB1.Length + ChainB2.Length + ChainB3.Length;
     Loss = powf(10.0f, -3.0f / (Parameters->DecayTime * (48000.0f / static_cast<float>(Total >> 1))));
     Loss = sqrtf(Loss * 0.5f);
-
-    Matrix = XaRvbMatrixLevel[Parameters->PositionMatrixLeft];
-    Spread = XaRvbMatrixSpread[Parameters->PositionMatrixLeft];
     Bright = fmaf(-Loss, 0.629999995f, 0.899999976f);
     Dark = fmaf(-Loss, -0.0787499994f, -0.112499997f);
     Early = XaRvbDiffusion[Parameters->EarlyDiffusion];
     Late = XaRvbDiffusion[Parameters->LateDiffusion];
+    Pre.SetDelay(XaRvbMilliseconds(Parameters->ReflectionsDelay));
 
-    if (Parameters->ReflectionsDelay != 0)
-        Delay = XaRvbCount(static_cast<float>(Parameters->ReflectionsDelay) * 48.0f);
-    Pre.SetDelay(Delay);
-
-    Reflect.Level[0] = 0.200000003f;
-    Reflect.Level[1] = 0.400000006f;
-    Reflect.Level[2] = XaRvbTapLevel[Parameters->PositionLeft];
-    SpreadA.SetGain(Early);
-    Echo.Level[0] = 0.200000003f;
-    Echo.Level[1] = 0.600000024f;
-    Echo.Level[2] = Matrix * -0.125f;
-    SpreadB.SetGain(Early);
-    SpreadC.SetGain(Early);
-    Feed.Level[0] = Bright * XaRvbMatrixEcho[Parameters->PositionMatrixLeft];
-    Feed.Level[1] = Bright * Spread;
-    EarlyMain = XaRvbEarlyMain[Parameters->PositionLeft];
-    EarlySide = XaRvbEarlySide[Parameters->PositionLeft];
+    Left.Reflect.Level[0] = 0.200000003f;
+    Left.Reflect.Level[1] = 0.400000006f;
+    Left.Reflect.Level[2] = XaRvbTapLevel[Parameters->PositionLeft];
+    Left.SpreadA.SetGain(Early);
+    Left.Echo.Level[0] = 0.200000003f;
+    Left.Echo.Level[1] = 0.600000024f;
+    Left.Echo.Level[2] = XaRvbMatrixLevel[MatrixLeft] * -0.125f;
+    Left.SpreadB.SetGain(Early);
+    Left.SpreadC.SetGain(Early);
+    Left.Feed.Level[0] = Bright * XaRvbMatrixEcho[MatrixLeft];
+    Left.Feed.Level[1] = Bright * XaRvbMatrixSpread[MatrixLeft];
+    Left.Main = XaRvbEarlyMain[Parameters->PositionLeft];
+    Left.Side = XaRvbEarlySide[Parameters->PositionLeft];
 
     InletA.SetGain(Late);
     InletB.SetGain(Late);
@@ -935,15 +1127,15 @@ XaRvbMono::Configure(
     ChainBTail.B = Loss * -0.5f;
 
     Level = powf(10.0f, Parameters->ReverbGain * 0.0500000007f);
-    BranchA.Loop.Level[1] = Level * Matrix;
-    BranchB.Loop.Level[1] = Level * Matrix;
-    ChainALoop.Level[1] = Level * (Dark * Spread);
-    ChainBLoop.Level[1] = Level * (Dark * Spread);
+    BranchA.Loop.Level[1] = Level * XaRvbMatrixLevel[MatrixLeft];
+    BranchB.Loop.Level[1] = Level * XaRvbMatrixLevel[MatrixLeft];
+    ChainALoop.Level[1] = Level * (Dark * XaRvbMatrixSpread[MatrixLeft]);
+    ChainBLoop.Level[1] = Level * (Dark * XaRvbMatrixSpread[MatrixLeft]);
     Reflections = powf(10.0f, Parameters->ReflectionsGain * 0.0500000007f);
-    Outlet1.Gain = Late * 0.600000024f;
-    Outlet1.Back = Late * -0.600000024f;
-    Outlet2.Gain = Late * 0.600000024f;
-    Outlet2.Back = Late * -0.600000024f;
+    Left.Outlet1.Gain = Late * 0.600000024f;
+    Left.Outlet1.Back = Late * -0.600000024f;
+    Left.Outlet2.Gain = Late * 0.600000024f;
+    Left.Outlet2.Back = Late * -0.600000024f;
 
     Room.Frequency = Parameters->RoomFilterFreq;
     Room.Main = Parameters->RoomFilterMain;
@@ -962,10 +1154,44 @@ XaRvbMono::Configure(
         Side.SetDelay(XaRvbMilliseconds(Parameters->SideDelay));
         Back.SetDelay(XaRvbMilliseconds(Parameters->RearDelay));
     }
+    if (!Stereo)
+        return;
+
+    /* The right side takes the right positions, and the left side's main early level moves with it */
+    Right.Reflect.Delay[0] = XaRvbPrimeOf(Shape.Far * 509.0f);
+    Right.Reflect.Delay[1] = Right.Reflect.Delay[0] - 1;
+    Right.Echo.Delay[0] = XaRvbPrimeOf(Shape.Far * 1297.0f);
+    Right.Echo.Delay[1] = Right.Echo.Delay[0] - 1;
+    Right.Feed.Delay[0] = XaRvbPrimeOf(FeedGap * Shape.Far);
+    PairPre.SetDelay(2 * XaRvbMilliseconds(Parameters->ReflectionsDelay));
+    Left.Main = XaRvbEarlyMain[Parameters->PositionRight];
+    Right.Main = XaRvbEarlyMain[Parameters->PositionLeft];
+    Right.Side = XaRvbEarlySide[Parameters->PositionRight];
+    Right.Reflect.Level[0] = 0.200000003f;
+    Right.Reflect.Level[1] = 0.400000006f;
+    Right.Reflect.Level[2] = XaRvbTapLevel[Parameters->PositionRight];
+    Right.SpreadA.SetGain(Early);
+    Right.Echo.Level[0] = 0.200000003f;
+    Right.Echo.Level[1] = 0.600000024f;
+    Right.Echo.Level[2] = XaRvbMatrixLevel[Parameters->PositionMatrixRight] * -0.125f;
+    Right.SpreadB.SetGain(Early);
+    Right.SpreadC.SetGain(Early);
+    Right.Feed.Level[0] = Bright * XaRvbMatrixEcho[Parameters->PositionMatrixRight];
+    Right.Feed.Level[1] = Bright * XaRvbMatrixSpread[Parameters->PositionMatrixRight];
+    BranchB.Loop.Level[1] = Level * XaRvbMatrixLevel[Parameters->PositionMatrixRight];
+    ChainBLoop.Level[1] = Level * (Dark * XaRvbMatrixSpread[Parameters->PositionMatrixRight]);
+    Right.Outlet1.Gain = Late * 0.600000024f;
+    Right.Outlet1.Back = Late * -0.600000024f;
+    Right.Outlet2.Gain = Late * 0.600000024f;
+    Right.Outlet2.Back = Late * -0.600000024f;
+    PairRoom.Shape.Frequency = Parameters->RoomFilterFreq;
+    PairRoom.Shape.Main = Parameters->RoomFilterMain;
+    PairRoom.Shape.High = Parameters->RoomFilterHF;
+    PairRoom.Shape.Update();
 }
 
 VOID
-XaRvbMono::Clear(VOID)
+XaRvbNetwork::Clear(VOID)
 {
     XaRvbBranch* Branches[2] = { &BranchA, &BranchB };
 
@@ -974,12 +1200,7 @@ XaRvbMono::Clear(VOID)
     Pre.Last = 0.0f;
     Room.StageA = 0.0f;
     Room.StageB = 0.0f;
-    Reflect.Clear();
-    SpreadA.Clear();
-    Echo.Clear();
-    SpreadB.Clear();
-    SpreadC.Clear();
-    Feed.Clear();
+    Left.Clear();
     InletA.Clear();
     InletB.Clear();
     for (UINT32 Index = 0; Index < ARRAYSIZE(Branches); Index++)
@@ -1003,66 +1224,57 @@ XaRvbMono::Clear(VOID)
     ChainB3.Clear();
     ChainBLoop.Clear();
     ChainBTail.Clear();
-    Outlet1.Clear();
-    Outlet2.Clear();
-    if (Channels != 1)
+    if (Channels > 2)
         Side.Clear();
     if (Channels == 8)
         Back.Clear();
+    if (!Stereo)
+        return;
+
+    /* A reset leaves half of the stereo room filter's stages as they were */
+    memset(PairPre.Line, 0, sizeof(PairPre.Line));
+    PairPre.Write = 0;
+    PairPre.Last[0] = 0.0f;
+    PairPre.Last[1] = 0.0f;
+    PairRoom.StageA[0] = 0.0f;
+    PairRoom.StageB[1] = 0.0f;
+    Right.Clear();
 }
 
 VOID
-XaRvbMono::Process(
-    _In_reads_(Frames) const float* Input,
+XaRvbNetwork::Process(
+    _In_ const float* Input,
     _Out_writes_(Frames * Channels) float* Output,
-    _Inout_updates_(Frames + 1) float* Scratch,
+    _Inout_ float* Scratch,
     _In_ UINT32 Frames,
     _In_ float Step)
 {
     float Mix = Step > 0.0f ? 0.0f : Wet;
-    float Tail = 0.0f;
+    float TailLeft = 0.0f;
+    float TailRight = 0.0f;
+    XaRvbEarly* Other = Stereo ? &Right : &Left;
+    UINT32 Stride = Stereo ? 2 : 1;
 
-    Pre.Run(Input, Scratch, Frames);
-    Room.Run(Scratch, Frames);
+    if (Stereo)
+    {
+        PairPre.Run(Input, Scratch, Frames);
+        PairRoom.Run(Scratch, Frames);
+    }
+    else
+    {
+        Pre.Run(Input, Scratch, Frames);
+        Room.Run(Scratch, Frames);
+    }
     for (UINT32 Frame = 0; Frame < Frames; Frame++)
     {
-        float Taps = Reflect.Out[0] + Reflect.Out[1];
-        float Third = Reflect.Out[2];
-        float Spread;
-        float EchoTaps;
-        float EchoThird;
-        float SpreadSecond;
-        float SpreadThird;
-        float FeedFar;
-        float FeedNear;
-        float Early;
-        float Fed;
-        float Tapped;
-        float Wetted;
         float Surround = 0.0f;
+        float Wetted;
 
-        /* Early reflections */
-        Reflect.Out[1] = Reflect.Read(1);
-        Reflect.Out[0] = Reflect.Read(0);
-        Reflect.Out[2] = Reflect.Read(2);
-        Reflect.Push(Scratch[Frame]);
-        Spread = SpreadA.Step(Taps);
-        EchoTaps = Echo.Out[0] + Echo.Out[1];
-        EchoThird = Echo.Out[2];
-        Echo.Out[1] = Echo.Read(1);
-        Echo.Out[0] = Echo.Read(0);
-        Echo.Out[2] = Echo.Read(2);
-        Echo.Push(Spread);
-        SpreadSecond = SpreadB.Step(EchoTaps);
-        SpreadThird = SpreadC.Step(SpreadSecond);
-        FeedFar = Feed.Out[1];
-        FeedNear = Feed.Out[0];
-        Feed.Out[0] = Feed.Read(0);
-        Feed.Out[1] = Feed.Read(1);
-        Feed.Push(SpreadThird);
-        Early = fmaf(EarlySide, SpreadSecond, fmaf(EarlyMain, Spread, Third));
+        Left.Step(Scratch[Frame * Stride]);
+        if (Stereo)
+            Right.Step(Scratch[Frame * 2 + 1]);
 
-        /* Late field */
+        /* Late field: branch and chain A follow the left taps, B the right ones */
         if (!LateOff)
         {
             float FirstA;
@@ -1071,14 +1283,18 @@ XaRvbMono::Process(
             float TailB;
             float LoopA;
             float LoopB;
+            float LoopC;
+            float LoopD;
             float ChainA;
             float ChainB;
             float BlendA;
             float BlendB;
             float Through;
+            float Fed;
+            float Tapped;
 
             FirstA = BranchA.Smear.Step(InletA.Out);
-            FirstA = XaRvbPole(&BranchA.Low, FirstA + EchoThird);
+            FirstA = XaRvbPole(&BranchA.Low, FirstA + Left.EchoThird);
             FirstA = XaRvbShelf(&BranchA.Shelf, FirstA);
             FirstA = XaRvbDamp(&BranchA.Damp, FirstA) * 8.0f;
             TailA = XaRvbHold(&BranchA.Tail, BranchA.Loop.Out[0]);
@@ -1088,55 +1304,65 @@ XaRvbMono::Process(
             BranchA.Loop.Push(FirstA);
 
             FirstB = BranchB.Smear.Step(InletB.Out);
-            FirstB = XaRvbPole(&BranchB.Low, FirstB + EchoThird);
+            FirstB = XaRvbPole(&BranchB.Low, FirstB + Other->EchoThird);
             FirstB = XaRvbShelf(&BranchB.Shelf, FirstB);
             FirstB = XaRvbDamp(&BranchB.Damp, FirstB) * 8.0f;
             Through = BranchB.Loop.Out[0];
+            LoopB = BranchB.Loop.Out[1];
+            BranchB.Loop.Out[1] = BranchB.Loop.Read(1);
             BranchB.Loop.Out[0] = BranchB.Loop.Read(0);
             BranchB.Loop.Push(FirstB);
             TailB = XaRvbHold(&BranchB.Tail, Through);
 
-            ChainA = ChainA1.Step(CrossA.Out + FeedFar);
+            ChainA = ChainA1.Step(CrossA.Out + Left.FeedFar);
             ChainA = ChainA2.Step(ChainA);
-            ChainA = ChainA3.Step(ChainA + FeedFar);
+            ChainA = ChainA3.Step(ChainA + Left.FeedFar);
             Through = ChainALoop.Out[0];
+            LoopC = ChainALoop.Out[1];
+            ChainALoop.Out[1] = ChainALoop.Read(1);
             ChainALoop.Out[0] = ChainALoop.Read(0);
-            ChainALoop.Push(ChainA + EchoThird);
+            ChainALoop.Push(ChainA + Left.EchoThird);
             BlendA = XaRvbBlend(&ChainATail, Through);
 
-            ChainB = ChainB1.Step(CrossB.Out + FeedFar);
+            ChainB = ChainB1.Step(CrossB.Out + Other->FeedFar);
             ChainB = ChainB2.Step(ChainB);
-            Through = ChainB3.Out + EchoThird;
-            ChainB = ChainB3.Step(ChainB + FeedFar);
+            Through = ChainB3.Out + Other->EchoThird;
+            ChainB = ChainB3.Step(ChainB + Other->FeedFar);
             BlendB = XaRvbBlend(&ChainBTail, ChainBLoop.Out[0]);
-            LoopB = ChainBLoop.Out[1];
+            LoopD = ChainBLoop.Out[1];
             ChainBLoop.Out[0] = ChainBLoop.Read(0);
             ChainBLoop.Out[1] = ChainBLoop.Read(1);
             ChainBLoop.Push(Through);
-            Tail = LoopB + LoopA;
+            TailLeft = LoopD + LoopA;
+            TailRight = LoopC + LoopB;
             Surround = LoopA;
 
             /* The four branches cross into the inlets of the next pass */
             Tapped = InletA.Tap();
-            Fed = (BlendB + BlendA) + fmaf(InletA.Gain, Tapped, FeedNear);
+            Fed = (BlendB + BlendA) + fmaf(InletA.Gain, Tapped, Left.FeedNear);
             InletA.Feed(Fed, Tapped);
             Tapped = InletB.Tap();
-            Fed = fmaf(InletB.Gain, Tapped, (BlendB - BlendA) + FeedNear);
+            Fed = fmaf(InletB.Gain, Tapped, (BlendB - BlendA) + Other->FeedNear);
             InletB.Feed(Fed, Tapped);
             Tapped = CrossA.Tap();
-            Fed = (TailB + TailA) + fmaf(CrossA.Gain, Tapped, FeedFar);
+            Fed = (TailB + TailA) + fmaf(CrossA.Gain, Tapped, Other->FeedFar);
             CrossA.Feed(Fed, Tapped);
             Tapped = CrossB.Tap();
-            Fed = fmaf(CrossB.Gain, Tapped, (TailB - TailA) + FeedFar);
+            Fed = fmaf(CrossB.Gain, Tapped, (TailB - TailA) + Left.FeedFar);
             CrossB.Feed(Fed, Tapped);
         }
 
-        Wetted = Outlet1.Step(fmaf(Early, Reflections + Reflections, Tail + Tail));
-        Wetted = Outlet2.Step(Wetted);
-        Wetted = fmaf(Wetted, Mix, (1.0f - Mix) * Input[Frame]);
-        if (Channels == 1)
+        Wetted = Left.Finish(TailLeft, Reflections);
+        if (Stereo)
         {
-            Output[Frame] = Wetted;
+            float WettedRight = Right.Finish(TailRight, Reflections);
+
+            Output[Frame * 2] = fmaf(Wetted, Mix, (1.0f - Mix) * Input[Frame * 2]);
+            Output[Frame * 2 + 1] = fmaf(WettedRight, Mix, (1.0f - Mix) * Input[Frame * 2 + 1]);
+        }
+        else if (Channels == 1)
+        {
+            Output[Frame] = fmaf(Wetted, Mix, (1.0f - Mix) * Input[Frame]);
         }
         else
         {
@@ -1144,6 +1370,7 @@ XaRvbMono::Process(
             float Sides = Side.Step(Surround);
 
             /* Front pair carries the mix, center and LFE stay silent, surrounds are wet only */
+            Wetted = fmaf(Wetted, Mix, (1.0f - Mix) * Input[Frame]);
             Speakers[0] = Wetted;
             Speakers[1] = Wetted;
             Speakers[2] = 0.0f;
@@ -1292,7 +1519,7 @@ private:
     BOOL WasEnabled;
     UINT32 InputChannels;
     UINT32 OutputChannels;
-    XaRvbMono* Network;
+    XaRvbNetwork* Network;
     float* Scratch;
     float* Matrix;
     XAUDIO2FX_REVERB_PARAMETERS Latest;
@@ -1373,18 +1600,20 @@ XaRvb::Build(
     _In_ UINT32 MaxFrames,
     _In_ UINT32 Rate)
 {
+    BOOLEAN Stereo = OutputChannels == 2;
     UINT32 Layout;
 
-    if (InputChannels != 1 || OutputChannels == 2)
+    /* The output alone picks mono or stereo; surround outputs pick by the input */
+    if (InputChannels != 1 && OutputChannels > 2)
     {
-        XA_TRACE_ONCE(L"CreateAudioReverb: stereo networks are not available yet");
+        XA_TRACE_ONCE(L"CreateAudioReverb: stereo to surround is not available yet");
         return XAPO_E_FORMAT_UNSUPPORTED;
     }
 
-    /* Any output other than mono or 5.1 gets the 7.1 network */
-    Layout = OutputChannels == 1 || OutputChannels == 6 ? OutputChannels : 8;
-    Network = new (std::nothrow) XaRvbMono();
-    Scratch = static_cast<float*>(CoTaskMemAlloc(sizeof(*Scratch) * ((MaxFrames + 1) + MaxFrames * Layout)));
+    /* Any output other than mono, stereo or 5.1 gets the 7.1 network */
+    Layout = OutputChannels <= 2 || OutputChannels == 6 ? OutputChannels : 8;
+    Network = new (std::nothrow) XaRvbNetwork();
+    Scratch = static_cast<float*>(CoTaskMemAlloc(sizeof(*Scratch) * (2 * (MaxFrames + 1) + MaxFrames * 8)));
     Matrix = static_cast<float*>(CoTaskMemAlloc(sizeof(*Matrix) * InputChannels * OutputChannels));
     if (Network == nullptr || Scratch == nullptr || Matrix == nullptr)
         return E_OUTOFMEMORY;
@@ -1393,7 +1622,7 @@ XaRvb::Build(
     {
         return E_OUTOFMEMORY;
     }
-    Network->Construct(Layout);
+    Network->Construct(Stereo, Layout);
     Network->Tune(static_cast<float>(Rate));
     return S_OK;
 }
@@ -1651,7 +1880,7 @@ XaRvb::Process(
     else
     {
         /* Odd layouts get the 7.1 frames laid end to end, cut at the buffer size */
-        float* Wide = Scratch + Frames + 1;
+        float* Wide = Scratch + 2 * (Frames + 1);
 
         Network->Process(Source, Wide, Scratch, Frames, Step);
         memcpy(Target, Wide, sizeof(*Target) * XaMin(OutputChannels, Network->Channels) * Frames);
