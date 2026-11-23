@@ -42,22 +42,13 @@ static constexpr UINT DdLegacyFirstVersion = 15;
 /* Below this much local memory the runtime borrows from the shared pool */
 static constexpr ULONGLONG DdDefaultMinimumLocal = 0x2000000;
 
-typedef NTSTATUS (APIENTRY* PDD_OPEN_FROM_HDC)(D3DKMT_OPENADAPTERFROMHDC*);
-
 static
-PDD_OPEN_FROM_HDC
+PFND3DKMT_OPENADAPTERFROMHDC
 DdOpenFromHdcThunk(VOID)
 {
-    static PDD_OPEN_FROM_HDC Thunk = []()
-    {
-        HMODULE Gdi = GetModuleHandleW(L"gdi32.dll");
+    const KmtThunks* Kmt = RxGetKmtThunks();
 
-        if (Gdi == NULL)
-            return static_cast<PDD_OPEN_FROM_HDC>(nullptr);
-        return reinterpret_cast<PDD_OPEN_FROM_HDC>(GetProcAddress(Gdi, "D3DKMTOpenAdapterFromHdc"));
-    }();
-
-    return Thunk;
+    return Kmt != nullptr ? Kmt->OpenAdapterFromHdc : nullptr;
 }
 
 HRESULT
@@ -447,7 +438,7 @@ DdHardware*
 DdOpenHardware(
     _In_ HDC Dc)
 {
-    PDD_OPEN_FROM_HDC OpenFromHdc = DdOpenFromHdcThunk();
+    PFND3DKMT_OPENADAPTERFROMHDC OpenFromHdc = DdOpenFromHdcThunk();
     D3DKMT_OPENADAPTERFROMHDC Open = {};
     BOOLEAN NeedsUpdate = FALSE;
     DdHardware* Hardware;
@@ -587,7 +578,7 @@ DdReadAdapterIdentity(
     _Out_writes_z_(DriverSize) PSTR Driver,
     _In_ SIZE_T DriverSize)
 {
-    PDD_OPEN_FROM_HDC OpenFromHdc = DdOpenFromHdcThunk();
+    PFND3DKMT_OPENADAPTERFROMHDC OpenFromHdc = DdOpenFromHdcThunk();
     D3DKMT_OPENADAPTERFROMHDC Open = {};
     D3DKMT_UMDFILENAMEINFO FileName = {};
     D3DKMT_CLOSEADAPTER Close;
@@ -646,7 +637,7 @@ DdAdapterLuidFromDc(
     _In_ HDC Dc,
     _Out_ LUID* AdapterLuid)
 {
-    PDD_OPEN_FROM_HDC OpenFromHdc = DdOpenFromHdcThunk();
+    PFND3DKMT_OPENADAPTERFROMHDC OpenFromHdc = DdOpenFromHdcThunk();
     D3DKMT_OPENADAPTERFROMHDC Open = {};
     D3DKMT_CLOSEADAPTER Close;
 

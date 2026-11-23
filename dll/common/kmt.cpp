@@ -44,6 +44,7 @@ RxLoadKmtThunks(
 
     RxResolve(Gdi32, "D3DKMTOpenAdapterFromLuid", Kmt.OpenAdapterFromLuid);
     RxResolve(Gdi32, "D3DKMTOpenAdapterFromGdiDisplayName", Kmt.OpenAdapterFromGdiDisplayName);
+    RxResolve(Gdi32, "D3DKMTOpenAdapterFromHdc", Kmt.OpenAdapterFromHdc);
     RxResolve(Gdi32, "D3DKMTEnumAdapters", Kmt.EnumAdapters);
     RxResolve(Gdi32, "D3DKMTEnumAdapters2", Kmt.EnumAdapters2);
     RxResolve(Gdi32, "D3DKMTCloseAdapter", Kmt.CloseAdapter);
