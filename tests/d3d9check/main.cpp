@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3d9on12.h>
+#include <dwmapi.h>
 
 #include <cstdio>
 #include <string>
@@ -885,6 +886,326 @@ NcCheckCreate(
     Plain->Release();
 }
 
+/* Prints a surface's description under a name */
+static
+VOID
+NcPrintSurface(
+    _In_z_ PCSTR Name,
+    _In_opt_ IDirect3DSurface9* Surface)
+{
+    D3DSURFACE_DESC Desc = {};
+    HRESULT hr;
+
+    if (Surface == nullptr)
+    {
+        printf("%s = null\n", Name);
+        return;
+    }
+    hr = Surface->GetDesc(&Desc);
+    printf("%s = %08lX fmt %u type %u usage %08lX pool %u ms %u:%lu size %ux%u\n", Name, hr, Desc.Format, Desc.Type,
+           Desc.Usage, Desc.Pool, Desc.MultiSampleType, Desc.MultiSampleQuality, Desc.Width, Desc.Height);
+}
+
+static
+VOID
+NcPrintParameters(
+    _In_z_ PCSTR Name,
+    _In_ const D3DPRESENT_PARAMETERS* Parameters,
+    _In_ HWND Window)
+{
+    printf("%s = bb %ux%u fmt %u count %u ms %u:%lu swap %u window %s windowed %d depth %d:%u flags %08lX "
+           "refresh %u interval %08lX\n", Name, Parameters->BackBufferWidth, Parameters->BackBufferHeight,
+           Parameters->BackBufferFormat, Parameters->BackBufferCount, Parameters->MultiSampleType,
+           Parameters->MultiSampleQuality, Parameters->SwapEffect,
+           Parameters->hDeviceWindow == Window ? "same" : (Parameters->hDeviceWindow == NULL ? "null" : "other"),
+           Parameters->Windowed, Parameters->EnableAutoDepthStencil, Parameters->AutoDepthStencilFormat,
+           Parameters->Flags, Parameters->FullScreen_RefreshRateInHz, Parameters->PresentationInterval);
+}
+
+/* Reads one pixel of a lockable surface */
+static
+VOID
+NcPrintPixels(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DSurface9* Surface)
+{
+    D3DLOCKED_RECT Locked = {};
+    HRESULT hr = Surface->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+
+    if (FAILED(hr))
+    {
+        printf("%s = %08lX\n", Name, hr);
+        return;
+    }
+    printf("%s = %08lX pitch %s first %08lX mid %08lX\n", Name, hr, Locked.Pitch >= 4 * 32 ? "wide" : "narrow",
+           *static_cast<const DWORD*>(Locked.pBits),
+           *reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(Locked.pBits) + Locked.Pitch * 20 + 4 * 40));
+    printf("%s_unlock = %08lX\n", Name, Surface->UnlockRect());
+}
+
+/* What the window shows after the compositor caught up */
+static
+VOID
+NcPrintWindowPixel(
+    _In_z_ PCSTR Name,
+    _In_ HWND Window)
+{
+    HDC Dc;
+
+    DwmFlush();
+    DwmFlush();
+    Dc = GetDC(Window);
+    printf("%s = %06lX %06lX\n", Name, GetPixel(Dc, 1, 1), GetPixel(Dc, 40, 20));
+    ReleaseDC(Window, Dc);
+}
+
+/* A windowed device: what creation leaves behind, its swap chain and surfaces, clears and presents */
+static
+VOID
+NcCheckDevice(
+    _Inout_ NineCheck* Check)
+{
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DDEVICE_CREATION_PARAMETERS Creation = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+    IDirect3DSwapChain9* Chain = nullptr;
+    IDirect3DSwapChain9* Missing = nullptr;
+    IDirect3DSwapChain9Ex* ChainEx = nullptr;
+    IDirect3DSurface9* Back = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Depth = nullptr;
+    IDirect3D9* Owner = nullptr;
+    D3DDISPLAYMODEEX ModeEx = {};
+    D3DDISPLAYROTATION Rotation = D3DDISPLAYROTATION_IDENTITY;
+    D3DDISPLAYMODE Mode = {};
+    D3DRASTER_STATUS Raster = {};
+    D3DPRESENTSTATS Stats = {};
+    D3DCAPS9 Caps = {};
+    D3DCAPS9 EnumCaps = {};
+    RECT Part = { 8, 8, 24, 16 };
+    D3DRECT Area = { 8, 8, 24, 16 };
+    INT Priority = 99;
+    UINT Latency = 99;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    Parameters.EnableAutoDepthStencil = TRUE;
+    Parameters.AutoDepthStencilFormat = D3DFMT_D24S8;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                   nullptr, &Device);
+    printf("device_create = %08lX %s\n", hr, Device != nullptr ? "device" : "null");
+    NcPrintParameters("device_parameters", &Parameters, Window);
+    if (Device == nullptr)
+    {
+        DestroyWindow(Window);
+        return;
+    }
+
+    hr = Device->GetCreationParameters(&Creation);
+    printf("device_creation = %08lX adapter %u type %u focus %s flags %08lX\n", hr, Creation.AdapterOrdinal,
+           Creation.DeviceType, Creation.hFocusWindow == Window ? "same" : "other", Creation.BehaviorFlags);
+
+    hr = Device->GetDirect3D(&Owner);
+    printf("device_direct3d = %08lX %s\n", hr, Owner == Check->Nine ? "same" : "other");
+    if (Owner != nullptr)
+        printf("device_direct3d_release = %lu\n", Owner->Release());
+
+    hr = Device->GetDeviceCaps(&Caps);
+    Check->Nine->GetDeviceCaps(0, D3DDEVTYPE_HAL, &EnumCaps);
+    printf("device_caps = %08lX %s\n", hr, memcmp(&Caps, &EnumCaps, sizeof(Caps)) == 0 ? "same" : "differs");
+    for (UINT Index = 0; Index < sizeof(Caps) / sizeof(DWORD); Index++)
+    {
+        if (reinterpret_cast<const DWORD*>(&Caps)[Index] != reinterpret_cast<const DWORD*>(&EnumCaps)[Index])
+            printf("device_caps_field[%u] = %08lX %08lX\n", Index, reinterpret_cast<const DWORD*>(&Caps)[Index],
+                   reinterpret_cast<const DWORD*>(&EnumCaps)[Index]);
+    }
+
+    hr = Device->GetDisplayMode(0, &Mode);
+    printf("device_mode = %08lX fmt %u %s\n", hr, Mode.Format, Mode.Width != 0 ? "sized" : "empty");
+    printf("device_mode_1 = %08lX\n", Device->GetDisplayMode(1, &Mode));
+    ModeEx.Size = sizeof(ModeEx);
+    hr = Device->GetDisplayModeEx(0, &ModeEx, &Rotation);
+    printf("device_mode_ex = %08lX fmt %u rotation %u\n", hr, ModeEx.Format, Rotation);
+
+    printf("device_addref = %lu\n", Device->AddRef());
+    printf("device_release = %lu\n", Device->Release());
+    printf("device_swapchains = %u\n", Device->GetNumberOfSwapChains());
+    hr = Device->GetSwapChain(0, &Chain);
+    printf("device_swapchain = %08lX %s\n", hr, Chain != nullptr ? "object" : "null");
+    printf("device_swapchain_1 = %08lX\n", Device->GetSwapChain(1, &Missing));
+    if (Chain != nullptr)
+    {
+        D3DPRESENT_PARAMETERS Current = {};
+        IDirect3DDevice9* Owner9 = nullptr;
+
+        hr = Chain->GetPresentParameters(&Current);
+        printf("chain_parameters_hr = %08lX\n", hr);
+        NcPrintParameters("chain_parameters", &Current, Window);
+        hr = Chain->GetDevice(&Owner9);
+        printf("chain_device = %08lX %s\n", hr, Owner9 == Device ? "same" : "other");
+        if (Owner9 != nullptr)
+            printf("chain_device_release = %lu\n", Owner9->Release());
+        hr = Chain->QueryInterface(__uuidof(IDirect3DSwapChain9Ex), reinterpret_cast<VOID**>(&ChainEx));
+        printf("chain_qi_ex = %08lX\n", hr);
+        if (ChainEx != nullptr)
+        {
+            UINT Count = 99;
+
+            printf("chain_stats = %08lX\n", ChainEx->GetPresentStats(&Stats));
+            printf("chain_last_count = %08lX\n", ChainEx->GetLastPresentCount(&Count));
+            printf("chain_ex_release = %lu\n", ChainEx->Release());
+        }
+        printf("chain_raster = %08lX\n", Chain->GetRasterStatus(&Raster));
+        printf("chain_addref = %lu\n", Chain->AddRef());
+        printf("chain_release = %lu\n", Chain->Release());
+        printf("chain_release_last = %lu\n", Chain->Release());
+        Chain = nullptr;
+    }
+
+    hr = Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back);
+    printf("device_backbuffer = %08lX\n", hr);
+    NcPrintSurface("backbuffer_desc", Back);
+    printf("device_backbuffer_1 = %08lX\n", Device->GetBackBuffer(0, 1, D3DBACKBUFFER_TYPE_MONO, &Target));
+    printf("device_backbuffer_chain_1 = %08lX\n", Device->GetBackBuffer(1, 0, D3DBACKBUFFER_TYPE_MONO, &Target));
+    printf("device_backbuffer_left = %08lX\n", Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_LEFT, &Target));
+    if (Target != nullptr)
+    {
+        Target->Release();
+        Target = nullptr;
+    }
+    hr = Device->GetRenderTarget(0, &Target);
+    printf("device_rendertarget = %08lX %s\n", hr, Target == Back ? "backbuffer" : "other");
+    if (Target != nullptr)
+    {
+        printf("rendertarget_release = %lu\n", Target->Release());
+        Target = nullptr;
+    }
+    printf("device_rendertarget_1 = %08lX\n", Device->GetRenderTarget(1, &Target));
+    hr = Device->GetDepthStencilSurface(&Depth);
+    printf("device_depth = %08lX\n", hr);
+    NcPrintSurface("depth_desc", Depth);
+
+    if (Back != nullptr)
+    {
+        IDirect3DDevice9* Owner9 = nullptr;
+        IUnknown* Container = nullptr;
+
+        hr = Back->GetDevice(&Owner9);
+        printf("backbuffer_device = %08lX %s\n", hr, Owner9 == Device ? "same" : "other");
+        if (Owner9 != nullptr)
+            Owner9->Release();
+        hr = Back->GetContainer(__uuidof(IDirect3DSwapChain9), reinterpret_cast<VOID**>(&Container));
+        printf("backbuffer_container = %08lX %s\n", hr, Container != nullptr ? "object" : "null");
+        if (Container != nullptr)
+            Container->Release();
+        printf("backbuffer_addref = %lu\n", Back->AddRef());
+        printf("backbuffer_release = %lu\n", Back->Release());
+    }
+
+    printf("device_coop = %08lX\n", Device->TestCooperativeLevel());
+    printf("device_state = %08lX\n", Device->CheckDeviceState(Window));
+    printf("device_state_null = %08lX\n", Device->CheckDeviceState(NULL));
+    hr = Device->GetGPUThreadPriority(&Priority);
+    printf("device_priority_get = %08lX %d\n", hr, Priority);
+    printf("device_priority_set3 = %08lX\n", Device->SetGPUThreadPriority(3));
+    hr = Device->GetGPUThreadPriority(&Priority);
+    printf("device_priority_get3 = %08lX %d\n", hr, Priority);
+    printf("device_priority_set8 = %08lX\n", Device->SetGPUThreadPriority(8));
+    printf("device_priority_setm8 = %08lX\n", Device->SetGPUThreadPriority(-8));
+    hr = Device->GetGPUThreadPriority(&Priority);
+    printf("device_priority_get_last = %08lX %d\n", hr, Priority);
+    hr = Device->GetMaximumFrameLatency(&Latency);
+    printf("device_latency_get = %08lX %u\n", hr, Latency);
+    printf("device_latency_set5 = %08lX\n", Device->SetMaximumFrameLatency(5));
+    hr = Device->GetMaximumFrameLatency(&Latency);
+    printf("device_latency_get5 = %08lX %u\n", hr, Latency);
+    printf("device_latency_set17 = %08lX\n", Device->SetMaximumFrameLatency(17));
+    printf("device_latency_set0 = %08lX\n", Device->SetMaximumFrameLatency(0));
+    hr = Device->GetMaximumFrameLatency(&Latency);
+    printf("device_latency_get0 = %08lX %u\n", hr, Latency);
+    printf("device_raster = %08lX\n", Device->GetRasterStatus(0, &Raster));
+    printf("device_raster_1 = %08lX\n", Device->GetRasterStatus(1, &Raster));
+
+    for (DWORD State = 0; State < 256; State++)
+    {
+        DWORD Value = 0xCCCCCCCC;
+
+        hr = Device->GetRenderState(static_cast<D3DRENDERSTATETYPE>(State), &Value);
+        if (SUCCEEDED(hr))
+            printf("renderstate[%lu] = %08lX\n", State, Value);
+        else if (State < 8)
+            printf("renderstate[%lu] = %08lX\n", State, hr);
+    }
+
+    printf("clear = %08lX\n", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF336699, 1.0f, 0));
+    printf("clear_depth = %08lX\n", Device->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 0.5f, 7));
+    printf("clear_rect = %08lX\n", Device->Clear(1, &Area, D3DCLEAR_TARGET, 0xFFCC0000, 1.0f, 0));
+    printf("clear_rects_null = %08lX\n", Device->Clear(1, nullptr, D3DCLEAR_TARGET, 0, 1.0f, 0));
+    printf("clear_flags_0 = %08lX\n", Device->Clear(0, nullptr, 0, 0, 1.0f, 0));
+    printf("clear_flags_bad = %08lX\n", Device->Clear(0, nullptr, 0x10, 0, 1.0f, 0));
+    printf("clear_z_range = %08lX\n", Device->Clear(0, nullptr, D3DCLEAR_ZBUFFER, 0, 2.0f, 0));
+    if (Back != nullptr)
+        NcPrintPixels("backbuffer_pixels", Back);
+
+    printf("present = %08lX\n", Device->Present(nullptr, nullptr, nullptr, nullptr));
+    NcPrintWindowPixel("window_pixels", Window);
+    printf("present_rect = %08lX\n", Device->Present(&Part, &Part, nullptr, nullptr));
+    printf("present_ex = %08lX\n", Device->PresentEx(nullptr, nullptr, nullptr, nullptr, 0));
+    printf("present_ex_flags = %08lX\n", Device->PresentEx(nullptr, nullptr, nullptr, nullptr, 0x80000000));
+    printf("present_ex_donotwait = %08lX\n", Device->PresentEx(nullptr, nullptr, nullptr, nullptr, D3DPRESENT_DONOTWAIT));
+    printf("present_ex_donotflip = %08lX\n", Device->PresentEx(nullptr, nullptr, nullptr, nullptr, D3DPRESENT_DONOTFLIP));
+    printf("present_window = %08lX\n", Device->Present(nullptr, nullptr, Window, nullptr));
+
+    if (Back != nullptr)
+    {
+        printf("backbuffer_release_last = %lu\n", Back->Release());
+        Back = nullptr;
+    }
+    if (Depth != nullptr)
+    {
+        printf("depth_release = %lu\n", Depth->Release());
+        Depth = nullptr;
+    }
+
+    {
+        D3DPRESENT_PARAMETERS Again = Parameters;
+
+        Again.BackBufferWidth = 32;
+        Again.BackBufferHeight = 24;
+        hr = Device->Reset(&Again);
+        printf("reset = %08lX\n", hr);
+        NcPrintParameters("reset_parameters", &Again, Window);
+        hr = Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back);
+        NcPrintSurface("reset_backbuffer", Back);
+        if (Back != nullptr)
+        {
+            Back->Release();
+            Back = nullptr;
+        }
+        Again = Parameters;
+        Again.BackBufferWidth = 0;
+        Again.BackBufferHeight = 0;
+        Again.EnableAutoDepthStencil = FALSE;
+        hr = Device->ResetEx(&Again, nullptr);
+        printf("reset_ex = %08lX\n", hr);
+        NcPrintParameters("reset_ex_parameters", &Again, Window);
+        hr = Device->GetDepthStencilSurface(&Depth);
+        printf("reset_ex_depth = %08lX %s\n", hr, Depth != nullptr ? "object" : "null");
+        if (Depth != nullptr)
+            Depth->Release();
+        Again.SwapEffect = static_cast<D3DSWAPEFFECT>(9);
+        printf("reset_bad = %08lX\n", Device->Reset(&Again));
+        printf("reset_bad_coop = %08lX\n", Device->TestCooperativeLevel());
+    }
+
+    printf("device_release_last = %lu\n", Device->Release());
+    DestroyWindow(Window);
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -900,6 +1221,7 @@ static const NineCheckInfo NcChecks[] =
     { "multisample", NcCheckMultisample },
     { "depthmatch", NcCheckDepthMatch },
     { "create", NcCheckCreate },
+    { "device", NcCheckDevice },
 };
 
 static
