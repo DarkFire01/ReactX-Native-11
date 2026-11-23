@@ -101,6 +101,10 @@ struct KmtThunks
     PFND3DKMT_SUBMITSIGNALSYNCOBJECTSTOHWQUEUE SubmitSignalSyncObjectsToHwQueue;
     PFND3DKMT_SUBMITPRESENTTOHWQUEUE SubmitPresentToHwQueue;
 
+    /* GDI device contexts over locked surface memory */
+    PFND3DKMT_CREATEDCFROMMEMORY CreateDCFromMemory;
+    PFND3DKMT_DESTROYDCFROMMEMORY DestroyDCFromMemory;
+
     /* Direct3D 12 queues */
     PFND3DKMT_QUERYCLOCKCALIBRATION QueryClockCalibration;
     PFND3DKMT_SETCONTEXTINPROCESSSCHEDULINGPRIORITY SetContextInProcessSchedulingPriority;

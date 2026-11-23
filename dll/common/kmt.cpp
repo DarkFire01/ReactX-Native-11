@@ -130,6 +130,8 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTSubmitWaitForSyncObjectsToHwQueue", Kmt.SubmitWaitForSyncObjectsToHwQueue);
     RxResolve(Gdi32, "D3DKMTSubmitSignalSyncObjectsToHwQueue", Kmt.SubmitSignalSyncObjectsToHwQueue);
     RxResolve(Gdi32, "D3DKMTSubmitPresentToHwQueue", Kmt.SubmitPresentToHwQueue);
+    RxResolve(Gdi32, "D3DKMTCreateDCFromMemory", Kmt.CreateDCFromMemory);
+    RxResolve(Gdi32, "D3DKMTDestroyDCFromMemory", Kmt.DestroyDCFromMemory);
     RxResolve(Gdi32, "D3DKMTQueryClockCalibration", Kmt.QueryClockCalibration);
     RxResolve(Gdi32, "D3DKMTSetContextInProcessSchedulingPriority", Kmt.SetContextInProcessSchedulingPriority);
 
