@@ -2460,6 +2460,19 @@ public:
 };
 
 /* How the host drives an application XAPO, and what it accepts */
+/* Counts engine passes so a test can wait for a known number of them */
+static XcEngineCallback XcPassCallback;
+
+static
+VOID
+XcWaitPasses(
+    _In_ UINT32 Count)
+{
+    XcResetEvents();
+    if (!XcWaitForEvent('p', Count, 5000))
+        printf("passes timed out\n");
+}
+
 static
 VOID
 XcCheckEffects(VOID)
@@ -2481,6 +2494,7 @@ XcCheckEffects(VOID)
 
     if (Engine == nullptr)
         return;
+    Engine->RegisterForCallbacks(&XcPassCallback);
     XcPcm(&Format, WAVE_FORMAT_PCM, 1, 44100, 16);
     for (UINT FlagIndex = 0; FlagIndex < ARRAYSIZE(FlagSets); FlagIndex++)
     {
@@ -2526,10 +2540,13 @@ XcCheckEffects(VOID)
                 Buffer.pAudioData = reinterpret_cast<const BYTE*>(Data);
                 Source->SubmitSourceBuffer(&Buffer);
                 Source->Start();
-                Sleep(60);
+                XcWaitPasses(6);
                 Source->Stop();
-                Sleep(20);
+                XcWaitPasses(2);
                 Probe.PrintLog("  fx running");
+
+                /* Changes stay queued while the engine is stopped, then land on the next pass */
+                Engine->StopEngine();
                 printf("  seteffectparams = %08lX\n", Source->SetEffectParameters(0, Parameters, sizeof(Parameters)));
                 printf("  seteffectparams deferred = %08lX\n", Source->SetEffectParameters(0, Parameters, 4, 3));
                 printf("  seteffectparams zero = %08lX\n", Source->SetEffectParameters(0, Parameters, 0));
@@ -2550,6 +2567,14 @@ XcCheckEffects(VOID)
                 Engine->CommitChanges(5);
                 Source->GetEffectState(0, &Enabled);
                 printf("  state after commit %d\n", Enabled);
+                Engine->StartEngine();
+                XcWaitPasses(2);
+                memset(Read, 0, sizeof(Read));
+                printf("  geteffectparams started = %08lX\n", Source->GetEffectParameters(0, Read, sizeof(Read)));
+                XcBytes("  read", Read, sizeof(Read));
+                Source->GetEffectState(0, &Enabled);
+                printf("  state started %d\n", Enabled);
+                Probe.PrintLog("  fx applied");
                 printf("  enable index = %08lX\n", Source->EnableEffect(1));
                 printf("  enable opset = %08lX\n", Source->EnableEffect(0, XAUDIO2_INVALID_OPSET));
                 Source->GetEffectState(1, &Enabled);
@@ -2571,7 +2596,7 @@ XcCheckEffects(VOID)
         IXAudio2SubmixVoice* Submix = nullptr;
 
         printf("submix chain = %08lX\n", Engine->CreateSubmixVoice(&Submix, 2, 32000, 0, 0, nullptr, &Chain));
-        Sleep(40);
+        XcWaitPasses(4);
         First.PrintLog("  first");
         Second.PrintLog("  second");
         if (Submix != nullptr)
@@ -2579,15 +2604,16 @@ XcCheckEffects(VOID)
         First.PrintLog("  first gone");
         Second.PrintLog("  second gone");
         printf("master chain = %08lX\n", Master->SetEffectChain(&Chain));
-        Sleep(40);
+        XcWaitPasses(4);
         First.PrintLog("  master first");
         Second.PrintLog("  master second");
         printf("master chain null = %08lX\n", Master->SetEffectChain(nullptr));
-        Sleep(40);
+        XcWaitPasses(4);
         First.PrintLog("  master first gone");
         Second.PrintLog("  master second gone");
         printf("refs %ld %ld\n", First.References, Second.References);
     }
+    Engine->UnregisterForCallbacks(&XcPassCallback);
     printf("release %lu\n", Engine->Release());
 }
 
