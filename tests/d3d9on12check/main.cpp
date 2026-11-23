@@ -698,6 +698,10 @@ wmain(
         fwprintf(stderr, L"the Direct3D 12 methods are not traced\n");
 
     Window = CkCreateWindow();
+
+    /* A hidden window counts as occluded and its presents never reach the driver */
+    ShowWindow(Window, SW_SHOWNOACTIVATE);
+    UpdateWindow(Window);
     Args.Enable9On12 = TRUE;
 
     printf("== Direct3DCreate9On12\n");
