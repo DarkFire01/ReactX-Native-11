@@ -725,6 +725,29 @@ DdReleaseLocalPalettes(
     _In_ DdLocal* Local);
 
 /* surface.cpp */
+
+/* Who compares a color key: the driver, the emulation layer, or whichever offers it */
+enum class DdKeyPath : UCHAR
+{
+    Either,
+    Driver,
+    Emulation,
+};
+
+HRESULT
+DdCheckColorKey(
+    _In_ const DdDriver* Driver,
+    _In_ DWORD Kind,
+    _In_ const DDCOLORKEY* Key,
+    _In_ DdKeyPath Path);
+
+HRESULT
+DdSetSurfaceKey(
+    _Inout_ DdSurface* Surface,
+    _In_ UCHAR Version,
+    _In_ DWORD Flags,
+    _In_opt_ const DDCOLORKEY* Key);
+
 HRESULT
 DdCreateSurfaceObject(
     _In_ DdInterface* This,

@@ -19,6 +19,9 @@ static constexpr DWORD DdCapsNeedingDirect3D = DDSCAPS_TEXTURE | DDSCAPS_3DDEVIC
 /* Surfaces wider or taller than this are refused */
 static constexpr DWORD DdMaxSurfaceSide = 65535;
 
+/* Flags SetColorKey and GetColorKey know */
+static constexpr DWORD DdKeyFlags = DDCKEY_COLORSPACE | DDCKEY_DESTBLT | DDCKEY_DESTOVERLAY | DDCKEY_SRCBLT | DDCKEY_SRCOVERLAY;
+
 static constexpr DWORD DdDescFlags = DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PITCH | DDSD_PIXELFORMAT;
 
 static
@@ -698,6 +701,60 @@ DdNewFlipChain(
     return S_OK;
 }
 
+/* Description key flags, in the order creation sets them on the new surface */
+static const struct
+{
+    DWORD DescFlag;
+    DWORD Kind;
+} DdDescKeys[] =
+{
+    { DDSD_CKSRCBLT, DDCKEY_SRCBLT },
+    { DDSD_CKDESTBLT, DDCKEY_DESTBLT },
+    { DDSD_CKSRCOVERLAY, DDCKEY_SRCOVERLAY },
+    { DDSD_CKDESTOVERLAY, DDCKEY_DESTOVERLAY },
+};
+
+static
+const DDCOLORKEY*
+DdDescKey(
+    _In_ const DDSURFACEDESC2* Desc,
+    _In_ DWORD Kind)
+{
+    switch (Kind)
+    {
+    case DDCKEY_SRCBLT:
+        return &Desc->ddckCKSrcBlt;
+    case DDCKEY_DESTBLT:
+        return &Desc->ddckCKDestBlt;
+    case DDCKEY_SRCOVERLAY:
+        return &Desc->ddckCKSrcOverlay;
+    default:
+        return &Desc->ddckCKDestOverlay;
+    }
+}
+
+/* Checks the description's keys as given, overlay destination first and blit source last */
+static
+HRESULT
+DdCheckDescKeys(
+    _In_ const DdDriver* Driver,
+    _In_ const DDSURFACEDESC2* Desc,
+    _In_ DdKeyPath Path)
+{
+    static const DWORD Order[] = { 3, 1, 2, 0 };
+    HRESULT hr;
+
+    for (DWORD Index : Order)
+    {
+        if ((Desc->dwFlags & DdDescKeys[Index].DescFlag) == 0)
+            continue;
+        hr = DdCheckColorKey(Driver, DdDescKeys[Index].Kind, DdDescKey(Desc, DdDescKeys[Index].Kind), Path);
+        if (FAILED(hr))
+            return hr;
+    }
+    return S_OK;
+}
+
 HRESULT
 DdCreateSurfaceObject(
     _In_ DdInterface* This,
@@ -844,6 +901,18 @@ DdCreateSurfaceObject(
         }
     }
 
+    /* Keys in the description must suit the memory the surface lands in; emulation may take what the driver refuses */
+    hr = DdCheckDescKeys(Driver, Desc, (Caps.dwCaps & DDSCAPS_SYSTEMMEMORY) != 0 ? DdKeyPath::Emulation : DdKeyPath::Driver);
+    if (hr == DDERR_NOCOLORKEYHW && (Caps.dwCaps & DDSCAPS_VIDEOMEMORY) != 0 && !Primary &&
+        (Desc->ddsCaps.dwCaps & DDSCAPS_VIDEOMEMORY) == 0 && (Driver->Flags & DdDriverHelCaps) != 0)
+    {
+        hr = DdCheckDescKeys(Driver, Desc, DdKeyPath::Emulation);
+        if (SUCCEEDED(hr))
+            Caps.dwCaps = (Caps.dwCaps & ~DDSCAPS_VIDEOMEMORY) | DDSCAPS_SYSTEMMEMORY;
+    }
+    if (FAILED(hr))
+        return hr;
+
     Version = This->Kind == DdKind::Draw7 ? 7 : This->Kind == DdKind::Draw4 ? 4 : 1;
     if (Chain)
         hr = DdNewFlipChain(This, &Caps, &Format, Width, Height, Desc->dwBackBufferCount, Version, SysMemRequested, &Surface);
@@ -878,6 +947,19 @@ DdCreateSurfaceObject(
     {
         DdAddRefInterface(This);
         Surface->Owner = This;
+    }
+
+    /* The keys go on through SetColorKey; a refused one takes the new surface down again */
+    for (const auto& Item : DdDescKeys)
+    {
+        if ((Desc->dwFlags & Item.DescFlag) == 0)
+            continue;
+        hr = DdSetSurfaceKey(Surface, Version, Item.Kind, DdDescKey(Desc, Item.Kind));
+        if (FAILED(hr))
+        {
+            DdDropSurface(Surface, Version);
+            return hr;
+        }
     }
 
     *Result = DdExistingInterface(Surface, Version);
@@ -1399,6 +1481,73 @@ DdRestoreLocalSurfaces(
     return S_OK;
 }
 
+/* The key kind a flag set names, in the order SetColorKey and GetColorKey look at them */
+static
+DWORD
+DdFirstKeyKind(
+    _In_ DWORD Flags)
+{
+    static const DWORD Order[] = { DDCKEY_DESTOVERLAY, DDCKEY_DESTBLT, DDCKEY_SRCOVERLAY, DDCKEY_SRCBLT };
+
+    for (DWORD Kind : Order)
+    {
+        if ((Flags & Kind) != 0)
+            return Kind;
+    }
+    return 0;
+}
+
+/* Caps the driver and the emulation layer both have; the driver's alone before emulation is up */
+static
+DWORD
+DdSharedCaps(
+    _In_ const DdDriver* Driver,
+    _In_ DWORD Hal,
+    _In_ DWORD Hel)
+{
+    return (Driver->Flags & DdDriverHelCaps) != 0 ? Hal & Hel : Hal;
+}
+
+HRESULT
+DdCheckColorKey(
+    _In_ const DdDriver* Driver,
+    _In_ DWORD Kind,
+    _In_ const DDCOLORKEY* Key,
+    _In_ DdKeyPath Path)
+{
+    BOOLEAN Single = Key->dwColorSpaceLowValue == Key->dwColorSpaceHighValue;
+    DWORD Needed;
+    DWORD Offered;
+
+    switch (Kind)
+    {
+    case DDCKEY_DESTBLT:
+        Needed = Single ? DDCKEYCAPS_DESTBLT : DDCKEYCAPS_DESTBLTCLRSPACE;
+        break;
+    case DDCKEY_DESTOVERLAY:
+        Needed = Single ? DDCKEYCAPS_DESTOVERLAY : DDCKEYCAPS_DESTOVERLAYCLRSPACE;
+        break;
+    case DDCKEY_SRCBLT:
+        Needed = Single ? DDCKEYCAPS_SRCBLT : DDCKEYCAPS_SRCBLTCLRSPACE;
+        break;
+    case DDCKEY_SRCOVERLAY:
+        Needed = Single ? DDCKEYCAPS_SRCOVERLAY : DDCKEYCAPS_SRCOVERLAYCLRSPACE;
+        break;
+    default:
+        return E_INVALIDARG;
+    }
+
+    if ((DdSharedCaps(Driver, Driver->HalCaps.dwCKeyCaps, Driver->HelCaps.dwCKeyCaps) & Needed) != 0)
+        return S_OK;
+    if (Path == DdKeyPath::Driver)
+        Offered = Driver->HalCaps.dwCKeyCaps;
+    else if (Path == DdKeyPath::Emulation)
+        Offered = Driver->HelCaps.dwCKeyCaps;
+    else
+        Offered = Driver->HalCaps.dwCKeyCaps | Driver->HelCaps.dwCKeyCaps;
+    return (Offered & Needed) != 0 ? S_OK : DDERR_NOCOLORKEYHW;
+}
+
 static
 DDCOLORKEY*
 DdKeySlot(
@@ -1429,16 +1578,112 @@ DdSurfaceGetColorKey(
     _Out_ LPDDCOLORKEY Key)
 {
     DdSurface* Surface = DdSurfaceFromCom(Com);
-    DDCOLORKEY* Slot;
+    const DdDriver* Driver = Surface->Driver;
+    DWORD Kind;
 
     DdLockScope Lock;
 
-    Slot = DdKeySlot(Surface, Flags);
-    if (Slot == nullptr || Key == nullptr)
-        return E_INVALIDARG;
-    if ((Surface->KeyFlags & Flags) == 0)
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
+    if ((Surface->Caps.dwCaps & (DDSCAPS_ZBUFFER | DDSCAPS_RESERVED2)) != 0)
         return DDERR_NOCOLORKEY;
-    *Key = *Slot;
+    if ((Flags & ~DdKeyFlags) != 0)
+        return E_INVALIDARG;
+    if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+        return DdErrOptimizedSurface;
+    if (((Driver->HalCaps.dwCaps | Driver->HelCaps.dwCaps) & DDCAPS_COLORKEY) == 0)
+        return DDERR_NOCOLORKEYHW;
+
+    /* One kind at a time; source overlay keys only live on overlays */
+    Kind = DdFirstKeyKind(Flags);
+    if (Kind == 0 || (Flags & ~(Kind | DDCKEY_COLORSPACE)) != 0)
+        return E_INVALIDARG;
+    if (Kind == DDCKEY_SRCOVERLAY && (Surface->Caps.dwCaps & DDSCAPS_OVERLAY) == 0)
+        return E_INVALIDARG;
+    if ((Surface->KeyFlags & Kind) == 0)
+        return DDERR_NOCOLORKEY;
+    if (Key == nullptr)
+        return E_INVALIDARG;
+    *Key = *DdKeySlot(Surface, Kind);
+    return S_OK;
+}
+
+HRESULT
+DdSetSurfaceKey(
+    _Inout_ DdSurface* Surface,
+    _In_ UCHAR Version,
+    _In_ DWORD Flags,
+    _In_opt_ const DDCOLORKEY* Key)
+{
+    const DdDriver* Driver = Surface->Driver;
+    BOOLEAN SystemMemory = (Surface->Caps.dwCaps & DDSCAPS_SYSTEMMEMORY) != 0;
+    DdKeyPath Path;
+    DDCOLORKEY Value = {};
+    DWORD Kind;
+    HRESULT hr;
+
+    if (Surface->Lost)
+        return DDERR_SURFACELOST;
+    if ((Surface->Caps.dwCaps & DDSCAPS_OPTIMIZED) != 0)
+        return DdErrOptimizedSurface;
+    if ((Surface->Caps.dwCaps & (DDSCAPS_ZBUFFER | DDSCAPS_RESERVED2)) != 0)
+        return DDERR_INVALIDSURFACETYPE;
+    if (Version == 7 && (Surface->Caps.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL) != 0)
+        return DDERR_NOTONMIPMAPSUBLEVEL;
+    if ((Flags & ~DdKeyFlags) != 0)
+        return E_INVALIDARG;
+
+    /* Who compares the key: both when both can, else whichever offers keys at all */
+    if ((DdSharedCaps(Driver, Driver->HalCaps.dwCaps, Driver->HelCaps.dwCaps) & DDCAPS_COLORKEY) != 0)
+    {
+        Path = SystemMemory ? DdKeyPath::Emulation : DdKeyPath::Either;
+    }
+    else if ((Driver->HalCaps.dwCaps & DDCAPS_COLORKEY) != 0)
+    {
+        if (SystemMemory &&
+            ((Driver->HelCaps.dwCaps & DDCAPS_COLORKEY) != 0 || (Driver->HalCaps.dwCaps & DDCAPS_CANBLTSYSMEM) == 0))
+        {
+            return E_FAIL;
+        }
+        Path = DdKeyPath::Driver;
+    }
+    else if ((Driver->HelCaps.dwCaps & DDCAPS_COLORKEY) != 0)
+    {
+        Path = DdKeyPath::Emulation;
+    }
+    else
+    {
+        return E_FAIL;
+    }
+
+    if (Key != nullptr)
+    {
+        Value = *Key;
+        if ((Flags & DDCKEY_COLORSPACE) == 0)
+            Value.dwColorSpaceHighValue = Value.dwColorSpaceLowValue;
+        hr = DdCheckColorKey(Driver, Flags & ~DDCKEY_COLORSPACE, &Value, Path);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    Kind = DdFirstKeyKind(Flags);
+    if (Kind == 0)
+        return S_OK;
+    if (Kind == DDCKEY_DESTOVERLAY)
+    {
+        if ((Driver->HalCaps.dwCaps & DDCAPS_OVERLAY) == 0)
+            return DDERR_NOOVERLAYHW;
+        if ((Surface->Caps.dwCaps & DDSCAPS_OVERLAY) == 0)
+            return DDERR_NOTAOVERLAYSURFACE;
+    }
+
+    if (Key == nullptr)
+    {
+        Surface->KeyFlags &= ~Kind;
+        return S_OK;
+    }
+    *DdKeySlot(Surface, Kind) = Value;
+    Surface->KeyFlags |= Kind;
     return S_OK;
 }
 
@@ -1450,27 +1695,9 @@ DdSurfaceSetColorKey(
     _In_ DWORD Flags,
     _In_opt_ LPDDCOLORKEY Key)
 {
-    DdSurface* Surface = DdSurfaceFromCom(Com);
-    DDCOLORKEY* Slot;
-    DWORD Which = Flags & ~DDCKEY_COLORSPACE;
-
     DdLockScope Lock;
 
-    Slot = DdKeySlot(Surface, Which);
-    if (Slot == nullptr)
-        return E_INVALIDARG;
-
-    if (Key == nullptr)
-    {
-        Surface->KeyFlags &= ~Which;
-        return S_OK;
-    }
-
-    *Slot = *Key;
-    if ((Flags & DDCKEY_COLORSPACE) == 0)
-        Slot->dwColorSpaceHighValue = Slot->dwColorSpaceLowValue;
-    Surface->KeyFlags |= Which;
-    return S_OK;
+    return DdSetSurfaceKey(DdSurfaceFromCom(Com), DdSurfaceVersionOf(Com), Flags, Key);
 }
 
 /* Colors of a palettized surface: its palette, or GDI's system palette without one */
