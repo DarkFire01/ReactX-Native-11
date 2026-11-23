@@ -671,6 +671,7 @@ D9Device::CreateDriverResource(
     {
         Create2.Format = Resource->Format;
         Create2.Pool = Resource->Pool;
+        Create2.Fvf = Resource->Fvf;
         Create2.MultisampleType = MultisampleType;
         Create2.MultisampleQuality = MultisampleQuality;
         Create2.pSurfList = Surface;
@@ -686,6 +687,7 @@ D9Device::CreateDriverResource(
     {
         Create.Format = Resource->Format;
         Create.Pool = Resource->Pool;
+        Create.Fvf = Resource->Fvf;
         Create.MultisampleType = MultisampleType;
         Create.MultisampleQuality = MultisampleQuality;
         Create.pSurfList = Surface;
@@ -725,6 +727,34 @@ D9Device::CreateDriverBuffer(
 
     Surface.Width = Size;
     Surface.Height = 1;
+    return CreateDriverResource(Resource, &Surface, D3DDDIMULTISAMPLE_NONE, 0);
+}
+
+/* A vertex or index buffer the application made, in video memory or in memory of the runtime's own */
+HRESULT
+D9Device::CreateBufferResource(
+    _In_ D3DFORMAT Format,
+    _In_ UINT Length,
+    _In_ UINT Flags,
+    _In_ DWORD Fvf,
+    _In_ D3DDDI_POOL Placement,
+    _In_opt_ VOID* Memory,
+    _Out_ D9Resource* Resource)
+{
+    D3DDDI_SURFACEINFO Surface = {};
+
+    ZeroMemory(Resource, sizeof(*Resource));
+    Resource->Format = static_cast<D3DDDIFORMAT>(Format);
+    Resource->Pool = Placement;
+    Resource->Flags.Value = Flags;
+    Resource->Width = Length;
+    Resource->Height = 1;
+    Resource->Fvf = Fvf;
+
+    Surface.Width = Length;
+    Surface.Height = 1;
+    Surface.pSysMem = Memory;
+    Surface.SysMemPitch = Memory != nullptr ? Length : 0;
     return CreateDriverResource(Resource, &Surface, D3DDDIMULTISAMPLE_NONE, 0);
 }
 
@@ -768,6 +798,56 @@ D9Device::DestroyDriverSurface(
     Resource->DriverResource = NULL;
 }
 
+/* The lock flags the driver sees for an application lock */
+static
+VOID
+D9DriverLockFlags(
+    _In_ const D9Resource* Resource,
+    _In_ DWORD Flags,
+    _Out_ D3DDDI_LOCKFLAGS* Driver)
+{
+    /* A read only lock never discards; system memory locks only tell the driver */
+    Driver->Value = 0;
+    Driver->ReadOnly = (Flags & D3DLOCK_READONLY) != 0;
+    Driver->Discard = !Driver->ReadOnly && (Flags & D3DLOCK_DISCARD) != 0;
+    Driver->DoNotWait = (Flags & D3DLOCK_DONOTWAIT) != 0;
+    Driver->NoOverwrite = (Flags & D3DLOCK_NOOVERWRITE) != 0;
+    Driver->NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
+}
+
+HRESULT
+D9Device::LockDriverBuffer(
+    _In_ D9Resource* Resource,
+    _In_ UINT Offset,
+    _In_ UINT Size,
+    _In_ BOOLEAN Ranged,
+    _In_ DWORD Flags,
+    _Outptr_ VOID** Data)
+{
+    D3DDDIARG_LOCK Args = {};
+    HRESULT hr;
+
+    Args.hResource = Resource->DriverResource;
+    D9DriverLockFlags(Resource, Flags, &Args.Flags);
+    if (Ranged)
+    {
+        Args.Flags.RangeValid = TRUE;
+        Args.Range.Offset = Offset;
+        Args.Range.Size = Size;
+    }
+
+    DrainBatch();
+    hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
+    if (FAILED(hr))
+    {
+        if (hr != D3DERR_WASSTILLDRAWING)
+            D9Trace(L"UMD Lock of a buffer failed 0x%08lX", hr);
+        return hr;
+    }
+    *Data = Args.pSurfData;
+    return S_OK;
+}
+
 HRESULT
 D9Device::LockDriverSurface(
     _In_ D9Resource* Resource,
@@ -778,13 +858,8 @@ D9Device::LockDriverSurface(
     D3DDDIARG_LOCK Args = {};
     HRESULT hr;
 
-    /* A read only lock never discards; system memory locks only tell the driver */
     Args.hResource = Resource->DriverResource;
-    Args.Flags.ReadOnly = (Flags & D3DLOCK_READONLY) != 0;
-    Args.Flags.Discard = !Args.Flags.ReadOnly && (Flags & D3DLOCK_DISCARD) != 0;
-    Args.Flags.DoNotWait = (Flags & D3DLOCK_DONOTWAIT) != 0;
-    Args.Flags.NoOverwrite = (Flags & D3DLOCK_NOOVERWRITE) != 0;
-    Args.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
+    D9DriverLockFlags(Resource, Flags, &Args.Flags);
     if (Rect != nullptr)
     {
         Args.Flags.AreaValid = TRUE;

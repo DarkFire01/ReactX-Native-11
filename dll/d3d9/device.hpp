@@ -38,6 +38,7 @@ struct D9Resource
     D3DDDI_RESOURCEFLAGS Flags;
     UINT Width;
     UINT Height;
+    UINT Fvf;
 };
 
 /* Driver calls a batch records instead of making them */
@@ -392,6 +393,99 @@ private:
     UINT BackBufferCount = 0;
 };
 
+/* Vertex and index buffers share everything but their description */
+template <class Interface, class Description>
+class D9Buffer final : public Interface, public D9Child
+{
+public:
+    D9Buffer(
+        _In_ D9Device* Owner,
+        _In_ UINT Length,
+        _In_ DWORD Usage,
+        _In_ D3DFORMAT Format,
+        _In_ DWORD Fvf,
+        _In_ D3DPOOL Pool);
+
+    ~D9Buffer();
+
+    D9Buffer(const D9Buffer&) = delete;
+    D9Buffer& operator=(const D9Buffer&) = delete;
+
+    HRESULT
+    Create(
+        _In_ D3DDDI_POOL Placement);
+
+    /* IUnknown */
+    STDMETHOD(QueryInterface)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Object) override;
+
+    STDMETHOD_(ULONG, AddRef)() override;
+
+    STDMETHOD_(ULONG, Release)() override;
+
+    /* IDirect3DResource9 */
+    STDMETHOD(GetDevice)(
+        _Out_ IDirect3DDevice9** Result) override;
+
+    STDMETHOD(SetPrivateData)(
+        _In_ REFGUID Guid,
+        _In_reads_bytes_opt_(Size) const VOID* Data,
+        _In_ DWORD Size,
+        _In_ DWORD Flags) override;
+
+    STDMETHOD(GetPrivateData)(
+        _In_ REFGUID Guid,
+        _Out_writes_bytes_opt_(*Size) VOID* Data,
+        _Inout_ DWORD* Size) override;
+
+    STDMETHOD(FreePrivateData)(
+        _In_ REFGUID Guid) override;
+
+    STDMETHOD_(DWORD, SetPriority)(
+        _In_ DWORD Priority) override;
+
+    STDMETHOD_(DWORD, GetPriority)() override;
+
+    STDMETHOD_(VOID, PreLoad)() override;
+
+    STDMETHOD_(D3DRESOURCETYPE, GetType)() override;
+
+    /* IDirect3DVertexBuffer9 and IDirect3DIndexBuffer9 */
+    STDMETHOD(Lock)(
+        _In_ UINT OffsetToLock,
+        _In_ UINT SizeToLock,
+        _Outptr_ VOID** Data,
+        _In_ DWORD Flags) override;
+
+    STDMETHOD(Unlock)() override;
+
+    STDMETHOD(GetDesc)(
+        _Out_ Description* Result) override;
+
+private:
+    BOOLEAN
+    IsVertex() const
+    {
+        return Format == D3DFMT_VERTEXDATA;
+    }
+
+    D9Resource* Resource = nullptr;
+    BYTE* Memory = nullptr;
+    UINT Length;
+    DWORD Usage;
+    D3DFORMAT Format;
+    DWORD Fvf;
+    D3DPOOL Pool;
+    DWORD ResourcePriority = 0;
+
+    /* Buffers lock any number of times; every unlock the driver accepts takes one away */
+    LONG LockCount = 0;
+};
+
+typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
+typedef D9Buffer<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC> D9IndexBuffer;
+
 /* surface.cpp */
 UINT64
 D9MemoryPitch(
@@ -498,6 +592,25 @@ public:
     HRESULT
     UnlockDriverSurface(
         _In_ D9Resource* Resource);
+
+    HRESULT
+    CreateBufferResource(
+        _In_ D3DFORMAT Format,
+        _In_ UINT Length,
+        _In_ UINT Flags,
+        _In_ DWORD Fvf,
+        _In_ D3DDDI_POOL Placement,
+        _In_opt_ VOID* Memory,
+        _Out_ D9Resource* Resource);
+
+    HRESULT
+    LockDriverBuffer(
+        _In_ D9Resource* Resource,
+        _In_ UINT Offset,
+        _In_ UINT Size,
+        _In_ BOOLEAN Ranged,
+        _In_ DWORD Flags,
+        _Outptr_ VOID** Data);
 
     HRESULT
     PresentToWindow(
@@ -1375,6 +1488,24 @@ private:
         _In_ BOOLEAN Lockable,
         _In_ BOOLEAN Discard,
         _Out_ IDirect3DSurface9** Surface);
+
+    D3DDDI_POOL
+    BufferPlacement(
+        _In_ BOOLEAN IsVertex,
+        _In_ DWORD Usage,
+        _In_ DWORD Fvf,
+        _In_ D3DPOOL Pool) const;
+
+    template <class Buffer>
+    HRESULT
+    AddBuffer(
+        _In_ UINT Length,
+        _In_ DWORD Usage,
+        _In_ D3DFORMAT Format,
+        _In_ DWORD Fvf,
+        _In_ D3DPOOL Pool,
+        _In_ D3DPOOL Placed,
+        _Outptr_ Buffer** Made);
 
     HRESULT
     CreateStagingBuffers(VOID);

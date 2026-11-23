@@ -1435,32 +1435,6 @@ D9Device::CreateCubeTexture(
     return D3DERR_INVALIDCALL;
 }
 
-STDMETHODIMP
-D9Device::CreateVertexBuffer(
-    _In_ UINT Length,
-    _In_ DWORD Usage,
-    _In_ DWORD FVF,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DVertexBuffer9** VertexBuffer,
-    _Inout_opt_ HANDLE* SharedHandle)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateIndexBuffer(
-    _In_ UINT Length,
-    _In_ DWORD Usage,
-    _In_ D3DFORMAT Format,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DIndexBuffer9** IndexBuffer,
-    _Inout_opt_ HANDLE* SharedHandle)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
 /* Usage bits the extended surface creation calls accept */
 static constexpr DWORD D9SurfaceUsageAllowed = D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE |
                                                D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER | D3DUSAGE_NONSECURE;
@@ -1835,6 +1809,242 @@ D9Device::CreateOffscreenPlainSurfaceEx(
     hr = CreatePlainSurface(Width, Height, Format, Pool, Usage, Surface, SharedHandle);
     if (FAILED(hr))
         *Surface = nullptr;
+    return hr;
+}
+
+/* Usage bits vertex and index buffers accept */
+static constexpr DWORD D9BufferUsageAllowed = D3DUSAGE_WRITEONLY | D3DUSAGE_SOFTWAREPROCESSING | D3DUSAGE_DONOTCLIP |
+                                              D3DUSAGE_POINTS | D3DUSAGE_RTPATCHES | D3DUSAGE_NPATCHES |
+                                              D3DUSAGE_DYNAMIC | D3DUSAGE_RESTRICTED_CONTENT |
+                                              D3DUSAGE_RESTRICT_SHARED_RESOURCE |
+                                              D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER | D3DUSAGE_NONSECURE |
+                                              D3DUSAGE_TEXTAPI;
+
+/* Driver caps bits that say buffers may live in video memory; GetDeviceCaps never shows them */
+static constexpr DWORD D9DevCapsVideoVertexBuffers = 0x02000000;
+static constexpr DWORD D9DevCapsVideoIndexBuffers = 0x04000000;
+
+/* Another spelling of the managed pool; the extended object accepts it and reports it back as given */
+static constexpr D3DPOOL D9PoolManagedAlias = static_cast<D3DPOOL>(6);
+
+/* Bytes one vertex of a flexible vertex format takes */
+static
+UINT
+D9VertexSize(
+    _In_ DWORD Fvf)
+{
+    static const BYTE PositionBytes[] = { 0, 12, 16, 16, 20, 24, 28, 32 };
+    UINT Size = PositionBytes[(Fvf & D3DFVF_XYZB5) >> 1];
+    UINT Textures = (Fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
+
+    if ((Fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZW)
+        Size = 16;
+    if ((Fvf & D3DFVF_NORMAL) != 0)
+        Size += 12;
+    if ((Fvf & D3DFVF_PSIZE) != 0)
+        Size += 4;
+    if ((Fvf & D3DFVF_DIFFUSE) != 0)
+        Size += 4;
+    if ((Fvf & D3DFVF_SPECULAR) != 0)
+        Size += 4;
+
+    /* Each set's coordinate count sits in two bits from bit 16; zero stands for two */
+    for (UINT Set = 0; Set < Textures; Set++)
+    {
+        static const BYTE CoordBytes[] = { 8, 12, 16, 4 };
+
+        Size += CoordBytes[(Fvf >> (16 + Set * 2)) & 3];
+    }
+    return Size;
+}
+
+/* Where a buffer lives: software vertex processing and missing driver support keep it in system memory */
+D3DDDI_POOL
+D9Device::BufferPlacement(
+    _In_ BOOLEAN IsVertex,
+    _In_ DWORD Usage,
+    _In_ DWORD Fvf,
+    _In_ D3DPOOL Pool) const
+{
+    DWORD DevCaps = Adapter->DriverCaps.DevCaps;
+    BOOLEAN Software = (BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0;
+    BOOLEAN Transformed = IsVertex && (Fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW;
+
+    if (Pool != D3DPOOL_DEFAULT)
+        return D3DDDIPOOL_SYSTEMMEM;
+    if ((DevCaps & (IsVertex ? D9DevCapsVideoVertexBuffers : D9DevCapsVideoIndexBuffers)) == 0)
+        return D3DDDIPOOL_SYSTEMMEM;
+
+    /* Clipped vertices go through the runtime's pipeline, which reads them from system memory */
+    if (Software || (Usage & D3DUSAGE_SOFTWAREPROCESSING) != 0)
+    {
+        if (IsVertex ? !(Transformed && (Usage & D3DUSAGE_DONOTCLIP) != 0) : (Usage & D3DUSAGE_DONOTCLIP) == 0)
+            return D3DDDIPOOL_SYSTEMMEM;
+    }
+    if ((Usage & D3DUSAGE_NPATCHES) != 0 && (DevCaps & D3DDEVCAPS_NPATCHES) == 0)
+        return D3DDDIPOOL_SYSTEMMEM;
+    return D3DDDIPOOL_VIDEOMEMORY;
+}
+
+/* Makes the buffer, trying system memory when the driver could not make it in video memory; Pool is what
+   the description reports and Placed the pool it behaves as */
+template <class Buffer>
+HRESULT
+D9Device::AddBuffer(
+    _In_ UINT Length,
+    _In_ DWORD Usage,
+    _In_ D3DFORMAT Format,
+    _In_ DWORD Fvf,
+    _In_ D3DPOOL Pool,
+    _In_ D3DPOOL Placed,
+    _Outptr_ Buffer** Made)
+{
+    D3DDDI_POOL Placement = BufferPlacement(Format == D3DFMT_VERTEXDATA, Usage, Fvf, Placed);
+    Buffer* Object;
+    HRESULT hr;
+
+    if ((Usage & D3DUSAGE_RESTRICTED_CONTENT) != 0)
+    {
+        hr = CheckProtectedContent();
+        if (FAILED(hr))
+            return hr;
+    }
+
+    Object = new (std::nothrow) Buffer(this, Length, Usage, Format, Fvf, Pool);
+    if (Object == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Object->Create(Placement);
+    if (FAILED(hr) && Placement != D3DDDIPOOL_SYSTEMMEM && hr != D3DERR_OUTOFVIDEOMEMORY)
+    {
+        delete Object;
+        Object = new (std::nothrow) Buffer(this, Length, Usage, Format, Fvf, Pool);
+        if (Object == nullptr)
+            return E_OUTOFMEMORY;
+        hr = Object->Create(D3DDDIPOOL_SYSTEMMEM);
+    }
+    if (FAILED(hr))
+    {
+        D9Trace(L"a buffer of %u bytes could not be made (0x%08lX)", Length, hr);
+        delete Object;
+        return hr;
+    }
+    Object->AddRef();
+    *Made = Object;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::CreateVertexBuffer(
+    _In_ UINT Length,
+    _In_ DWORD Usage,
+    _In_ DWORD FVF,
+    _In_ D3DPOOL Pool,
+    _Out_ IDirect3DVertexBuffer9** VertexBuffer,
+    _Inout_opt_ HANDLE* SharedHandle)
+{
+    D9VertexBuffer* Made = nullptr;
+    HRESULT hr;
+
+    D9_DEVICE_LOCK();
+
+    D3DPOOL Placed = Pool == D9PoolManagedAlias ? D3DPOOL_MANAGED : Pool;
+
+    if (Pool == D3DPOOL_MANAGED && Enum->IsExtended())
+    {
+        D9_TRACE_ONCE(L"CreateVertexBuffer: the extended object has no managed pool");
+        return D3DERR_INVALIDCALL;
+    }
+    if (SharedHandle == nullptr)
+        *VertexBuffer = nullptr;
+    if ((Usage & ~D9BufferUsageAllowed) != 0)
+    {
+        D9_TRACE_ONCE(L"CreateVertexBuffer: invalid usage 0x%08lX", Usage);
+        return D3DERR_INVALIDCALL;
+    }
+
+    *VertexBuffer = nullptr;
+    if (Length == 0 || Placed > D3DPOOL_SYSTEMMEM)
+        return D3DERR_INVALIDCALL;
+    if ((Usage & D3DUSAGE_SOFTWAREPROCESSING) != 0 &&
+        (BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)) == 0)
+    {
+        D9_TRACE_ONCE(L"CreateVertexBuffer: software processing needs a mixed or software device");
+        return D3DERR_INVALIDCALL;
+    }
+    if ((Usage & D3DUSAGE_DYNAMIC) != 0 && Placed == D3DPOOL_MANAGED)
+        return D3DERR_INVALIDCALL;
+    if ((Usage & D9SurfaceUsageShared) != 0)
+        return D3DERR_INVALIDCALL;
+    if (FVF != 0 && Length < D9VertexSize(FVF))
+    {
+        D9_TRACE_ONCE(L"CreateVertexBuffer: %u bytes do not hold one vertex", Length);
+        return D3DERR_INVALIDCALL;
+    }
+    if (SharedHandle != nullptr)
+    {
+        RX_UNIMPLEMENTED();
+        return D3DERR_NOTAVAILABLE;
+    }
+
+    hr = AddBuffer(Length, Usage, D3DFMT_VERTEXDATA, FVF, Enum->IsExtended() ? Pool : Placed, Placed, &Made);
+    if (SUCCEEDED(hr))
+        *VertexBuffer = Made;
+    return hr;
+}
+
+STDMETHODIMP
+D9Device::CreateIndexBuffer(
+    _In_ UINT Length,
+    _In_ DWORD Usage,
+    _In_ D3DFORMAT Format,
+    _In_ D3DPOOL Pool,
+    _Out_ IDirect3DIndexBuffer9** IndexBuffer,
+    _Inout_opt_ HANDLE* SharedHandle)
+{
+    D3DPOOL Placed = Pool == D9PoolManagedAlias ? D3DPOOL_MANAGED : Pool;
+    D9IndexBuffer* Made = nullptr;
+    HRESULT hr;
+
+    D9_DEVICE_LOCK();
+
+    if (SharedHandle == nullptr)
+        *IndexBuffer = nullptr;
+    if ((Usage & ~D9BufferUsageAllowed) != 0)
+    {
+        D9_TRACE_ONCE(L"CreateIndexBuffer: invalid usage 0x%08lX", Usage);
+        return D3DERR_INVALIDCALL;
+    }
+    if (Pool == D3DPOOL_MANAGED && Enum->IsExtended())
+    {
+        D9_TRACE_ONCE(L"CreateIndexBuffer: the extended object has no managed pool");
+        return D3DERR_INVALIDCALL;
+    }
+
+    *IndexBuffer = nullptr;
+    if ((Format != D3DFMT_INDEX16 && Format != D3DFMT_INDEX32) || Length < (Format == D3DFMT_INDEX16 ? 2U : 4U))
+        return D3DERR_INVALIDCALL;
+    if (Placed > D3DPOOL_SYSTEMMEM)
+        return D3DERR_INVALIDCALL;
+    if ((Usage & D3DUSAGE_SOFTWAREPROCESSING) != 0 &&
+        (BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)) == 0)
+    {
+        D9_TRACE_ONCE(L"CreateIndexBuffer: software processing needs a mixed or software device");
+        return D3DERR_INVALIDCALL;
+    }
+    if ((Usage & D3DUSAGE_DYNAMIC) != 0 && Placed == D3DPOOL_MANAGED)
+        return D3DERR_INVALIDCALL;
+    if ((Usage & D9SurfaceUsageShared) != 0)
+        return D3DERR_INVALIDCALL;
+    if (SharedHandle != nullptr)
+    {
+        RX_UNIMPLEMENTED();
+        return D3DERR_NOTAVAILABLE;
+    }
+
+    hr = AddBuffer(Length, Usage, Format, 0, Enum->IsExtended() ? Pool : Placed, Placed, &Made);
+    if (SUCCEEDED(hr))
+        *IndexBuffer = Made;
     return hr;
 }
 

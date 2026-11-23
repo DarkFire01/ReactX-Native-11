@@ -1,0 +1,279 @@
+/*
+ * PROJECT:     ReactX Direct3D 9
+ * LICENSE:     MIT (https://spdx.org/licenses/MIT)
+ * PURPOSE:     Vertex and index buffers
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
+ */
+
+#include "device.hpp"
+
+/* Driver flags for a buffer: what it holds, how often it changes and what draws from it */
+static
+UINT
+D9BufferFlags(
+    _In_ BOOLEAN IsVertex,
+    _In_ DWORD Usage)
+{
+    D3DDDI_RESOURCEFLAGS Flags = {};
+
+    Flags.VertexBuffer = IsVertex;
+    Flags.IndexBuffer = !IsVertex;
+    Flags.Dynamic = (Usage & D3DUSAGE_DYNAMIC) != 0;
+    Flags.HintStatic = (Usage & D3DUSAGE_DYNAMIC) == 0;
+    Flags.WriteOnly = (Usage & D3DUSAGE_WRITEONLY) != 0;
+    Flags.Points = (Usage & D3DUSAGE_POINTS) != 0;
+    Flags.RtPatches = (Usage & D3DUSAGE_RTPATCHES) != 0;
+    Flags.NPatches = (Usage & D3DUSAGE_NPATCHES) != 0;
+    return Flags.Value;
+}
+
+template <class Interface, class Description>
+D9Buffer<Interface, Description>::D9Buffer(
+    _In_ D9Device* Owner,
+    _In_ UINT Length,
+    _In_ DWORD Usage,
+    _In_ D3DFORMAT Format,
+    _In_ DWORD Fvf,
+    _In_ D3DPOOL Pool)
+    : D9Child(Owner),
+      Length(Length),
+      Usage(Usage),
+      Format(Format),
+      Fvf(Fvf),
+      Pool(Pool)
+{
+}
+
+template <class Interface, class Description>
+D9Buffer<Interface, Description>::~D9Buffer()
+{
+    if (Resource != nullptr)
+    {
+        Device->DestroyDriverSurface(Resource);
+        delete Resource;
+    }
+    if (Memory != nullptr)
+        _aligned_free(Memory);
+}
+
+/* System memory buffers keep their bytes in memory of the runtime's own that the driver reads */
+template <class Interface, class Description>
+HRESULT
+D9Buffer<Interface, Description>::Create(
+    _In_ D3DDDI_POOL Placement)
+{
+    if (Placement == D3DDDIPOOL_SYSTEMMEM)
+    {
+        Memory = static_cast<BYTE*>(_aligned_malloc(Length, 32));
+        if (Memory == nullptr)
+            return E_OUTOFMEMORY;
+        ZeroMemory(Memory, Length);
+    }
+
+    Resource = new (std::nothrow) D9Resource();
+    if (Resource == nullptr)
+        return E_OUTOFMEMORY;
+    return Device->CreateBufferResource(Format, Length, D9BufferFlags(IsVertex(), Usage), Fvf, Placement, Memory,
+                                        Resource);
+}
+
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::QueryInterface(
+    _In_ REFIID Iid,
+    _COM_Outptr_ VOID** Object)
+{
+    if (Object == nullptr)
+        return E_POINTER;
+
+    *Object = nullptr;
+    if (IsEqualGUID(Iid, __uuidof(IUnknown)) || IsEqualGUID(Iid, __uuidof(IDirect3DResource9)) ||
+        IsEqualGUID(Iid, __uuidof(Interface)))
+    {
+        *Object = static_cast<Interface*>(this);
+        AddRef();
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP_(ULONG)
+D9Buffer<Interface, Description>::AddRef()
+{
+    return AddRefChild();
+}
+
+/* The device outlives the buffer it destroys */
+template <class Interface, class Description>
+STDMETHODIMP_(ULONG)
+D9Buffer<Interface, Description>::Release()
+{
+    D9Device* Owner = Device;
+    LONG Count = InterlockedDecrement(&RefCount);
+
+    if (Count == 0)
+    {
+        delete this;
+        Owner->Release();
+    }
+    return static_cast<ULONG>(Count);
+}
+
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::GetDevice(
+    _Out_ IDirect3DDevice9** Result)
+{
+    if (Result == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    *Result = Device;
+    Device->AddRef();
+    return S_OK;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::SetPrivateData(
+    _In_ REFGUID Guid,
+    _In_reads_bytes_opt_(Size) const VOID* Data,
+    _In_ DWORD Size,
+    _In_ DWORD Flags)
+{
+    RX_UNIMPLEMENTED();
+    return D3DERR_INVALIDCALL;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::GetPrivateData(
+    _In_ REFGUID Guid,
+    _Out_writes_bytes_opt_(*Size) VOID* Data,
+    _Inout_ DWORD* Size)
+{
+    RX_UNIMPLEMENTED();
+    return D3DERR_NOTFOUND;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::FreePrivateData(
+    _In_ REFGUID Guid)
+{
+    RX_UNIMPLEMENTED();
+    return D3DERR_NOTFOUND;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP_(DWORD)
+D9Buffer<Interface, Description>::SetPriority(
+    _In_ DWORD Priority)
+{
+    DWORD Previous = ResourcePriority;
+
+    ResourcePriority = Priority;
+    return Previous;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP_(DWORD)
+D9Buffer<Interface, Description>::GetPriority()
+{
+    return ResourcePriority;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP_(VOID)
+D9Buffer<Interface, Description>::PreLoad()
+{
+}
+
+template <class Interface, class Description>
+STDMETHODIMP_(D3DRESOURCETYPE)
+D9Buffer<Interface, Description>::GetType()
+{
+    return IsVertex() ? D3DRTYPE_VERTEXBUFFER : D3DRTYPE_INDEXBUFFER;
+}
+
+/* Vertex buffers hand the driver the range they lock; index buffers always lock whole */
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::Lock(
+    _In_ UINT OffsetToLock,
+    _In_ UINT SizeToLock,
+    _Outptr_ VOID** Data,
+    _In_ DWORD Flags)
+{
+    BOOLEAN Ranged = IsVertex() && SizeToLock != 0;
+    VOID* Base = nullptr;
+    HRESULT hr;
+
+    if (IsVertex() && Memory == nullptr)
+        *Data = nullptr;
+
+    LockCount += 1;
+    hr = Device->LockDriverBuffer(Resource, OffsetToLock, SizeToLock, Ranged, Flags, &Base);
+    if (FAILED(hr))
+    {
+        LockCount -= 1;
+        return hr;
+    }
+
+    /* The driver already moved a ranged vertex buffer lock to its offset */
+    if (Memory != nullptr)
+        *Data = Memory + OffsetToLock;
+    else if (IsVertex())
+        *Data = Base;
+    else
+        *Data = static_cast<BYTE*>(Base) + OffsetToLock;
+    return S_OK;
+}
+
+template <class Interface, class Description>
+STDMETHODIMP
+D9Buffer<Interface, Description>::Unlock()
+{
+    HRESULT hr = Device->UnlockDriverSurface(Resource);
+
+    if (FAILED(hr))
+        return hr;
+    LockCount -= 1;
+    return S_OK;
+}
+
+template <>
+STDMETHODIMP
+D9VertexBuffer::GetDesc(
+    _Out_ D3DVERTEXBUFFER_DESC* Result)
+{
+    if (Result == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    Result->Format = Format;
+    Result->Type = D3DRTYPE_VERTEXBUFFER;
+    Result->Usage = Usage;
+    Result->Pool = Pool;
+    Result->Size = Length;
+    Result->FVF = Fvf;
+    return S_OK;
+}
+
+template <>
+STDMETHODIMP
+D9IndexBuffer::GetDesc(
+    _Out_ D3DINDEXBUFFER_DESC* Result)
+{
+    if (Result == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    Result->Format = Format;
+    Result->Type = D3DRTYPE_INDEXBUFFER;
+    Result->Usage = Usage;
+    Result->Pool = Pool;
+    Result->Size = Length;
+    return S_OK;
+}
+
+template class D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC>;
+template class D9Buffer<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC>;
