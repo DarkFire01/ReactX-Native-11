@@ -230,6 +230,95 @@ CkDescribeHeap(
              static_cast<UINT>(Flags));
 }
 
+/* A short fingerprint of bytes, so shader code and root signatures compare in one word */
+static
+UINT
+CkHashBytes(
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ SIZE_T Size)
+{
+    const BYTE* Bytes = static_cast<const BYTE*>(Data);
+    UINT Hash = 0x811C9DC5;
+
+    for (SIZE_T Index = 0; Index < Size; Index += 1)
+        Hash = (Hash ^ Bytes[Index]) * 0x01000193;
+    return Hash;
+}
+
+/* Prints the size and fingerprint of code, and every word of it when CK_DXBC is set */
+static
+VOID
+CkDescribeBytecode(
+    _Inout_ std::string* Text,
+    _In_z_ PCSTR Label,
+    _In_reads_bytes_opt_(Size) const VOID* Data,
+    _In_ SIZE_T Size)
+{
+    static const BOOL Full = GetEnvironmentVariableA("CK_DXBC", nullptr, 0) != 0;
+
+    if (Data == nullptr || Size == 0)
+        return;
+    CkAppend(Text, " %s %zu/%08X", Label, Size, CkHashBytes(Data, Size));
+    if (!Full)
+        return;
+    for (SIZE_T Offset = 0; Offset + 4 <= Size; Offset += 4)
+    {
+        if (Offset % 32 == 0)
+            CkAppend(Text, "\n    %s %04zX:", Label, Offset);
+        CkAppend(Text, " %08X", *reinterpret_cast<const UINT*>(static_cast<const BYTE*>(Data) + Offset));
+    }
+    CkAppend(Text, "\n   ");
+}
+
+static
+VOID
+CkDescribeGraphicsPipeline(
+    _Inout_ std::string* Text,
+    _In_ const D3D12_GRAPHICS_PIPELINE_STATE_DESC* Desc)
+{
+    const D3D12_RASTERIZER_DESC* Raster = &Desc->RasterizerState;
+    const D3D12_DEPTH_STENCIL_DESC* Depth = &Desc->DepthStencilState;
+
+    CkAppend(Text, " root %s", CkName(Desc->pRootSignature).c_str());
+    CkDescribeBytecode(Text, "vs", Desc->VS.pShaderBytecode, Desc->VS.BytecodeLength);
+    CkDescribeBytecode(Text, "ps", Desc->PS.pShaderBytecode, Desc->PS.BytecodeLength);
+    CkDescribeBytecode(Text, "gs", Desc->GS.pShaderBytecode, Desc->GS.BytecodeLength);
+    CkDescribeBytecode(Text, "hs", Desc->HS.pShaderBytecode, Desc->HS.BytecodeLength);
+    CkDescribeBytecode(Text, "ds", Desc->DS.pShaderBytecode, Desc->DS.BytecodeLength);
+    CkAppend(Text, " so %u topology %u targets %u ds %u samples %u/%u mask %X cut %u flags %X", Desc->StreamOutput.NumEntries,
+             Desc->PrimitiveTopologyType, Desc->NumRenderTargets, Desc->DSVFormat, Desc->SampleDesc.Count,
+             Desc->SampleDesc.Quality, Desc->SampleMask, Desc->IBStripCutValue, Desc->Flags);
+    CkAppend(Text, " rtv");
+    for (UINT Index = 0; Index < Desc->NumRenderTargets && Index < 8; Index += 1)
+        CkAppend(Text, " %u", Desc->RTVFormats[Index]);
+    CkAppend(Text, " blend %u %u", Desc->BlendState.AlphaToCoverageEnable, Desc->BlendState.IndependentBlendEnable);
+    for (UINT Index = 0; Index < 8; Index += 1)
+    {
+        const D3D12_RENDER_TARGET_BLEND_DESC* Blend = &Desc->BlendState.RenderTarget[Index];
+
+        CkAppend(Text, " [%u %u %u %u %u %u %u %u %u %u]", Blend->BlendEnable, Blend->LogicOpEnable, Blend->SrcBlend,
+                 Blend->DestBlend, Blend->BlendOp, Blend->SrcBlendAlpha, Blend->DestBlendAlpha, Blend->BlendOpAlpha,
+                 Blend->LogicOp, Blend->RenderTargetWriteMask);
+    }
+    CkAppend(Text, " raster %u %u %u %d %g %g %u %u %u %u %u", Raster->FillMode, Raster->CullMode,
+             Raster->FrontCounterClockwise, Raster->DepthBias, Raster->DepthBiasClamp, Raster->SlopeScaledDepthBias,
+             Raster->DepthClipEnable, Raster->MultisampleEnable, Raster->AntialiasedLineEnable, Raster->ForcedSampleCount,
+             Raster->ConservativeRaster);
+    CkAppend(Text, " depth %u %u %u stencil %u %X %X [%u %u %u %u] [%u %u %u %u]", Depth->DepthEnable,
+             Depth->DepthWriteMask, Depth->DepthFunc, Depth->StencilEnable, Depth->StencilReadMask,
+             Depth->StencilWriteMask, Depth->FrontFace.StencilFailOp, Depth->FrontFace.StencilDepthFailOp,
+             Depth->FrontFace.StencilPassOp, Depth->FrontFace.StencilFunc, Depth->BackFace.StencilFailOp,
+             Depth->BackFace.StencilDepthFailOp, Depth->BackFace.StencilPassOp, Depth->BackFace.StencilFunc);
+    CkAppend(Text, " inputs %u", Desc->InputLayout.NumElements);
+    for (UINT Index = 0; Index < Desc->InputLayout.NumElements; Index += 1)
+    {
+        const D3D12_INPUT_ELEMENT_DESC* Element = &Desc->InputLayout.pInputElementDescs[Index];
+
+        CkAppend(Text, " [%s %u %u %u %u %u %u]", Element->SemanticName, Element->SemanticIndex, Element->Format,
+                 Element->InputSlot, Element->AlignedByteOffset, Element->InputSlotClass, Element->InstanceDataStepRate);
+    }
+}
+
 /* The arguments of a Direct3D 12 device method that say what it makes */
 static
 VOID
@@ -251,16 +340,8 @@ CkDescribeDeviceCall(
             CkAppend(Text, " type %u", static_cast<UINT>(A[1]));
             break;
         case 10:
-        {
-            const D3D12_GRAPHICS_PIPELINE_STATE_DESC* Desc =
-                reinterpret_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(A[1]);
-
-            CkAppend(Text, " root %s vs %zu ps %zu inputs %u topology %u targets %u rt0 %u ds %u samples %u",
-                     CkName(Desc->pRootSignature).c_str(), Desc->VS.BytecodeLength, Desc->PS.BytecodeLength,
-                     Desc->InputLayout.NumElements, Desc->PrimitiveTopologyType, Desc->NumRenderTargets,
-                     Desc->RTVFormats[0], Desc->DSVFormat, Desc->SampleDesc.Count);
+            CkDescribeGraphicsPipeline(Text, reinterpret_cast<const D3D12_GRAPHICS_PIPELINE_STATE_DESC*>(A[1]));
             break;
-        }
         case 11:
         {
             const D3D12_COMPUTE_PIPELINE_STATE_DESC* Desc =
@@ -284,9 +365,30 @@ CkDescribeDeviceCall(
             break;
         }
         case 16:
-            CkAppend(Text, " node %u size %zu", static_cast<UINT>(A[1]), static_cast<SIZE_T>(A[3]));
+            CkAppend(Text, " node %u", static_cast<UINT>(A[1]));
+            CkDescribeBytecode(Text, "blob", reinterpret_cast<const VOID*>(A[2]), static_cast<SIZE_T>(A[3]));
             break;
         case 18:
+            CkAppend(Text, " resource %s", CkName(reinterpret_cast<VOID*>(A[1])).c_str());
+            if (A[2] != 0)
+            {
+                const D3D12_SHADER_RESOURCE_VIEW_DESC* Desc = reinterpret_cast<const D3D12_SHADER_RESOURCE_VIEW_DESC*>(A[2]);
+
+                CkAppend(Text, " format %u dim %u mapping %X raw %08X %08X %08X %08X", Desc->Format, Desc->ViewDimension,
+                         Desc->Shader4ComponentMapping, Desc->Texture2DArray.MostDetailedMip, Desc->Texture2DArray.MipLevels,
+                         Desc->Texture2DArray.FirstArraySlice, Desc->Texture2DArray.ArraySize);
+            }
+            break;
+        case 22:
+        {
+            const D3D12_SAMPLER_DESC* Desc = reinterpret_cast<const D3D12_SAMPLER_DESC*>(A[1]);
+
+            CkAppend(Text, " filter %X address %u %u %u bias %g aniso %u compare %u border %g %g %g %g lod %g %g",
+                     Desc->Filter, Desc->AddressU, Desc->AddressV, Desc->AddressW, Desc->MipLODBias, Desc->MaxAnisotropy,
+                     Desc->ComparisonFunc, Desc->BorderColor[0], Desc->BorderColor[1], Desc->BorderColor[2],
+                     Desc->BorderColor[3], Desc->MinLOD, Desc->MaxLOD);
+            break;
+        }
         case 19:
         case 20:
         case 21:
@@ -423,6 +525,68 @@ CkDescribeDdiCall(
 {
     switch (Slot)
     {
+        case 4:
+            CkAppend(Text, " stage %u texture %s", static_cast<UINT>(A[1]), CkName(reinterpret_cast<VOID*>(A[2])).c_str());
+            break;
+        case 7:
+        {
+            const D3DDDIARG_SETSTREAMSOURCEUM* Args = reinterpret_cast<const D3DDDIARG_SETSTREAMSOURCEUM*>(A[1]);
+
+            CkAppend(Text, " stream %u stride %u data %s", Args->Stream, Args->Stride, A[2] != 0 ? "set" : "none");
+            break;
+        }
+        case 8:
+        {
+            const D3DDDIARG_SETINDICES* Args = reinterpret_cast<const D3DDDIARG_SETINDICES*>(A[1]);
+
+            CkAppend(Text, " buffer %s stride %u", CkName(Args->hIndexBuffer).c_str(), Args->Stride);
+            break;
+        }
+        case 9:
+            CkAppend(Text, " size %u data %s", static_cast<UINT>(A[1]), A[2] != 0 ? "set" : "none");
+            break;
+        case 10:
+        {
+            const D3DDDIARG_DRAWPRIMITIVE* Args = reinterpret_cast<const D3DDDIARG_DRAWPRIMITIVE*>(A[1]);
+
+            CkAppend(Text, " type %u start %u count %u flags %s", Args->PrimitiveType, Args->VStart, Args->PrimitiveCount,
+                     A[2] != 0 ? "set" : "none");
+            break;
+        }
+        case 11:
+        {
+            const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Args = reinterpret_cast<const D3DDDIARG_DRAWINDEXEDPRIMITIVE*>(A[1]);
+
+            CkAppend(Text, " type %u base %d min %u vertices %u start %u count %u", Args->PrimitiveType,
+                     Args->BaseVertexIndex, Args->MinIndex, Args->NumVertices, Args->StartIndex, Args->PrimitiveCount);
+            break;
+        }
+        case 14:
+        {
+            const D3DDDIARG_DRAWPRIMITIVE2* Args = reinterpret_cast<const D3DDDIARG_DRAWPRIMITIVE2*>(A[1]);
+
+            CkAppend(Text, " type %u offset %u count %u", Args->PrimitiveType, Args->FirstVertexOffset,
+                     Args->PrimitiveCount);
+            break;
+        }
+        case 15:
+        {
+            const D3DDDIARG_DRAWINDEXEDPRIMITIVE2* Args = reinterpret_cast<const D3DDDIARG_DRAWINDEXEDPRIMITIVE2*>(A[1]);
+
+            CkAppend(Text, " type %u base %d min %u vertices %u offset %u count %u size %u indices %s flags %s",
+                     Args->PrimitiveType, Args->BaseVertexOffset, Args->MinIndex, Args->NumVertices,
+                     Args->StartIndexOffset, Args->PrimitiveCount, static_cast<UINT>(A[2]), A[3] != 0 ? "set" : "none",
+                     A[4] != 0 ? "set" : "none");
+            break;
+        }
+        case 51:
+        {
+            const D3DDDIARG_SETSTREAMSOURCE* Args = reinterpret_cast<const D3DDDIARG_SETSTREAMSOURCE*>(A[1]);
+
+            CkAppend(Text, " stream %u buffer %s offset %u stride %u", Args->Stream, CkName(Args->hVertexBuffer).c_str(),
+                     Args->Offset, Args->Stride);
+            break;
+        }
         case CkDdiCreateResource2:
         {
             const D3DDDIARG_CREATERESOURCE2* Args = reinterpret_cast<const D3DDDIARG_CREATERESOURCE2*>(A[1]);

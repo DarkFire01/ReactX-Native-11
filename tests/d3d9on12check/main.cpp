@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <string>
 
-#include "hooks.hpp"
+#include "checks.hpp"
 
 typedef HRESULT (APIENTRY* PFN_CK_OPEN_ADAPTER)(D3DDDIARG_OPENADAPTER*, const LUID*, VOID*);
 typedef VOID (APIENTRY* PFN_CK_GET_TABLE)(VOID*);
@@ -946,6 +946,7 @@ CkScene(
 
     if (Flush != nullptr)
         CkShaders(Device, Flush);
+    CkDraws(Device, Back);
     CkQueries(Device);
 
     if (Target != nullptr)
