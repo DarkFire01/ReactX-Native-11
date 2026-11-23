@@ -14,6 +14,7 @@
 
 class RxDevice12;
 class RxSchedulingGroup;
+struct RxFormatContext12;
 
 /* The one DDI revision this runtime drives: release 8, build 118 */
 constexpr UINT RxDdiInterface12 = D3D12DDI_INTERFACE_VERSION_R8;
@@ -423,6 +424,13 @@ private:
     HRESULT
     FillTables();
 
+    VOID
+    QueryVideoVersion();
+
+    /* The answers CheckFeatureSupport gives for formats depend on these */
+    RxFormatContext12
+    FormatContext();
+
     LONG RefCount = 1;
     RxAdapter12* Adapter = nullptr;
     D3DKMT_HANDLE KmDevice = 0;
@@ -432,6 +440,9 @@ private:
     D3D12DDI_DEVICE_FUNCS_CORE_0116 CoreFunctions = {};
     D3D12DDI_COMMAND_LIST_FUNCS_3D_0114 ListFunctions = {};
     D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001 QueueFunctions = {};
+    D3D12DDI_EXTENDED_FEATURES_FUNCS_0096 ExtendedFunctions = {};
+    UINT VideoVersion = 0;
+    LONG TypedLoadMinimal = -1;
     D3D12DDI_D3D12_OPTIONS_DATA_0089 Options = {};
     D3D12DDI_MEMORY_ARCHITECTURE_CAPS_0041 MemoryArchitecture = {};
     D3D12DDI_SHADER_CAPS_0084 ShaderCaps = {};

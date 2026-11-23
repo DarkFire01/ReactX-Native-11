@@ -426,7 +426,46 @@ RxDevice12::FillTables()
         return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
     }
 
+    /* Optional; drivers without extended features leave video off */
+    if (SUCCEEDED(Functions.pfnFillDDITable(Adapter->GetDriverHandle(), D3D12DDI_TABLE_TYPE_0096_EXTENDED_FEATURES,
+                                            &ExtendedFunctions, sizeof(ExtendedFunctions), 0, NoTable)))
+    {
+        QueryVideoVersion();
+    }
+
     return S_OK;
+}
+
+/* The newest video feature version the driver offers */
+VOID
+RxDevice12::QueryVideoVersion()
+{
+    UINT32 Versions[32];
+    UINT32 Count = 0;
+    UINT Index;
+
+    if (ExtendedFunctions.pfnGetSupportedExtendedFeatureVersions == nullptr)
+        return;
+    if (FAILED(ExtendedFunctions.pfnGetSupportedExtendedFeatureVersions(DriverDevice, D3D12DDI_FEATURE_0020_VIDEO,
+                                                                       &Count, nullptr)))
+    {
+        return;
+    }
+
+    if (Count > _countof(Versions))
+        Count = _countof(Versions);
+    if (Count == 0 || FAILED(ExtendedFunctions.pfnGetSupportedExtendedFeatureVersions(DriverDevice,
+                                                                                    D3D12DDI_FEATURE_0020_VIDEO,
+                                                                                    &Count, Versions)))
+    {
+        return;
+    }
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        if (Versions[Index] > VideoVersion)
+            VideoVersion = Versions[Index];
+    }
 }
 
 RxDevice12::~RxDevice12()

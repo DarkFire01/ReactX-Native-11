@@ -14,6 +14,8 @@ nt_add_usermode_dll(d3d12core
         device_stubs.cpp
         devicecreate.cpp
         features.cpp
+        formatsupport12.cpp
+        formattable12.cpp
         fence.cpp
         fence_stubs.cpp
         queue.cpp

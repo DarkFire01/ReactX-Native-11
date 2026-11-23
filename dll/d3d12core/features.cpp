@@ -6,9 +6,7 @@
  */
 
 #include "objects.hpp"
-#include "formatsupport.hpp"
-
-#include <d3d11.h>
+#include "formatsupport12.hpp"
 
 /* Formats stored as more than one plane */
 static
@@ -29,7 +27,6 @@ RxPlaneCount(
         case DXGI_FORMAT_NV12:
         case DXGI_FORMAT_P010:
         case DXGI_FORMAT_P016:
-        case DXGI_FORMAT_420_OPAQUE:
         case DXGI_FORMAT_NV11:
         case DXGI_FORMAT_P208:
             return 2;
@@ -47,6 +44,52 @@ RxIsKnownShaderModel(
     _In_ D3D_SHADER_MODEL Model)
 {
     return Model == D3D_SHADER_MODEL_5_1 || (Model >= D3D_SHADER_MODEL_6_0 && Model <= D3D_SHADER_MODEL_6_9);
+}
+
+static
+UINT
+RxQueryDriverFormat(
+    _In_ VOID* Context,
+    _In_ DXGI_FORMAT Format)
+{
+    RxDevice12* Device = static_cast<RxDevice12*>(Context);
+    UINT Bits = 0;
+
+    Device->Ddi().pfnCheckFormatSupport(Device->Handle(), Format, &Bits);
+    return Bits;
+}
+
+RxFormatContext12
+RxDevice12::FormatContext()
+{
+    RxFormatContext12 Context = {};
+
+    Context.Level = Adapter->GetMaxFeatureLevel();
+    Context.Video = VideoVersion >= 8;
+    Context.LogicOp = Options.OutputMergerLogicOp != FALSE;
+    Context.Tiled = Options.TiledResourcesTier != D3D12DDI_TILED_RESOURCES_TIER_NOT_SUPPORTED;
+    Context.SamplerFeedback = Options.SamplerFeedbackTier != 0;
+    Context.TypedLoadExtra = Context.Level >= D3D_FEATURE_LEVEL_11_0 && ShaderCaps.TypedUAVLoadAdditionalFormats;
+    Context.DisplayableDdi = TRUE;
+
+    /* The two byte sized integer formats decide whether minimal typed loads exist */
+    if (TypedLoadMinimal < 0)
+    {
+        BOOLEAN Minimal = Context.TypedLoadExtra;
+
+        for (DXGI_FORMAT Format : { DXGI_FORMAT_R8G8_UINT, DXGI_FORMAT_R8_UINT })
+        {
+            if (RxTypedLoadRule12(Context.Level, Format) == RxRuleRequired ||
+                (RxQueryDriverFormat(this, Format) & 0x20000) != 0)
+            {
+                Minimal = TRUE;
+            }
+        }
+        InterlockedExchange(&TypedLoadMinimal, Minimal);
+    }
+
+    Context.TypedLoadMinimal = Context.Level >= D3D_FEATURE_LEVEL_11_0 && TypedLoadMinimal > 0;
+    return Context;
 }
 
 HRESULT
@@ -130,54 +173,54 @@ RxDevice12::CheckFeatureSupport(
         case D3D12_FEATURE_FORMAT_SUPPORT:
         {
             D3D12_FEATURE_DATA_FORMAT_SUPPORT* Data = static_cast<D3D12_FEATURE_DATA_FORMAT_SUPPORT*>(pFeatureSupportData);
-            UINT Driver = 0;
+            RxFormatContext12 Context = FormatContext();
             UINT Support1;
             UINT Support2;
+            BOOLEAN Supported;
 
             if (FeatureSupportDataSize != sizeof(*Data))
                 return E_INVALIDARG;
 
-            Data->Support1 = D3D12_FORMAT_SUPPORT1_NONE;
-            Data->Support2 = D3D12_FORMAT_SUPPORT2_NONE;
-
-            if (Data->Format != DXGI_FORMAT_UNKNOWN)
-            {
-                CoreFunctions.pfnCheckFormatSupport(DriverDevice, Data->Format, &Driver);
-                if ((Driver & D3D12DDI_FORMAT_SUPPORT_NOT_SUPPORTED) != 0)
-                    return E_FAIL;
-            }
-
-            if (!RxDeriveFormatSupport(Data->Format, Driver, &Support1))
-                return E_FAIL;
-            if (!RxDeriveFormatSupport2(Data->Format, Driver, &Support2))
-                Support2 = 0;
-
-            /* Mip generation, CPU locking and sharing are Direct3D 11 answers with no Direct3D 12 meaning */
-            Support1 &= ~(D3D11_FORMAT_SUPPORT_MIP_AUTOGEN | D3D11_FORMAT_SUPPORT_CPU_LOCKABLE | 0x80000000u);
-            Support2 &= ~D3D11_FORMAT_SUPPORT2_SHAREABLE;
-
-            /* Buffers can be tiled whenever the device has tiled resources at all */
-            if (Data->Format == DXGI_FORMAT_UNKNOWN && Options.TiledResourcesTier != D3D12DDI_TILED_RESOURCES_TIER_NOT_SUPPORTED)
-                Support2 |= D3D12_FORMAT_SUPPORT2_TILED;
-
+            Supported = RxCheckFormatSupport12(Context, Data->Format, RxQueryDriverFormat, this, &Support1, &Support2);
             Data->Support1 = (D3D12_FORMAT_SUPPORT1)Support1;
             Data->Support2 = (D3D12_FORMAT_SUPPORT2)Support2;
-            return S_OK;
+            return Supported ? S_OK : E_FAIL;
         }
 
         case D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS:
         {
             D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS* Data =
                 static_cast<D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS*>(pFeatureSupportData);
+            RxFormatContext12 Context = FormatContext();
+            BOOLEAN Tiled;
             UINT Levels = 0;
 
             if (FeatureSupportDataSize != sizeof(*Data))
                 return E_INVALIDARG;
 
+            if (!RxFormatKnown12(Context, Data->Format))
+                return E_FAIL;
+
+            /* Tiled resources need the format to be tileable at that count and a tiled tier at all */
+            Tiled = (Data->Flags & D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_TILED_RESOURCE) != 0;
+            if (Data->SampleCount == 1)
+            {
+                Data->NumQualityLevels = !Tiled || (RxFormatTileable12(Context, Data->Format, 1) && Context.Tiled);
+                return S_OK;
+            }
+
+            if (Data->SampleCount == 0 || Data->SampleCount > D3D12_MAX_MULTISAMPLE_SAMPLE_COUNT)
+            {
+                Data->NumQualityLevels = 0;
+                return E_FAIL;
+            }
+
             CoreFunctions.pfnCheckMultisampleQualityLevels(DriverDevice, Data->Format, Data->SampleCount,
                                                            (D3D12DDI_MULTISAMPLE_QUALITY_LEVEL_FLAGS)Data->Flags,
                                                            &Levels);
-            Data->NumQualityLevels = Levels;
+            if (Tiled && (!RxFormatTileable12(Context, Data->Format, Data->SampleCount) || !Context.Tiled))
+                Levels = 0;
+            Data->NumQualityLevels = Levels > 0x80000000 ? 0x80000000 : Levels;
             return S_OK;
         }
 
@@ -185,7 +228,7 @@ RxDevice12::CheckFeatureSupport(
         {
             D3D12_FEATURE_DATA_FORMAT_INFO* Data = static_cast<D3D12_FEATURE_DATA_FORMAT_INFO*>(pFeatureSupportData);
 
-            if (FeatureSupportDataSize != sizeof(*Data))
+            if (FeatureSupportDataSize != sizeof(*Data) || !RxFormatKnown12(FormatContext(), Data->Format))
                 return E_INVALIDARG;
 
             Data->PlaneCount = (UINT8)RxPlaneCount(Data->Format);
