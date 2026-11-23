@@ -6174,6 +6174,147 @@ TrMixedShaderWork(
     TrSettle(Device);
 }
 
+/* Dynamic resources a batching device locks without waiting, and draws from memory too large for its fills */
+static
+VOID
+TrMixedAsyncWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DPixelShader9* Color = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexBuffer9* Dynamic = nullptr;
+    IDirect3DIndexBuffer9* DynamicIndices = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    std::vector<FLOAT> Many(300 * 6);
+    std::vector<WORD> Indices(330);
+    D3DLOCKED_RECT Locked;
+    VOID* Data = nullptr;
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < 300; Index++)
+    {
+        CopyMemory(&Many[Index * 6], &TrDrawVertices[(Index % 7) * 6], 6 * sizeof(FLOAT));
+        Many[Index * 6] += (Index / 7) * 0.001f;
+    }
+    for (UINT Index = 0; Index < Indices.size(); Index++)
+        Indices[Index] = static_cast<WORD>(10 + (Index * 7) % 280);
+
+    TrPhase("mixed async create");
+    TrApi("CreateVertexShader", Device->CreateVertexShader(TrDrawVertexCode, &Vertex));
+    TrApi("CreatePixelShader color", Device->CreatePixelShader(TrDrawColorCode, &Color));
+    TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrDrawElements, &Declaration));
+    TrApi("CreateVertexBuffer dynamic", Device->CreateVertexBuffer(sizeof(TrDrawVertices), D3DUSAGE_DYNAMIC |
+                                                                   D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT,
+                                                                   &Dynamic, nullptr));
+    TrApi("CreateIndexBuffer dynamic", Device->CreateIndexBuffer(sizeof(TrDrawIndices16), D3DUSAGE_DYNAMIC |
+                                                                 D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                                 D3DPOOL_DEFAULT, &DynamicIndices, nullptr));
+    TrApi("CreateTexture dynamic", Device->CreateTexture(4, 4, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8,
+                                                         D3DPOOL_DEFAULT, &Texture, nullptr));
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("SetPixelShader", Device->SetPixelShader(Color));
+    TrSettle(Device);
+
+    TrPhase("mixed async locks");
+    hr = Dynamic != nullptr ? Dynamic->Lock(0, 0, &Data, D3DLOCK_DISCARD) : E_FAIL;
+    TrApi("Lock dynamic discard", hr);
+    if (SUCCEEDED(hr))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        TrApi("Unlock dynamic", Dynamic->Unlock());
+    }
+    hr = DynamicIndices != nullptr ? DynamicIndices->Lock(0, 0, &Data, D3DLOCK_DISCARD) : E_FAIL;
+    TrApi("Lock dynamic indices discard", hr);
+    if (SUCCEEDED(hr))
+    {
+        CopyMemory(Data, TrDrawIndices16, sizeof(TrDrawIndices16));
+        TrApi("Unlock dynamic indices", DynamicIndices->Unlock());
+    }
+    TrApi("SetStreamSource dynamic", Device->SetStreamSource(0, Dynamic, 0, TrDrawStride));
+    TrApi("SetIndices dynamic", Device->SetIndices(DynamicIndices));
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawIndexedPrimitive dynamic", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2));
+    hr = Dynamic != nullptr ? Dynamic->Lock(TrDrawStride * 4, TrDrawStride * 3, &Data, D3DLOCK_NOOVERWRITE) : E_FAIL;
+    TrApi("Lock dynamic no overwrite", hr);
+    if (SUCCEEDED(hr))
+    {
+        static_cast<FLOAT*>(Data)[1] = -0.25f;
+        TrApi("Unlock dynamic", Dynamic->Unlock());
+    }
+    TrApi("DrawPrimitive dynamic", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 4, 1));
+    hr = Dynamic != nullptr ? Dynamic->Lock(0, 0, &Data, 0) : E_FAIL;
+    TrApi("Lock dynamic plain", hr);
+    if (SUCCEEDED(hr))
+        TrApi("Unlock dynamic", Dynamic->Unlock());
+    hr = Dynamic != nullptr ? Dynamic->Lock(0, 0, &Data, D3DLOCK_DISCARD) : E_FAIL;
+    TrApi("Lock dynamic discard again", hr);
+    if (SUCCEEDED(hr))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        TrApi("Unlock dynamic", Dynamic->Unlock());
+    }
+    TrApi("DrawPrimitive dynamic again", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("EndScene", Device->EndScene());
+    hr = Texture != nullptr ? Texture->LockRect(0, &Locked, nullptr, D3DLOCK_DISCARD) : E_FAIL;
+    TrApi("LockRect dynamic discard", hr);
+    if (SUCCEEDED(hr))
+        TrApi("UnlockRect dynamic", Texture->UnlockRect(0));
+    hr = Texture != nullptr ? Texture->LockRect(0, &Locked, nullptr, 0) : E_FAIL;
+    TrApi("LockRect dynamic plain", hr);
+    if (SUCCEEDED(hr))
+        TrApi("UnlockRect dynamic", Texture->UnlockRect(0));
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "mixed async");
+    TrSettle(Device);
+
+    TrPhase("mixed async memory");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF203010, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitiveUP large", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 100, Many.data(), TrDrawStride));
+    TrApi("DrawPrimitiveUP small", Device->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, 3, Many.data() + 6, TrDrawStride));
+    TrApi("DrawIndexedPrimitiveUP based", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 4, 3, 1,
+                                                                         TrDrawIndices16 + 6, D3DFMT_INDEX16,
+                                                                         TrDrawVertices, TrDrawStride));
+    TrApi("DrawIndexedPrimitiveUP large", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 10, 280, 110,
+                                                                         Indices.data(), D3DFMT_INDEX16,
+                                                                         Many.data(), TrDrawStride));
+    for (UINT Round = 0; Round < 8; Round++)
+    {
+        TrApi("DrawPrimitiveUP filling", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 80, Many.data() + Round * 6,
+                                                                 TrDrawStride));
+    }
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "mixed memory");
+    TrSettle(Device);
+
+    TrPhase("mixed async release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetPixelShader null", Device->SetPixelShader(nullptr));
+    TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetIndices null", Device->SetIndices(nullptr));
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrRelease(Vertex);
+    TrRelease(Color);
+    TrRelease(Declaration);
+    TrRelease(Dynamic);
+    TrRelease(DynamicIndices);
+    TrRelease(Texture);
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
 /* Draws on a mixed vertex processing device of the plain object while it processes vertices in hardware */
 static
 VOID
@@ -6200,6 +6341,37 @@ TrScenarioDrawsMixed(
         TrDrawWork(Device);
         TrMixedShaderWork(Device);
         TrPhase("draws mixed release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
+/* Asynchronous locks and draws from memory on a mixed vertex processing device of the plain object */
+static
+VOID
+TrScenarioDrawsMixedAsync(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+
+    TrPhase("draws mixed async create");
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_MIXED_VERTEXPROCESSING,
+                                              &Parameters, &Device));
+    if (Device != nullptr)
+    {
+        TrSettle(Device);
+        TrMixedAsyncWork(Device);
+        TrPhase("draws mixed async release");
         TrRelease(Device);
     }
     DestroyWindow(Window);
@@ -7681,6 +7853,7 @@ static const TrScenario TrScenarios[] =
     { "draws", TrScenarioDraws },
     { "draws_plain", TrScenarioDrawsPlain },
     { "draws_mixed", TrScenarioDrawsMixed },
+    { "draws_mixed_async", TrScenarioDrawsMixedAsync },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
