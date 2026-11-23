@@ -3919,6 +3919,44 @@ XcAttachFx(
     return hr;
 }
 
+/* Puts the environmental reverb on a submix, with the gains held under unity */
+static
+HRESULT
+XcAttachReverb(
+    _In_ IXAudio2Voice* Voice,
+    _In_z_ PCSTR Export,
+    _In_ UINT32 Channels)
+{
+    PXC_CREATE_APO Create = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, Export));
+    XAUDIO2FX_REVERB_PARAMETERS Settings = XcReverbSettings[1];
+    BYTE Old[56];
+    IUnknown* Object = nullptr;
+    XAUDIO2_EFFECT_DESCRIPTOR Effect;
+    XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
+    HRESULT hr;
+
+    if (Create == nullptr)
+        return E_NOINTERFACE;
+    hr = Create(&Object);
+    if (FAILED(hr))
+        return hr;
+    Effect.pEffect = Object;
+    Effect.InitialState = FALSE;
+    Effect.OutputChannels = Channels;
+    hr = Voice->SetEffectChain(&Chain);
+    Object->Release();
+    if (FAILED(hr))
+        return hr;
+    Settings.ReverbGain = -6.0f;
+    Settings.ReflectionsGain = -6.0f;
+    if (strcmp(Export, "CreateAudioReverbV2_8") == 0)
+    {
+        XcReverbLegacy(Old, &Settings);
+        return Voice->SetEffectParameters(0, Old, sizeof(Old));
+    }
+    return Voice->SetEffectParameters(0, &Settings, sizeof(Settings));
+}
+
 /* Plays short quiet buffers and compares what reaches the endpoint, sample for sample */
 static
 VOID
@@ -3936,6 +3974,9 @@ XcCheckMix(VOID)
         XcRouteEq,
         XcRouteEcho,
         XcRouteFxReverb,
+        XcRouteReverb,
+        XcRouteReverbMono,
+        XcRouteReverbLegacy,
     };
     static const struct
     {
@@ -3998,6 +4039,9 @@ XcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 2, 44100, 16, XcRouteEcho, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
         { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteFxReverb, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
         { WAVE_FORMAT_PCM, 1, 32000, 16, XcRouteFxReverb, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteReverb, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 44100, 16, XcRouteReverbMono, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteReverbLegacy, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
     };
     static BYTE Data[48000 * 6 * 4];
 
@@ -4055,6 +4099,16 @@ XcCheckMix(VOID)
             hr = Engine->CreateSubmixVoice(&Submix, 2, Cases[Case].Route == XcRouteSubmixSlow ? 32000 : 48000);
             if (FAILED(hr))
                 printf("mix[%u] submix = %08lX\n", Case, hr);
+        }
+        if (Cases[Case].Route >= XcRouteReverb)
+        {
+            PCSTR Export = Cases[Case].Route == XcRouteReverbLegacy ? "CreateAudioReverbV2_8" : "CreateAudioReverb";
+
+            hr = Engine->CreateSubmixVoice(&Submix, Cases[Case].Channels, 48000);
+            if (SUCCEEDED(hr))
+                hr = XcAttachReverb(Submix, Export, Cases[Case].Channels);
+            if (FAILED(hr))
+                printf("mix[%u] reverb = %08lX\n", Case, hr);
         }
 
         memset(FormatStorage, 0, sizeof(FormatStorage));
@@ -4119,7 +4173,7 @@ XcCheckMix(VOID)
             Engine->Release();
             continue;
         }
-        if (Cases[Case].Route >= XcRouteLimiter)
+        if (Cases[Case].Route >= XcRouteLimiter && Cases[Case].Route < XcRouteReverb)
         {
             hr = XcAttachFx(Source, Cases[Case].Route - XcRouteLimiter, Cases[Case].Channels);
             if (FAILED(hr))
@@ -4146,7 +4200,17 @@ XcCheckMix(VOID)
         /* The recorder on the mastering voice hears the mix before the endpoint does */
         Sleep(50);
         Recorder.Recording = TRUE;
-        Source->Start();
+        /* The reverb starts with the source so its delay fade does not depend on idle passes */
+        if (Cases[Case].Route >= XcRouteReverb && Submix != nullptr)
+        {
+            Submix->EnableEffect(0, 77);
+            Source->Start(0, 77);
+            Engine->CommitChanges(77);
+        }
+        else
+        {
+            Source->Start();
+        }
         Sleep(400);
         Recorder.Recording = FALSE;
         {
