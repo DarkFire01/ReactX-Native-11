@@ -4666,6 +4666,181 @@ NcCheckStates(
     Plain->Release();
 }
 
+/* The first register a kind of constant refuses, found by setting one register at a time */
+static
+UINT
+NcConstantRegisters(
+    _In_ IDirect3DDevice9* Device,
+    _In_ UINT Kind)
+{
+    static const FLOAT Floats[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    static const INT Ints[4] = { 1, 2, 3, 4 };
+    static const BOOL Bools[1] = { TRUE };
+    UINT Low = 0;
+    UINT High = 0x10000;
+
+    while (Low < High)
+    {
+        UINT Middle = (Low + High) / 2;
+        HRESULT hr = E_FAIL;
+
+        switch (Kind)
+        {
+        case 0:
+            hr = Device->SetVertexShaderConstantF(Middle, Floats, 1);
+            break;
+        case 1:
+            hr = Device->SetVertexShaderConstantI(Middle, Ints, 1);
+            break;
+        case 2:
+            hr = Device->SetVertexShaderConstantB(Middle, Bools, 1);
+            break;
+        case 3:
+            hr = Device->SetPixelShaderConstantF(Middle, Floats, 1);
+            break;
+        case 4:
+            hr = Device->SetPixelShaderConstantI(Middle, Ints, 1);
+            break;
+        default:
+            hr = Device->SetPixelShaderConstantB(Middle, Bools, 1);
+            break;
+        }
+        if (SUCCEEDED(hr))
+            Low = Middle + 1;
+        else
+            High = Middle;
+    }
+    return Low;
+}
+
+/* Constant limits of each kind, values set and read back over ranges, and what a reset leaves */
+static
+VOID
+NcCheckConstantsOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ const D3DPRESENT_PARAMETERS* Parameters)
+{
+    static const PCSTR Kinds[] = { "vf", "vi", "vb", "pf", "pi", "pb" };
+    D3DPRESENT_PARAMETERS Again = *Parameters;
+    FLOAT Floats[4 * 16];
+    FLOAT Read[4 * 16];
+    INT Ints[4 * 8];
+    INT ReadInts[4 * 8];
+    BOOL Bools[8];
+    BOOL ReadBools[8];
+    HRESULT hr;
+
+    for (UINT Kind = 0; Kind < _countof(Kinds); Kind++)
+        printf("%s_%s_registers = %u\n", Prefix, Kinds[Kind], NcConstantRegisters(Device, Kind));
+
+    for (UINT Index = 0; Index < _countof(Floats); Index++)
+        Floats[Index] = static_cast<FLOAT>(Index) * 0.25f - 3.0f;
+    for (UINT Index = 0; Index < _countof(Ints); Index++)
+        Ints[Index] = static_cast<INT>(Index * 7) - 50;
+    for (UINT Index = 0; Index < _countof(Bools); Index++)
+        Bools[Index] = static_cast<BOOL>(Index % 3);
+
+    printf("%s_set_vf = %08lX\n", Prefix, Device->SetVertexShaderConstantF(4, Floats, 16));
+    printf("%s_set_pf = %08lX\n", Prefix, Device->SetPixelShaderConstantF(2, Floats, 16));
+    printf("%s_set_vi = %08lX\n", Prefix, Device->SetVertexShaderConstantI(3, Ints, 8));
+    printf("%s_set_pi = %08lX\n", Prefix, Device->SetPixelShaderConstantI(5, Ints, 8));
+    printf("%s_set_vb = %08lX\n", Prefix, Device->SetVertexShaderConstantB(1, Bools, 8));
+    printf("%s_set_pb = %08lX\n", Prefix, Device->SetPixelShaderConstantB(6, Bools, 8));
+    printf("%s_set_vf_overlap = %08lX\n", Prefix, Device->SetVertexShaderConstantF(10, Floats + 8, 2));
+
+    for (UINT Start = 0; Start < 12; Start += 3)
+    {
+        memset(Read, 0xCC, sizeof(Read));
+        hr = Device->GetVertexShaderConstantF(Start, Read, 16);
+        printf("%s_get_vf[%u] = %08lX %08X\n", Prefix, Start, hr, NcHashState(Read, sizeof(Read)));
+        memset(Read, 0xCC, sizeof(Read));
+        hr = Device->GetPixelShaderConstantF(Start, Read, 16);
+        printf("%s_get_pf[%u] = %08lX %08X\n", Prefix, Start, hr, NcHashState(Read, sizeof(Read)));
+        memset(ReadInts, 0xCC, sizeof(ReadInts));
+        hr = Device->GetVertexShaderConstantI(Start, ReadInts, 4);
+        printf("%s_get_vi[%u] = %08lX %08X\n", Prefix, Start, hr, NcHashState(ReadInts, sizeof(ReadInts)));
+        memset(ReadInts, 0xCC, sizeof(ReadInts));
+        hr = Device->GetPixelShaderConstantI(Start, ReadInts, 4);
+        printf("%s_get_pi[%u] = %08lX %08X\n", Prefix, Start, hr, NcHashState(ReadInts, sizeof(ReadInts)));
+        memset(ReadBools, 0xCC, sizeof(ReadBools));
+        hr = Device->GetVertexShaderConstantB(Start, ReadBools, 4);
+        printf("%s_get_vb[%u] = %08lX %08X\n", Prefix, Start, hr, NcHashState(ReadBools, sizeof(ReadBools)));
+        memset(ReadBools, 0xCC, sizeof(ReadBools));
+        hr = Device->GetPixelShaderConstantB(Start, ReadBools, 4);
+        printf("%s_get_pb[%u] = %08lX %08X\n", Prefix, Start, hr, NcHashState(ReadBools, sizeof(ReadBools)));
+    }
+
+    printf("%s_reset = %08lX\n", Prefix, Device->Reset(&Again));
+    memset(Read, 0xCC, sizeof(Read));
+    hr = Device->GetVertexShaderConstantF(0, Read, 16);
+    printf("%s_reset_vf = %08lX %08X\n", Prefix, hr, NcHashState(Read, sizeof(Read)));
+    memset(Read, 0xCC, sizeof(Read));
+    hr = Device->GetPixelShaderConstantF(0, Read, 16);
+    printf("%s_reset_pf = %08lX %08X\n", Prefix, hr, NcHashState(Read, sizeof(Read)));
+    memset(ReadInts, 0xCC, sizeof(ReadInts));
+    hr = Device->GetVertexShaderConstantI(0, ReadInts, 8);
+    printf("%s_reset_vi = %08lX %08X\n", Prefix, hr, NcHashState(ReadInts, sizeof(ReadInts)));
+    memset(ReadBools, 0xCC, sizeof(ReadBools));
+    hr = Device->GetPixelShaderConstantB(0, ReadBools, 8);
+    printf("%s_reset_pb = %08lX %08X\n", Prefix, hr, NcHashState(ReadBools, sizeof(ReadBools)));
+}
+
+/* Shader constants on every kind of vertex processing a windowed device can have */
+static
+VOID
+NcCheckConstants(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "constants_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "constants_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "constants_sw", D3DCREATE_SOFTWARE_VERTEXPROCESSING, TRUE },
+        { "constants_mixed", D3DCREATE_MIXED_VERTEXPROCESSING, TRUE },
+        { "constants_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        D3DPRESENT_PARAMETERS Made;
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        Made = Parameters;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Made, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Made, nullptr, &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckConstantsOn(Case.Name, Device, &Parameters);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -4694,6 +4869,7 @@ static const NineCheckInfo NcChecks[] =
     { "cursor", NcCheckCursor },
     { "presentstats", NcCheckPresentStats },
     { "states", NcCheckStates },
+    { "constants", NcCheckConstants },
 };
 
 static
