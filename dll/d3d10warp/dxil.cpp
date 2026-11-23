@@ -271,6 +271,12 @@ private:
         _In_ UINT Limit);
 
     BOOLEAN
+    BindingRange(
+        _In_ llvm::Constant *Binding,
+        _Out_ UINT *Class,
+        _Out_ UINT *Range);
+
+    BOOLEAN
     LowerDynamic(
         _In_ llvm::CallInst *Call,
         _In_ llvm::Value *Handle,
@@ -772,16 +778,35 @@ RxLowering::HandleOf(
     _Out_ RX_HANDLE *Handle)
 {
     llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(Value);
+    llvm::Value *Register;
     llvm::ConstantInt *Index;
     UINT Range;
     const hlsl::DxilResourceBase *Base;
 
     ZeroMemory(Handle, sizeof(*Handle));
-    if (Call == nullptr || !hlsl::OP::IsDxilOpFuncCallInst(Call) || hlsl::OP::getOpCode(Call) != OpCode::CreateHandle)
+
+    /* Shader model 6.6 handles carry their properties in an annotation around the binding */
+    while (Call != nullptr && hlsl::OP::IsDxilOpFuncCallInst(Call) && hlsl::OP::getOpCode(Call) == OpCode::AnnotateHandle)
+        Call = llvm::dyn_cast<llvm::CallInst>(Call->getArgOperand(1));
+    if (Call == nullptr || !hlsl::OP::IsDxilOpFuncCallInst(Call))
         return FALSE;
-    Handle->Class = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue();
-    Range = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(2))->getZExtValue();
-    Index = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(3));
+    if (hlsl::OP::getOpCode(Call) == OpCode::CreateHandle)
+    {
+        Handle->Class = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue();
+        Range = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(2))->getZExtValue();
+        Register = Call->getArgOperand(3);
+    }
+    else if (hlsl::OP::getOpCode(Call) == OpCode::CreateHandleFromBinding)
+    {
+        if (!BindingRange(llvm::cast<llvm::Constant>(Call->getArgOperand(1)), &Handle->Class, &Range))
+            return FALSE;
+        Register = Call->getArgOperand(2);
+    }
+    else
+    {
+        return FALSE;
+    }
+    Index = llvm::dyn_cast<llvm::ConstantInt>(Register);
     if (Bases.count(((UINT64)Handle->Class << 32) | Range) == 0)
         return FALSE;
     switch ((hlsl::DXIL::ResourceClass)Handle->Class)
@@ -815,7 +840,7 @@ RxLowering::HandleOf(
     }
     if (Index == nullptr)
     {
-        Handle->Index = Call->getArgOperand(3);
+        Handle->Index = Register;
         return TRUE;
     }
     if ((UINT)Index->getZExtValue() >= Handle->Lower)
@@ -823,6 +848,63 @@ RxLowering::HandleOf(
     else
         Handle->Slot += (UINT)Index->getZExtValue();
     return TRUE;
+}
+
+/* The declared range a shader model 6.6 binding names, found by class, space and first register */
+BOOLEAN
+RxLowering::BindingRange(
+    _In_ llvm::Constant *Binding,
+    _Out_ UINT *Class,
+    _Out_ UINT *Range)
+{
+    UINT Lower = (UINT)llvm::cast<llvm::ConstantInt>(Binding->getAggregateElement(0u))->getZExtValue();
+    UINT Space = (UINT)llvm::cast<llvm::ConstantInt>(Binding->getAggregateElement(2u))->getZExtValue();
+
+    *Class = (UINT)llvm::cast<llvm::ConstantInt>(Binding->getAggregateElement(3u))->getZExtValue();
+    *Range = 0;
+    switch ((hlsl::DXIL::ResourceClass)*Class)
+    {
+        case hlsl::DXIL::ResourceClass::SRV:
+            for (const std::unique_ptr<hlsl::DxilResource> &Resource : Dxil.GetSRVs())
+            {
+                if (Resource->GetLowerBound() == Lower && Resource->GetSpaceID() == Space)
+                {
+                    *Range = Resource->GetID();
+                    return TRUE;
+                }
+            }
+            return FALSE;
+        case hlsl::DXIL::ResourceClass::UAV:
+            for (const std::unique_ptr<hlsl::DxilResource> &Resource : Dxil.GetUAVs())
+            {
+                if (Resource->GetLowerBound() == Lower && Resource->GetSpaceID() == Space)
+                {
+                    *Range = Resource->GetID();
+                    return TRUE;
+                }
+            }
+            return FALSE;
+        case hlsl::DXIL::ResourceClass::CBuffer:
+            for (const std::unique_ptr<hlsl::DxilCBuffer> &Resource : Dxil.GetCBuffers())
+            {
+                if (Resource->GetLowerBound() == Lower && Resource->GetSpaceID() == Space)
+                {
+                    *Range = Resource->GetID();
+                    return TRUE;
+                }
+            }
+            return FALSE;
+        default:
+            for (const std::unique_ptr<hlsl::DxilSampler> &Resource : Dxil.GetSamplers())
+            {
+                if (Resource->GetLowerBound() == Lower && Resource->GetSpaceID() == Space)
+                {
+                    *Range = Resource->GetID();
+                    return TRUE;
+                }
+            }
+            return FALSE;
+    }
 }
 
 /*
@@ -1315,7 +1397,7 @@ RxLowering::LowerCall(
     Code = hlsl::OP::getOpCode(Call);
 
     /* Operations on a resource picked at run time run once per register it may name */
-    if (Code != OpCode::CreateHandle)
+    if (Code != OpCode::CreateHandle && Code != OpCode::AnnotateHandle && Code != OpCode::CreateHandleFromBinding)
     {
         for (UINT Argument = 1; Argument < Call->getNumArgOperands() && Argument < 3; Argument++)
         {
@@ -1386,6 +1468,8 @@ RxLowering::LowerCall(
             return TRUE;
         }
         case OpCode::CreateHandle:
+        case OpCode::CreateHandleFromBinding:
+        case OpCode::AnnotateHandle:
             return TRUE;
         case OpCode::CBufferLoadLegacy:
         {
