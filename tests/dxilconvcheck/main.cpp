@@ -403,7 +403,7 @@ DcCompile(
                     nullptr,
                     Shader->Entry,
                     Shader->Profile,
-                    0,
+                    Shader->Flags,
                     0,
                     Code,
                     &Errors);
@@ -418,6 +418,21 @@ DcCompile(
     {
         printf("%s: compile hr=%08lX\n", Shader->Name, hr);
         return FALSE;
+    }
+
+    /* The debug database carries a fresh GUID every compile; drop it so runs compare */
+    if ((Shader->Flags & D3DCOMPILE_DEBUG) != 0)
+    {
+        ID3DBlob* Stripped = nullptr;
+
+        hr = D3DStripShader((*Code)->GetBufferPointer(), (*Code)->GetBufferSize(), D3DCOMPILER_STRIP_DEBUG_INFO, &Stripped);
+        (*Code)->Release();
+        *Code = Stripped;
+        if (FAILED(hr))
+        {
+            printf("%s: strip hr=%08lX\n", Shader->Name, hr);
+            return FALSE;
+        }
     }
 
     return TRUE;
