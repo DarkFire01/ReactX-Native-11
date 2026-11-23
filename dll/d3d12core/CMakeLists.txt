@@ -30,4 +30,6 @@ nt_add_usermode_dll(d3d12core
         rootsigobject.cpp
         schedulinggroup.cpp)
 target_link_libraries(d3d12core PRIVATE rxcommon ole32 advapi32 dxguid)
+target_include_directories(d3d12core PRIVATE "${RX_INTERNAL_SHADERS_DIR}")
+add_dependencies(d3d12core internalshaders_header)
 set_target_properties(d3d12core PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/reactx")

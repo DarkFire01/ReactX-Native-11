@@ -47,6 +47,10 @@ if(NT_TARGET MATCHES "^win1[01]")
     add_subdirectory(third_party)
 endif()
 
+if(NT_TARGET MATCHES "^win1[01]")
+    add_subdirectory(tools/internalshaders)
+endif()
+
 add_subdirectory(dll)
 add_subdirectory(tests)
 add_subdirectory(NativeVideoDecode)
