@@ -11,8 +11,23 @@
 /* Direct3D 9 opens its user mode driver at the DirectX 9 interface */
 static constexpr UINT D9UmdInterface = 9;
 
-/* The newest runtime version is offered without its hybrid adapter extension */
+/* Without single adapter hybrid mode the newest runtime version is offered without its hybrid extension */
 static constexpr UINT D9UmdVersionWithoutHybrid = 0x11000;
+
+/* The feature switch for single adapter hybrid mode; it is on unless configured off */
+static constexpr ULONG D9HybridModeFeature = 56684010;
+static constexpr ULONG D9FeatureRuntimeConfiguration = 1;
+static constexpr ULONG D9FeatureStateDisabled = 1;
+
+/* What ntdll reports for a configured feature */
+struct D9FeatureConfiguration
+{
+    ULONG FeatureId;
+    ULONG Flags;
+    ULONG VariantPayload;
+};
+
+typedef NTSTATUS (NTAPI* PD9_QUERY_FEATURE)(ULONG, ULONG, ULONGLONG*, D9FeatureConfiguration*);
 
 /* An adapter property queried by number; bit 7 of its answer withdraws the overlay cap */
 static constexpr KMTQUERYADAPTERINFOTYPE D9OverlayPropertyQuery = static_cast<KMTQUERYADAPTERINFOTYPE>(57);
@@ -73,6 +88,48 @@ D9QueryAdapterInfoCb2(
         return D9HresultFromStatus(STATUS_INVALID_PARAMETER);
 
     return D9HresultFromStatus(D9QueryKernel(Adapter, Type, Args->pPrivateDriverData, Args->PrivateDriverDataSize));
+}
+
+static
+BOOLEAN
+D9HybridModeEnabled(VOID)
+{
+    static PD9_QUERY_FEATURE Query = reinterpret_cast<PD9_QUERY_FEATURE>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlQueryFeatureConfiguration"));
+    D9FeatureConfiguration Configuration = {};
+    ULONGLONG ChangeStamp = 0;
+
+    if (Query == nullptr ||
+        !NT_SUCCESS(Query(D9HybridModeFeature, D9FeatureRuntimeConfiguration, &ChangeStamp, &Configuration)))
+    {
+        return TRUE;
+    }
+    return ((Configuration.Flags >> 4) & 3) != D9FeatureStateDisabled;
+}
+
+/* Like the second query, but the driver passes back the adapter it was opened for */
+static
+HRESULT
+APIENTRY
+D9QueryAdapterInfoCb3(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDICB_QUERYADAPTERINFO2* Args)
+{
+    const D9Adapter* Adapter = static_cast<const D9Adapter*>(hDevice);
+
+    if (!D9HybridModeEnabled())
+        return E_NOTIMPL;
+
+    if (Args->QueryType == D3DDDI_QUERYADAPTERTYPE_SINGLEADAPTERHYBRIDMODE)
+    {
+        if (Args->PrivateDriverDataSize < sizeof(DWORD))
+            return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+
+        /* Only Direct3D 9 on 12 runs an adapter in hybrid mode */
+        *static_cast<DWORD*>(Args->pPrivateDriverData) = 0;
+        return S_OK;
+    }
+    return D9QueryAdapterInfoCb2(reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Adapter->KernelAdapter)), Args);
 }
 
 /* The kernel returns its own method records; the driver wants the two field DDI form */
@@ -161,6 +218,7 @@ D9CallOpenAdapter(
 {
     PFND3DDDI_OPENADAPTER OpenAdapter;
     D3DDDIARG_OPENADAPTER Args;
+    BOOLEAN Hybrid = D9HybridModeEnabled();
     HRESULT hr = E_FAIL;
 
     *DriverAdapter = NULL;
@@ -175,7 +233,9 @@ D9CallOpenAdapter(
         Args.hAdapter = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Adapter->KernelAdapter));
         Args.Interface = D9UmdInterface;
         Args.Version = RxD3D9UmdVersions[Index];
-        if (Args.Version == D3D_UMD_INTERFACE_VERSION_WDDM3_2_2)
+        if (Hybrid)
+            Args.hDevice = const_cast<D9Adapter*>(Adapter);
+        else if (Args.Version == D3D_UMD_INTERFACE_VERSION_WDDM3_2_2)
             Args.Version = D9UmdVersionWithoutHybrid;
         Args.pAdapterCallbacks = Callbacks;
         Args.pAdapterFuncs = Functions;
@@ -221,6 +281,8 @@ D9OpenDriverAdapter(
     Adapter->Callbacks.pfnQueryAdapterInfoCb = D9QueryAdapterInfoCb;
     Adapter->Callbacks.pfnGetMultisampleMethodListCb = D9GetMultisampleMethodListCb;
     Adapter->Callbacks.pfnQueryAdapterInfoCb2 = D9QueryAdapterInfoCb2;
+    if (D9HybridModeEnabled())
+        Adapter->Callbacks.pfnQueryAdapterInfoCb3 = D9QueryAdapterInfoCb3;
 
     hr = D9CallOpenAdapter(Adapter, &Adapter->Callbacks, &Adapter->Functions, &Adapter->DriverAdapter,
                            &Adapter->RuntimeVersion, &Adapter->DriverVersion);
