@@ -1127,6 +1127,13 @@ NcCheckDevice(
     printf("device_latency_set0 = %08lX\n", Device->SetMaximumFrameLatency(0));
     hr = Device->GetMaximumFrameLatency(&Latency);
     printf("device_latency_get0 = %08lX %u\n", hr, Latency);
+    printf("device_latency_set30 = %08lX\n", Device->SetMaximumFrameLatency(30));
+    printf("device_latency_set31 = %08lX\n", Device->SetMaximumFrameLatency(31));
+    hr = Device->GetMaximumFrameLatency(&Latency);
+    printf("device_latency_get30 = %08lX %u\n", hr, Latency);
+    printf("device_priority_setm7 = %08lX\n", Device->SetGPUThreadPriority(-7));
+    hr = Device->GetGPUThreadPriority(&Priority);
+    printf("device_priority_getm7 = %08lX %d\n", hr, Priority);
     printf("device_raster = %08lX\n", Device->GetRasterStatus(0, &Raster));
     printf("device_raster_1 = %08lX\n", Device->GetRasterStatus(1, &Raster));
 
