@@ -77,7 +77,7 @@ TcDxcCompile(
     return hr;
 }
 
-/* One way to build a program: FXC bytecode the runtime converts, or DXC's own DXIL */
+/* One way to build a program: FXC bytecode the runtime converts, or DXC's own DXIL, with shader model 6.6 handles last */
 struct TcOpsBuild
 {
     PCSTR FxcProfile;
@@ -85,10 +85,11 @@ struct TcOpsBuild
     PCWSTR DxcExtra;
 };
 
-static const TcOpsBuild TcOpsBoth[] =
+static const TcOpsBuild TcOpsBuilds[] =
 {
     { "cs_5_1", NULL, NULL },
     { NULL, L"cs_6_0", NULL },
+    { NULL, L"cs_6_6", NULL },
 };
 
 static
@@ -516,7 +517,7 @@ SceneOpsFlow(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsFlowSource, "flow", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 2);
+    return TcOpsRun(Device, Result, TcOpsFlowSource, "flow", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 2);
 }
 
 /* Loads, sizes, level and gradient samples, comparisons and gathers, through fixed and computed resource indices */
@@ -561,7 +562,7 @@ SceneOpsRead(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsReadSource, "reads", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+    return TcOpsRun(Device, Result, TcOpsReadSource, "reads", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 1);
 }
 
 /*
@@ -629,7 +630,7 @@ SceneOpsAtom(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsAtomSource, "atoms", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+    return TcOpsRun(Device, Result, TcOpsAtomSource, "atoms", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 1);
 }
 
 /* Samples far outside the unit square and below zero, where power of two sizes wrap texel indices instead of coordinates */
@@ -664,7 +665,7 @@ SceneOpsAddress(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsAddressSource, "address", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+    return TcOpsRun(Device, Result, TcOpsAddressSource, "address", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 1);
 }
 
 /* Gradient samples under a lowest level of detail, and the residency status every sample form returns */
@@ -694,7 +695,7 @@ SceneOpsClamp(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsClampSource, "clamp", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+    return TcOpsRun(Device, Result, TcOpsClampSource, "clamp", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 1);
 }
 
 /* Sizes of every unordered access view kind, next to the read only ones */
@@ -719,5 +720,5 @@ SceneOpsSize(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsSizeSource, "sizes", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+    return TcOpsRun(Device, Result, TcOpsSizeSource, "sizes", TcOpsBuilds, ARRAYSIZE(TcOpsBuilds), 1);
 }
