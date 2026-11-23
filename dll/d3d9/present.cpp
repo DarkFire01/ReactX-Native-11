@@ -217,6 +217,7 @@ D9Device::OpenWindowSurface(
     Args.pPrivateDriverData = Driver.data();
     Args.PrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
     Args.hResource = Resource;
+    Args.Rotation = D3DDDI_ROTATION_IDENTITY;
     DrainBatch();
     hr = DeviceFunctions.pfnOpenResource(DriverDevice, &Args);
     if (FAILED(hr))
