@@ -152,16 +152,60 @@ D9PvPackColor(
            (D9PvChannel(Color[1].Float) << 8) | D9PvChannel(Color[2].Float);
 }
 
-/* Reads one element of a vertex into an input register; parts the type lacks read as (0, 0, 0, 1) */
+/* A float from its bits */
+static
+FLOAT
+D9PvBits(
+    _In_ DWORD Bits)
+{
+    FLOAT Value;
+
+    CopyMemory(&Value, &Bits, sizeof(Value));
+    return Value;
+}
+
+/* A half float widened the way the system does it: the largest exponent stays a number */
+static
+DWORD
+D9PvWidenHalf(
+    _In_ WORD Half)
+{
+    DWORD Sign = static_cast<DWORD>(Half & 0x8000) << 16;
+    DWORD Exponent = (Half >> 10) & 0x1F;
+    DWORD Fraction = Half & 0x3FF;
+    INT Scale = -14;
+
+    if (Exponent != 0)
+        return Sign | ((Exponent + 112) << 23) | (Fraction << 13);
+    if (Fraction == 0)
+        return Sign;
+
+    /* Denormals shift up until the leading bit reaches the hidden position */
+    while ((Fraction & 0x400) == 0)
+    {
+        Fraction <<= 1;
+        Scale -= 1;
+    }
+    return Sign | (static_cast<DWORD>(Scale + 127) << 23) | ((Fraction & 0x3FF) << 13);
+}
+
+/* Reads one element of a vertex into the components of an input register its declaration names, in order;
+   names past what the type holds read 0, or 1 for w */
 static
 VOID
 D9PvFetch(
     _In_ const BYTE* Data,
     _In_ BYTE Type,
-    _Out_writes_(4) D9VmValue* Register)
+    _In_ UINT Mask,
+    _Inout_updates_(4) D9VmValue* Register)
 {
-    FLOAT Values[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    UINT Count = 0;
+    static const DWORD UnitByte = 0x3B808081;
+    static const DWORD UnitShort = 0x38000100;
+    static const DWORD UnitWord = 0x37800080;
+    static const DWORD UnitTen = 0x3B004020;
+    DWORD Values[4] = {};
+    UINT Held = 0;
+    UINT Taken = 0;
 
     switch (Type)
     {
@@ -169,43 +213,107 @@ D9PvFetch(
     case D3DDECLTYPE_FLOAT2:
     case D3DDECLTYPE_FLOAT3:
     case D3DDECLTYPE_FLOAT4:
-        Count = Type + 1;
-        CopyMemory(Values, Data, Count * sizeof(*Values));
+        Held = Type + 1;
+        CopyMemory(Values, Data, Held * sizeof(*Values));
         break;
     case D3DDECLTYPE_D3DCOLOR:
     {
-        static const DWORD Scale = 0x3B808081;
-        FLOAT Step;
+        static const BYTE Order[4] = { 2, 1, 0, 3 };
 
-        CopyMemory(&Step, &Scale, sizeof(Step));
-        Values[0] = static_cast<FLOAT>(Data[2]) * Step;
-        Values[1] = static_cast<FLOAT>(Data[1]) * Step;
-        Values[2] = static_cast<FLOAT>(Data[0]) * Step;
-        Values[3] = static_cast<FLOAT>(Data[3]) * Step;
-        Count = 4;
+        Held = 4;
+        for (UINT Part = 0; Part < 4; Part++)
+        {
+            FLOAT Value = static_cast<FLOAT>(Data[Order[Part]]) * D9PvBits(UnitByte);
+
+            CopyMemory(&Values[Part], &Value, sizeof(Value));
+        }
         break;
     }
     case D3DDECLTYPE_UBYTE4:
+    case D3DDECLTYPE_UBYTE4N:
+        Held = 4;
         for (UINT Part = 0; Part < 4; Part++)
-            Values[Part] = static_cast<FLOAT>(Data[Part]);
-        Count = 4;
+        {
+            FLOAT Value = static_cast<FLOAT>(Data[Part]);
+
+            if (Type == D3DDECLTYPE_UBYTE4N)
+                Value *= D9PvBits(UnitByte);
+            CopyMemory(&Values[Part], &Value, sizeof(Value));
+        }
         break;
     case D3DDECLTYPE_SHORT2:
     case D3DDECLTYPE_SHORT4:
-        Count = Type == D3DDECLTYPE_SHORT2 ? 2 : 4;
-        for (UINT Part = 0; Part < Count; Part++)
+    case D3DDECLTYPE_SHORT2N:
+    case D3DDECLTYPE_SHORT4N:
+    case D3DDECLTYPE_USHORT2N:
+    case D3DDECLTYPE_USHORT4N:
+        Held = (Type == D3DDECLTYPE_SHORT2 || Type == D3DDECLTYPE_SHORT2N || Type == D3DDECLTYPE_USHORT2N) ? 2 : 4;
+        for (UINT Part = 0; Part < Held; Part++)
         {
-            SHORT Value;
+            WORD Raw;
+            FLOAT Value;
 
-            CopyMemory(&Value, Data + Part * sizeof(Value), sizeof(Value));
-            Values[Part] = static_cast<FLOAT>(Value);
+            CopyMemory(&Raw, Data + Part * sizeof(Raw), sizeof(Raw));
+            if (Type == D3DDECLTYPE_USHORT2N || Type == D3DDECLTYPE_USHORT4N)
+                Value = static_cast<FLOAT>(Raw) * D9PvBits(UnitWord);
+            else
+                Value = static_cast<FLOAT>(static_cast<SHORT>(Raw));
+            if (Type == D3DDECLTYPE_SHORT2N || Type == D3DDECLTYPE_SHORT4N)
+                Value *= D9PvBits(UnitShort);
+            CopyMemory(&Values[Part], &Value, sizeof(Value));
+        }
+        break;
+    case D3DDECLTYPE_UDEC3:
+    case D3DDECLTYPE_DEC3N:
+    {
+        DWORD Packed;
+
+        CopyMemory(&Packed, Data, sizeof(Packed));
+        Held = 3;
+        for (UINT Part = 0; Part < 3; Part++)
+        {
+            DWORD Field = (Packed >> (Part * 10)) & 0x3FF;
+            FLOAT Value;
+
+            if (Type == D3DDECLTYPE_UDEC3)
+            {
+                Value = static_cast<FLOAT>(Field);
+            }
+            else
+            {
+                INT Signed = (Field & 0x200) != 0 ? static_cast<INT>(Field) - 0x400 : static_cast<INT>(Field);
+
+                Value = static_cast<FLOAT>(Signed) * D9PvBits(UnitTen);
+            }
+            CopyMemory(&Values[Part], &Value, sizeof(Value));
+        }
+        break;
+    }
+    case D3DDECLTYPE_FLOAT16_2:
+    case D3DDECLTYPE_FLOAT16_4:
+        Held = Type == D3DDECLTYPE_FLOAT16_2 ? 2 : 4;
+        for (UINT Part = 0; Part < Held; Part++)
+        {
+            WORD Raw;
+
+            CopyMemory(&Raw, Data + Part * sizeof(Raw), sizeof(Raw));
+            Values[Part] = D9PvWidenHalf(Raw);
         }
         break;
     default:
         return;
     }
+
     for (UINT Part = 0; Part < 4; Part++)
-        Register[Part].Float = Values[Part];
+    {
+        if ((Mask & (1u << Part)) == 0)
+            continue;
+        if (Taken < Held)
+            Register[Part].Bits = Values[Taken];
+        else
+            Register[Part].Bits = Part == 3 ? 0x3F800000 : 0;
+        Taken += 1;
+    }
 }
 
 /* Whether any of the six frustum tests of a position in the half space form fails, by sign bit like the
@@ -591,10 +699,11 @@ D9Device::ProcessVertices(
         return D3DERR_INVALIDCALL;
     }
 
-    /* A declaration destination starts where the last format destination's vertex size puts it */
+    /* Under hardware processing a declaration destination starts where the last format destination's vertex
+       size puts it; the software pipeline steps by the declaration's own size */
     if (Output == nullptr)
         ProcessedStride = Stride;
-    Vertex = Base + static_cast<SIZE_T>(ProcessedStride) * DestIndex;
+    Vertex = Base + static_cast<SIZE_T>(SoftwareVertices ? Stride : ProcessedStride) * DestIndex;
     hr = S_OK;
 
     for (UINT Number = 0; Number < VertexCount; Number++, Vertex += Stride)
@@ -626,7 +735,7 @@ D9Device::ProcessVertices(
                 continue;
             Data = Source->Bytes() + Stream->Offset + static_cast<SIZE_T>(Stream->Stride) * (SrcStartIndex + Number) +
                    Element->Offset;
-            D9PvFetch(Data, Element->Type, Registers->Inputs[Declared->Register]);
+            D9PvFetch(Data, Element->Type, Declared->Mask, Registers->Inputs[Declared->Register]);
         }
         if (FAILED(hr))
             break;

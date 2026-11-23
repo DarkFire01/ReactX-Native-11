@@ -6905,6 +6905,154 @@ NcCheckProcessFixedOn(
         Two->Release();
 }
 
+/* vs_3_0 handing each input straight to an output; some inputs declare only part of their register */
+static const DWORD NcPvInputCode[] =
+{
+    0xFFFE0300,
+    0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000005, 0x900F0001,
+    0x0200001F, 0x80010005, 0x90030002, 0x0200001F, 0x80020005, 0x900F0003,
+    0x0200001F, 0x80030005, 0x900C0004, 0x0200001F, 0x80040005, 0x900F0005,
+    0x0200001F, 0x80050005, 0x900F0006, 0x0200001F, 0x80060005, 0x900E0007,
+    0x0200001F, 0x80070005, 0x900F0008, 0x0200001F, 0x8000000A, 0x900F0009,
+    0x0200001F, 0x8001000A, 0x9009000A,
+    0x0200001F, 0x80000000, 0xE00F0000, 0x0200001F, 0x80000005, 0xE00F0001,
+    0x0200001F, 0x80010005, 0xE00F0002, 0x0200001F, 0x80020005, 0xE00F0003,
+    0x0200001F, 0x80030005, 0xE00F0004, 0x0200001F, 0x80040005, 0xE00F0005,
+    0x0200001F, 0x80050005, 0xE00F0006, 0x0200001F, 0x80060005, 0xE00F0007,
+    0x0200001F, 0x80070005, 0xE00F0008, 0x0200001F, 0x8000000A, 0xE00F0009,
+    0x0200001F, 0x8001000A, 0xE00F000A,
+    0x02000001, 0xE00F0000, 0x90E40000, 0x02000001, 0xE00F0001, 0x90E40001,
+    0x02000001, 0xE00F0002, 0x90440002, 0x02000001, 0xE00F0003, 0x90E40003,
+    0x02000001, 0xE00F0004, 0x90EE0004, 0x02000001, 0xE00F0005, 0x90E40005,
+    0x02000001, 0xE00F0006, 0x90E40006, 0x02000001, 0xE00F0007, 0x90F90007,
+    0x02000001, 0xE00F0008, 0x90E40008, 0x02000001, 0xE00F0009, 0x90E40009,
+    0x02000001, 0xE00F000A, 0x90CC000A,
+    0x0000FFFF,
+};
+
+/* Every input type the format conversions read, at an 80 byte stride */
+static const D3DVERTEXELEMENT9 NcPvInputElements[] =
+{
+    { 0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITION, 0 },
+    { 0, 16, D3DDECLTYPE_FLOAT16_2, 0, D3DDECLUSAGE_TEXCOORD, 0 },
+    { 0, 20, D3DDECLTYPE_FLOAT16_4, 0, D3DDECLUSAGE_TEXCOORD, 1 },
+    { 0, 28, D3DDECLTYPE_UBYTE4N, 0, D3DDECLUSAGE_TEXCOORD, 2 },
+    { 0, 32, D3DDECLTYPE_SHORT2N, 0, D3DDECLUSAGE_TEXCOORD, 3 },
+    { 0, 36, D3DDECLTYPE_SHORT4N, 0, D3DDECLUSAGE_TEXCOORD, 4 },
+    { 0, 44, D3DDECLTYPE_USHORT2N, 0, D3DDECLUSAGE_TEXCOORD, 5 },
+    { 0, 48, D3DDECLTYPE_USHORT4N, 0, D3DDECLUSAGE_TEXCOORD, 6 },
+    { 0, 56, D3DDECLTYPE_UDEC3, 0, D3DDECLUSAGE_TEXCOORD, 7 },
+    { 0, 60, D3DDECLTYPE_DEC3N, 0, D3DDECLUSAGE_COLOR, 0 },
+    { 0, 64, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 1 },
+    D3DDECL_END()
+};
+
+/* Halves that are normal, denormal, signed zero, infinite and not a number */
+static const WORD NcPvHalves[] = { 0x3C00, 0x0001, 0x8000, 0x7C00, 0x7E00, 0x03FF, 0xFBFF, 0xC4A8, 0x0200, 0x3555,
+                                   0x8001, 0x7BFF };
+
+/* ProcessVertices reading every input type into a declaration destination of four floats each */
+static
+VOID
+NcCheckProcessInputsOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ DWORD Usage)
+{
+    static const UINT Stride = 80;
+    static const UINT OutStride = 176;
+    static const UINT WideStride = 192;
+    D3DVERTEXELEMENT9 OutElements[12];
+    D3DVERTEXELEMENT9 WideElements[13];
+    D3DCAPS9 Caps;
+    IDirect3DVertexDeclaration9* WideDeclaration = nullptr;
+    IDirect3DVertexShader9* Shader = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexDeclaration9* OutDeclaration = nullptr;
+    IDirect3DVertexBuffer9* Source = nullptr;
+    IDirect3DVertexBuffer9* Dest = nullptr;
+    VOID* Data;
+
+    for (UINT Index = 0; Index < 11; Index++)
+    {
+        OutElements[Index].Stream = 0;
+        OutElements[Index].Offset = static_cast<WORD>(Index * 16);
+        OutElements[Index].Type = D3DDECLTYPE_FLOAT4;
+        OutElements[Index].Method = D3DDECLMETHOD_DEFAULT;
+        OutElements[Index].Usage = static_cast<BYTE>(Index == 0 ? D3DDECLUSAGE_POSITIONT : D3DDECLUSAGE_TEXCOORD);
+        OutElements[Index].UsageIndex = static_cast<BYTE>(Index == 0 ? 0 : Index - 1);
+    }
+    OutElements[9].Usage = D3DDECLUSAGE_COLOR;
+    OutElements[9].UsageIndex = 0;
+    OutElements[10].Usage = D3DDECLUSAGE_COLOR;
+    OutElements[10].UsageIndex = 1;
+    OutElements[11] = D3DDECL_END();
+    if (SUCCEEDED(Device->GetDeviceCaps(&Caps)))
+        printf("%s_decltypes = %08lX\n", Prefix, Caps.DeclTypes);
+
+    printf("%s_vs = %08lX\n", Prefix, Device->CreateVertexShader(NcPvInputCode, &Shader));
+    printf("%s_decl = %08lX\n", Prefix, Device->CreateVertexDeclaration(NcPvInputElements, &Declaration));
+    printf("%s_outdecl = %08lX\n", Prefix, Device->CreateVertexDeclaration(OutElements, &OutDeclaration));
+
+    /* The same with room for one more element than the shader writes */
+    CopyMemory(WideElements, OutElements, 11 * sizeof(*WideElements));
+    WideElements[11] = OutElements[1];
+    WideElements[11].Offset = 176;
+    WideElements[11].UsageIndex = 9;
+    WideElements[12] = D3DDECL_END();
+    printf("%s_widedecl = %08lX\n", Prefix, Device->CreateVertexDeclaration(WideElements, &WideDeclaration));
+    printf("%s_src = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * Stride, Usage, 0, D3DPOOL_SYSTEMMEM,
+                                                                  &Source, nullptr));
+    printf("%s_dst = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * WideStride, Usage, 0,
+                                                                  D3DPOOL_SYSTEMMEM, &Dest, nullptr));
+    if (Shader != nullptr && Declaration != nullptr && OutDeclaration != nullptr && WideDeclaration != nullptr &&
+        Source != nullptr && Dest != nullptr)
+    {
+        if (SUCCEEDED(Source->Lock(0, 0, &Data, 0)))
+        {
+            for (UINT Index = 0; Index < NcPvCount; Index++)
+            {
+                BYTE* Vertex = static_cast<BYTE*>(Data) + Index * Stride;
+                FLOAT Position[4] = { NcPvSource[Index * 6] * 0.5f, NcPvSource[Index * 6 + 1] * 0.5f, 0.5f, 1.0f };
+                FLOAT Last[3] = { NcPvSource[Index * 6 + 2], NcPvSource[Index * 6 + 4], NcPvSource[Index * 6 + 5] };
+
+                for (UINT Byte = 16; Byte < 68; Byte++)
+                    Vertex[Byte] = static_cast<BYTE>(Byte * 37 + Index * 101 + 13);
+                for (UINT Half = 0; Half < 6; Half++)
+                {
+                    WORD Value = NcPvHalves[(Half + Index * 2) % _countof(NcPvHalves)];
+
+                    CopyMemory(Vertex + 16 + Half * 2, &Value, sizeof(Value));
+                }
+                CopyMemory(Vertex, Position, sizeof(Position));
+                CopyMemory(Vertex + 68, Last, sizeof(Last));
+            }
+            Source->Unlock();
+        }
+        Device->SetVertexDeclaration(Declaration);
+        Device->SetVertexShader(Shader);
+        Device->SetStreamSource(0, Source, 0, Stride);
+        NcPvRun(Prefix, "types", Device, Dest, OutStride, 0, 0, NcPvCount, OutDeclaration, 0);
+        NcPvRun(Prefix, "types_later", Device, Dest, OutStride, 2, 1, 3, OutDeclaration, 0);
+        NcPvRun(Prefix, "types_wide", Device, Dest, WideStride, 1, 1, 3, WideDeclaration, 0);
+        Device->SetStreamSource(0, nullptr, 0, 0);
+        Device->SetVertexShader(nullptr);
+        Device->SetVertexDeclaration(nullptr);
+    }
+    if (Shader != nullptr)
+        Shader->Release();
+    if (Declaration != nullptr)
+        Declaration->Release();
+    if (OutDeclaration != nullptr)
+        OutDeclaration->Release();
+    if (WideDeclaration != nullptr)
+        WideDeclaration->Release();
+    if (Source != nullptr)
+        Source->Release();
+    if (Dest != nullptr)
+        Dest->Release();
+}
+
 static
 VOID
 NcCheckProcessVertices(
@@ -6946,6 +7094,8 @@ NcCheckProcessVertices(
         NcCheckProcessVerticesOn(Case.Name, Device, Case.Usage);
         sprintf_s(Prefix, "%s_ff", Case.Name);
         NcCheckProcessFixedOn(Prefix, Device, Case.Usage);
+        sprintf_s(Prefix, "%s_in", Case.Name);
+        NcCheckProcessInputsOn(Prefix, Device, Case.Usage);
         printf("%s_release = %lu\n", Case.Name, Device->Release());
     }
     DestroyWindow(Window);
