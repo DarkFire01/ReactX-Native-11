@@ -782,6 +782,8 @@ NineFreeResource(
 
     Resource->Underlying.reset();
     Resource->SrgbSrv.reset();
+    Resource->TopMipSrv[0].reset();
+    Resource->TopMipSrv[1].reset();
     Resource->Srv.reset();
     Resource->SrgbRtvs.clear();
     Resource->Rtvs.clear();
@@ -1557,6 +1559,61 @@ NineUnlockAsync(
     catch (std::bad_alloc&)
     {
         return E_OUTOFMEMORY;
+    }
+    return NineDxgiResult(S_OK);
+}
+
+TL::TSRV*
+NineShaderViewOf(
+    _Inout_ NineResource* Resource,
+    _In_ UINT Kind)
+{
+    std::unique_ptr<TL::TSRV>* Slot;
+
+    if (Resource->Srv == nullptr)
+        return nullptr;
+    if (Resource->SrgbSrv == nullptr)
+        Kind &= ~NineViewSrgb;
+    if (Resource->Typed.MipLevels == 1)
+        Kind &= ~NineViewTopMip;
+
+    switch (Kind)
+    {
+        case 0:
+            return Resource->Srv.get();
+        case NineViewSrgb:
+            return Resource->SrgbSrv.get();
+        default:
+            Slot = &Resource->TopMipSrv[Kind & NineViewSrgb];
+            if (*Slot == nullptr)
+                Slot->reset(NineMakeShaderView(Resource, Kind));
+            return Slot->get();
+    }
+}
+
+HRESULT
+APIENTRY
+NineRename(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_RENAME* Args)
+{
+    NineDevice* Device = static_cast<NineDevice*>(hDevice);
+    NineResource* Resource;
+    TL::Resource* Cookie;
+
+    if (Device == nullptr || Args == nullptr)
+        return E_INVALIDARG;
+
+    Resource = Args->hResource == reinterpret_cast<HANDLE>(1) ? nullptr : static_cast<NineResource*>(Args->hResource);
+    Cookie = static_cast<TL::Resource*>(Args->hCookie);
+    try
+    {
+        Device->Context->Rename(Resource->Underlying.get(), Cookie);
+        Device->Context->DeleteRenameCookie(Cookie);
+    }
+    catch (_com_error& Error)
+    {
+        return NineDxgiResult(Error.Error());
     }
     return NineDxgiResult(S_OK);
 }

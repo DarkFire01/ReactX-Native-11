@@ -55,6 +55,12 @@ NineScBuildOutputSignature(
     _In_ const NineScOutputs* Outputs,
     _Out_ NineScBlob* Signature);
 
+/* Builds the output signature of a pixel shader: a target for each of bits 0 to 3, depth for bit 4 */
+VOID
+NineScBuildPixelOutputSignature(
+    _In_ UINT Written,
+    _Out_ NineScBlob* Signature);
+
 /* Packs the signatures and the tokens into a container and signs it */
 HRESULT
 NineScPackageShader(

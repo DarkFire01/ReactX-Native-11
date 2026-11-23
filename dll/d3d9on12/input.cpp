@@ -141,8 +141,9 @@ NineBindStream(
     NineDeviceState* State = &Device->State;
     NineStreamSlot* Slot = &State->Streams[Stream];
 
-    if (Slot->Buffer == Buffer && Slot->Stride == Stride && Slot->Offset == Offset)
+    if (Slot->User == nullptr && Slot->Buffer == Buffer && Slot->Stride == Stride && Slot->Offset == Offset)
         return;
+    Slot->User = nullptr;
 
     if (Slot->Buffer != nullptr)
     {
@@ -176,6 +177,13 @@ NineBindStream(
     Slot->Buffer = Buffer;
     Slot->Offset = Offset;
     Slot->Stride = Stride;
+
+    /* A system memory buffer is read from the runtime's copy at each draw */
+    if (Buffer != nullptr && Buffer->SystemMemory && !Buffer->SysMem.empty())
+    {
+        Slot->User = Buffer->SysMem[0].Data;
+        Slot->Limit = static_cast<UINT>(Buffer->TotalSize);
+    }
     State->Dirty |= NineDirtyVertexBuffers;
 }
 
@@ -188,8 +196,9 @@ NineBindIndices(
 {
     NineDeviceState* State = &Device->State;
 
-    if (State->IndexBuffer == Buffer && State->IndexStride == Stride)
+    if (State->UserIndices == nullptr && State->IndexBuffer == Buffer && State->IndexStride == Stride)
         return;
+    State->UserIndices = nullptr;
 
     if (State->IndexBuffer != nullptr)
         State->IndexBuffer->BoundAsIndices = FALSE;
@@ -197,6 +206,11 @@ NineBindIndices(
         Buffer->BoundAsIndices = TRUE;
     State->IndexBuffer = Buffer;
     State->IndexStride = Stride;
+    if (Buffer != nullptr && Buffer->SystemMemory && !Buffer->SysMem.empty())
+    {
+        State->UserIndices = Buffer->SysMem[0].Data;
+        State->UserIndexLimit = static_cast<UINT>(Buffer->TotalSize);
+    }
     State->Dirty |= NineDirtyIndexBuffer;
 }
 

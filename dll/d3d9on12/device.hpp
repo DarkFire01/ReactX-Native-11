@@ -88,6 +88,20 @@ enum NineShaderStage
     NineShaderStageCount
 };
 
+/* One conversion of a shader for the pipeline state it was keyed on */
+struct NineConverted
+{
+    std::vector<BYTE> Key;
+    NineScBlob Container;
+    NineScBlob OutputSignature;
+    NineScOutputs Outputs;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> Layout;
+    std::vector<NineScConstant> Defines[NineScBufferCount];
+    UINT Used[NineScBufferCount];
+    BYTE PixelOutputs;
+    std::unique_ptr<TL::Shader> Shader;
+};
+
 /* A Direct3D 9 shader; identical code shares one object that counts its creates */
 struct NineShader
 {
@@ -95,6 +109,15 @@ struct NineShader
     UINT References;
     UINT64 Hash;
     std::vector<BYTE> Code;
+    std::vector<std::unique_ptr<NineConverted>> Converted;
+};
+
+/* A texture stage: what is bound and the sampler words kept beside it */
+struct NineStageTexture
+{
+    NineResource* Texture;
+    BOOLEAN Shadow;
+    BOOLEAN SwappedRedBlue;
 };
 
 /* One vertex stream: the buffer, where it starts and its stride */
@@ -103,6 +126,45 @@ struct NineStreamSlot
     NineResource* Buffer;
     UINT Offset;
     UINT Stride;
+    const BYTE* User;
+    UINT Limit;
+};
+
+/* One constant buffer slot fed from its own upload buffer */
+struct NineConstantSlot
+{
+    NineUploadRing Ring;
+    NineUploadSlice Current;
+    UINT64 Uploaded;
+    BOOLEAN Dirty;
+};
+
+/* Constant buffer slots the vertex, geometry and pixel extensions use */
+static constexpr UINT NineExtensionSlot = 3;
+static constexpr UINT NineBumpSlot = 4;
+static constexpr UINT NineExtensionSize = 0xA0;
+
+/* Converted shaders the pipeline is built from, with the state they share */
+struct NinePipelineKey
+{
+    NineConverted* Vertex;
+    NineConverted* Pixel;
+    NineConverted* Geometry;
+    D3D12_BLEND_DESC Blend;
+    UINT SampleMask;
+    D3D12_RASTERIZER_DESC Raster;
+    D3D12_DEPTH_STENCIL_DESC Depth;
+    D3D12_PRIMITIVE_TOPOLOGY_TYPE Topology;
+    UINT TargetCount;
+    DXGI_FORMAT TargetFormats[8];
+    DXGI_FORMAT DepthFormat;
+    DXGI_SAMPLE_DESC Samples;
+};
+
+struct NinePipeline
+{
+    NinePipelineKey Key;
+    std::unique_ptr<TL::PipelineState> State;
 };
 
 /* State the input assembler and the shader stages changed since the last draw */
@@ -137,11 +199,35 @@ struct NineDeviceState
     UINT Frequencies[NineScStreamCount];
     NineResource* IndexBuffer;
     UINT IndexStride;
+    const BYTE* UserIndices;
+    UINT UserIndexLimit;
+    NineStageTexture Textures[NineStageCount];
     NineVertexDecl* VertexDecl;
     BOOLEAN Pretransformed;
     UINT Dirty;
 
     NineShader* Shaders[NineShaderStageCount];
+
+    /* The draw being prepared: primitive, point size and what has to be converted again */
+    UINT Primitive;
+    FLOAT PointSize[3];
+    BOOLEAN PointSizeDirty;
+    BOOLEAN PointSizeLarge;
+    BOOLEAN VertexKeyDirty;
+    BOOLEAN ExtensionDirty;
+    BOOLEAN FogDirty;
+    BOOLEAN BumpDirty;
+    BYTE TextureKinds[16];
+    UINT ShadowSamplers;
+    NineScRasterStates LastPixelKey;
+    BOOLEAN HavePixelKey;
+
+    /* The converted shaders and pipeline last drawn with */
+    NineConverted* Vertex;
+    NineConverted* Geometry;
+    NineConverted* Pixel;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc;
+    TL::PipelineState* Pipeline;
 };
 
 /* A byte range of a buffer locked with discard, kept to turn adjacent discards into no overwrite locks */
@@ -226,6 +312,28 @@ struct NineDevice
 
     /* Shaders by their code, one map for each stage */
     std::unordered_multimap<UINT64, std::unique_ptr<NineShader>> ShaderCache[NineShaderStageCount];
+
+    /* The converter, the shaders the driver makes itself and every pipeline built so far */
+    NineScTranslator* Translator;
+    NineShader TransformedVertex;
+    NineShader PointGeometry;
+    std::vector<std::unique_ptr<NinePipeline>> Pipelines;
+
+    /* Constants of the vertex and pixel stage, then the extension slots */
+    NineConstantSlot VertexSlots[NineConstantKindCount];
+    NineConstantSlot PixelSlots[NineConstantKindCount];
+    NineConstantSlot VertexExtension;
+    NineConstantSlot GeometryExtension;
+    NineConstantSlot PixelFog;
+    NineConstantSlot PixelBump;
+    BYTE Extension[NineExtensionSize];
+    BYTE Bump[256];
+
+    /* Samplers by their state words, user memory vertices and the triangle fan indices */
+    std::vector<std::pair<std::array<UINT, 4>, std::unique_ptr<TL::Sampler>>> Samplers;
+    NineUploadRing UserRing;
+    NineUploadRing FanRing;
+    UINT FanCapacity;
 
     /* Discarded ranges of each buffer locked since it was created */
     std::mutex LockRangesLock;
@@ -339,6 +447,7 @@ struct NineResource
     std::unique_ptr<TL::TDSV> Dsvs[4];
     std::unique_ptr<TL::TSRV> Srv;
     std::unique_ptr<TL::TSRV> SrgbSrv;
+    std::unique_ptr<TL::TSRV> TopMipSrv[2];
     UINT TextureType;
 
     /* Render target slots and the depth slot this resource is bound to */
@@ -404,6 +513,19 @@ NineSubresourceOf(
     _In_ UINT Index,
     _In_ UINT Plane,
     _In_ BOOLEAN Expanded);
+
+/* Swaps in the allocation an asynchronous discard lock wrote to */
+HRESULT
+APIENTRY
+NineRename(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_RENAME* Args);
+
+/* The shader view of a kind: bit 0 reads through sRGB, bit 1 shows the top mip only */
+TL::TSRV*
+NineShaderViewOf(
+    _Inout_ NineResource* Resource,
+    _In_ UINT Kind);
 
 /* output.cpp */
 HRESULT
@@ -697,6 +819,78 @@ NineDestroyDevice(
 VOID
 NineFillDeviceFuncs(
     _Out_ D3DDDI_DEVICEFUNCS* Functions);
+
+/* device.cpp */
+NineUploadSlice
+NineAllocateUpload(
+    _Inout_ NineUploadRing* Ring,
+    _In_ UINT Size);
+
+/* draw.cpp */
+HRESULT
+APIENTRY
+NineSetTexture(
+    _In_ HANDLE hDevice,
+    _In_ UINT Stage,
+    _In_ HANDLE hTexture);
+
+HRESULT
+APIENTRY
+NineSetStreamSourceUm(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SETSTREAMSOURCEUM* Args,
+    _In_ const VOID* Data);
+
+HRESULT
+APIENTRY
+NineSetIndicesUm(
+    _In_ HANDLE hDevice,
+    _In_ UINT IndexSize,
+    _In_ const VOID* Data);
+
+HRESULT
+APIENTRY
+NineDrawPrimitive(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_DRAWPRIMITIVE* Args,
+    _In_opt_ const UINT* FlagBuffer);
+
+HRESULT
+APIENTRY
+NineDrawPrimitive2(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_DRAWPRIMITIVE2* Args);
+
+HRESULT
+APIENTRY
+NineDrawIndexedPrimitive(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Args);
+
+HRESULT
+APIENTRY
+NineDrawIndexedPrimitive2(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE2* Args,
+    _In_ UINT IndicesSize,
+    _In_ const VOID* Indices,
+    _In_opt_ const UINT* FlagBuffer);
+
+/* Sets up the constant slots of a new device */
+VOID
+NineInitDrawState(
+    _Inout_ NineDevice* Device);
+
+/* Lets go of every converted shader of a shader and the pipelines built from them */
+VOID
+NineDropConverted(
+    _Inout_ NineDevice* Device,
+    _Inout_ NineShader* Shader);
+
+/* Frees the converter and every pipeline before the context goes */
+VOID
+NineFreeDrawState(
+    _Inout_ NineDevice* Device);
 
 /* state.cpp */
 HRESULT

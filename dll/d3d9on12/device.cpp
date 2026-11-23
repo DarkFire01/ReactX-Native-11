@@ -84,7 +84,6 @@ NineRefillRing(
     Ring->Cursor = 0;
 }
 
-static
 NineUploadSlice
 NineAllocateUpload(
     _Inout_ NineUploadRing* Ring,
@@ -190,6 +189,7 @@ NineInitDevice(
         Device->Context->SetNumScissorRects(1);
 
         NineInitConstants(Device);
+        NineInitDrawState(Device);
         Device->Adapter->VideoDevice = Device;
     }
 
@@ -203,6 +203,8 @@ VOID
 NineFreeDevice(
     _In_ _Post_invalid_ NineDevice* Device)
 {
+    if (Device->Context)
+        NineFreeDrawState(Device);
     Device->ConstantRing.Buffer.reset();
     Device->Sharing.reset();
     Device->Context.reset();

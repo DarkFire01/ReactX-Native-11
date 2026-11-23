@@ -27,6 +27,7 @@
 #include <featurestagingapi.h>
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 #include <mutex>
 #include <new>

@@ -7,6 +7,8 @@
 
 #include "device.hpp"
 
+#include <algorithm>
+
 /* The displacement map sampler and the vertex samplers follow the 16 pixel samplers */
 static constexpr UINT NineDisplacementSampler = 256;
 static constexpr UINT NineFirstVertexSampler = 257;
@@ -16,6 +18,16 @@ static constexpr UINT NineVertexSamplerCount = 4;
 static constexpr UINT NineAddressBoth = 12;
 static constexpr UINT NineAddressU = 13;
 static constexpr UINT NineAddressV = 14;
+
+/* Render state values that ask for something other than the state */
+static constexpr DWORD NineResolveDepthCode = 0x7FA05000;
+static constexpr DWORD NineAtocCode = 0x434F5441;
+
+/* Bump mapping stage states and where they go in the bump constants */
+static constexpr UINT NineBumpMatrixFirst = 7;
+static constexpr UINT NineBumpMatrixLast = 10;
+static constexpr UINT NineBumpScale = 22;
+static constexpr UINT NineBumpOffset = 23;
 
 static
 NineDevice*
@@ -62,6 +74,76 @@ NineStoreConstants(
     return NineDxgiResult(S_OK);
 }
 
+/* Copies a float out of a render state value */
+static
+FLOAT
+NineStateFloat(
+    _In_ DWORD Value)
+{
+    FLOAT Float;
+
+    memcpy(&Float, &Value, sizeof(Float));
+    return Float;
+}
+
+/* Stores a render state and marks what the next draw has to build again */
+static
+VOID
+NineNoteRenderState(
+    _Inout_ NineDevice* Device,
+    _In_ UINT State,
+    _In_ DWORD Value)
+{
+    NineDeviceState* Draw = &Device->State;
+    FLOAT* Point = reinterpret_cast<FLOAT*>(Device->Extension + 16);
+    DWORD Previous = Draw->RenderStates[State];
+
+    switch (State)
+    {
+        case D3DDDIRS_POINTSIZE:
+            /* The depth resolve request is not a size */
+            if (Value == NineResolveDepthCode)
+            {
+                NINE_TRACE_ONCE(L"the depth resolve render state is not handled yet");
+                return;
+            }
+            Point[0] = NineStateFloat(Value);
+            Draw->PointSizeDirty = TRUE;
+            Draw->ExtensionDirty = TRUE;
+            break;
+        case D3DDDIRS_POINTSIZE_MIN:
+            Point[1] = std::max(NineStateFloat(Value), 1.0f);
+            Draw->PointSizeDirty = TRUE;
+            Draw->ExtensionDirty = TRUE;
+            break;
+        case D3DDDIRS_POINTSIZE_MAX:
+            Point[2] = std::min(NineStateFloat(Value), 8192.0f);
+            Draw->PointSizeDirty = TRUE;
+            Draw->ExtensionDirty = TRUE;
+            break;
+        case D3DDDIRS_ADAPTIVETESS_Y:
+            /* Only the alpha to coverage codes are kept */
+            if (Value != NineAtocCode && Value != 0)
+                return;
+            break;
+        case D3DDDIRS_CLIPPLANEENABLE:
+            if (((Previous ^ Value) & 0x3F) != 0)
+                Draw->VertexKeyDirty = TRUE;
+            break;
+        case D3DDDIRS_FOGCOLOR:
+        case D3DDDIRS_FOGTABLEMODE:
+        case D3DDDIRS_FOGSTART:
+        case D3DDDIRS_FOGEND:
+        case D3DDDIRS_FOGDENSITY:
+        case D3DDDIRS_ALPHAREF:
+            Draw->FogDirty = TRUE;
+            break;
+        default:
+            break;
+    }
+    Draw->RenderStates[State] = Value;
+}
+
 HRESULT
 APIENTRY
 NineSetRenderState(
@@ -72,7 +154,7 @@ NineSetRenderState(
         return E_INVALIDARG;
 
     if (static_cast<UINT>(Args->State) < NineRenderStateCount)
-        NineDeviceFrom(hDevice)->State.RenderStates[Args->State] = Args->Value;
+        NineNoteRenderState(NineDeviceFrom(hDevice), Args->State, Args->Value);
     else
         NINE_TRACE_ONCE(L"render state %u is out of range", Args->State);
     return NineDxgiResult(S_OK);
@@ -112,6 +194,24 @@ NineSetTextureStageState(
 
     if (Stage >= NineStageCount || static_cast<UINT>(Args->State) >= NineStageStateCount)
         return E_INVALIDARG;
+
+    /* Bump mapping states of the first 8 stages are pixel shader constants */
+    if (Stage < 8)
+    {
+        NineDevice* Device = NineDeviceFrom(hDevice);
+        UINT State = static_cast<UINT>(Args->State);
+        UINT At = ~0u;
+
+        if (State >= NineBumpMatrixFirst && State <= NineBumpMatrixLast)
+            At = 16 * Stage + 4 * (State - NineBumpMatrixFirst);
+        else if (State == NineBumpScale || State == NineBumpOffset)
+            At = 128 + 16 * Stage + 4 * (State - NineBumpScale);
+        if (At != ~0u)
+        {
+            memcpy(Device->Bump + At, &Args->Value, sizeof(Args->Value));
+            Device->State.BumpDirty = TRUE;
+        }
+    }
 
     /* The combined address state sets both the U and the V address */
     States = NineDeviceFrom(hDevice)->State.StageStates;
@@ -264,7 +364,10 @@ NineSetClipPlane(
     if (memcmp(State->ClipPlanes[Args->Index], Args->Plane, sizeof(State->ClipPlanes[Args->Index])) != 0)
     {
         CopyMemory(State->ClipPlanes[Args->Index], Args->Plane, sizeof(State->ClipPlanes[Args->Index]));
+        CopyMemory(NineDeviceFrom(hDevice)->Extension + 16 * (2 + Args->Index), Args->Plane,
+                   sizeof(State->ClipPlanes[Args->Index]));
         State->ClipPlanesDirty = TRUE;
+        State->ExtensionDirty = TRUE;
     }
     return NineDxgiResult(S_OK);
 }

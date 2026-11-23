@@ -75,6 +75,7 @@ NineReleaseShader(
 
     if (Device->State.Shaders[Shader->Stage] == Shader)
         Device->State.Shaders[Shader->Stage] = nullptr;
+    NineDropConverted(Device, Shader);
     for (auto Entry = Range.first; Entry != Range.second; ++Entry)
     {
         if (Entry->second.get() == Shader)
@@ -131,6 +132,8 @@ NineBindShader(
     if (Device == nullptr || hShader == nullptr)
         return E_INVALIDARG;
 
+    if (Device->State.Shaders[Stage] != hShader && Stage == NineVertexStage)
+        Device->State.VertexKeyDirty = TRUE;
     Device->State.Shaders[Stage] = static_cast<NineShader*>(hShader);
     return NineDxgiResult(S_OK);
 }

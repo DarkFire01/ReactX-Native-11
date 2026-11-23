@@ -285,6 +285,41 @@ NineScBuildOutputSignature(
     ScWriteSignature(Entries, Signature);
 }
 
+VOID
+NineScBuildPixelOutputSignature(
+    _In_ UINT Written,
+    _Out_ NineScBlob* Signature)
+{
+    std::vector<ScSignatureEntry> Entries;
+
+    for (UINT Target = 0; Target < 4; Target += 1)
+    {
+        ScSignatureEntry Entry = {};
+
+        if ((Written & (1u << Target)) == 0)
+            continue;
+        Entry.Name = "SV_Target";
+        Entry.Parameter.SemanticIndex = Target;
+        Entry.Parameter.SystemValue = 64;
+        Entry.Parameter.ComponentType = ScComponentFloat;
+        Entry.Parameter.Register = Target;
+        Entry.Parameter.Mask = 0xF;
+        Entries.push_back(Entry);
+    }
+    if (Written & 0x10)
+    {
+        ScSignatureEntry Entry = {};
+
+        Entry.Name = "SV_Depth";
+        Entry.Parameter.SystemValue = 65;
+        Entry.Parameter.ComponentType = ScComponentFloat;
+        Entry.Parameter.Register = ~0u;
+        Entry.Parameter.Mask = 1;
+        Entries.push_back(Entry);
+    }
+    ScWriteSignature(Entries, Signature);
+}
+
 HRESULT
 NineScPackageShader(
     _In_reads_bytes_(CodeSize) const VOID* Code,
