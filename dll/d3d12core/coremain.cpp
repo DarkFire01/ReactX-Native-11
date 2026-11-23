@@ -34,7 +34,19 @@ D3D12GetInterface(
     _In_ REFIID riid,
     _COM_Outptr_opt_ void** ppvDebug);
 
-/* Removed device data settings: kept per process and read by nothing yet, since no breadcrumbs are recorded */
+/* What applications ask removed device data to record, applied to devices made after */
+struct RxDredState
+{
+    D3D12_DRED_ENABLEMENT AutoBreadcrumbs;
+    D3D12_DRED_ENABLEMENT PageFault;
+    D3D12_DRED_ENABLEMENT WatsonDump;
+    D3D12_DRED_ENABLEMENT BreadcrumbContext;
+    BOOL MarkersOnlyBreadcrumbs;
+};
+
+static RxDredState RxProcessDred;
+
+/* Each request gets its own settings object; all of them write the process settings */
 class RxDredSettings final : public ID3D12DeviceRemovedExtendedDataSettings2
 {
 public:
@@ -52,6 +64,7 @@ public:
             riid == __uuidof(ID3D12DeviceRemovedExtendedDataSettings2))
         {
             *ppvObject = static_cast<ID3D12DeviceRemovedExtendedDataSettings2*>(this);
+            AddRef();
             return S_OK;
         }
 
@@ -59,19 +72,22 @@ public:
         return E_NOINTERFACE;
     }
 
-    /* One object for the whole process, never freed */
     ULONG
     STDMETHODCALLTYPE
     AddRef(VOID) override
     {
-        return 2;
+        return InterlockedIncrement(&RefCount);
     }
 
     ULONG
     STDMETHODCALLTYPE
     Release(VOID) override
     {
-        return 1;
+        ULONG Count = InterlockedDecrement(&RefCount);
+
+        if (Count == 0)
+            delete this;
+        return Count;
     }
 
     VOID
@@ -79,7 +95,7 @@ public:
     SetAutoBreadcrumbsEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        AutoBreadcrumbs = Enablement;
+        RxProcessDred.AutoBreadcrumbs = Enablement;
     }
 
     VOID
@@ -87,7 +103,7 @@ public:
     SetPageFaultEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        PageFault = Enablement;
+        RxProcessDred.PageFault = Enablement;
     }
 
     VOID
@@ -95,7 +111,7 @@ public:
     SetWatsonDumpEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        WatsonDump = Enablement;
+        RxProcessDred.WatsonDump = Enablement;
     }
 
     VOID
@@ -103,7 +119,7 @@ public:
     SetBreadcrumbContextEnablement(
         D3D12_DRED_ENABLEMENT Enablement) override
     {
-        BreadcrumbContext = Enablement;
+        RxProcessDred.BreadcrumbContext = Enablement;
     }
 
     VOID
@@ -111,18 +127,14 @@ public:
     UseMarkersOnlyAutoBreadcrumbs(
         BOOL MarkersOnly) override
     {
-        MarkersOnlyBreadcrumbs = MarkersOnly;
+        RxProcessDred.MarkersOnlyBreadcrumbs = MarkersOnly;
     }
 
 private:
-    D3D12_DRED_ENABLEMENT AutoBreadcrumbs = D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED;
-    D3D12_DRED_ENABLEMENT PageFault = D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED;
-    D3D12_DRED_ENABLEMENT WatsonDump = D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED;
-    D3D12_DRED_ENABLEMENT BreadcrumbContext = D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED;
-    BOOL MarkersOnlyBreadcrumbs = FALSE;
-};
+    ~RxDredSettings() = default;
 
-static RxDredSettings RxProcessDredSettings;
+    LONG RefCount = 1;
+};
 
 static const RxD3D12CoreExports RxCoreExports =
 {
@@ -136,6 +148,8 @@ static const RxD3D12CoreExports RxCoreExports =
     D3D12GetInterface,
 };
 
+/* The driver verifier class, which has no public header */
+static constexpr CLSID RxDriverVerifierClsid = {0xb7b44efa, 0x03ed, 0x4af2, {0xab, 0xc8, 0x51, 0x30, 0x04, 0x51, 0x9d, 0xcb}};
 extern "C"
 HRESULT
 WINAPI
@@ -152,18 +166,24 @@ D3D12GetInterface(
         return S_OK;
     }
 
-    if (ppvDebug != nullptr)
-        *ppvDebug = nullptr;
-
     if (rclsid == CLSID_D3D12DeviceRemovedExtendedData)
     {
+        RxDredSettings* Settings;
+        HRESULT hr;
+
         if (ppvDebug == nullptr)
             return S_FALSE;
-        return RxProcessDredSettings.QueryInterface(riid, ppvDebug);
+
+        Settings = new (std::nothrow) RxDredSettings();
+        if (Settings == nullptr)
+            return E_OUTOFMEMORY;
+        hr = Settings->QueryInterface(riid, ppvDebug);
+        Settings->Release();
+        return hr;
     }
 
-    /* The debug layer is a separate install on Windows too, and this runtime has none */
-    if (rclsid == CLSID_D3D12Debug)
+    /* The debug layer and driver verifier are separate installs on Windows too; the output is left alone */
+    if (rclsid == CLSID_D3D12Debug || rclsid == RxDriverVerifierClsid)
         return DXGI_ERROR_SDK_COMPONENT_MISSING;
 
     return E_NOINTERFACE;
