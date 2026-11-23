@@ -332,6 +332,7 @@ D9Device::BindRenderTargets(VOID)
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     RenderTargets[0] = ImplicitChain->BackBuffer(0);
+    AcquireWriteAccess(RenderTargets[0]);
     DepthStencil = AutoDepthStencil;
     TargetsDirty |= 1;
     DepthDirty = TRUE;
@@ -350,6 +351,7 @@ D9Device::SendTargets(VOID)
     {
         if ((TargetsDirty & (1UL << Index)) == 0)
             continue;
+        AcquireWriteAccess(RenderTargets[Index]);
         Target.RenderTargetIndex = Index;
         Target.hRenderTarget = RenderTargets[Index] != nullptr ?
                                RenderTargets[Index]->DriverResource()->DriverResource : NULL;
@@ -2373,6 +2375,7 @@ D9Device::SetRenderTarget(
         }
     }
 
+    AcquireWriteAccess(Next);
     Previous = RenderTargets[RenderTargetIndex];
     if (Next != Previous)
     {

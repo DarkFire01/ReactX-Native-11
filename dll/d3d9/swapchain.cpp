@@ -141,6 +141,7 @@ D9SwapChain::Reset(
     PresentMark = 0;
     ComposedIndex = 0;
     FenceValue = 0;
+    FenceWaited = 0;
     ZeroMemory(&CachedStats, sizeof(CachedStats));
     ZeroMemory(&LastStats, sizeof(LastStats));
 
@@ -835,9 +836,19 @@ D9SwapChain::CreateComposition(
         D9Trace(L"D3DKMTCreateSynchronizationObject2 failed 0x%08lX for the flip model fence", Status);
         return D9HresultFromStatus(Status);
     }
-    Fence = Create.hSyncObject;
+    Fence = new (std::nothrow) D9TrackedFence;
+    if (Fence == nullptr)
+    {
+        D3DKMT_DESTROYSYNCHRONIZATIONOBJECT Destroy = {};
 
-    hr = D9ShareWithCompositor(Fence, Security, &FenceHandle);
+        Destroy.hSyncObject = Create.hSyncObject;
+        RxGetKmtThunks()->DestroySynchronizationObject(&Destroy);
+        return E_OUTOFMEMORY;
+    }
+    Fence->References = 1;
+    Fence->Handle = Create.hSyncObject;
+
+    hr = D9ShareWithCompositor(Fence->Handle, Security, &FenceHandle);
     if (FAILED(hr))
         return hr;
 
@@ -955,7 +966,6 @@ VOID
 D9SwapChain::ReleaseComposition(VOID)
 {
     const D9CompositionCalls* Calls = D9Composition();
-    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT Destroy = {};
 
     if (!Composed)
         return;
@@ -975,11 +985,10 @@ D9SwapChain::ReleaseComposition(VOID)
             CloseHandle(CompositionSurface);
             CompositionSurface = NULL;
         }
-        if (Fence != 0)
+        if (Fence != nullptr)
         {
-            Destroy.hSyncObject = Fence;
-            RxGetKmtThunks()->DestroySynchronizationObject(&Destroy);
-            Fence = 0;
+            D9ReleaseTrackedFence(Fence);
+            Fence = nullptr;
             if (FenceHandle != NULL)
             {
                 CloseHandle(FenceHandle);
@@ -1053,7 +1062,7 @@ D9SwapChain::PresentComposed(
     }
     Present.Surface = CompositionSurface;
     Present.BindingId = BindingId;
-    Present.FenceHandle = Fence != 0 ? FenceHandle : NULL;
+    Present.FenceHandle = Fence != nullptr ? FenceHandle : NULL;
     Present.Flags = Flags;
     Present.DirtyRegion = DirtyRegion;
     Present.Width = Parameters.BackBufferWidth;
@@ -1176,4 +1185,33 @@ D9SwapChain::ComposedStats(
     }
     LastStats = *Stats;
     return hr;
+}
+
+/* The compositor may still show a buffer the chain hands out again; once every buffer went around, writing one
+   waits for the present that let it go */
+VOID
+D9SwapChain::AcquireWriteAccess(
+    _In_ const D9Surface* Surface)
+{
+    UINT Limit;
+    UINT64 Value;
+
+    if (!Composed || CompositionSurface == NULL || Fence == nullptr)
+        return;
+
+    for (UINT Buffer = 0; Buffer < BackBufferCount; Buffer++)
+    {
+        if (BackBuffers[Buffer] != Surface)
+            continue;
+
+        Limit = BackBufferCount;
+        if (FenceValue + Buffer < Limit)
+            return;
+        Value = FenceValue + Buffer - (Limit - 1);
+        if (Value <= FenceWaited)
+            return;
+        FenceWaited = Value;
+        Device->WaitOnFence(Fence, Value);
+        return;
+    }
 }

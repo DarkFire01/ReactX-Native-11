@@ -567,7 +567,11 @@ D9Device::RunSyncToken(
     if (FAILED(hr) && hr != E_OUTOFMEMORY)
         return hr;
     if (Packet.Kind != Expected)
+    {
+        if (Packet.Tracked != nullptr)
+            D9ReleaseTrackedFence(Packet.Tracked);
         return E_INVALIDARG;
+    }
 
     if (Args->BroadcastContextArray != nullptr)
     {
@@ -620,6 +624,8 @@ D9Device::RunSyncToken(
         if (!NT_SUCCESS(Status))
             D9Trace(L"signaling a sync token's fence failed 0x%08lX", Status);
     }
+    if (Packet.Tracked != nullptr)
+        D9ReleaseTrackedFence(Packet.Tracked);
     return S_OK;
 }
 

@@ -107,6 +107,7 @@ D9Device::UpdateSurface(
 
     if (NotReset || Source == nullptr || Target == nullptr || Source->Owner() != this || Target->Owner() != this)
         return D3DERR_INVALIDCALL;
+    AcquireWriteAccess(Target);
     if (Source->IsBusy() || Target->IsBusy())
     {
         D9_TRACE_ONCE(L"UpdateSurface: a surface is locked");
@@ -326,6 +327,7 @@ D9Device::StretchRect(
     {
         return D3DERR_INVALIDCALL;
     }
+    AcquireWriteAccess(Target);
     if (Source->IsBusy() || Target->IsBusy() || Source == Target)
     {
         D9_TRACE_ONCE(L"StretchRect: a surface is locked or both are the same");
@@ -438,6 +440,7 @@ D9Device::ColorFill(
 
     if (NotReset || Target == nullptr || Target->Owner() != this)
         return D3DERR_INVALIDCALL;
+    AcquireWriteAccess(Target);
     if (Target->IsBusy())
     {
         D9_TRACE_ONCE(L"ColorFill: the surface is locked");

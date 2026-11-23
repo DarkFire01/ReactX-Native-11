@@ -686,6 +686,7 @@ D9Device::ExchangeTargets(
 
     for (UINT Index = 0; Index < Caps.NumSimultaneousRTs && Index < D9MaxRenderTargets; Index++)
     {
+        AcquireWriteAccess(Targets[Index]);
         Held = RenderTargets[Index];
         RenderTargets[Index] = Targets[Index];
         Targets[Index] = Held;
@@ -822,4 +823,74 @@ D9Device::PresentToCompositor(
     if (Lost)
         return D3DERR_DEVICELOST;
     return hr;
+}
+
+/* Driver interfaces past this take fence waits as sync tokens */
+static constexpr UINT D9SyncTokenWaitVersion = 0x6000;
+
+VOID
+D9Device::AcquireWriteAccess(
+    _In_opt_ D9Surface* Surface)
+{
+    if (Surface != nullptr && ImplicitChain != nullptr)
+        ImplicitChain->AcquireWriteAccess(Surface);
+}
+
+/* Older drivers are flushed and every context waits; newer ones hear the wait as a token */
+VOID
+D9ReleaseTrackedFence(
+    _In_ D9TrackedFence* Fence)
+{
+    D3DKMT_DESTROYSYNCHRONIZATIONOBJECT Destroy = {};
+
+    if (InterlockedDecrement(&Fence->References) != 0)
+        return;
+    Destroy.hSyncObject = Fence->Handle;
+    RxGetKmtThunks()->DestroySynchronizationObject(&Destroy);
+    delete Fence;
+}
+
+VOID
+D9Device::WaitOnFence(
+    _In_ D9TrackedFence* Fence,
+    _In_ UINT64 Value)
+{
+    D9SyncPacket Packet = {};
+    D3DDDIARG_SYNCTOKEN Token = {};
+    UINT64 Handle = 0;
+
+    if (DriverVersion <= D9SyncTokenWaitVersion || DeviceFunctions.pfnAcquireResource == nullptr)
+    {
+        FlushDriver();
+        for (UINT Remaining = KernelContextCount; Remaining > 0; Remaining -= 1)
+        {
+            D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU Wait = {};
+
+            Wait.hContext = KernelContexts[Remaining - 1];
+            Wait.ObjectCount = 1;
+            Wait.ObjectHandleArray = &Fence->Handle;
+            Wait.MonitoredFenceValueArray = &Value;
+            if (!NT_SUCCESS(RxGetKmtThunks()->WaitForSynchronizationObjectFromGpu(&Wait)))
+            {
+                D9Trace(L"waiting for a flip model fence failed");
+                break;
+            }
+        }
+        return;
+    }
+
+    /* The token keeps the fence until the driver runs it */
+    Packet.Kind = D9SyncKind::Wait;
+    Packet.Fence = Fence->Handle;
+    Packet.Value = Value;
+    Packet.Tracked = Fence;
+    InterlockedIncrement(&Fence->References);
+    if (FAILED(AcquireSyncToken(&Packet, &Handle)))
+    {
+        D9ReleaseTrackedFence(Fence);
+        return;
+    }
+    Token.hSyncToken = reinterpret_cast<HANDLE>(Handle);
+    DrainBatch();
+    DeviceFunctions.pfnAcquireResource(DriverDevice, &Token);
 }

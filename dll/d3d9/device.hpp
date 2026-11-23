@@ -90,11 +90,23 @@ enum class D9SyncKind : UINT
     Signal,
 };
 
+/* A fence the runtime made and every token naming it keeps alive; the last reference destroys it */
+struct D9TrackedFence
+{
+    LONG References;
+    D3DKMT_HANDLE Handle;
+};
+
+VOID
+D9ReleaseTrackedFence(
+    _In_ D9TrackedFence* Fence);
+
 struct D9SyncPacket
 {
     D9SyncKind Kind;
     D3DKMT_HANDLE Fence;
     UINT64 Value;
+    D9TrackedFence* Tracked;
 };
 
 /* What one creation asks of sharing: the mode, the handle to open and the usage the resource records */
@@ -1189,6 +1201,14 @@ private:
     ComposedStats(
         _Out_ D3DPRESENTSTATS* Stats);
 
+public:
+    /* Writing a buffer of the chain first waits for the compositor to give it back */
+    VOID
+    AcquireWriteAccess(
+        _In_ const D9Surface* Surface);
+
+private:
+
     UINT Index;
     HWND FocusWindow;
     D3DPRESENT_PARAMETERS Parameters = {};
@@ -1210,9 +1230,10 @@ private:
     HANDLE BufferHandles[D3DPRESENT_BACK_BUFFERS_MAX_EX + 1] = {};
     D9Surface* ClearTarget = nullptr;
     D9Surface* ClearDepth = nullptr;
-    D3DKMT_HANDLE Fence = 0;
+    D9TrackedFence* Fence = nullptr;
     HANDLE FenceHandle = NULL;
     UINT64 FenceValue = 0;
+    UINT64 FenceWaited = 0;
     HANDLE CompositionSurface = NULL;
     UINT64 BindingId = 0;
     BOOLEAN DirectFlipBound = FALSE;
@@ -2159,6 +2180,17 @@ public:
     /* Whether as many presents as the limit allows are still in flight */
     BOOLEAN
     PresentLimitReached(VOID);
+
+    /* A surface about to be written waits until the compositor let go of it, when a flip model chain owns it */
+    VOID
+    AcquireWriteAccess(
+        _In_opt_ D9Surface* Surface);
+
+    /* Has the driver wait on its contexts until a fence reaches a value */
+    VOID
+    WaitOnFence(
+        _In_ D9TrackedFence* Fence,
+        _In_ UINT64 Value);
 
     /* Swaps the bound targets and depth buffer with the ones given, as presents of the flip model do */
     VOID
