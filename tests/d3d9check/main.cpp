@@ -2292,6 +2292,143 @@ NcCheckTextures(
     Plain->Release();
 }
 
+/* Makes one resource of a kind the reset checks hold across a reset */
+static
+IUnknown*
+NcMakeResetResource(
+    _In_ IDirect3DDevice9* Device,
+    _In_ UINT Kind)
+{
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+
+    switch (Kind)
+    {
+    case 0:
+        Device->CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+        return Texture;
+    case 1:
+        Device->CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Texture, nullptr);
+        return Texture;
+    case 2:
+        Device->CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, nullptr);
+        return Texture;
+    case 3:
+        Device->CreateRenderTarget(16, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+        return Surface;
+    case 4:
+        Device->CreateOffscreenPlainSurface(16, 16, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, nullptr);
+        return Surface;
+    case 5:
+        Device->CreateOffscreenPlainSurface(16, 16, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, nullptr);
+        return Surface;
+    case 6:
+        Device->CreateVertexBuffer(64, 0, 0, D3DPOOL_DEFAULT, &Vertices, nullptr);
+        return Vertices;
+    case 7:
+        Device->CreateIndexBuffer(64, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &Indices,
+                                  nullptr);
+        return Indices;
+    case 8:
+        Device->CreateVertexBuffer(64, 0, 0, D3DPOOL_SYSTEMMEM, &Vertices, nullptr);
+        return Vertices;
+    case 9:
+        Device->CreateCubeTexture(8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube, nullptr);
+        return Cube;
+    case 10:
+        Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Surface);
+        return Surface;
+    case 11:
+        Device->GetDepthStencilSurface(&Surface);
+        return Surface;
+    default:
+        Device->CreateDepthStencilSurface(16, 16, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+        return Surface;
+    }
+}
+
+/* Resets while resources of each kind live, what the device says afterwards, and a reset once they are gone */
+static
+VOID
+NcCheckResetOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_opt_ IDirect3DDevice9Ex* DeviceEx,
+    _In_ D3DPRESENT_PARAMETERS* Parameters)
+{
+    D3DPRESENT_PARAMETERS Again;
+    IUnknown* Held;
+    HRESULT hr;
+
+    for (UINT Kind = 0; Kind <= 12; Kind++)
+    {
+        Held = NcMakeResetResource(Device, Kind);
+        Again = *Parameters;
+        hr = Device->Reset(&Again);
+        printf("%s_reset[%u] = held %d reset %08lX", Prefix, Kind, Held != nullptr, hr);
+        printf(" cooperative %08lX", Device->TestCooperativeLevel());
+        if (DeviceEx != nullptr)
+        {
+            Again = *Parameters;
+            hr = DeviceEx->ResetEx(&Again, nullptr);
+            printf(" resetex %08lX state %08lX", hr, DeviceEx->CheckDeviceState(nullptr));
+        }
+        printf(" clear %08lX", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1.0f, 0));
+        if (Held != nullptr)
+            printf(" release %lu", Held->Release());
+        printf(" before %08lX", Device->TestCooperativeLevel());
+        Again = *Parameters;
+        hr = Device->Reset(&Again);
+        printf(" after %08lX cooperative %08lX", hr, Device->TestCooperativeLevel());
+        printf(" present %08lX\n", Device->Present(nullptr, nullptr, nullptr, nullptr));
+        fflush(stdout);
+    }
+}
+
+/* Device resets against held resources on an extended device and on a device of the plain object */
+static
+VOID
+NcCheckReset(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.EnableAutoDepthStencil = TRUE;
+    Parameters.AutoDepthStencilFormat = D3DFMT_D24S8;
+    Made = Parameters;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, nullptr,
+                                   &DeviceEx);
+    printf("reset_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckResetOn("reset_ex", DeviceEx, DeviceEx, &Parameters);
+        printf("reset_ex_release = %lu\n", DeviceEx->Release());
+    }
+
+    Made = Parameters;
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made, &Device);
+    printf("reset_create_plain = %08lX\n", hr);
+    if (Device != nullptr)
+    {
+        NcCheckResetOn("reset_plain", Device, nullptr, &Parameters);
+        printf("reset_plain_release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -2312,6 +2449,7 @@ static const NineCheckInfo NcChecks[] =
     { "surfaces", NcCheckSurfaces },
     { "buffers", NcCheckBuffers },
     { "textures", NcCheckTextures },
+    { "reset", NcCheckReset },
 };
 
 static
