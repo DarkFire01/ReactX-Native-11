@@ -286,6 +286,7 @@ DcCheckFactory(VOID)
     static const IID Converter = __uuidof(IDxbcConverter);
     static const IID Blob = __uuidof(IDxcBlob);
     static const IID Marshal = { 0x00000003, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    static const IID NoMarshal = __uuidof(INoMarshal);
     static const IID Random = { 0x12345678, 0x1234, 0x5678, { 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78 } };
     const struct
     {
@@ -298,6 +299,7 @@ DcCheckFactory(VOID)
         { "converter/unknown", &DcClsidConverter, &Unknown },
         { "converter/blob", &DcClsidConverter, &Blob },
         { "converter/marshal", &DcClsidConverter, &Marshal },
+        { "converter/nomarshal", &DcClsidConverter, &NoMarshal },
         { "converter/random", &DcClsidConverter, &Random },
         { "compiler/unknown", &CLSID_DxcCompiler, &Unknown },
         { "validator/unknown", &CLSID_DxcValidator, &Unknown },
@@ -364,6 +366,7 @@ DcCheckFactory(VOID)
         { "converter", &Converter },
         { "blob", &Blob },
         { "marshal", &Marshal },
+        { "nomarshal", &NoMarshal },
         { "random", &Random },
     };
 
@@ -455,6 +458,59 @@ DcCheckArguments(
 
     *reinterpret_cast<ULONG*>(&Copy[28]) = 0;
     DcConvert("args no parts", Copy.data(), Size, nullptr, TRUE);
+    memcpy(Copy.data(), Source, Size);
+
+    /* With the digest check off the layout and part checks are reached */
+    Copy[4] ^= 0xFF;
+    DcConvert("nohash bad digest", Copy.data(), Size, L"-disableHashCheck", TRUE);
+    Copy[4] = Source[4];
+
+    Copy[20] = 2;
+    DcConvert("nohash bad version", Copy.data(), Size, L"-disableHashCheck", TRUE);
+    Copy[20] = Source[20];
+
+    *reinterpret_cast<ULONG*>(&Copy[28]) = 0;
+    DcConvert("nohash no parts", Copy.data(), Size, L"-disableHashCheck", TRUE);
+    memcpy(Copy.data(), Source, Size);
+
+    *reinterpret_cast<ULONG*>(&Copy[32]) += 4;
+    DcConvert("nohash part gap", Copy.data(), Size, L"-disableHashCheck", TRUE);
+    memcpy(Copy.data(), Source, Size);
+
+    *reinterpret_cast<ULONG*>(&Copy[24]) -= 4;
+    DcConvert("nohash short total", Copy.data(), Size, L"-disableHashCheck", TRUE);
+    DcConvert("nohash short both", Copy.data(), Size - 4, L"-disableHashCheck", TRUE);
+    memcpy(Copy.data(), Source, Size);
+
+    const ULONG Renames[] =
+    {
+        DXC_FOURCC('S', 'H', 'D', 'R'),
+        DXC_FOURCC('S', 'H', 'E', 'X'),
+        DXC_FOURCC('I', 'S', 'G', 'N'),
+        DXC_FOURCC('O', 'S', 'G', 'N'),
+        DXC_FOURCC('R', 'D', 'E', 'F'),
+        DXC_FOURCC('S', 'T', 'A', 'T'),
+    };
+    ULONG Parts = *reinterpret_cast<const ULONG*>(Source + 28);
+
+    for (ULONG Rename = 0; Rename < _countof(Renames); Rename++)
+    {
+        CHAR Name[5];
+        CHAR Label[64];
+
+        for (ULONG Part = 0; Part < Parts; Part++)
+        {
+            ULONG Offset = *reinterpret_cast<const ULONG*>(Source + 32 + Part * 4);
+
+            if (*reinterpret_cast<const ULONG*>(Source + Offset) == Renames[Rename])
+                *reinterpret_cast<ULONG*>(&Copy[Offset]) = DXC_FOURCC('X', 'X', 'X', 'X');
+        }
+
+        DcFourCC(Renames[Rename], Name);
+        sprintf_s(Label, "nohash without %s", Name);
+        DcConvert(Label, Copy.data(), Size, L"-disableHashCheck", TRUE);
+        memcpy(Copy.data(), Source, Size);
+    }
 
     DcConvert("args options empty", Source, Size, L"", TRUE);
     DcConvert("args options unknown", Source, Size, L"-bogus", TRUE);

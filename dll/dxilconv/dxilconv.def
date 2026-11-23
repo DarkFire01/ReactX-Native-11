@@ -1,0 +1,4 @@
+LIBRARY dxilconv.dll
+EXPORTS
+    DxcCreateInstance @1
+    DxcCreateInstance2 @2
