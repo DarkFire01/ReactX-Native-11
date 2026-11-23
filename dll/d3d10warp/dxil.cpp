@@ -257,6 +257,11 @@ private:
         _In_ OpCode Code);
 
     BOOLEAN
+    LowerWave(
+        _In_ llvm::CallInst *Call,
+        _In_ OpCode Code);
+
+    BOOLEAN
     HandleOf(
         _In_ llvm::Value *Value,
         _Out_ RX_HANDLE *Handle);
@@ -1566,9 +1571,101 @@ RxLowering::LowerCall(
             Emit(Opcode, { Dest(Call), Temp(Left, RxSwizzleMode, RxXyzw), Temp(Right, RxSwizzleMode, RxXyzw) });
             return TRUE;
         }
+        case OpCode::WaveGetLaneCount:
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxImmediate(RxWarpWaveLanes) });
+            return TRUE;
+        case OpCode::WaveGetLaneIndex:
+        case OpCode::WaveIsFirstLane:
+        case OpCode::WaveAnyTrue:
+        case OpCode::WaveAllTrue:
+        case OpCode::WaveActiveAllEqual:
+        case OpCode::WaveActiveBallot:
+        case OpCode::WaveReadLaneAt:
+        case OpCode::WaveReadLaneFirst:
+        case OpCode::WaveActiveOp:
+        case OpCode::WaveActiveBit:
+        case OpCode::WavePrefixOp:
+        case OpCode::WaveAllBitCount:
+        case OpCode::WavePrefixBitCount:
+        case OpCode::QuadReadLaneAt:
+        case OpCode::QuadOp:
+            return LowerWave(Call, Code);
         default:
             return LowerResource(Call, Code);
     }
+}
+
+/* Cross lane operations on 32 bit and boolean scalars */
+BOOLEAN
+RxLowering::LowerWave(
+    _In_ llvm::CallInst *Call,
+    _In_ OpCode Code)
+{
+    llvm::Value *Value = (Call->getNumArgOperands() > 1) ? Call->getArgOperand(1) : nullptr;
+    RxTokens Lane = RxImmediate(0);
+    RxTokens Target;
+    UINT Kind;
+    UINT Variant = 0;
+    UINT Type = RxWarpWaveUnsigned;
+
+    if (Value != nullptr)
+    {
+        llvm::Type *Scalar = Value->getType();
+
+        if (Scalar->isFloatTy())
+            Type = RxWarpWaveFloat;
+        else if (!Scalar->isIntegerTy(32) && !Scalar->isIntegerTy(1))
+            return FALSE;
+    }
+
+    switch (Code)
+    {
+        case OpCode::WaveGetLaneIndex: Kind = RxWarpWaveLaneIndex; break;
+        case OpCode::WaveIsFirstLane: Kind = RxWarpWaveFirstLane; break;
+        case OpCode::WaveAnyTrue: Kind = RxWarpWaveAnyTrue; break;
+        case OpCode::WaveAllTrue: Kind = RxWarpWaveAllTrue; break;
+        case OpCode::WaveActiveAllEqual: Kind = RxWarpWaveAllEqual; break;
+        case OpCode::WaveActiveBallot: Kind = RxWarpWaveBallot; break;
+        case OpCode::WaveReadLaneAt: Kind = RxWarpWaveReadLane; break;
+        case OpCode::WaveReadLaneFirst: Kind = RxWarpWaveReadFirst; break;
+        case OpCode::WaveActiveOp: Kind = RxWarpWaveReduce; break;
+        case OpCode::WaveActiveBit: Kind = RxWarpWaveBits; break;
+        case OpCode::WavePrefixOp: Kind = RxWarpWavePrefix; break;
+        case OpCode::WaveAllBitCount: Kind = RxWarpWaveCount; break;
+        case OpCode::WavePrefixBitCount: Kind = RxWarpWavePrefixCount; break;
+        case OpCode::QuadReadLaneAt: Kind = RxWarpWaveQuadRead; break;
+        default: Kind = RxWarpWaveQuadSwap; break;
+    }
+
+    /* The operation the call names, then whether integer reductions and prefixes are signed */
+    if (Kind == RxWarpWaveReduce || Kind == RxWarpWaveBits || Kind == RxWarpWavePrefix || Kind == RxWarpWaveQuadSwap)
+    {
+        llvm::ConstantInt *Operation = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(2));
+
+        if (Operation == nullptr)
+            return FALSE;
+        Variant = (UINT)Operation->getZExtValue();
+        if (Variant > 3 || (Kind == RxWarpWavePrefix && Variant > 1))
+            return FALSE;
+    }
+    if ((Kind == RxWarpWaveReduce || Kind == RxWarpWavePrefix) && Type != RxWarpWaveFloat)
+    {
+        llvm::ConstantInt *Signed = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(3));
+
+        if (Signed == nullptr)
+            return FALSE;
+        Type = (Signed->getZExtValue() == (UINT64)hlsl::DXIL::SignedOpKind::Signed) ? RxWarpWaveSigned : RxWarpWaveUnsigned;
+    }
+    if (Kind == RxWarpWaveReadLane || Kind == RxWarpWaveQuadRead)
+        Lane = Source(Call->getArgOperand(2));
+
+    if (Kind == RxWarpWaveBallot)
+        Target = Temp(ResultRegister(Call), RxMaskMode, 0xF);
+    else
+        Target = Dest(Call);
+    Emit(RxWarpOpcodeWave, { Target, (Value != nullptr) ? Source(Value) : RxImmediate(0), Lane,
+                             RxImmediate(Kind | Variant << 8 | Type << 16) });
+    return TRUE;
 }
 
 UINT

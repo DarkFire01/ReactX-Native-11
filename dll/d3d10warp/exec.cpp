@@ -8,6 +8,7 @@
 #include "precomp.hpp"
 #include "device.hpp"
 #include "sample.hpp"
+#include "dxil.hpp"
 
 typedef UINT RX_WARP_LANE_VALUES[RxWarpLanes][4];
 
@@ -226,6 +227,10 @@ private:
 
     VOID
     FullyMapped(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
+    Wave(
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
@@ -840,6 +845,10 @@ RxWarpMachine::Execute(VOID)
             case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
                 if (Active != 0)
                     FullyMapped(Instruction);
+                break;
+            case RxWarpOpcodeWave:
+                if (Active != 0)
+                    Wave(Instruction);
                 break;
             default:
                 if (Active != 0)
@@ -1738,6 +1747,198 @@ RxWarpMachine::FullyMapped(
     {
         for (UINT Component = 0; Component < 4; Component++)
             Result[Lane][Component] = (Status[Lane][Component] != 0) ? UINT_MAX : 0;
+    }
+    Store(Instruction, 0, Result, FALSE);
+}
+
+/* One step of a wave reduction or prefix: sum, product, min or max, then and, or, xor at four and up */
+static
+UINT
+RxWarpWaveCombine(
+    _In_ UINT Variant,
+    _In_ UINT Type,
+    _In_ UINT A,
+    _In_ UINT B)
+{
+    FLOAT Left = RxWarpAsFloat(A);
+    FLOAT Right = RxWarpAsFloat(B);
+
+    switch (Variant)
+    {
+        case 0:
+            return (Type == RxWarpWaveFloat) ? RxWarpAsUint(Left + Right) : A + B;
+        case 1:
+            return (Type == RxWarpWaveFloat) ? RxWarpAsUint(Left * Right) : A * B;
+        case 2:
+            if (Type == RxWarpWaveFloat)
+                return RxWarpAsUint(fminf(Left, Right));
+            if (Type == RxWarpWaveSigned)
+                return ((INT)A < (INT)B) ? A : B;
+            return (A < B) ? A : B;
+        case 3:
+            if (Type == RxWarpWaveFloat)
+                return RxWarpAsUint(fmaxf(Left, Right));
+            if (Type == RxWarpWaveSigned)
+                return ((INT)A > (INT)B) ? A : B;
+            return (A > B) ? A : B;
+        case 4:
+            return A & B;
+        case 5:
+            return A | B;
+        default:
+            return A ^ B;
+    }
+}
+
+/* The identity a prefix starts from */
+static
+UINT
+RxWarpWaveIdentity(
+    _In_ UINT Variant,
+    _In_ UINT Type)
+{
+    if (Variant == 1)
+        return (Type == RxWarpWaveFloat) ? 0x3F800000 : 1;
+    return 0;
+}
+
+/*
+ * Wave operations over the running lanes that are not helpers. Reductions pair lanes two apart
+ * first and then neighbors, the order the reference's float results show.
+ */
+VOID
+RxWarpMachine::Wave(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Value = {};
+    RX_WARP_LANE_VALUES Where = {};
+    RX_WARP_LANE_VALUES Result = {};
+    UINT Lanes = Active & Invocation->Live & ~Invocation->Helper;
+    UINT Kind;
+    UINT Variant;
+    UINT Type;
+    UINT First;
+    UINT Total;
+
+    if (Instruction.OperandCount < 4)
+        return;
+    Kind = Instruction.Operands[3].Immediate[0] & 0xFF;
+    Variant = (Instruction.Operands[3].Immediate[0] >> 8) & 0xFF;
+    Type = Instruction.Operands[3].Immediate[0] >> 16;
+    FetchAll(Instruction.Operands[1], TRUE, Value);
+    FetchAll(Instruction.Operands[2], TRUE, Where);
+    if (Lanes == 0)
+        return;
+    First = 0;
+    while (!(Lanes & (1u << First)))
+        First++;
+
+    /* Pairs of lanes 0 and 2, 1 and 3, then the two pair results */
+    Total = 0;
+    if (Kind == RxWarpWaveReduce || Kind == RxWarpWaveBits)
+    {
+        UINT Code = (Kind == RxWarpWaveBits) ? Variant + 4 : Variant;
+        UINT Pair[2] = {};
+        UINT Filled = 0;
+
+        for (UINT Half = 0; Half < 2; Half++)
+        {
+            UINT Low = Half;
+            UINT High = Half + 2;
+
+            if ((Lanes & (1u << Low)) && (Lanes & (1u << High)))
+                Pair[Half] = RxWarpWaveCombine(Code, Type, Value[Low][0], Value[High][0]);
+            else if (Lanes & (1u << Low))
+                Pair[Half] = Value[Low][0];
+            else if (Lanes & (1u << High))
+                Pair[Half] = Value[High][0];
+            else
+                continue;
+            Filled |= 1u << Half;
+        }
+        Total = (Filled == 3) ? RxWarpWaveCombine(Code, Type, Pair[0], Pair[1]) : Pair[(Filled == 2) ? 1 : 0];
+    }
+
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        UINT *Out = Result[Lane];
+        UINT Below = Lanes & ((1u << Lane) - 1);
+        UINT Matches = 1;
+
+        switch (Kind)
+        {
+            case RxWarpWaveLaneIndex:
+                Out[0] = Lane;
+                break;
+            case RxWarpWaveFirstLane:
+                Out[0] = (Lane == First) ? UINT_MAX : 0;
+                break;
+            case RxWarpWaveAnyTrue:
+            case RxWarpWaveAllTrue:
+            case RxWarpWaveBallot:
+            case RxWarpWaveCount:
+            case RxWarpWavePrefixCount:
+            {
+                UINT Set = 0;
+
+                for (UINT Other = 0; Other < RxWarpLanes; Other++)
+                {
+                    if ((Lanes & (1u << Other)) && Value[Other][0] != 0)
+                        Set |= 1u << Other;
+                }
+                if (Kind == RxWarpWaveAnyTrue)
+                    Out[0] = (Set != 0) ? UINT_MAX : 0;
+                else if (Kind == RxWarpWaveAllTrue)
+                    Out[0] = (Set == Lanes) ? UINT_MAX : 0;
+                else if (Kind == RxWarpWaveBallot)
+                    Out[0] = Set;
+                else if (Kind == RxWarpWaveCount)
+                    Out[0] = RxWarpCountBits(Set);
+                else
+                    Out[0] = RxWarpCountBits(Set & Below);
+                break;
+            }
+            case RxWarpWaveAllEqual:
+                for (UINT Other = 0; Other < RxWarpLanes; Other++)
+                {
+                    if (!(Lanes & (1u << Other)))
+                        continue;
+                    if (Type == RxWarpWaveFloat)
+                        Matches &= (RxWarpAsFloat(Value[Other][0]) == RxWarpAsFloat(Value[First][0]));
+                    else
+                        Matches &= (Value[Other][0] == Value[First][0]);
+                }
+                Out[0] = Matches ? UINT_MAX : 0;
+                break;
+            case RxWarpWaveReadLane:
+            case RxWarpWaveQuadRead:
+                Out[0] = Value[Where[Lane][0] & (RxWarpLanes - 1)][0];
+                break;
+            case RxWarpWaveReadFirst:
+                Out[0] = Value[First][0];
+                break;
+            case RxWarpWaveReduce:
+            case RxWarpWaveBits:
+                Out[0] = Total;
+                break;
+            case RxWarpWavePrefix:
+                Out[0] = RxWarpWaveIdentity(Variant, Type);
+                for (UINT Other = 0; Other < Lane; Other++)
+                {
+                    if (Below & (1u << Other))
+                        Out[0] = RxWarpWaveCombine(Variant, Type, Out[0], Value[Other][0]);
+                }
+                break;
+            case RxWarpWaveQuadSwap:
+                Out[0] = Value[Lane ^ (Variant + 1)][0];
+                break;
+            default:
+                break;
+        }
+
+        /* Scalars land in whichever component the destination masks; a ballot fills x to w */
+        if (Kind != RxWarpWaveBallot)
+            Out[1] = Out[2] = Out[3] = Out[0];
     }
     Store(Instruction, 0, Result, FALSE);
 }
