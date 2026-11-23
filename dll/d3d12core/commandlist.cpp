@@ -482,6 +482,300 @@ RxCommandList::CopyResource(
 
 /* Barriers */
 
+/* What one legacy state bit means to a driver that takes enhanced barriers */
+struct RxStateMeaning
+{
+    UINT State;
+    UINT TextureSync;
+    UINT BufferSync;
+    UINT Access;
+    UINT Layout;
+};
+
+constexpr UINT RxNoLayout = (UINT)D3D12_BARRIER_LAYOUT_UNDEFINED;
+constexpr UINT RxUavBufferSync = D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW |
+                                 D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO |
+                                 D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE |
+                                 D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE;
+constexpr UINT RxStructureSync = D3D12_BARRIER_SYNC_ALL_SHADING |
+                                 D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO |
+                                 D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE |
+                                 D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE;
+constexpr UINT RxUavTextureSync = D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW;
+constexpr UINT RxUavBufferAccess = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS |
+                                   D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ |
+                                   D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE;
+
+/* Layouts the core keeps for legacy states that have no public enhanced layout */
+constexpr UINT RxLegacyCopySource = 0x80000000;
+constexpr UINT RxLegacyCopyDest = 0x80000001;
+constexpr UINT RxLegacyNonPixelResource = 0x80000002;
+constexpr UINT RxLegacyPixelResource = 0x80000003;
+
+static const RxStateMeaning RxStateMeanings[] =
+{
+    { D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_BARRIER_SYNC_ALL_SHADING, D3D12_BARRIER_SYNC_ALL_SHADING,
+      D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_CONSTANT_BUFFER, 0 },
+    { D3D12_RESOURCE_STATE_INDEX_BUFFER, D3D12_BARRIER_SYNC_INDEX_INPUT, D3D12_BARRIER_SYNC_INDEX_INPUT,
+      D3D12_BARRIER_ACCESS_INDEX_BUFFER, 0 },
+    { D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_BARRIER_SYNC_RENDER_TARGET, D3D12_BARRIER_SYNC_RENDER_TARGET,
+      D3D12_BARRIER_ACCESS_RENDER_TARGET, D3D12_BARRIER_LAYOUT_RENDER_TARGET },
+    { D3D12_RESOURCE_STATE_UNORDERED_ACCESS, RxUavTextureSync, RxUavBufferSync, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+      D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS },
+    { D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE },
+    { D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_BARRIER_SYNC_DEPTH_STENCIL, D3D12_BARRIER_SYNC_DEPTH_STENCIL,
+      D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ, D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ },
+    { D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+      D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_RAYTRACING,
+      D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_RAYTRACING |
+          D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE,
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, RxLegacyNonPixelResource },
+    { D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+      D3D12_BARRIER_ACCESS_SHADER_RESOURCE, RxLegacyPixelResource },
+    { D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_BARRIER_SYNC_VERTEX_SHADING, D3D12_BARRIER_SYNC_VERTEX_SHADING,
+      D3D12_BARRIER_ACCESS_STREAM_OUTPUT, RxNoLayout },
+    { D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_BARRIER_SYNC_EXECUTE_INDIRECT, D3D12_BARRIER_SYNC_EXECUTE_INDIRECT,
+      D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT, 0 },
+    { D3D12_RESOURCE_STATE_COPY_DEST, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_COPY_DEST,
+      RxLegacyCopyDest },
+    { D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_SYNC_COPY,
+      D3D12_BARRIER_ACCESS_COPY_SOURCE, RxLegacyCopySource },
+    { D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_BARRIER_SYNC_RESOLVE, D3D12_BARRIER_SYNC_RESOLVE,
+      D3D12_BARRIER_ACCESS_RESOLVE_DEST, D3D12_BARRIER_LAYOUT_RESOLVE_DEST },
+    { D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_BARRIER_SYNC_RESOLVE, D3D12_BARRIER_SYNC_RESOLVE,
+      D3D12_BARRIER_ACCESS_RESOLVE_SOURCE, D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE },
+    { D3D12_RESOURCE_STATE_VIDEO_DECODE_READ, D3D12_BARRIER_SYNC_VIDEO_DECODE, D3D12_BARRIER_SYNC_VIDEO_DECODE,
+      D3D12_BARRIER_ACCESS_VIDEO_DECODE_READ, D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ },
+    { D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE, D3D12_BARRIER_SYNC_VIDEO_DECODE, D3D12_BARRIER_SYNC_VIDEO_DECODE,
+      D3D12_BARRIER_ACCESS_VIDEO_DECODE_WRITE, D3D12_BARRIER_LAYOUT_VIDEO_DECODE_WRITE },
+    { D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ, D3D12_BARRIER_SYNC_VIDEO_PROCESS, D3D12_BARRIER_SYNC_VIDEO_PROCESS,
+      D3D12_BARRIER_ACCESS_VIDEO_PROCESS_READ, D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_READ },
+    { D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE, D3D12_BARRIER_SYNC_VIDEO_PROCESS, D3D12_BARRIER_SYNC_VIDEO_PROCESS,
+      D3D12_BARRIER_ACCESS_VIDEO_PROCESS_WRITE, D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_WRITE },
+    { D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_BARRIER_SYNC_VIDEO_ENCODE, D3D12_BARRIER_SYNC_VIDEO_ENCODE,
+      D3D12_BARRIER_ACCESS_VIDEO_ENCODE_READ, D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_READ },
+    { D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, RxStructureSync, RxStructureSync,
+      D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ |
+          D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE,
+      RxNoLayout },
+    { D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_BARRIER_SYNC_VIDEO_ENCODE, D3D12_BARRIER_SYNC_VIDEO_ENCODE,
+      D3D12_BARRIER_ACCESS_VIDEO_ENCODE_WRITE, D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_WRITE },
+    { D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE, D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+      D3D12_BARRIER_ACCESS_SHADING_RATE_SOURCE, D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE },
+};
+
+/* States that write; a mix holding one of them has no enhanced meaning */
+constexpr UINT RxWritingStates = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+                                 D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_COPY_DEST |
+                                 D3D12_RESOURCE_STATE_RESOLVE_DEST | D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE |
+                                 D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE | D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
+
+/* The read states a mix of reads is made of, for textures and for buffers */
+constexpr UINT RxTextureReads = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE |
+                                D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_SOURCE |
+                                D3D12_RESOURCE_STATE_VIDEO_DECODE_READ | D3D12_RESOURCE_STATE_VIDEO_PROCESS_READ |
+                                D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ | D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
+constexpr UINT RxBufferReads = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+                               D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT |
+                               D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+
+static
+const RxStateMeaning*
+RxMeaningOf(
+    _In_ UINT State)
+{
+    for (const RxStateMeaning& Meaning : RxStateMeanings)
+    {
+        if (Meaning.State == State)
+            return &Meaning;
+    }
+
+    return nullptr;
+}
+
+/* The work a legacy state waits on or blocks */
+static
+UINT
+RxLegacySync(
+    _In_ UINT State,
+    _In_ BOOLEAN IsBuffer)
+{
+    const RxStateMeaning* Single = RxMeaningOf(State);
+    UINT Reads = State & (IsBuffer ? RxBufferReads : RxTextureReads);
+    UINT Sync = 0;
+
+    if (State == D3D12_RESOURCE_STATE_COMMON)
+        return D3D12_BARRIER_SYNC_ALL;
+    if (Single != nullptr)
+        return IsBuffer ? Single->BufferSync : Single->TextureSync;
+    if ((State & RxWritingStates) != 0)
+        return D3D12_BARRIER_SYNC_NONE;
+
+    for (const RxStateMeaning& Meaning : RxStateMeanings)
+    {
+        if ((Reads & Meaning.State) != 0)
+            Sync |= IsBuffer ? Meaning.BufferSync : Meaning.TextureSync;
+    }
+
+    return Sync;
+}
+
+static
+UINT
+RxLegacyAccess(
+    _In_ UINT State,
+    _In_ BOOLEAN IsBuffer)
+{
+    const RxStateMeaning* Single = RxMeaningOf(State);
+    UINT Reads = State & (IsBuffer ? RxBufferReads : RxTextureReads);
+    UINT Access = 0;
+
+    if (State == D3D12_RESOURCE_STATE_COMMON)
+        return D3D12_BARRIER_ACCESS_COMMON;
+    if (Single != nullptr)
+        return Single->Access;
+    if ((State & RxWritingStates) != 0)
+        return D3D12_BARRIER_ACCESS_NO_ACCESS;
+
+    for (const RxStateMeaning& Meaning : RxStateMeanings)
+    {
+        if ((Reads & Meaning.State) != 0)
+            Access |= Meaning.Access;
+    }
+
+    return Access;
+}
+
+/* The texture layout a legacy state stands for; a mix of reads takes a generic read layout */
+static
+UINT
+RxLegacyLayout(
+    _In_ UINT State)
+{
+    constexpr UINT BufferOnly = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+                                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    constexpr UINT GraphicsReads = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+                                   D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                   D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_RESOLVE_SOURCE |
+                                   D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
+    constexpr UINT DirectOnlyReads = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                     D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
+    const RxStateMeaning* Single = RxMeaningOf(State);
+
+    if (State == D3D12_RESOURCE_STATE_COMMON)
+        return D3D12_BARRIER_LAYOUT_COMMON;
+    if (Single != nullptr && (Single->State & BufferOnly) == 0)
+        return Single->Layout;
+    if ((State & ~BufferOnly) == 0 || (State & RxWritingStates) != 0)
+        return RxNoLayout;
+    if ((State & ~GraphicsReads) == 0)
+        return D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ;
+    if ((State & DirectOnlyReads) != 0)
+        return D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ_COMPUTE_QUEUE_ACCESSIBLE;
+    return D3D12_BARRIER_LAYOUT_GENERIC_READ;
+}
+
+/* A legacy barrier in the enhanced form, for drivers that take only that form */
+static
+VOID
+RxToEnhancedBarrier(
+    _In_ const D3D12_RESOURCE_BARRIER& Barrier,
+    _In_ D3D12_COMMAND_LIST_TYPE ListType,
+    _Out_ D3D12DDIARG_BARRIER_0094& Out)
+{
+    RxResource* Resource;
+    BOOLEAN IsBuffer;
+    UINT Before;
+    UINT After;
+
+    ZeroMemory(&Out, sizeof(Out));
+
+    if (Barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING)
+    {
+        Out.Type = D3D12DDI_BARRIER_TYPE_GLOBAL;
+        Out.GlobalBarrier.SyncBefore = (D3D12DDI_BARRIER_SYNC)D3D12_BARRIER_SYNC_ALL;
+        Out.GlobalBarrier.SyncAfter = (D3D12DDI_BARRIER_SYNC)D3D12_BARRIER_SYNC_ALL;
+        return;
+    }
+
+    if (Barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_UAV)
+    {
+        Resource = RxUnwrap12<RxResource>(Barrier.UAV.pResource);
+        if (Resource == nullptr)
+        {
+            Out.Type = D3D12DDI_BARRIER_TYPE_GLOBAL;
+            Out.GlobalBarrier.SyncBefore = (D3D12DDI_BARRIER_SYNC)RxUavBufferSync;
+            Out.GlobalBarrier.SyncAfter = (D3D12DDI_BARRIER_SYNC)RxUavBufferSync;
+            Out.GlobalBarrier.AccessBefore = (D3D12DDI_BARRIER_ACCESS)RxUavBufferAccess;
+            Out.GlobalBarrier.AccessAfter = (D3D12DDI_BARRIER_ACCESS)RxUavBufferAccess;
+        }
+        else if (Resource->GetApiDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+        {
+            Out.Type = D3D12DDI_BARRIER_TYPE_BUFFER;
+            Out.BufferBarrier.SyncBefore = (D3D12DDI_BARRIER_SYNC)RxUavBufferSync;
+            Out.BufferBarrier.SyncAfter = (D3D12DDI_BARRIER_SYNC)RxUavBufferSync;
+            Out.BufferBarrier.AccessBefore = (D3D12DDI_BARRIER_ACCESS)RxUavBufferAccess;
+            Out.BufferBarrier.AccessAfter = (D3D12DDI_BARRIER_ACCESS)RxUavBufferAccess;
+            Out.BufferBarrier.hResource = Resource->GetDriverHandle();
+        }
+        else
+        {
+            Out.Type = D3D12DDI_BARRIER_TYPE_TEXTURE;
+            Out.TextureBarrier.SyncBefore = (D3D12DDI_BARRIER_SYNC)RxUavTextureSync;
+            Out.TextureBarrier.SyncAfter = (D3D12DDI_BARRIER_SYNC)RxUavTextureSync;
+            Out.TextureBarrier.AccessBefore = (D3D12DDI_BARRIER_ACCESS)D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+            Out.TextureBarrier.AccessAfter = (D3D12DDI_BARRIER_ACCESS)D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+            Out.TextureBarrier.LayoutBefore = (D3D12DDI_BARRIER_LAYOUT)D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+            Out.TextureBarrier.LayoutAfter = (D3D12DDI_BARRIER_LAYOUT)D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
+            Out.TextureBarrier.hResource = Resource->GetDriverHandle();
+            Out.TextureBarrier.Subresources.IndexOrFirstMipLevel = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        }
+        return;
+    }
+
+    /* A split barrier's missing half waits on nothing */
+    Resource = RxUnwrap12<RxResource>(Barrier.Transition.pResource);
+    IsBuffer = Resource != nullptr && Resource->GetApiDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+    Before = Barrier.Transition.StateBefore;
+    After = Barrier.Transition.StateAfter;
+
+    if (IsBuffer)
+    {
+        Out.Type = D3D12DDI_BARRIER_TYPE_BUFFER;
+        Out.BufferBarrier.SyncBefore = (D3D12DDI_BARRIER_SYNC)((Barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY) != 0
+                                                                   ? D3D12_BARRIER_SYNC_SPLIT
+                                                                   : RxLegacySync(Before, TRUE));
+        Out.BufferBarrier.SyncAfter = (D3D12DDI_BARRIER_SYNC)((Barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) != 0
+                                                                  ? D3D12_BARRIER_SYNC_SPLIT
+                                                                  : RxLegacySync(After, TRUE));
+        Out.BufferBarrier.AccessBefore = (D3D12DDI_BARRIER_ACCESS)RxLegacyAccess(Before, TRUE);
+        Out.BufferBarrier.AccessAfter = (D3D12DDI_BARRIER_ACCESS)RxLegacyAccess(After, TRUE);
+        Out.BufferBarrier.hResource = Resource->GetDriverHandle();
+        return;
+    }
+
+    Out.Type = D3D12DDI_BARRIER_TYPE_TEXTURE;
+    Out.TextureBarrier.SyncBefore = (D3D12DDI_BARRIER_SYNC)((Barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_END_ONLY) != 0
+                                                                ? D3D12_BARRIER_SYNC_SPLIT
+                                                                : RxLegacySync(Before, FALSE));
+    Out.TextureBarrier.SyncAfter = (D3D12DDI_BARRIER_SYNC)((Barrier.Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) != 0
+                                                               ? D3D12_BARRIER_SYNC_SPLIT
+                                                               : RxLegacySync(After, FALSE));
+    Out.TextureBarrier.AccessBefore = (D3D12DDI_BARRIER_ACCESS)RxLegacyAccess(Before, FALSE);
+    Out.TextureBarrier.AccessAfter = (D3D12DDI_BARRIER_ACCESS)RxLegacyAccess(After, FALSE);
+    Out.TextureBarrier.hResource = RxDriverResourceOf(Barrier.Transition.pResource);
+    Out.TextureBarrier.Subresources.IndexOrFirstMipLevel = Barrier.Transition.Subresource;
+
+    /* Simultaneous access textures and copy queue textures keep the common layout */
+    if (ListType != D3D12_COMMAND_LIST_TYPE_COPY && Resource != nullptr &&
+        (Resource->GetApiDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0)
+    {
+        Out.TextureBarrier.LayoutBefore = (D3D12DDI_BARRIER_LAYOUT)RxLegacyLayout(Before);
+        Out.TextureBarrier.LayoutAfter = (D3D12DDI_BARRIER_LAYOUT)RxLegacyLayout(After);
+    }
+}
+
 VOID
 STDMETHODCALLTYPE
 RxCommandList::ResourceBarrier(
@@ -495,6 +789,27 @@ RxCommandList::ResourceBarrier(
 
     if (NumBarriers == 0 || pBarriers == nullptr)
         return;
+
+    if (Device.GetOptions().EnhancedBarriersSupported && DriverTable->pfnBarrier != nullptr)
+    {
+        D3D12DDIARG_BARRIER_0094 EnhancedStack[8];
+        D3D12DDIARG_BARRIER_0094* Enhanced = EnhancedStack;
+
+        if (NumBarriers > _countof(EnhancedStack))
+        {
+            Enhanced = new (std::nothrow) D3D12DDIARG_BARRIER_0094[NumBarriers];
+            if (Enhanced == nullptr)
+                return;
+        }
+
+        for (Index = 0; Index < NumBarriers; Index++)
+            RxToEnhancedBarrier(pBarriers[Index], Type, Enhanced[Index]);
+        DriverTable->pfnBarrier(DriverList, NumBarriers, Enhanced);
+
+        if (Enhanced != EnhancedStack)
+            delete[] Enhanced;
+        return;
+    }
 
     /* Aliasing can take two driver entries for one API barrier */
     if (NumBarriers * 2 > _countof(Stack))
