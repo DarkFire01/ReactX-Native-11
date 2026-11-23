@@ -288,6 +288,11 @@ public:
         _In_opt_ void* Context) override
     {
         XcRecord('L', static_cast<UINT32>(reinterpret_cast<ULONG_PTR>(Context)));
+        if (ExitVoice == nullptr)
+            return;
+        LoopsSeen += 1;
+        if (LoopsSeen == ExitAfter)
+            ExitResult = ExitVoice->ExitLoop();
     }
 
     void
@@ -298,6 +303,12 @@ public:
     {
         XcRecord('R', static_cast<UINT32>(Error));
     }
+
+    /* Calls ExitLoop from the engine thread on a set loop end, so the timing is the same each run */
+    IXAudio2SourceVoice* ExitVoice = nullptr;
+    UINT32 ExitAfter = 0;
+    UINT32 LoopsSeen = 0;
+    HRESULT ExitResult = S_FALSE;
 };
 
 /* Prints the events from the first buffer event on, with runs of passes counted */
@@ -2071,10 +2082,12 @@ XcCheckQueue(VOID)
     Buffer.LoopLength = 480;
     Buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
     Buffer.pContext = reinterpret_cast<void*>(30);
+    Callback.ExitVoice = Source;
+    Callback.ExitAfter = 3;
     Source->SubmitSourceBuffer(&Buffer);
-    XcWaitForEvent('L', 3, 2000);
-    printf("exitloop playing = %08lX\n", Source->ExitLoop());
     XcWaitForEvent('b', 1, 2000);
+    Callback.ExitVoice = nullptr;
+    printf("exitloop playing = %08lX\n", Callback.ExitResult);
     Sleep(30);
     XcState("exited loop", Source);
     Buffer.LoopLength = 0;
