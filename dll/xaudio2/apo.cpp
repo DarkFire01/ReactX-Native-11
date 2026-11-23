@@ -33,12 +33,11 @@ XaCreateFx(
     _In_reads_bytes_opt_(InitDataByteSize) const void* InitData,
     _In_ UINT32 InitDataByteSize)
 {
-    UNREFERENCED_PARAMETER(InitData);
-    UNREFERENCED_PARAMETER(InitDataByteSize);
-
     /* Only the echo takes its creation data, the others start from their defaults */
     if (IsEqualCLSID(Clsid, __uuidof(FXEQ)))
         return XaCreateEqObject(Effect);
+    if (IsEqualCLSID(Clsid, __uuidof(FXEcho)))
+        return XaCreateEchoObject(Effect, InitData, InitDataByteSize);
 
     /* Unknown classes report the same failure as an allocation that did not succeed */
     XA_TRACE_ONCE(L"CreateFX: class not available");

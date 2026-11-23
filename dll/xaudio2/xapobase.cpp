@@ -134,6 +134,17 @@ XaApoParameters::Take(VOID)
 }
 
 VOID
+XaApoParameters::Overwrite(
+    _In_reads_bytes_(Size) const VOID* Value)
+{
+    AcquireSRWLockExclusive(&Lock);
+    memcpy(Newest, Value, Size);
+    memcpy(Taken, Value, Size);
+    memcpy(Reported, Value, Size);
+    ReleaseSRWLockExclusive(&Lock);
+}
+
+VOID
 XaApoParameters::Read(
     _Out_writes_bytes_(Bytes) VOID* Value,
     _In_ UINT32 Bytes)

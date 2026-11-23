@@ -45,6 +45,18 @@ public:
         _Out_writes_bytes_(Bytes) VOID* Value,
         _In_ UINT32 Bytes);
 
+    /* Replaces every copy at once, leaving a waiting set marked as waiting */
+    VOID
+    Overwrite(
+        _In_reads_bytes_(Size) const VOID* Value);
+
+    /* The parameters Process last picked up */
+    const BYTE*
+    Active(VOID) const
+    {
+        return Taken;
+    }
+
     UINT32 Size;
 
 private:
@@ -185,3 +197,22 @@ XaCreateMeterObject(
 HRESULT
 XaCreateEqObject(
     _Outptr_ IUnknown** Apo);
+
+HRESULT
+XaCreateEchoObject(
+    _Outptr_ IUnknown** Apo,
+    _In_opt_ const VOID* InitData,
+    _In_ UINT32 InitSize);
+
+/* fcvtzu: truncates toward zero, with NaN and negatives at zero */
+inline
+UINT64
+XaFloatToCount(
+    _In_ float Value)
+{
+    if (!(Value > 0.0f))
+        return 0;
+    if (Value >= 18446744073709551616.0f)
+        return ~0ull;
+    return static_cast<UINT64>(Value);
+}
