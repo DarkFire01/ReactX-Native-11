@@ -88,6 +88,9 @@ static thread_local BOOLEAN TrQuiet;
 /* How deep the driver is in runtime callbacks on this thread */
 static thread_local UINT TrCallbackDepth;
 
+/* The DDI call whose arguments are being printed */
+static thread_local const CHAR* TrCallName;
+
 static
 VOID
 TrAppend(
@@ -312,6 +315,12 @@ TrDescribe(
     _In_ const D3D12DDIARG_CREATE_COMMAND_LIST_0040* Args,
     _In_ SIZE_T Size)
 {
+    /* Sizing passes no ID or flags; the system core leaves those fields unset */
+    if (TrCallName != nullptr && strcmp(TrCallName, "CalcPrivateCommandListSize") == 0)
+    {
+        TrAppend(Text, "{type %u queue %08X node %u}", Args->Type, Args->QueueFlags, Args->NodeMask);
+        return;
+    }
     TrAppend(Text, "{type %u queue %08X id %llu flags %08X node %u}", Args->Type, Args->QueueFlags, Args->ID,
              Args->CommandListFlags, Args->NodeMask);
 }
@@ -482,6 +491,149 @@ TrDescribe(
         TrAppend(Text, "%s%s:%u", Index != 0 ? " " : "", TrId(TrKindDriver, (ULONG_PTR)Args->pObjects[Index].Handle).c_str(),
                  Args->pObjects[Index].Type);
     TrAppend(Text, "] flags %08X fence %s}", Args->Flags.Value, Args->pPagingFenceValue != nullptr ? "p" : "0");
+}
+
+static
+std::string
+TrDriverId(
+    _In_opt_ const VOID* Handle)
+{
+    return TrId(TrKindDriver, (ULONG_PTR)Handle);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_RESETCOMMANDLIST_0040* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{recorder %s id %llu flags %08X}", TrDriverId(Args->hDrvCommandRecorder.pDrvPrivate).c_str(), Args->ID,
+             Args->CommandListFlags);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATEHEAP_0001* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{size %llu align %llu pool %u page %u flags %08X nodes %u:%u}", Args->ByteSize, Args->Alignment,
+             Args->MemoryPool, Args->CPUPageProperty, Args->Flags, Args->CreationNodeMask, Args->VisibleNodeMask);
+}
+
+/* Every field but the padding after the resource type, which the system core leaves unset */
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATERESOURCE_0111* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{reuse %s+%llu type %u width %llu height %u depth %u mips %u format %u samples %u:%u layout %u",
+             TrDriverId(Args->ReuseBufferGPUVA.BaseAddress.UMD.hResource.pDrvPrivate).c_str(),
+             Args->ReuseBufferGPUVA.BaseAddress.UMD.Offset, Args->ResourceType, Args->Width, Args->Height,
+             Args->DepthOrArraySize, Args->MipLevels, Args->Format, Args->SampleDesc.Count, Args->SampleDesc.Quality,
+             Args->Layout);
+    TrAppend(Text, " flags %08X barrier %u", Args->Flags, Args->InitialBarrierLayout);
+    if (Args->pRowMajorLayout != nullptr)
+        TrAppend(Text, " rowmajor %u:%u", Args->pRowMajorLayout->RowPitch, Args->pRowMajorLayout->SlicePitch);
+    else
+        TrAppend(Text, " rowmajor 0");
+    TrAppend(Text, " region %u:%u:%u castable %u [", Args->SamplerFeedbackMipRegion.Width,
+             Args->SamplerFeedbackMipRegion.Height, Args->SamplerFeedbackMipRegion.Depth, Args->NumCastableFormats);
+    for (UINT Index = 0; Args->pCastableFormats != nullptr && Index < Args->NumCastableFormats; Index++)
+        TrAppend(Text, "%s%u", Index != 0 ? " " : "", Args->pCastableFormats[Index]);
+    TrAppend(Text, "] va %llX guid ", Args->CreateAtVirtualAddress);
+    TrAppendBytes(Text, &Args->LayoutGuid, sizeof(Args->LayoutGuid));
+    TrAppend(Text, "}");
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDI_CLEAR_VALUES* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{format %u ", Args->Format);
+    TrAppendBytes(Text, Args->Color, sizeof(Args->Color));
+    TrAppend(Text, "}");
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_BUFFER_PLACEMENT* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{%s+%llu}", TrDriverId(Args->BaseAddress.UMD.hResource.pDrvPrivate).c_str(),
+             Args->BaseAddress.UMD.Offset);
+}
+
+/* A view desc: the resource, format and dimension, then the dimension's own fields as bytes */
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_RENDER_TARGET_VIEW_0002* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{res %s format %u dim %u ", TrDriverId(Args->hDrvResource.pDrvPrivate).c_str(), Args->Format,
+             Args->ResourceDimension);
+    TrAppendBytes(Text, &Args->Buffer, sizeof(*Args) - offsetof(D3D12DDIARG_CREATE_RENDER_TARGET_VIEW_0002, Buffer));
+    TrAppend(Text, "}");
+}
+
+/* Where a texture copy reads or writes: a subresource index or a footprint */
+static
+VOID
+TrDescribePlaced(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_PLACED_RESOURCE& Placed)
+{
+    TrAppend(Text, "{layout %u", Placed.Layout);
+    if (Placed.pLayout == nullptr)
+    {
+        TrAppend(Text, " 0}");
+    }
+    else if (Placed.Layout == D3D12DDI_RL_SELECT_SUBRESOURCE)
+    {
+        TrAppend(Text, " sub %u}", *static_cast<const UINT*>(Placed.pLayout));
+    }
+    else
+    {
+        const D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT* Pitched =
+            static_cast<const D3D12DDIARG_PHYSICAL_SUBRESOURCE_PITCHED_LAYOUT*>(Placed.pLayout);
+
+        TrAppend(Text, " format %u size %u:%u:%u pitch %u:%u}", Pitched->Format, Pitched->PhysicalWidth,
+                 Pitched->PhysicalHeight, Pitched->PhysicalDepth, Pitched->Pitch, Pitched->SlicePitch);
+    }
+}
+
+/* An application object handle; the driver object behind its bypass header stands for it */
+template <typename T>
+struct TrIsApiHandle : std::bool_constant<std::is_same_v<T, D3D12DDI_API_HCOMMANDLIST> ||
+                                          std::is_same_v<T, D3D12DDI_API_HPIPELINESTATE> ||
+                                          std::is_same_v<T, D3D12DDI_API_HSTATEOBJECT> ||
+                                          std::is_same_v<T, D3D12DDI_API_HROOTSIGNATURE>>
+{
+};
+
+static
+VOID
+TrDescribeApi(
+    _Inout_ std::string* Text,
+    _In_opt_ const VOID* Handle)
+{
+    const D3D12DDI_RUNTIME_BYPASS_HEADER* Header = static_cast<const D3D12DDI_RUNTIME_BYPASS_HEADER*>(Handle);
+
+    if (Header == nullptr)
+        Text->append("0");
+    else
+        Text->append("@" + TrDriverId(Header->pDriverObject));
 }
 
 static
@@ -742,6 +894,18 @@ TrArg(
         else
             TrDescribe(Text, Value, sizeof(Pointee));
     }
+    else if constexpr (TrIsApiHandle<T>::value)
+    {
+        TrDescribeApi(Text, Value.pDrvPrivate);
+    }
+    else if constexpr (std::is_same_v<T, D3D12DDIARG_PLACED_RESOURCE>)
+    {
+        TrDescribePlaced(Text, Value);
+    }
+    else if constexpr (std::is_same_v<T, D3D12DDIARG_BUFFER_PLACEMENT>)
+    {
+        TrDescribe(Text, &Value, sizeof(Value));
+    }
     else if constexpr (TrIsDriverHandle<T>::value)
     {
         Text->append(TrId(TrKindDriver, (ULONG_PTR)Value.pDrvPrivate));
@@ -788,6 +952,393 @@ TrResult(
         TrArg(&Text, Value);
     return Text;
 }
+
+/* Arrays sized by another argument: every element, or 0 or p alone when the count is zero */
+template <typename T, typename F>
+static
+VOID
+TrArray(
+    _Inout_ std::string* Text,
+    _In_ UINT Count,
+    _In_reads_opt_(Count) const T* Items,
+    _In_ F Each)
+{
+    Text->append(" ");
+    if (Items == nullptr)
+    {
+        Text->append("0");
+        return;
+    }
+    if (Count == 0)
+    {
+        Text->append("p");
+        return;
+    }
+
+    Text->append("[");
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        if (Index != 0)
+            Text->append(" ");
+        Each(Items[Index]);
+    }
+    Text->append("]");
+}
+
+static
+VOID
+TrFloats(
+    _Inout_ std::string* Text,
+    _In_ UINT Count,
+    _In_reads_opt_(Count) const FLOAT* Values)
+{
+    TrArray(Text, Count, Values, [Text](FLOAT Value) {
+        UINT Bits;
+
+        memcpy(&Bits, &Value, sizeof(Bits));
+        TrAppend(Text, "f%08X", Bits);
+    });
+}
+
+/* Calls that print through their own formatter instead of one argument at a time */
+template <TrFamily Family, UINT Slot>
+struct TrFormat
+{
+    static constexpr BOOLEAN Custom = FALSE;
+};
+
+#define TR_LIST_SLOT(Member) (offsetof(D3D12DDI_COMMAND_LIST_FUNCS_3D_0114, Member) / sizeof(VOID*))
+#define TR_QUEUE_SLOT(Member) (offsetof(D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001, Member) / sizeof(VOID*))
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnSetDescriptorHeaps)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_HCOMMANDLIST List,
+        UINT Count,
+        D3D12DDI_HDESCRIPTORHEAP* Heaps)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Heaps, [Text](const D3D12DDI_HDESCRIPTORHEAP& Heap) {
+            Text->append(TrDriverId(Heap.pDrvPrivate));
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnIASetVertexBuffers)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        UINT StartSlot,
+        UINT Count,
+        const D3D12DDI_VERTEX_BUFFER_VIEW* Views)
+    {
+        TrArg(Text, List);
+        TrArg(Text, StartSlot);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Views, [Text](const D3D12DDI_VERTEX_BUFFER_VIEW& View) {
+            TrAppend(Text, "%llX:%u:%u", View.BufferLocation, View.SizeInBytes, View.StrideInBytes);
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnSOSetTargets)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        UINT StartSlot,
+        UINT Count,
+        const D3D12DDI_STREAM_OUTPUT_BUFFER_VIEW* Views)
+    {
+        TrArg(Text, List);
+        TrArg(Text, StartSlot);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Views, [Text](const D3D12DDI_STREAM_OUTPUT_BUFFER_VIEW& View) {
+            TrAppend(Text, "%llX:%llu:%llX", View.BufferLocation, View.SizeInBytes, View.BufferFilledSizeLocation);
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnIASetIndexBuffer)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        const D3D12DDI_INDEX_BUFFER_VIEW* View)
+    {
+        TrArg(Text, List);
+        if (View == nullptr)
+            Text->append(" 0");
+        else
+            TrAppend(Text, " {%llX:%u:%u}", View->BufferLocation, View->SizeInBytes, View->Format);
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnOMSetRenderTargets)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        UINT Count,
+        const D3D12DDI_CPU_DESCRIPTOR_HANDLE* Targets,
+        BOOL SingleRange,
+        const D3D12DDI_CPU_DESCRIPTOR_HANDLE* DepthStencil)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Count);
+        TrArray(Text, SingleRange && Count != 0 ? 1 : Count, Targets, [Text](const D3D12DDI_CPU_DESCRIPTOR_HANDLE& Each) {
+            Text->append(TrDriverId((const VOID*)Each.ptr));
+        });
+        TrArg(Text, SingleRange);
+        if (DepthStencil == nullptr)
+            Text->append(" 0");
+        else
+            Text->append(" " + TrDriverId((const VOID*)DepthStencil->ptr));
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnRsSetViewports)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        UINT Count,
+        const D3D12DDI_VIEWPORT* Viewports)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Viewports, [Text](const D3D12DDI_VIEWPORT& Viewport) {
+            TrAppendBytes(Text, &Viewport, sizeof(Viewport));
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnRsSetScissorRects)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        UINT Count,
+        const D3D12DDI_RECT* Rects)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Rects, [Text](const D3D12DDI_RECT& Rect) {
+            TrAppend(Text, "%d:%d:%d:%d", Rect.left, Rect.top, Rect.right, Rect.bottom);
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnOmSetBlendFactor)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        const FLOAT* Factor)
+    {
+        TrArg(Text, List);
+        TrFloats(Text, 4, Factor);
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnRSSetShadingRate)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_API_HCOMMANDLIST List,
+        D3D12DDI_SHADING_RATE_0062 Rate,
+        const D3D12DDI_SHADING_RATE_COMBINER_0062* Combiners)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Rate);
+        TrArray(Text, D3D12_RS_SET_SHADING_RATE_COMBINER_COUNT, Combiners,
+                [Text](D3D12DDI_SHADING_RATE_COMBINER_0062 Combiner) { TrAppend(Text, "%u", Combiner); });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnClearRenderTargetView)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_HCOMMANDLIST List,
+        D3D12DDI_CPU_DESCRIPTOR_HANDLE View,
+        const FLOAT* Color,
+        UINT Count,
+        const D3D12DDI_RECT* Rects)
+    {
+        TrArg(Text, List);
+        TrArg(Text, View);
+        TrFloats(Text, 4, Color);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Rects, [Text](const D3D12DDI_RECT& Rect) {
+            TrAppend(Text, "%d:%d:%d:%d", Rect.left, Rect.top, Rect.right, Rect.bottom);
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnResourceBarrier)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_HCOMMANDLIST List,
+        UINT Count,
+        const D3D12DDIARG_RESOURCE_BARRIER_0022* Barriers)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Barriers, [Text](const D3D12DDIARG_RESOURCE_BARRIER_0022& Barrier) {
+            TrAppend(Text, "(t%u f%X", Barrier.Type, Barrier.Flags);
+            switch (Barrier.Type)
+            {
+                case D3D12DDI_RESOURCE_BARRIER_TYPE_TRANSITION:
+                    TrAppend(Text, " %s sub %u %X>%X)", TrDriverId(Barrier.Transition.hResource.pDrvPrivate).c_str(),
+                             Barrier.Transition.Subresource, Barrier.Transition.StateBefore,
+                             Barrier.Transition.StateAfter);
+                    break;
+                case D3D12DDI_RESOURCE_BARRIER_TYPE_UAV:
+                    TrAppend(Text, " %s)", TrDriverId(Barrier.UAV.hResource.pDrvPrivate).c_str());
+                    break;
+                default:
+                    Text->append(" ");
+                    TrAppendBytes(Text, &Barrier.Ranged, sizeof(Barrier.Ranged));
+                    Text->append(")");
+                    break;
+            }
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnBarrier)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_HCOMMANDLIST List,
+        UINT32 Count,
+        const D3D12DDIARG_BARRIER_0094* Barriers)
+    {
+        TrArg(Text, List);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Barriers, [Text](const D3D12DDIARG_BARRIER_0094& Barrier) {
+            TrAppend(Text, "(t%u", Barrier.Type);
+            switch (Barrier.Type)
+            {
+                case D3D12DDI_BARRIER_TYPE_GLOBAL:
+                    TrAppend(Text, " sync %X>%X access %X>%X)", Barrier.GlobalBarrier.SyncBefore,
+                             Barrier.GlobalBarrier.SyncAfter, Barrier.GlobalBarrier.AccessBefore,
+                             Barrier.GlobalBarrier.AccessAfter);
+                    break;
+                case D3D12DDI_BARRIER_TYPE_TEXTURE:
+                {
+                    const D3D12DDI_TEXTURE_BARRIER_0088& Each = Barrier.TextureBarrier;
+
+                    TrAppend(Text, " sync %X>%X access %X>%X layout %u>%u %s sub %u:%u:%u:%u:%u:%u flags %X)",
+                             Each.SyncBefore, Each.SyncAfter, Each.AccessBefore, Each.AccessAfter, Each.LayoutBefore,
+                             Each.LayoutAfter, TrDriverId(Each.hResource.pDrvPrivate).c_str(),
+                             Each.Subresources.IndexOrFirstMipLevel, Each.Subresources.NumMipLevels,
+                             Each.Subresources.FirstArraySlice, Each.Subresources.NumArraySlices,
+                             Each.Subresources.FirstPlane, Each.Subresources.NumPlanes, Each.Flags);
+                    break;
+                }
+                case D3D12DDI_BARRIER_TYPE_BUFFER:
+                    TrAppend(Text, " sync %X>%X access %X>%X %s)", Barrier.BufferBarrier.SyncBefore,
+                             Barrier.BufferBarrier.SyncAfter, Barrier.BufferBarrier.AccessBefore,
+                             Barrier.BufferBarrier.AccessAfter,
+                             TrDriverId(Barrier.BufferBarrier.hResource.pDrvPrivate).c_str());
+                    break;
+                default:
+                    TrAppend(Text, " flags %X %s sub %u range %llu:%llu)", Barrier.RangedBarrier.Flags,
+                             TrDriverId(Barrier.RangedBarrier.hResource.pDrvPrivate).c_str(),
+                             Barrier.RangedBarrier.Subresource, (UINT64)Barrier.RangedBarrier.Range.Begin,
+                             (UINT64)Barrier.RangedBarrier.Range.End);
+                    break;
+            }
+        });
+    }
+};
+
+template <>
+struct TrFormat<TrFamilyQueue, TR_QUEUE_SLOT(pfnExecuteCommandLists)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_HCOMMANDQUEUE Queue,
+        UINT Count,
+        const D3D12DDI_HCOMMANDLIST* Lists)
+    {
+        TrArg(Text, Queue);
+        TrArg(Text, Count);
+        TrArray(Text, Count, Lists, [Text](const D3D12DDI_HCOMMANDLIST& List) {
+            Text->append(TrDriverId(List.pDrvPrivate));
+        });
+    }
+};
 
 static
 const CHAR*
@@ -889,9 +1440,16 @@ struct TrHook<Family, Slot, R (APIENTRY*)(A...)>
 
         if (Log)
         {
+            constexpr TrFamily Shape = Family >= TrFamilyList0 && Family <= TrFamilyList3 ? TrFamilyList0 : Family;
+
             Text = TrName(Family, Slot);
             Text.append("(");
-            (TrArg(&Text, Args), ...);
+            TrCallName = TrName(Family, Slot);
+            if constexpr (TrFormat<Shape, Slot>::Custom)
+                TrFormat<Shape, Slot>::Format(&Text, Args...);
+            else
+                (TrArg(&Text, Args), ...);
+            TrCallName = nullptr;
             Text.append(")");
             TrBegin(Text);
         }
