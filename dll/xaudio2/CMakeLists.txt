@@ -24,6 +24,7 @@ nt_add_usermode_dll(xaudio2_9
         wmabits.cpp
         wmadec.cpp
         wmaformat.cpp
+        wmalpc.cpp
         wmanoise.cpp
         wmapro.cpp
         wmarecon.cpp

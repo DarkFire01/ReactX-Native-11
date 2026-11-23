@@ -33,6 +33,7 @@ struct XaWmaTransform;
 #define XA_WMA_MAX_BANDS        29
 #define XA_WMA_MAX_LEVELS       8
 #define XA_WMA_MAX_TILES        64
+#define XA_WMA_LSP_COUNT        10
 
 /* Limits of WMA Pro streams */
 #define XA_WMA_PRO_BANDS        28
@@ -213,6 +214,11 @@ struct XaWmaChannel
     UINT8 NoiseMarks[XA_WMA_MAX_BANDS + 1];
     INT32 NoisePowers[XA_WMA_MAX_BANDS];
     float NoiseWeights[XA_WMA_MAX_BANDS];
+
+    /* LPC streams: line spectral pair codes and the spectral weights they give, with their peak */
+    UINT8 LspCodes[XA_WMA_LSP_COUNT];
+    float* Weights;
+    float WeightPeak;
 
     /* WMA Pro: the mask as sent, at MaskSize, and resampled to the current subframe */
     BOOLEAN HasMask;
@@ -415,6 +421,16 @@ XaWmaDecodeLevels(
 
 HRESULT
 XaWmaQuantizeMid(
+    _Inout_ XaWmaDecoder* Decoder,
+    _Inout_ XaWmaChannel* Channel);
+
+/* LPC weighting */
+HRESULT
+XaWmaReadLpcHeader(
+    _Inout_ XaWmaDecoder* Decoder);
+
+VOID
+XaWmaQuantizeLow(
     _Inout_ XaWmaDecoder* Decoder,
     _Inout_ XaWmaChannel* Channel);
 

@@ -59,7 +59,7 @@ XaWmaDecodable(
         return FALSE;
     if (Decoder->Layout.Version == XA_WMA_PRO)
         return Decoder->Layout.FrameSamples != 0;
-    return Decoder->Layout.Version == XA_WMA_STANDARD_MAX && Decoder->Standard.SuperFrames && Decoder->Standard.Bark;
+    return Decoder->Layout.Version == XA_WMA_STANDARD_MAX && Decoder->Standard.SuperFrames;
 }
 
 static
@@ -228,6 +228,8 @@ XaWmaReadMasks(
 
     for (UINT32 Index = 0; Index < Decoder->Layout.Channels; Index++)
         Decoder->Channels[Index].FreshMask = Fresh != 0;
+    if (!Decoder->Standard.Bark)
+        return XaWmaReadLpcHeader(Decoder);
 
     for (UINT32 Index = 0; Index < Decoder->Layout.Channels; Index++)
     {
@@ -321,6 +323,11 @@ XaWmaDecodeQuantized(
 
         if (!Channel->Coded)
             continue;
+        if (!Decoder->Standard.Bark)
+        {
+            XaWmaQuantizeLow(Decoder, Channel);
+            continue;
+        }
         hr = XaWmaQuantizeMid(Decoder, Channel);
         if (FAILED(hr))
             return hr;
@@ -387,6 +394,15 @@ XaWmaDecodeTile(
         if (FAILED(hr))
             return hr;
     }
+    else if (!Decoder->Standard.Bark)
+    {
+        /* Without coded channels, LPC weights still restart on the frame's first tile */
+        for (UINT32 Index = 0; Index < Channels; Index++)
+            Decoder->Channels[Index].FreshMask = Decoder->Channels[Index].Tiles.Index == 0;
+        hr = XaWmaReadLpcHeader(Decoder);
+        if (FAILED(hr))
+            return hr;
+    }
 
     Decoder->QuantStep = XaWmaQuantStep(Decoder->QuantIndex);
     for (UINT32 Index = 0; Index < Channels; Index++)
@@ -396,7 +412,7 @@ XaWmaDecodeTile(
         memset(Channel->Coefs, 0, sizeof(*Channel->Coefs) * Channel->Size);
         Channel->Audible = FALSE;
     }
-    if (Decoder->NoiseSub)
+    if (Decoder->NoiseSub || !Decoder->Standard.Bark)
     {
         hr = XaWmaDecodeQuantized(Decoder);
         if (FAILED(hr))
@@ -709,9 +725,10 @@ XaWmaCreate(
 
             Channel->Book = Created->MidBook;
             Channel->Pcm = new (std::nothrow) float[3 * Created->FrameSize / 2];
-            if (Created->NoiseSub)
-                Channel->Levels = new (std::nothrow) INT32[Created->FrameSize];
-            if (Channel->Pcm == nullptr || (Created->NoiseSub && Channel->Levels == nullptr))
+            Channel->Levels = new (std::nothrow) INT32[Created->FrameSize];
+            if (!Standard->Bark)
+                Channel->Weights = new (std::nothrow) float[Created->FrameSize];
+            if (Channel->Pcm == nullptr || Channel->Levels == nullptr || (!Standard->Bark && Channel->Weights == nullptr))
                 hr = E_OUTOFMEMORY;
         }
         if (SUCCEEDED(hr))
@@ -742,6 +759,7 @@ XaWmaFree(
     {
         delete[] Decoder->Channels[Index].Pcm;
         delete[] Decoder->Channels[Index].Levels;
+        delete[] Decoder->Channels[Index].Weights;
     }
     delete Decoder;
 }
