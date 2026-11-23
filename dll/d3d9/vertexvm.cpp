@@ -260,6 +260,62 @@ D9VmProgram::~D9VmProgram()
     delete[] Steps;
 }
 
+/* Records what an instruction declares, defines or writes that the vertex pipeline around the program needs */
+VOID
+D9VmProgram::Note(
+    _In_ UINT Position)
+{
+    DWORD Token = Code[Position];
+    WORD Opcode = LOWORD(Token);
+    DWORD Target = Code[Position + 1];
+
+    switch (Opcode)
+    {
+    case D9OpDef:
+    case D9OpDefI:
+    case D9OpDefB:
+        if (DefinitionCount < D9VmDefinitionLimit)
+            Definitions[DefinitionCount++] = Position;
+        return;
+    case D9OpDcl:
+    {
+        DWORD Register = Code[Position + 2];
+        UINT Type = D9VmRegisterType(Register);
+        D9VmDeclared Entry;
+
+        Entry.Register = static_cast<BYTE>(Register & 0x7FF);
+        Entry.Usage = static_cast<BYTE>(Target & 0x1F);
+        Entry.Index = static_cast<BYTE>((Target >> 16) & 0xF);
+        Entry.Mask = static_cast<BYTE>((Register >> 16) & 0xF);
+        if (Type == D9VmInput && InputCount < D9VmDeclaredLimit)
+            Inputs[InputCount++] = Entry;
+        else if (Type == D9VmOutput && Version >= D9VmModel3 && OutputCount < D9VmDeclaredLimit)
+            Outputs[OutputCount++] = Entry;
+        return;
+    }
+    case D9OpNop:
+    case D9OpEnd:
+    case D9OpComment:
+    case D9OpBreakP:
+        return;
+    default:
+        break;
+    }
+    if ((Opcode >= D9OpCall && Opcode <= D9OpLabel) || (Opcode >= D9OpRep && Opcode <= D9OpBreakC))
+        return;
+    if (D9VmRegisterType(Target) == D9VmRasterizer)
+    {
+        if ((Target & 0x7FF) == 1)
+            Written |= D9VmWritesFog;
+        else if ((Target & 0x7FF) == 2)
+            Written |= D9VmWritesPointSize;
+    }
+    else if (D9VmRegisterType(Target) == D9VmColor)
+    {
+        Written |= (Target & 0x7FF) == 0 ? D9VmWritesDiffuse : D9VmWritesSpecular;
+    }
+}
+
 /* Copies the tokens and links every branch to where it lands; definitions, declarations and comments drop out */
 HRESULT
 D9VmProgram::Compile(
@@ -291,6 +347,8 @@ D9VmProgram::Compile(
 
         if (Length == 0 || Position + Length > Count)
             return D3DERR_INVALIDCALL;
+        if (Length > 1)
+            Note(Position);
         if (Opcode == D9OpLabel)
         {
             UINT Label = Code[Position + 1] & 0x7FF;

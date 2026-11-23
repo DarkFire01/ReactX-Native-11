@@ -218,6 +218,7 @@ D9Device::~D9Device()
     UnbindStreams();
     UnpinTargets();
     delete[] Lights;
+    delete Machine;
     delete[] VertexFloats;
     delete[] VertexInts;
     delete[] VertexBools;
@@ -2512,19 +2513,6 @@ D9Device::SetCurrentTexturePalette(
 STDMETHODIMP
 D9Device::GetCurrentTexturePalette(
     _Out_ UINT* PaletteNumber)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::ProcessVertices(
-    _In_ UINT SrcStartIndex,
-    _In_ UINT DestIndex,
-    _In_ UINT VertexCount,
-    _In_opt_ IDirect3DVertexBuffer9* DestBuffer,
-    _In_opt_ IDirect3DVertexDeclaration9* VertexDecl,
-    _In_ DWORD Flags)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

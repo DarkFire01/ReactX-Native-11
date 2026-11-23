@@ -11,6 +11,7 @@
 #include "kmcallbacks.hpp"
 #include "ffpixel.hpp"
 #include "ffvertex.hpp"
+#include "vertexvm.hpp"
 #include "shadervalidator.hpp"
 
 class D9Device;
@@ -1441,6 +1442,13 @@ public:
     DrawResource(
         _Out_ BOOLEAN* Made);
 
+    /* The bytes of a system memory buffer, which the software vertex pipeline reads in place */
+    BYTE*
+    Bytes() const
+    {
+        return Memory;
+    }
+
     /* Bytes per index of an index buffer */
     UINT
     IndexSize() const
@@ -1581,7 +1589,16 @@ public:
         return Code;
     }
 
+    const DWORD*
+    Tokens() const
+    {
+        return Function;
+    }
+
     HANDLE DriverHandle = NULL;
+
+    /* The vertex shader as the software vertex pipeline runs it, made on first use */
+    D9VmProgram* Program = nullptr;
 
 private:
     DWORD* Function = nullptr;
@@ -3704,6 +3721,11 @@ private:
 
     /* The pixel shaders standing in for the texture stages */
     D9PixelConverter PixelShaders;
+
+    /* The software vertex pipeline's interpreter, made on first use, and the vertex size the last
+       ProcessVertices into a format used, which a later one into a declaration starts from */
+    D9VertexMachine* Machine = nullptr;
+    UINT ProcessedStride = 0;
 
     /* The vertex shaders standing in for the fixed function vertex pipeline, and whether vertex fog is on */
     D9VertexConverter VertexShaders;

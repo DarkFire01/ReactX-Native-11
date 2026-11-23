@@ -56,6 +56,25 @@ typedef VOID (*D9VmSampleRoutine)(
     _In_ FLOAT Lod,
     _Out_writes_(4) D9VmValue* Texel);
 
+/* A register a dcl instruction declares, with its usage and write mask */
+struct D9VmDeclared
+{
+    BYTE Register;
+    BYTE Usage;
+    BYTE Index;
+    BYTE Mask;
+};
+
+/* Rasterizer and color outputs a version 1 or 2 shader writes */
+static constexpr DWORD D9VmWritesSpecular = 0x1;
+static constexpr DWORD D9VmWritesDiffuse = 0x2;
+static constexpr DWORD D9VmWritesPointSize = 0x8;
+static constexpr DWORD D9VmWritesFog = 0x10;
+
+/* Declarations and definitions one program can hold */
+static constexpr UINT D9VmDeclaredLimit = 32;
+static constexpr UINT D9VmDefinitionLimit = 512;
+
 /* One instruction of a compiled program: where its tokens start and, for flow control, where it goes */
 struct D9VmStep
 {
@@ -85,6 +104,20 @@ public:
     D9VmStep* Steps = nullptr;
     UINT StepCount = 0;
     UINT Labels[D9VmLabelCount] = {};
+
+    /* Declared inputs and outputs, where the definitions sit in Code and the outputs written */
+    D9VmDeclared Inputs[D9VmDeclaredLimit] = {};
+    UINT InputCount = 0;
+    D9VmDeclared Outputs[D9VmDeclaredLimit] = {};
+    UINT OutputCount = 0;
+    UINT Definitions[D9VmDefinitionLimit] = {};
+    UINT DefinitionCount = 0;
+    DWORD Written = 0;
+
+private:
+    VOID
+    Note(
+        _In_ UINT Position);
 };
 
 /* Runs vertex shaders one vertex at a time with the system's arithmetic */

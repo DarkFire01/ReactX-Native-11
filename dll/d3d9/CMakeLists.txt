@@ -21,6 +21,7 @@ nt_add_usermode_dll(d3d9
         modes.cpp
         perf.cpp
         present.cpp
+        process.cpp
         psgp.cpp
         reference.cpp
         shader.cpp
