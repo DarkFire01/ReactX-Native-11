@@ -21,6 +21,17 @@ NineMissingEntry(VOID)
     return 0;
 }
 
+/* Private entries that answer with an HRESULT say they are not done yet */
+template <UINT Slot>
+static
+HRESULT
+APIENTRY
+NineMissingCall(VOID)
+{
+    NINE_TRACE_ONCE(L"private entry %u is not implemented", Slot);
+    return E_NOTIMPL;
+}
+
 static const NinePrivateTable NinePrivate =
 {
     NineOpenAdapter,
@@ -36,7 +47,7 @@ static const NinePrivateTable NinePrivate =
     reinterpret_cast<PVOID>(NineMissingEntry<10>),
     reinterpret_cast<PVOID>(NineMissingEntry<11>),
     reinterpret_cast<PVOID>(NineMissingEntry<12>),
-    reinterpret_cast<PVOID>(NineMissingEntry<13>),
+    reinterpret_cast<PVOID>(NineMissingCall<13>),
     reinterpret_cast<PVOID>(NineMissingEntry<14>),
     reinterpret_cast<PVOID>(NineMissingEntry<15>),
     reinterpret_cast<PVOID>(NineMissingEntry<16>),
