@@ -537,6 +537,354 @@ NcCheckInterfaces(
     printf("release_last = %lu\n", Plain->Release());
 }
 
+/* A small top level window the device checks render and present to */
+static
+HWND
+NcCreateWindow(
+    _In_ BOOLEAN Visible)
+{
+    static ATOM Class;
+    WNDCLASSW Info = {};
+    RECT Rect = { 0, 0, 64, 48 };
+    HWND Window;
+
+    if (Class == 0)
+    {
+        Info.lpfnWndProc = DefWindowProcW;
+        Info.hInstance = GetModuleHandleW(nullptr);
+        Info.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        Info.lpszClassName = L"NcWindow";
+        Class = RegisterClassW(&Info);
+    }
+
+    AdjustWindowRect(&Rect, WS_OVERLAPPEDWINDOW, FALSE);
+    Window = CreateWindowExW(0, L"NcWindow", L"d3d9check", WS_OVERLAPPEDWINDOW, 40, 40, Rect.right - Rect.left,
+                             Rect.bottom - Rect.top, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (Window != NULL && Visible)
+    {
+        ShowWindow(Window, SW_SHOWNOACTIVATE);
+        UpdateWindow(Window);
+    }
+    return Window;
+}
+
+/* Which entry point a creation case goes through */
+enum NcCreatePath
+{
+    NcPathPlain,
+    NcPathEx,
+    NcPathExEx,
+};
+
+struct NcCreateCase
+{
+    char Name[40];
+    UINT Adapter;
+    D3DDEVTYPE Type;
+    DWORD Behavior;
+    HWND Focus;
+    D3DPRESENT_PARAMETERS Parameters;
+    D3DDISPLAYMODEEX Mode;
+    BOOLEAN PassMode;
+};
+
+/* Runs one creation case through one entry point and prints the code and what it left in the parameters */
+static
+VOID
+NcRunCreateCase(
+    _In_ NineCheck* Check,
+    _In_ IDirect3D9* Plain,
+    _In_ const NcCreateCase* Case,
+    _In_ NcCreatePath Path)
+{
+    static const PCSTR PathNames[] = { "plain", "ex", "exex" };
+    D3DPRESENT_PARAMETERS Parameters = Case->Parameters;
+    D3DDISPLAYMODEEX Mode = Case->Mode;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    if (Path == NcPathPlain)
+    {
+        hr = Plain->CreateDevice(Case->Adapter, Case->Type, Case->Focus, Case->Behavior, &Parameters, &Device);
+    }
+    else if (Path == NcPathEx)
+    {
+        hr = Check->Ex->CreateDevice(Case->Adapter, Case->Type, Case->Focus, Case->Behavior, &Parameters, &Device);
+    }
+    else
+    {
+        hr = Check->Ex->CreateDeviceEx(Case->Adapter, Case->Type, Case->Focus, Case->Behavior, &Parameters,
+                                       Case->PassMode ? &Mode : nullptr, &DeviceEx);
+        Device = DeviceEx;
+    }
+
+    printf("create[%s][%s] = %08lX %s bb %ux%u fmt %u count %u swap %u interval %08lX flags %08lX\n", Case->Name,
+           PathNames[Path], hr, Device != nullptr ? "device" : "null", Parameters.BackBufferWidth,
+           Parameters.BackBufferHeight, Parameters.BackBufferFormat, Parameters.BackBufferCount,
+           Parameters.SwapEffect, Parameters.PresentationInterval, Parameters.Flags);
+    if (Device != nullptr)
+        printf("create_release[%s][%s] = %lu\n", Case->Name, PathNames[Path], Device->Release());
+}
+
+/* CreateDevice argument rules; only windowed cases may succeed, fullscreen ones fail in validation */
+static
+VOID
+NcCheckCreate(
+    _Inout_ NineCheck* Check)
+{
+    static const DWORD Hw = D3DCREATE_HARDWARE_VERTEXPROCESSING;
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(FALSE);
+    HWND Other = NcCreateWindow(FALSE);
+    HWND Gone = NcCreateWindow(FALSE);
+    std::vector<NcCreateCase> Cases;
+    NcCreateCase Base = {};
+
+    DestroyWindow(Gone);
+    Base.Type = D3DDEVTYPE_HAL;
+    Base.Behavior = Hw;
+    Base.Focus = Window;
+    Base.Parameters.Windowed = TRUE;
+    Base.Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Base.Parameters.hDeviceWindow = Window;
+
+    auto Add = [&](PCSTR Name, auto Change)
+    {
+        NcCreateCase Case = Base;
+
+        strcpy_s(Case.Name, Name);
+        Change(Case);
+        Cases.push_back(Case);
+    };
+    char Name[40];
+
+    Add("base", [](NcCreateCase&) {});
+    Add("adapter_bad", [&](NcCreateCase& C) { C.Adapter = Check->Nine->GetAdapterCount(); });
+    Add("type_0", [](NcCreateCase& C) { C.Type = static_cast<D3DDEVTYPE>(0); });
+    Add("type_sw", [](NcCreateCase& C) { C.Type = D3DDEVTYPE_SW; });
+    Add("type_5", [](NcCreateCase& C) { C.Type = static_cast<D3DDEVTYPE>(5); });
+    Add("vp_sw", [](NcCreateCase& C) { C.Behavior = D3DCREATE_SOFTWARE_VERTEXPROCESSING; });
+    Add("vp_mixed", [](NcCreateCase& C) { C.Behavior = D3DCREATE_MIXED_VERTEXPROCESSING; });
+    Add("vp_none", [](NcCreateCase& C) { C.Behavior = 0; });
+    Add("vp_hw_sw", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_SOFTWARE_VERTEXPROCESSING; });
+    Add("vp_all", [](NcCreateCase& C) { C.Behavior = 0xE0; });
+    Add("pure_hw", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_PUREDEVICE; });
+    Add("pure_sw", [](NcCreateCase& C) { C.Behavior = D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE; });
+    Add("pure_mixed", [](NcCreateCase& C) { C.Behavior = D3DCREATE_MIXED_VERTEXPROCESSING | D3DCREATE_PUREDEVICE; });
+    Add("pure_only", [](NcCreateCase& C) { C.Behavior = D3DCREATE_PUREDEVICE; });
+    for (DWORD Bit : { 0x1UL, 0x8UL, 0x1000UL, 0x10000UL, 0x800000UL, 0x8000000UL, 0x20000000UL, 0x80000000UL })
+    {
+        sprintf_s(Name, "flag_%08lX", Bit);
+        Add(Name, [Bit](NcCreateCase& C) { C.Behavior = Hw | Bit; });
+    }
+    Add("multithreaded", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_MULTITHREADED | D3DCREATE_FPU_PRESERVE; });
+    Add("nowindowchanges", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_NOWINDOWCHANGES; });
+    Add("nodrivermanagement", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_DISABLE_DRIVER_MANAGEMENT; });
+    Add("nodrivermanagement_ex", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_DISABLE_DRIVER_MANAGEMENT_EX; });
+    Add("psgp_threading", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_DISABLE_PSGP_THREADING; });
+    Add("presentstats", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_ENABLE_PRESENTSTATS; });
+    Add("printscreen", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_DISABLE_PRINTSCREEN; });
+    Add("screensaver", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_SCREENSAVER; });
+    Add("adaptergroup", [](NcCreateCase& C) { C.Behavior = Hw | D3DCREATE_ADAPTERGROUP_DEVICE; });
+
+    for (D3DFORMAT Format : { D3DFMT_X8R8G8B8, D3DFMT_A8R8G8B8, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_A1R5G5B5,
+                              D3DFMT_A2R10G10B10, D3DFMT_A2B10G10R10, D3DFMT_A16B16G16R16F,
+                              D3DFMT_A2B10G10R10_XR_BIAS, D3DFMT_A8B8G8R8, D3DFMT_D24S8,
+                              static_cast<D3DFORMAT>(0x7FFFFFFF) })
+    {
+        sprintf_s(Name, "format_%u", Format);
+        Add(Name, [Format](NcCreateCase& C) { C.Parameters.BackBufferFormat = Format; });
+    }
+
+    for (UINT Count : { 1U, 2U, 3U, 4U, 30U, 31U })
+    {
+        sprintf_s(Name, "count_%u", Count);
+        Add(Name, [Count](NcCreateCase& C) { C.Parameters.BackBufferCount = Count; });
+    }
+
+    Add("swap_copy", [](NcCreateCase& C) { C.Parameters.SwapEffect = D3DSWAPEFFECT_COPY; });
+    Add("swap_copy_2", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+        C.Parameters.BackBufferCount = 2;
+    });
+    Add("swap_flip", [](NcCreateCase& C) { C.Parameters.SwapEffect = D3DSWAPEFFECT_FLIP; });
+    Add("swap_flip_2", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_FLIP;
+        C.Parameters.BackBufferCount = 2;
+    });
+    Add("swap_flipex", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_FLIPEX;
+        C.Parameters.BackBufferCount = 2;
+    });
+    Add("swap_flipex_565", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_FLIPEX;
+        C.Parameters.BackBufferFormat = D3DFMT_R5G6B5;
+    });
+    Add("swap_overlay", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_OVERLAY;
+        C.Parameters.BackBufferFormat = D3DFMT_X8R8G8B8;
+    });
+    Add("swap_nopresent", [](NcCreateCase& C) { C.Parameters.SwapEffect = static_cast<D3DSWAPEFFECT>(0x40000000); });
+    Add("swap_0", [](NcCreateCase& C) { C.Parameters.SwapEffect = static_cast<D3DSWAPEFFECT>(0); });
+    Add("swap_6", [](NcCreateCase& C) { C.Parameters.SwapEffect = static_cast<D3DSWAPEFFECT>(6); });
+
+    Add("ms_2", [](NcCreateCase& C) { C.Parameters.MultiSampleType = D3DMULTISAMPLE_2_SAMPLES; });
+    Add("ms_4", [](NcCreateCase& C) { C.Parameters.MultiSampleType = D3DMULTISAMPLE_4_SAMPLES; });
+    Add("ms_4_copy", [](NcCreateCase& C)
+    {
+        C.Parameters.MultiSampleType = D3DMULTISAMPLE_4_SAMPLES;
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    });
+    Add("ms_4_lockable", [](NcCreateCase& C)
+    {
+        C.Parameters.MultiSampleType = D3DMULTISAMPLE_4_SAMPLES;
+        C.Parameters.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    });
+    Add("ms_nonmaskable", [](NcCreateCase& C) { C.Parameters.MultiSampleType = D3DMULTISAMPLE_NONMASKABLE; });
+    Add("ms_17", [](NcCreateCase& C) { C.Parameters.MultiSampleType = static_cast<D3DMULTISAMPLE_TYPE>(17); });
+    Add("ms_quality_1", [](NcCreateCase& C) { C.Parameters.MultiSampleQuality = 1; });
+
+    for (DWORD Flags : { 0x1UL, 0x2UL, 0x4UL, 0x8UL, 0x10UL, 0x20UL, 0x40UL, 0x80UL, 0x400UL, 0x800UL, 0x1000UL })
+    {
+        sprintf_s(Name, "pflags_%08lX", Flags);
+        Add(Name, [Flags](NcCreateCase& C) { C.Parameters.Flags = Flags; });
+    }
+    Add("pflags_discard_depth", [](NcCreateCase& C)
+    {
+        C.Parameters.Flags = D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL;
+        C.Parameters.EnableAutoDepthStencil = TRUE;
+        C.Parameters.AutoDepthStencilFormat = D3DFMT_D24S8;
+    });
+    Add("pflags_flipex_lock", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_FLIPEX;
+        C.Parameters.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    });
+    Add("pflags_flipex_clip", [](NcCreateCase& C)
+    {
+        C.Parameters.SwapEffect = D3DSWAPEFFECT_FLIPEX;
+        C.Parameters.Flags = D3DPRESENTFLAG_DEVICECLIP;
+    });
+
+    for (D3DFORMAT Format : { D3DFMT_D24S8, D3DFMT_D16, D3DFMT_D24X8, D3DFMT_D32, D3DFMT_D16_LOCKABLE,
+                              D3DFMT_D32F_LOCKABLE, D3DFMT_X8R8G8B8, D3DFMT_UNKNOWN })
+    {
+        sprintf_s(Name, "depth_%u", Format);
+        Add(Name, [Format](NcCreateCase& C)
+        {
+            C.Parameters.EnableAutoDepthStencil = TRUE;
+            C.Parameters.AutoDepthStencilFormat = Format;
+        });
+    }
+
+    Add("refresh_60", [](NcCreateCase& C) { C.Parameters.FullScreen_RefreshRateInHz = 60; });
+    Add("interval_immediate", [](NcCreateCase& C) { C.Parameters.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE; });
+    Add("interval_one", [](NcCreateCase& C) { C.Parameters.PresentationInterval = D3DPRESENT_INTERVAL_ONE; });
+    Add("interval_two", [](NcCreateCase& C) { C.Parameters.PresentationInterval = D3DPRESENT_INTERVAL_TWO; });
+    Add("interval_13", [](NcCreateCase& C) { C.Parameters.PresentationInterval = 0x13; });
+    Add("mode_windowed", [](NcCreateCase& C)
+    {
+        C.PassMode = TRUE;
+        C.Mode.Size = sizeof(C.Mode);
+    });
+    Add("size_set", [](NcCreateCase& C)
+    {
+        C.Parameters.BackBufferWidth = 32;
+        C.Parameters.BackBufferHeight = 16;
+    });
+    Add("size_width", [](NcCreateCase& C) { C.Parameters.BackBufferWidth = 20; });
+
+    Add("window_gone", [&](NcCreateCase& C) { C.Parameters.hDeviceWindow = Gone; });
+    Add("focus_gone", [&](NcCreateCase& C) { C.Focus = Gone; });
+    Add("focus_null", [](NcCreateCase& C) { C.Focus = NULL; });
+    Add("window_null", [](NcCreateCase& C) { C.Parameters.hDeviceWindow = NULL; });
+    Add("window_other", [&](NcCreateCase& C) { C.Parameters.hDeviceWindow = Other; });
+    Add("windows_null", [](NcCreateCase& C)
+    {
+        C.Focus = NULL;
+        C.Parameters.hDeviceWindow = NULL;
+    });
+
+    /* Fullscreen cases, each one refused by validation before any mode change */
+    auto AddFull = [&](PCSTR FullName, auto Change)
+    {
+        Add(FullName, [&](NcCreateCase& C)
+        {
+            C.Parameters.Windowed = FALSE;
+            C.Parameters.BackBufferFormat = D3DFMT_X8R8G8B8;
+            Change(C);
+        });
+    };
+    AddFull("full_flag_1", [](NcCreateCase& C) { C.Behavior |= 1; });
+    AddFull("full_vp_none", [](NcCreateCase& C) { C.Behavior = 0; });
+    AddFull("full_format_0", [](NcCreateCase& C) { C.Parameters.BackBufferFormat = D3DFMT_UNKNOWN; });
+    AddFull("full_swap_6", [](NcCreateCase& C) { C.Parameters.SwapEffect = static_cast<D3DSWAPEFFECT>(6); });
+    AddFull("full_nopresent", [](NcCreateCase& C) { C.Parameters.SwapEffect = static_cast<D3DSWAPEFFECT>(0x40000000); });
+    AddFull("full_interval_13", [](NcCreateCase& C) { C.Parameters.PresentationInterval = 0x13; });
+    AddFull("full_count_31", [](NcCreateCase& C) { C.Parameters.BackBufferCount = 31; });
+    AddFull("full_ms_quality", [](NcCreateCase& C) { C.Parameters.MultiSampleQuality = 1; });
+    AddFull("full_pflags_8", [](NcCreateCase& C) { C.Parameters.Flags = 8; });
+
+    for (const NcCreateCase& Case : Cases)
+    {
+        NcRunCreateCase(Check, Plain, &Case, NcPathEx);
+        NcRunCreateCase(Check, Plain, &Case, NcPathExEx);
+        NcRunCreateCase(Check, Plain, &Case, NcPathPlain);
+    }
+
+    /* Fullscreen cases only some entry points refuse */
+    {
+        NcCreateCase Case = Base;
+
+        Case.Parameters.Windowed = FALSE;
+        Case.Parameters.BackBufferFormat = D3DFMT_X8R8G8B8;
+        Case.Parameters.BackBufferWidth = 640;
+        Case.Parameters.BackBufferHeight = 480;
+
+        strcpy_s(Case.Name, "full_mode_null");
+        NcRunCreateCase(Check, Plain, &Case, NcPathExEx);
+
+        strcpy_s(Case.Name, "full_mode_mismatch");
+        Case.PassMode = TRUE;
+        Case.Mode.Size = sizeof(Case.Mode);
+        Case.Mode.Width = 800;
+        Case.Mode.Height = 600;
+        Case.Mode.Format = D3DFMT_X8R8G8B8;
+        NcRunCreateCase(Check, Plain, &Case, NcPathExEx);
+
+        strcpy_s(Case.Name, "full_mode_size");
+        Case.Mode.Size = 0;
+        Case.Mode.Width = 640;
+        Case.Mode.Height = 480;
+        NcRunCreateCase(Check, Plain, &Case, NcPathExEx);
+
+        strcpy_s(Case.Name, "full_mode_scanline");
+        Case.Mode.Size = sizeof(Case.Mode);
+        Case.Mode.ScanLineOrdering = static_cast<D3DSCANLINEORDERING>(3);
+        NcRunCreateCase(Check, Plain, &Case, NcPathExEx);
+
+        strcpy_s(Case.Name, "full_noautorotate");
+        Case.PassMode = FALSE;
+        Case.Parameters.Flags = D3DPRESENTFLAG_NOAUTOROTATE;
+        NcRunCreateCase(Check, Plain, &Case, NcPathPlain);
+
+        strcpy_s(Case.Name, "full_focus_null");
+        Case.Parameters.Flags = 0;
+        Case.Focus = NULL;
+        NcRunCreateCase(Check, Plain, &Case, NcPathPlain);
+    }
+
+    DestroyWindow(Other);
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -551,6 +899,7 @@ static const NineCheckInfo NcChecks[] =
     { "formats", NcCheckFormats },
     { "multisample", NcCheckMultisample },
     { "depthmatch", NcCheckDepthMatch },
+    { "create", NcCheckCreate },
 };
 
 static
