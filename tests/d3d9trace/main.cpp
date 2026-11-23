@@ -6093,6 +6093,119 @@ TrScenarioDrawsPlain(
     Plain->Release();
 }
 
+/* A vs_2_0 shader reading a constant past the hardware's registers, which only the runtime's pipeline runs */
+static const DWORD TrMixedSoftwareCode[] = { 0xFFFE0200, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000005,
+                                             0x900F0001, 0x03000002, 0xC00F0000, 0x90E40000, 0xA0E4012C, 0x02000001,
+                                             0xE00F0000, 0x90E40001, 0x0000FFFF };
+
+/* Shaders a mixed device makes for its driver only when they first draw, one of which the driver cannot run */
+static
+VOID
+TrMixedShaderWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DVertexShader9* Software = nullptr;
+    IDirect3DPixelShader9* Color = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    static const FLOAT Zero[4] = {};
+    static const INT Ints[4] = { 3, 1, 2, 0 };
+    VOID* Data = nullptr;
+
+    TrPhase("mixed shaders create");
+    TrApi("CreateVertexShader", Device->CreateVertexShader(TrDrawVertexCode, &Vertex));
+    TrApi("CreateVertexShader software", Device->CreateVertexShader(TrMixedSoftwareCode, &Software));
+    TrApi("CreatePixelShader color", Device->CreatePixelShader(TrDrawColorCode, &Color));
+    TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrDrawElements, &Declaration));
+    TrApi("CreateVertexBuffer", Device->CreateVertexBuffer(sizeof(TrDrawVertices), 0, 0, D3DPOOL_DEFAULT, &Buffer,
+                                                           nullptr));
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    if (Buffer != nullptr && SUCCEEDED(Buffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        Buffer->Unlock();
+    }
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("SetPixelShader", Device->SetPixelShader(Color));
+    TrApi("SetVertexShaderConstantF 300", Device->SetVertexShaderConstantF(300, Zero, 1));
+    TrApi("SetVertexShaderConstantI 2", Device->SetVertexShaderConstantI(2, Ints, 1));
+    TrSettle(Device);
+
+    TrPhase("mixed shaders draw");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("SetVertexShader software", Device->SetVertexShader(Software));
+    TrApi("DrawPrimitive software", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("DrawPrimitive software again", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 4, 1));
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("DrawPrimitive", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetVertexShader again", Device->SetVertexShader(Vertex));
+    TrApi("DrawPrimitive again", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 4, 1));
+    TrApi("SetVertexShader software", Device->SetVertexShader(Software));
+    TrApi("DrawPrimitiveUP software", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, TrDrawVertices, TrDrawStride));
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, TrDrawVertices + 24, TrDrawStride));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "mixed shaders");
+    TrSettle(Device);
+
+    TrPhase("mixed shaders release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetPixelShader null", Device->SetPixelShader(nullptr));
+    TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrRelease(Vertex);
+    TrRelease(Software);
+    TrRelease(Color);
+    TrRelease(Declaration);
+    TrRelease(Buffer);
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
+/* Draws on a mixed vertex processing device of the plain object while it processes vertices in hardware */
+static
+VOID
+TrScenarioDrawsMixed(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+
+    TrPhase("draws mixed create");
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_MIXED_VERTEXPROCESSING,
+                                              &Parameters, &Device));
+    if (Device != nullptr)
+    {
+        TrSettle(Device);
+        TrDrawWork(Device);
+        TrMixedShaderWork(Device);
+        TrPhase("draws mixed release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* A state one fixed function case sets: a stage state, or a render state when the stage is TrFixedRender */
 struct TrFixedSet
 {
@@ -7567,6 +7680,7 @@ static const TrScenario TrScenarios[] =
     { "declarations_plain", TrScenarioDeclarationsPlain },
     { "draws", TrScenarioDraws },
     { "draws_plain", TrScenarioDrawsPlain },
+    { "draws_mixed", TrScenarioDrawsMixed },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
