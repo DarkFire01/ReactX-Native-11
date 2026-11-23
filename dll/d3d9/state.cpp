@@ -677,6 +677,8 @@ D9Device::SetLight(
 
     Lights[Index].Made = TRUE;
     Lights[Index].Light = *Light;
+    if (Switch.HasVertexConverter && !VertexShaders.SetLight(Index, Light))
+        D9_TRACE_ONCE(L"SetLight: the vertex converter has no room for another light");
     return S_OK;
 }
 
@@ -726,6 +728,8 @@ D9Device::LightEnable(
     if (Recording != nullptr)
         return Recording->Add(D9BlockOp::LightEnable, Index, 0, &Enabled, sizeof(Enabled));
     Found->Enabled = Enable != FALSE;
+    if (Switch.HasVertexConverter && !VertexShaders.EnableLight(Index, Found->Enabled))
+        D9_TRACE_ONCE(L"LightEnable: the vertex converter has no room for another light");
     return S_OK;
 }
 

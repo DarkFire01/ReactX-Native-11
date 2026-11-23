@@ -365,19 +365,8 @@ D9Device::PrepareVertexShader(VOID)
     }
 
     /* The lights in use are counted again; one light needs no loop registers */
-    if ((VertexShaders.Stale & 0x400000) != 0)
-    {
-        VertexShaders.Stale = (VertexShaders.Stale | 0x2C00000) & ~0x400000u;
-        VertexShaders.Key.Modes &= ~0x8u;
-        for (UINT Kind = 0; Kind < 3; Kind++)
-        {
-            VertexShaders.Loops[Kind][0] = 0;
-            VertexShaders.Loops[Kind][1] = 0;
-            VertexShaders.Loops[Kind][2] = 7;
-            VertexShaders.Loops[Kind][3] = 0;
-        }
+    if ((VertexShaders.Stale & 0x400000) != 0 && VertexShaders.GatherLights())
         DdiShaderConstants(D9BatchCall::VertexShaderConstI, 0, 3, VertexShaders.Loops, sizeof(VertexShaders.Loops));
-    }
 
     if (VertexShaders.RefreshKey())
     {

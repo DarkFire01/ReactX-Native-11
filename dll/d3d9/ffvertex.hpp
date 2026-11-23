@@ -62,6 +62,17 @@ typedef struct _D9_FIXED_VERTEX_ENTRY
     HANDLE Shader;
 } D9_FIXED_VERTEX_ENTRY;
 
+/* A light the application set, and whether it is enabled */
+typedef struct _D9_VS_LIGHT
+{
+    DWORD Index;
+    BOOLEAN Enabled;
+    D3DLIGHT9 Light;
+} D9_VS_LIGHT;
+
+/* The most lights the converter remembers */
+static constexpr UINT D9VertexLightCapacity = 256;
+
 /* The most shaders the converter keeps before it lets the oldest go with each new one */
 static constexpr UINT D9VertexCacheLimit = 1001;
 
@@ -72,6 +83,7 @@ public:
     ~D9VertexConverter()
     {
         delete[] Cache;
+        delete[] Lights;
     }
 
     /**
@@ -126,6 +138,27 @@ public:
     SetViewportSize(
         _In_ DWORD Width,
         _In_ DWORD Height);
+
+    /**
+     * @brief Takes a light the application set.
+     * @return FALSE when there is no room for another light.
+     */
+    BOOLEAN
+    SetLight(
+        _In_ DWORD Index,
+        _In_ const D3DLIGHT9* Light);
+
+    BOOLEAN
+    EnableLight(
+        _In_ DWORD Index,
+        _In_ BOOLEAN Enable);
+
+    /**
+     * @brief Counts the enabled lights again, sorts their registers by kind and fills the loop registers.
+     * @return TRUE when the driver needs the loop registers.
+     */
+    BOOLEAN
+    GatherLights(VOID);
 
     /**
      * @brief Works out the key the next draw needs.
@@ -208,6 +241,18 @@ private:
     VOID
     ApplyMaterialSources(VOID);
 
+    D9_VS_LIGHT*
+    FindLight(
+        _In_ DWORD Index);
+
+    VOID
+    WriteLight(
+        _In_ UINT Slot,
+        _In_ const D3DLIGHT9* Light);
+
+    VOID
+    TransformLights(VOID);
+
     D9_VERTEX_RANGE Ranges[3] = {};
     UINT LightLimit = 0;
     UINT MatrixLimit = 0;
@@ -221,6 +266,13 @@ private:
     D3DMATRIX Projection = {};
     D3DMATRIX World = {};
     D3DMATRIX WorldView = {};
+    D9_VS_LIGHT* Lights = nullptr;
+    UINT LightCount = 0;
+    UINT Enabled[D9VertexLightCapacity] = {};
+    UINT EnabledCount = 0;
+    const D9_VS_LIGHT* Active[D9VertexLightCapacity] = {};
+    UINT ActiveSlots[D9VertexLightCapacity] = {};
+    UINT ActiveCount = 0;
     D9_FIXED_VERTEX_ENTRY* Cache = nullptr;
     UINT CacheFirst = 0;
     UINT CacheCount = 0;

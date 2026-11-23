@@ -7,6 +7,7 @@
 
 #include "ffvertex.hpp"
 
+#include <math.h>
 #include <new>
 #include <string.h>
 
@@ -109,6 +110,7 @@ typedef struct _D9_VS_SOURCE
     BYTE Swizzle;
     USHORT Number;
     BOOLEAN Negate;
+    BOOLEAN Relative;
 } D9_VS_SOURCE;
 
 typedef struct _D9_VS_TARGET
@@ -125,7 +127,7 @@ D9VsSrc(
     _In_ UINT Number,
     _In_ BYTE Swizzle)
 {
-    D9_VS_SOURCE Source = { File, Swizzle, static_cast<USHORT>(Number), FALSE };
+    D9_VS_SOURCE Source = { File, Swizzle, static_cast<USHORT>(Number), FALSE, FALSE };
 
     return Source;
 }
@@ -236,7 +238,25 @@ public:
         _In_ const D9_VS_SOURCE& Source)
     {
         Put(Register(Source.File, Source.Number) | (static_cast<DWORD>(Source.Swizzle) << 16) |
-            (Source.Negate ? 0x01000000 : 0));
+            (Source.Negate ? 0x01000000 : 0) | (Source.Relative ? 0x2000 : 0));
+        if (Source.Relative)
+            Put(0xF0E40800);
+    }
+
+    /* An instruction's token counts the tokens after it, relative addresses included */
+    VOID
+    Begin(
+        _In_ DWORD Opcode)
+    {
+        Start = Count;
+        Put(Opcode);
+    }
+
+    VOID
+    End(VOID)
+    {
+        if (Start < D9FixedVertexTokenLimit)
+            Tokens[Start] |= (Count - Start - 1) << 24;
     }
 
     VOID
@@ -245,9 +265,10 @@ public:
         _In_ const D9_VS_TARGET& Out,
         _In_ const D9_VS_SOURCE& First)
     {
-        Put(Opcode | (2u << 24));
+        Begin(Opcode);
         Target(Out);
         Source(First);
+        End();
     }
 
     VOID
@@ -257,10 +278,11 @@ public:
         _In_ const D9_VS_SOURCE& First,
         _In_ const D9_VS_SOURCE& Second)
     {
-        Put(Opcode | (3u << 24));
+        Begin(Opcode);
         Target(Out);
         Source(First);
         Source(Second);
+        End();
     }
 
     VOID
@@ -271,11 +293,12 @@ public:
         _In_ const D9_VS_SOURCE& Second,
         _In_ const D9_VS_SOURCE& Third)
     {
-        Put(Opcode | (4u << 24));
+        Begin(Opcode);
         Target(Out);
         Source(First);
         Source(Second);
         Source(Third);
+        End();
     }
 
     VOID
@@ -291,8 +314,24 @@ public:
 
     DWORD* Tokens;
     UINT Count = 0;
+    UINT Start = 0;
     BOOLEAN Overflow = FALSE;
 };
+
+/* Opens a block taken when the comparison holds */
+static
+VOID
+D9VsIf(
+    _Inout_ D9VsWriter* Out,
+    _In_ DWORD Comparison,
+    _In_ const D9_VS_SOURCE& Left,
+    _In_ const D9_VS_SOURCE& Right)
+{
+    Out->Begin(0x29 | (Comparison << 16));
+    Out->Source(Left);
+    Out->Source(Right);
+    Out->End();
+}
 
 /* Input registers number in the order the shader first declares them */
 class D9VsInputs
@@ -443,6 +482,268 @@ D9VsGenerate(
     return Made;
 }
 
+/* What the lighting part of a shader reads: the material colors, the light registers and the outputs it adds to */
+typedef struct _D9_VS_LIGHTING
+{
+    D9_VS_SOURCE Ambient;
+    D9_VS_SOURCE Emissive;
+    D9_VS_SOURCE Diffuse;
+    D9_VS_SOURCE Specular;
+    BOOLEAN Single;
+    BOOLEAN HasNormal;
+    BOOLEAN Highlights;
+    BOOLEAN LocalViewer;
+    BOOLEAN FlowControl;
+} D9_VS_LIGHTING;
+
+/* One of a light's seven registers, through the loop counter when the lights loop */
+static
+D9_VS_SOURCE
+D9VsLightRegister(
+    _In_ const D9_VS_LIGHTING* Lighting,
+    _In_ UINT Part)
+{
+    D9_VS_SOURCE Source = D9VsWhole(D9VertexFixedRegisters + Part);
+
+    Source.Relative = !Lighting->Single;
+    return Source;
+}
+
+/* The diffuse, specular and ambient terms of one light of a kind, added to r10 and r11 */
+static
+VOID
+D9VsLightTerms(
+    _Inout_ D9VsWriter* Out,
+    _In_ const D9_VS_LIGHTING* Lighting,
+    _In_ D3DLIGHTTYPE Kind)
+{
+    static const D9_VS_TARGET Toward = { D9VsTemp, 0x7, 5 };
+    D9_VS_SOURCE Eye = D9VsSrc(D9VsTemp, D9VsTempEye, D9VsAll);
+    D9_VS_SOURCE Normal = D9VsSrc(D9VsTemp, D9VsTempNormal, D9VsAll);
+    D9_VS_SOURCE Facing = D9VsSrc(D9VsTemp, 9, D9VsX);
+    D9_VS_SOURCE Distance = D9VsSrc(D9VsTemp, 9, D9VsY);
+    D9_VS_SOURCE Strength = D9VsSrc(D9VsTemp, 9, D9VsZ);
+    D9_VS_SOURCE Falloff = D9VsSrc(D9VsTemp, 9, D9VsW);
+    D9_VS_SOURCE Work = D9VsSrc(D9VsTemp, 8, D9VsAll);
+    D9_VS_SOURCE Half = D9VsSrc(D9VsTemp, 7, D9VsAll);
+    D9_VS_SOURCE Color = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsAll);
+    D9_VS_SOURCE Highlight = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll);
+    D9_VS_SOURCE Zero = D9VsConstant(D9VsConstZero, 0);
+    D9_VS_SOURCE Light;
+    BOOLEAN Directional = Kind == D3DLIGHT_DIRECTIONAL;
+
+    if (Directional)
+    {
+        Light = D9VsNegated(D9VsLightRegister(Lighting, 3));
+    }
+    else
+    {
+        D9_VS_SOURCE Cone = D9VsLightRegister(Lighting, 6);
+        D9_VS_SOURCE Attenuation = D9VsLightRegister(Lighting, 5);
+
+        /* The unit vector toward the light, its distance, then the attenuation within the range */
+        Light = D9VsSrc(D9VsTemp, 5, D9VsAll);
+        Out->Op(D9VsAdd, Toward, D9VsLightRegister(Lighting, 4), D9VsNegated(Eye));
+        Out->Op(D9VsDp3, D9VsDst(D9VsTemp, 9, 0x2), Light, Light);
+        Out->Op(D9VsRsq, D9VsDst(D9VsTemp, 9, 0x2), Distance);
+        Out->Op(D9VsMul, Toward, Light, Distance);
+        Out->Op(D9VsRcp, D9VsDst(D9VsTemp, 9, 0x2), Distance);
+        Out->Op(0x0D, D9VsDst(D9VsTemp, 9, 0x4), D9VsSwizzled(Cone, D9VsZ), Distance);
+        Out->Op(D9VsMul, D9VsDst(D9VsTemp, 9, 0x8), D9VsSwizzled(Attenuation, D9VsZ), Distance);
+        Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 9, 0x8), D9VsSwizzled(Attenuation, D9VsY), Falloff);
+        Out->Op(D9VsMad, D9VsDst(D9VsTemp, 9, 0x8), Falloff, Distance, D9VsSwizzled(Attenuation, D9VsX));
+        Out->Op(D9VsRcp, D9VsDst(D9VsTemp, 9, 0x8), Falloff);
+        Out->Op(D9VsMul, D9VsDst(D9VsTemp, 9, 0x4), Strength, Falloff);
+
+        /* A spot light fades from the inner cone to the outer one */
+        if (Kind == D3DLIGHT_SPOT)
+        {
+            D9_VS_SOURCE Spot = D9VsSrc(D9VsTemp, 7, D9VsW);
+
+            Out->Op(D9VsDp3, D9VsDst(D9VsTemp, 9, 0x2), Light, D9VsNegated(D9VsLightRegister(Lighting, 3)));
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 7, 0x8), D9VsSwizzled(Cone, D9VsX),
+                    D9VsNegated(D9VsSwizzled(Cone, D9VsY)));
+            Out->Op(D9VsRcp, D9VsDst(D9VsTemp, 7, 0x8), Spot);
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 7, 0x1), Distance, D9VsNegated(D9VsSwizzled(Cone, D9VsY)));
+            Out->Op(D9VsMul, D9VsDst(D9VsTemp, 7, 0x8), Spot, D9VsSrc(D9VsTemp, 7, D9VsX));
+            Out->Op(D9VsPow, D9VsDst(D9VsTemp, 7, 0x8), Spot, D9VsSwizzled(Attenuation, D9VsW));
+            Out->Op(0x0C, D9VsDst(D9VsTemp, 7, 0x2), D9VsSwizzled(Cone, D9VsX), Distance);
+            Out->Op(0x0B, D9VsDst(D9VsTemp, 7, 0x8), Spot, D9VsSrc(D9VsTemp, 7, D9VsY));
+            Out->Op(0x0C, D9VsDst(D9VsTemp, 7, 0x4), D9VsSwizzled(Cone, D9VsY), Distance);
+            Out->Op(D9VsMul, D9VsDst(D9VsTemp, 7, 0x8), Spot, D9VsSrc(D9VsTemp, 7, D9VsZ));
+            Out->Op(D9VsMul, D9VsDst(D9VsTemp, 9, 0x4), Strength, Spot);
+        }
+    }
+
+    /* Diffuse and specular need a normal; facing away from the light adds nothing */
+    if (Lighting->HasNormal)
+    {
+        Out->Op(D9VsDp3, D9VsDst(D9VsTemp, 9, 0x1), Normal, Light);
+        if (Lighting->FlowControl)
+            D9VsIf(Out, 1, Facing, Zero);
+        else
+            Out->Op(0x0B, D9VsDst(D9VsTemp, 9, 0x1), Facing, Zero);
+        Out->Op(D9VsMul, D9VsDst(D9VsTemp, 8, 0x7), Facing, Lighting->Diffuse);
+        Out->Op(D9VsMul, D9VsDst(D9VsTemp, 8, 0x7), Work, D9VsLightRegister(Lighting, 1));
+        if (Directional)
+            Out->Op(D9VsAdd, D9VsDst(D9VsTemp, D9VsTempOut, 0x7), Work, Color);
+        else
+            Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempOut, 0x7), Work, Strength, Color);
+
+        if (Lighting->Highlights)
+        {
+            if (Lighting->LocalViewer)
+            {
+                Out->Op(D9VsNrm, D9VsDst(D9VsTemp, 8, 0x7), D9VsNegated(Eye));
+                Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 8, 0x7), Work, Light);
+            }
+            else
+            {
+                Out->Op(D9VsMov, D9VsDst(D9VsTemp, 8, 0x7), Light);
+                Out->Op(D9VsAdd, D9VsDst(D9VsTemp, 8, 0x4), Work, D9VsNegated(D9VsConstant(D9VsConstZero, 3)));
+            }
+            Out->Op(D9VsNrm, D9VsDst(D9VsTemp, 7, 0x7), Work);
+            Out->Op(D9VsDp3, D9VsDst(D9VsTemp, 9, 0x2), Normal, Half);
+            if (Lighting->FlowControl)
+            {
+                D9VsIf(Out, 1, Distance, Zero);
+            }
+            else
+            {
+                Out->Op(0x0B, D9VsDst(D9VsTemp, 9, 0x2), Distance, Zero);
+                Out->Op(0x0C, D9VsDst(D9VsTemp, 9, 0x1), Zero, Facing);
+                Out->Op(D9VsMul, D9VsDst(D9VsTemp, 9, 0x2), Distance, Facing);
+            }
+            Out->Op(D9VsPow, D9VsDst(D9VsTemp, 9, 0x2), Distance, D9VsConstant(D9VsConstMaterial + 4, 0));
+            if (!Directional)
+                Out->Op(D9VsMul, D9VsDst(D9VsTemp, 9, 0x2), Distance, Strength);
+            if (Lighting->Single)
+            {
+                Out->Op(D9VsMul, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), Distance, D9VsLightRegister(Lighting, 2));
+            }
+            else
+            {
+                Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), Distance, D9VsLightRegister(Lighting, 2),
+                        Highlight);
+            }
+            if (Lighting->FlowControl)
+                Out->Put(0x0000002B);
+        }
+        if (Lighting->FlowControl)
+            Out->Put(0x0000002B);
+    }
+
+    /* The light's ambient color, attenuated unless it is directional */
+    if (!Directional)
+    {
+        Out->Op(D9VsMul, D9VsDst(D9VsTemp, 7, 0x7), Lighting->Ambient, Strength);
+        Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempOut, 0x7), Half, D9VsLightRegister(Lighting, 0), Color);
+    }
+    else if (Lighting->Ambient.File == D9VsConst)
+    {
+        Out->Op(D9VsMov, D9VsDst(D9VsTemp, 7, 0x7), Lighting->Ambient);
+        Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempOut, 0x7), Half, D9VsLightRegister(Lighting, 0), Color);
+    }
+    else
+    {
+        Out->Op(D9VsMad, D9VsDst(D9VsTemp, D9VsTempOut, 0x7), Lighting->Ambient, D9VsLightRegister(Lighting, 0),
+                Color);
+    }
+}
+
+/* Emissive and ambient light, then each kind of light, then the colors with the material's alphas */
+static
+VOID
+D9VsWriteLighting(
+    _Inout_ D9VsWriter* Out,
+    _In_ const D9_FIXED_VERTEX_KEY* Key,
+    _In_ const D9_VS_SOURCE& VertexDiffuse,
+    _In_ const D9_VS_SOURCE& VertexSpecular,
+    _In_ BOOLEAN FlowControl)
+{
+    static const D3DLIGHTTYPE Kinds[3] = { D3DLIGHT_DIRECTIONAL, D3DLIGHT_POINT, D3DLIGHT_SPOT };
+    DWORD In = Key->Inputs;
+    DWORD Modes = Key->Modes;
+    D9_VS_LIGHTING Lighting;
+    D9_VS_SOURCE Color = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsAll);
+    D9_VS_TARGET Sum = D9VsDst(D9VsTemp, D9VsTempOut, 0x7);
+
+    Lighting.Ambient = D9VsWhole(D9VsConstMaterial);
+    Lighting.Emissive = D9VsWhole(D9VsConstMaterial + 1);
+    Lighting.Diffuse = D9VsWhole(D9VsConstMaterial + 2);
+    Lighting.Specular = D9VsWhole(D9VsConstMaterial + 3);
+    if ((In & D9VsColorVertex) != 0)
+    {
+        if ((In & D9VsInDiffuse) != 0)
+        {
+            if ((Modes & 0xC00) == 0x400)
+                Lighting.Diffuse = VertexDiffuse;
+            if ((Modes & 0x3000) == 0x1000)
+                Lighting.Specular = VertexDiffuse;
+            if ((Modes & 0xC000) == 0x4000)
+                Lighting.Ambient = VertexDiffuse;
+            if ((Modes & 0x30000) == 0x10000)
+                Lighting.Emissive = VertexDiffuse;
+        }
+        if ((In & D9VsInSpecular) != 0)
+        {
+            if ((Modes & 0xC00) == 0x800)
+                Lighting.Diffuse = VertexSpecular;
+            if ((Modes & 0x3000) == 0x2000)
+                Lighting.Specular = VertexSpecular;
+            if ((Modes & 0xC000) == 0x8000)
+                Lighting.Ambient = VertexSpecular;
+            if ((Modes & 0x30000) == 0x20000)
+                Lighting.Emissive = VertexSpecular;
+        }
+    }
+    Lighting.Single = (Modes & 0x8) != 0;
+    Lighting.HasNormal = (In & D9VsInNormal) != 0;
+    Lighting.Highlights = (In & D9VsSpecularOn) != 0 && (In & D9VsOutSpecular) != 0;
+    Lighting.LocalViewer = (In & D9VsLocalViewer) != 0;
+    Lighting.FlowControl = FlowControl;
+
+    Out->Op(D9VsMov, Sum, Lighting.Ambient);
+    Out->Op(D9VsMul, Sum, Color, D9VsWhole(D9VsConstAmbient));
+    Out->Op(D9VsAdd, Sum, Color, Lighting.Emissive);
+    if (Lighting.Highlights)
+        Out->Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempScratch, 0x7), D9VsConstant(D9VsConstZero, 0));
+
+    for (UINT Kind = 0; Kind < 3; Kind++)
+    {
+        if ((Modes & (1u << Kind)) == 0)
+            continue;
+        if (!Lighting.Single)
+        {
+            Out->Put(0x0200001B);
+            Out->Put(0xF0E40800);
+            Out->Put(0xF0E40000 | Kind);
+        }
+        D9VsLightTerms(Out, &Lighting, Kinds[Kind]);
+        if (!Lighting.Single)
+            Out->Put(0x0000001D);
+    }
+
+    if ((In & D9VsOutDiffuse) != 0)
+    {
+        Out->Op(D9VsMov, D9VsDst(D9VsColorOut, 0, 0x7), Color);
+        Out->Op(D9VsMov, D9VsDst(D9VsColorOut, 0, 0x8), D9VsSwizzled(Lighting.Diffuse, D9VsW));
+    }
+    if ((In & D9VsOutSpecular) != 0)
+    {
+        if ((In & D9VsSpecularOn) != 0)
+        {
+            Out->Op(D9VsMul, D9VsDst(D9VsColorOut, 1, 0x7), D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll),
+                    Lighting.Specular);
+            Out->Op(D9VsMov, D9VsDst(D9VsColorOut, 1, 0x8), D9VsSwizzled(Lighting.Specular, D9VsW));
+        }
+        else
+        {
+            Out->Op(D9VsMov, D9VsDst(D9VsColorOut, 1, 0xF), VertexSpecular);
+        }
+    }
+}
+
 BOOLEAN
 D9BuildFixedVertexShader(
     _Inout_ D9_FIXED_VERTEX_KEY* Key,
@@ -472,7 +773,7 @@ D9BuildFixedVertexShader(
     *Count = 0;
 
     /* Parts not converted yet */
-    if ((In & (D9VsTweening | D9VsLighting)) != 0 || (Needs & D9VertexNeedsBlend) != 0)
+    if ((In & D9VsTweening) != 0 || (Needs & D9VertexNeedsBlend) != 0)
         return FALSE;
 
     Position = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Position), D9VsAll);
@@ -552,11 +853,18 @@ D9BuildFixedVertexShader(
         Out.Op(D9VsMov, D9VsDst(D9VsTemp, D9VsTempNormal, 0x7), D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsAll));
     }
 
-    /* Without lighting the vertex colors pass through */
-    if (DiffuseOut)
-        Out.Op(D9VsMov, D9VsDst(D9VsColorOut, 0, 0xF), Diffuse);
-    if (SpecularOut)
-        Out.Op(D9VsMov, D9VsDst(D9VsColorOut, 1, 0xF), Specular);
+    /* Lighting makes the colors; without it the vertex colors pass through */
+    if ((In & D9VsLighting) != 0)
+    {
+        D9VsWriteLighting(&Out, Key, Diffuse, Specular, FlowControl);
+    }
+    else
+    {
+        if (DiffuseOut)
+            Out.Op(D9VsMov, D9VsDst(D9VsColorOut, 0, 0xF), Diffuse);
+        if (SpecularOut)
+            Out.Op(D9VsMov, D9VsDst(D9VsColorOut, 1, 0xF), Specular);
+    }
 
     /* Vertex fog from the eye distance or depth, or the specular alpha when no mode is set */
     if ((In & (D9VsFog | D9VsOutFog)) == (D9VsFog | D9VsOutFog))
@@ -623,9 +931,7 @@ D9BuildFixedVertexShader(
             Out.Op(D9VsMad, Sum, Summed, Measured, D9VsConstant(D9VsConstPointScale, 0));
             if (FlowControl)
             {
-                Out.Put(0x02000029 | (6u << 16));
-                Out.Source(Summed);
-                Out.Source(D9VsConstant(D9VsConstZero, 0));
+                D9VsIf(&Out, 6, Summed, D9VsConstant(D9VsConstZero, 0));
                 Out.Op(D9VsMov, Points, D9VsConstant(D9VsConstPoint, 0));
                 Out.Put(0x0000002A);
                 Out.Op(D9VsRsq, Sum, Summed);
@@ -795,6 +1101,9 @@ D9VertexConverter::Start(
     }
     Mark = 0;
     ZeroMemory(Loops, sizeof(Loops));
+    LightCount = 0;
+    EnabledCount = 0;
+    ActiveCount = 0;
     ZeroMemory(&Key, sizeof(Key));
     ZeroMemory(&UsedKey, sizeof(UsedKey));
     UsedKey.Size = 0xFFFFFFFF;
@@ -1371,6 +1680,237 @@ D9VertexConverter::TakeOldest(
     return TRUE;
 }
 
+/* Lights */
+
+D9_VS_LIGHT*
+D9VertexConverter::FindLight(
+    _In_ DWORD Index)
+{
+    for (UINT Slot = 0; Slot < LightCount; Slot++)
+    {
+        if (Lights[Slot].Index == Index)
+            return &Lights[Slot];
+    }
+    return nullptr;
+}
+
+/* A new light waits for the list of enabled lights; a change to an enabled one moves or recolors it */
+BOOLEAN
+D9VertexConverter::SetLight(
+    _In_ DWORD Index,
+    _In_ const D3DLIGHT9* Light)
+{
+    D9_VS_LIGHT* Kept = FindLight(Index);
+
+    if (Kept == nullptr)
+    {
+        if (Lights == nullptr)
+        {
+            Lights = new (std::nothrow) D9_VS_LIGHT[D9VertexLightCapacity];
+            if (Lights == nullptr)
+                return FALSE;
+        }
+        if (LightCount == D9VertexLightCapacity)
+            return FALSE;
+        Kept = &Lights[LightCount];
+        LightCount += 1;
+        Kept->Index = Index;
+        Kept->Enabled = FALSE;
+        Kept->Light = *Light;
+        Stale |= 0xC00000;
+        Dirty = TRUE;
+    }
+    if (Kept->Enabled)
+    {
+        if (Light->Type != Kept->Light.Type)
+        {
+            Stale |= 0x400000;
+            Dirty = TRUE;
+        }
+        if (Kept->Light.Direction.x != Light->Direction.x || Kept->Light.Direction.y != Light->Direction.y ||
+            Kept->Light.Direction.z != Light->Direction.z || Kept->Light.Position.x != Light->Position.x ||
+            Kept->Light.Position.y != Light->Position.y || Kept->Light.Position.z != Light->Position.z)
+        {
+            Stale |= 0x800000;
+            Dirty = TRUE;
+        }
+        if ((Stale & 0x400000) == 0)
+            Stale |= 0x2000000;
+    }
+    Kept->Light = *Light;
+    return TRUE;
+}
+
+/* Enabling puts a light first among the enabled ones; a light never set starts as the default one */
+BOOLEAN
+D9VertexConverter::EnableLight(
+    _In_ DWORD Index,
+    _In_ BOOLEAN Enable)
+{
+    D9_VS_LIGHT* Kept = FindLight(Index);
+    UINT Slot;
+
+    if (Kept == nullptr)
+    {
+        D3DLIGHT9 Default = {};
+
+        Default.Type = D3DLIGHT_DIRECTIONAL;
+        Default.Diffuse.r = Default.Diffuse.g = Default.Diffuse.b = 1.0f;
+        Default.Direction.z = 1.0f;
+        if (!SetLight(Index, &Default))
+            return FALSE;
+        Kept = FindLight(Index);
+    }
+    if ((Kept->Enabled != FALSE) == (Enable != FALSE))
+        return TRUE;
+
+    Slot = static_cast<UINT>(Kept - Lights);
+    for (UINT Place = 0; Place < EnabledCount; Place++)
+    {
+        if (Enabled[Place] != Slot)
+            continue;
+        MoveMemory(&Enabled[Place], &Enabled[Place + 1], (EnabledCount - Place - 1) * sizeof(Enabled[0]));
+        EnabledCount -= 1;
+        break;
+    }
+    if (Enable)
+    {
+        MoveMemory(&Enabled[1], &Enabled[0], EnabledCount * sizeof(Enabled[0]));
+        Enabled[0] = Slot;
+        EnabledCount += 1;
+    }
+    Kept->Enabled = Enable;
+    Stale |= 0x400000;
+    Dirty = TRUE;
+    return TRUE;
+}
+
+/* Directional lights take the first registers, then point and spot lights, each kind looping by seven */
+BOOLEAN
+D9VertexConverter::GatherLights(VOID)
+{
+    UINT Counts[3] = {};
+    UINT Taken[3] = {};
+
+    Stale = (Stale | 0x2C00000) & ~0x400000u;
+    Dirty = TRUE;
+    Key.Modes &= ~0x7u;
+    ActiveCount = 0;
+    for (UINT Place = 0; Place < EnabledCount && ActiveCount < LightLimit; Place++)
+    {
+        const D9_VS_LIGHT* Light = &Lights[Enabled[Place]];
+
+        Active[ActiveCount] = Light;
+        ActiveCount += 1;
+        if (Light->Light.Type == D3DLIGHT_DIRECTIONAL)
+            Key.Modes |= 1;
+        else if (Light->Light.Type == D3DLIGHT_POINT)
+            Key.Modes |= 2;
+        else
+            Key.Modes |= 4;
+    }
+    for (UINT Index = 0; Index < ActiveCount; Index++)
+    {
+        D3DLIGHTTYPE Type = Active[Index]->Light.Type;
+
+        Counts[Type == D3DLIGHT_DIRECTIONAL ? 0 : Type == D3DLIGHT_POINT ? 1 : 2] += 1;
+    }
+    for (UINT Index = 0; Index < ActiveCount; Index++)
+    {
+        D3DLIGHTTYPE Type = Active[Index]->Light.Type;
+        UINT Kind = Type == D3DLIGHT_DIRECTIONAL ? 0 : Type == D3DLIGHT_POINT ? 1 : 2;
+        UINT Before = Kind == 0 ? 0 : Kind == 1 ? Counts[0] : Counts[0] + Counts[1];
+
+        ActiveSlots[Index] = Before + Taken[Kind];
+        Taken[Kind] += 1;
+    }
+    for (UINT Kind = 0; Kind < 3; Kind++)
+    {
+        UINT Before = Kind == 0 ? 0 : Kind == 1 ? Counts[0] : Counts[0] + Counts[1];
+
+        Loops[Kind][0] = static_cast<INT>(Counts[Kind]);
+        Loops[Kind][1] = static_cast<INT>(7 * Before);
+        Loops[Kind][2] = 7;
+        Loops[Kind][3] = 0;
+    }
+    if (ActiveCount == 1)
+    {
+        Key.Modes |= 0x8;
+        return FALSE;
+    }
+    Key.Modes &= ~0x8u;
+    return TRUE;
+}
+
+/* A light's colors, attenuation and cone in its seven registers */
+VOID
+D9VertexConverter::WriteLight(
+    _In_ UINT Slot,
+    _In_ const D3DLIGHT9* Light)
+{
+    UINT Base = D9VertexFixedRegisters + 7 * Slot;
+    FLOAT* Block = Registers[Base];
+
+    CopyMemory(Block, &Light->Ambient, sizeof(Light->Ambient));
+    CopyMemory(Block + 4, &Light->Diffuse, sizeof(Light->Diffuse));
+    CopyMemory(Block + 8, &Light->Specular, sizeof(Light->Specular));
+    Block[20] = Light->Attenuation0;
+    Block[21] = Light->Attenuation1;
+    Block[22] = Light->Attenuation2;
+    Block[23] = Light->Falloff;
+    Block[24] = cosf(Light->Theta * 0.5f);
+    Block[25] = cosf(Light->Phi * 0.5f);
+    Block[26] = Light->Range;
+    Touch(1, Base, Base + 7);
+}
+
+/* Directions and positions move into eye space; directions keep unit length */
+VOID
+D9VertexConverter::TransformLights(VOID)
+{
+    for (UINT Index = 0; Index < ActiveCount; Index++)
+    {
+        const D3DLIGHT9* Light = &Active[Index]->Light;
+        UINT Base = D9VertexFixedRegisters + 7 * ActiveSlots[Index];
+
+        if (Light->Type == D3DLIGHT_SPOT || Light->Type == D3DLIGHT_DIRECTIONAL)
+        {
+            FLOAT* Direction = Registers[Base + 3];
+            FLOAT X = (Light->Direction.x * View._11 + Light->Direction.y * View._21) + Light->Direction.z * View._31;
+            FLOAT Y = (Light->Direction.x * View._12 + Light->Direction.y * View._22) + Light->Direction.z * View._32;
+            FLOAT Z = (Light->Direction.x * View._13 + Light->Direction.y * View._23) + Light->Direction.z * View._33;
+            FLOAT Length = sqrtf((X * X + Y * Y) + Z * Z);
+
+            Direction[0] = X;
+            Direction[1] = Y;
+            Direction[2] = Z;
+            Direction[3] = 1.0f;
+            if (Length != 0.0f)
+            {
+                FLOAT Inverse = 1.0f / Length;
+
+                Direction[0] = X * Inverse;
+                Direction[1] = Y * Inverse;
+                Direction[2] = Z * Inverse;
+            }
+            Touch(1, Base + 3, Base + 4);
+        }
+        if (Light->Type == D3DLIGHT_POINT || Light->Type == D3DLIGHT_SPOT)
+        {
+            FLOAT* Position = Registers[Base + 4];
+
+            Position[0] = ((Light->Position.x * View._11 + Light->Position.y * View._21) +
+                           Light->Position.z * View._31) + View._41;
+            Position[1] = ((Light->Position.x * View._12 + Light->Position.y * View._22) +
+                           Light->Position.z * View._32) + View._42;
+            Position[2] = ((Light->Position.x * View._13 + Light->Position.y * View._23) +
+                           Light->Position.z * View._33) + View._43;
+            Position[3] = 1.0f;
+            Touch(1, Base + 4, Base + 5);
+        }
+    }
+}
+
 /* One row of the product of two matrices, each sum taken in row order */
 static
 VOID
@@ -1506,6 +2046,17 @@ D9VertexConverter::UpdateRegisters(VOID)
             WriteMatrix(D9VsConstNormal, &Inverse);
             Flags &= ~0x100u;
         }
+    }
+    if ((Flags & 0x800000) != 0)
+    {
+        TransformLights();
+        Flags &= ~0x800000u;
+    }
+    if ((Flags & 0x2000000) != 0)
+    {
+        for (UINT Index = 0; Index < ActiveCount; Index++)
+            WriteLight(ActiveSlots[Index], &Active[Index]->Light);
+        Flags &= ~0x2000000u;
     }
     Updated = Flags;
     Stale = Flags;
