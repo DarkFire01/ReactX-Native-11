@@ -666,17 +666,15 @@ XaProcessMaster(
     }
     else
     {
-        for (UINT32 Frame = 0; Frame < Frames; Frame++)
-        {
-            for (UINT32 Row = 0; Row < DeviceChannels; Row++)
-            {
-                float Sum = 0.0f;
+        XaMixBlock Block = {};
 
-                for (UINT32 Column = 0; Column < Channels; Column++)
-                    Sum += Mix[Frame * Channels + Column] * Master->DeviceMatrix[Row * Channels + Column];
-                Device[Frame * DeviceChannels + Row] = Sum;
-            }
-        }
+        Block.Input = Mix;
+        Block.Output = Device;
+        Block.Frames = Frames;
+        Block.InputChannels = Channels;
+        Block.OutputChannels = DeviceChannels;
+        Block.Matrix = Master->DeviceMatrix;
+        XaMatrixMix(&Block);
     }
     if (Frames < DeviceFrames)
         memset(Device + static_cast<SIZE_T>(Frames) * DeviceChannels, 0, sizeof(*Device) * (DeviceFrames - Frames) * DeviceChannels);
