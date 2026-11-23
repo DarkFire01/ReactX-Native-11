@@ -410,6 +410,8 @@ ScSwz(
 }
 
 static constexpr UINT ScSwzXYZW = ScSwz(0, 1, 2, 3);
+static constexpr UINT ScSwzXXXX = ScSwz(0, 0, 0, 0);
+static constexpr UINT ScSwzYYYY = ScSwz(1, 1, 1, 1);
 static constexpr UINT ScSwzXYYY = ScSwz(0, 1, 1, 1);
 static constexpr UINT ScSwzWWWW = ScSwz(3, 3, 3, 3);
 static constexpr UINT ScSwzZZZZ = ScSwz(2, 2, 2, 2);
