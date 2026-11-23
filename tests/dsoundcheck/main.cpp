@@ -1950,6 +1950,398 @@ DcEnumDescriptionA(
     return *static_cast<UINT*>(Context) < 1;
 }
 
+static
+VOID
+DcShowDescription1(
+    _In_z_ PCSTR Name,
+    _In_ const DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA* Data)
+{
+    printf("%s type %d flow %d", Name, Data->Type, Data->DataFlow);
+    DcGuid(" id", &Data->DeviceId);
+    printf("%s description %.256s / %.256ls module %.260s / %.260ls wave %lu devnode %lX\n", Name, Data->DescriptionA,
+           Data->DescriptionW, Data->ModuleA, Data->ModuleW, Data->WaveDeviceId, Data->Devnode);
+}
+
+static
+BOOL
+CALLBACK
+DcEnumDescription1(
+    _In_ PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA Data,
+    _In_ LPVOID Context)
+{
+    DcShowDescription1("  enum1", Data);
+    *static_cast<UINT*>(Context) += 1;
+    return TRUE;
+}
+
+/* A device id and one value after it, the shape of the presence, mixer and acceleration properties */
+struct DC_PRIVATE_VALUE
+{
+    GUID DeviceId;
+    ULONG Value;
+    ULONG Extra;
+};
+
+/* Reads a value property, then writes another value and puts the first one back when the property can be written */
+static
+VOID
+DcPrivateValue(
+    _In_ IKsPropertySet* Properties,
+    _In_z_ PCSTR Name,
+    _In_ REFGUID Set,
+    _In_ ULONG Id,
+    _In_ ULONG Size,
+    _In_ BOOLEAN Writable)
+{
+    DC_PRIVATE_VALUE Data;
+    ULONG Original;
+    ULONG Returned = 0xCCCC;
+    HRESULT hr;
+
+    memset(&Data, 0xCC, sizeof(Data));
+    Data.DeviceId = DSDEVID_DefaultPlayback;
+    hr = Properties->Get(Set, Id, nullptr, 0, &Data, Size, &Returned);
+    printf("private %s get = %08lX %lu value %lX extra %lX\n", Name, hr, Returned, Data.Value, Data.Extra);
+    if (!Writable)
+    {
+        printf("private %s set = %08lX\n", Name, Properties->Set(Set, Id, nullptr, 0, &Data, Size));
+        return;
+    }
+
+    Original = Size == 24 ? Data.Extra : Data.Value;
+    Data.Value = 7;
+    Data.Extra = 7;
+    printf("private %s set = %08lX\n", Name, Properties->Set(Set, Id, nullptr, 0, &Data, Size));
+    printf("private %s set_short = %08lX\n", Name, Properties->Set(Set, Id, nullptr, 0, &Data, Size - 1));
+    memset(&Data.Value, 0xCC, sizeof(Data.Value) * 2);
+    hr = Properties->Get(Set, Id, nullptr, 0, &Data, Size, &Returned);
+    printf("private %s get_after = %08lX value %lX extra %lX\n", Name, hr, Data.Value, Data.Extra);
+    Data.Value = Original;
+    Data.Extra = Original;
+    printf("private %s restore = %08lX\n", Name, Properties->Set(Set, Id, nullptr, 0, &Data, Size));
+}
+
+/* Error code names and descriptions, both widths, at every size around the one needed */
+static
+VOID
+DcPrivateTranslate(
+    _In_ IKsPropertySet* Properties)
+{
+    /* Every code the system names, with its neighbors to catch ranges, and a few it does not */
+    static const ULONG Codes[] =
+    {
+        0x00000000, 0x00000001, 0x00000002, 0x08780009, 0x0878000A, 0x0878000B, 0x12345678, 0x80000000,
+        0x80004000, 0x80004001, 0x80004002, 0x80004003, 0x80004004, 0x80004005, 0x80004006, 0x8004010F,
+        0x80040110, 0x80040111, 0x80040153, 0x80040154, 0x80040155, 0x80040204, 0x80040205, 0x80040206,
+        0x80070004, 0x80070005, 0x80070006, 0x8007000D, 0x8007000E, 0x8007000F, 0x80070056, 0x80070057,
+        0x80070058, 0x88780009, 0x8878000A, 0x8878000B, 0x8878001D, 0x8878001E, 0x8878001F, 0x88780031,
+        0x88780032, 0x88780033, 0x88780045, 0x88780046, 0x88780047, 0x88780063, 0x88780064, 0x88780065,
+        0x88780077, 0x88780078, 0x88780079, 0x88780081, 0x88780082, 0x88780083, 0x88780095, 0x88780096,
+        0x88780097, 0x8878009F, 0x887800A0, 0x887800A1, 0x887800A9, 0x887800AA, 0x887800AB, 0x887800BD,
+        0x887800BE, 0x887800BF, 0x887800C7, 0x887800C8, 0x887800C9, 0x887800D1, 0x887800D2, 0x887800D3,
+        0x88781160, 0x88781161, 0x88781162, 0x887D0002, 0x887D0003, 0x887D0004, 0x88880006, 0x88880007,
+        0x88880008, 0x88880100, 0x88880101, 0x88880102, 0x88880301, 0x88880302, 0x88880303, 0x88880304,
+        0x88880305, 0x88890003, 0x88890004, 0x88890005, 0x88890007, 0x88890008, 0x88890009, 0x8889000A,
+        0x8889000B, 0x8889000E, 0x8889000F, 0x88890010, 0x88890011, 0x89ABCDEF,
+    };
+    union
+    {
+        BYTE Space[1024];
+        struct
+        {
+            HRESULT Code;
+            PVOID Name;
+            PVOID Description;
+        } Head;
+    } Data;
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Codes); Index++)
+    {
+        for (ULONG Id = 2; Id <= 3; Id++)
+        {
+            PVOID Untouched = reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(0xCCCCCCCCCCCCCCCCull));
+            ULONG Needed = 0xCCCC;
+            ULONG Returned = 0xCCCC;
+            HRESULT Head;
+            HRESULT Short;
+            HRESULT hr;
+
+            memset(&Data, 0xCC, sizeof(Data));
+            Data.Head.Code = static_cast<HRESULT>(Codes[Index]);
+            Head = Properties->Get(DcPrivateSets[3], Id, nullptr, 0, &Data, 24, &Needed);
+            printf("private translate %lu %08lX = %08lX %lu", Id, Codes[Index], Head, Needed);
+            if (Data.Head.Name != Untouched || Needed <= 24 || Needed > sizeof(Data))
+            {
+                printf(" name %s\n", Data.Head.Name == Untouched ? "untouched" : "set");
+                continue;
+            }
+
+            Data.Head.Code = static_cast<HRESULT>(Codes[Index]);
+            Short = Properties->Get(DcPrivateSets[3], Id, nullptr, 0, &Data, Needed - 1, &Returned);
+            printf(" short %08lX %lu %s", Short, Returned, Data.Head.Name == Untouched ? "untouched" : "set");
+            Data.Head.Code = static_cast<HRESULT>(Codes[Index]);
+            hr = Properties->Get(DcPrivateSets[3], Id, nullptr, 0, &Data, Needed, &Returned);
+            if (FAILED(hr))
+                printf(" exact %08lX %lu\n", hr, Returned);
+            else if (Id == 2)
+                printf(" exact %08lX %lu %.200s | %.400s\n", hr, Returned, static_cast<PCSTR>(Data.Head.Name),
+                       static_cast<PCSTR>(Data.Head.Description));
+            else
+                printf(" exact %08lX %lu %.200ls | %.400ls\n", hr, Returned, static_cast<PCWSTR>(Data.Head.Name),
+                       static_cast<PCWSTR>(Data.Head.Description));
+        }
+    }
+}
+
+/* Which buffer pointers name a device, and which DirectSound objects the process has */
+static
+VOID
+DcPrivateObjects(
+    _In_ IKsPropertySet* Properties,
+    _In_ const GUID* Playback)
+{
+    PDC_CAPTURE_CREATE CaptureCreate = reinterpret_cast<PDC_CAPTURE_CREATE>(GetProcAddress(DcModule, "DirectSoundCaptureCreate8"));
+    PDC_GET_CLASS_OBJECT GetClassObject = reinterpret_cast<PDC_GET_CLASS_OBJECT>(GetProcAddress(DcModule, "DllGetClassObject"));
+    IDirectSound8* Sounds[2] = {};
+    IUnknown* Faces[2] = {};
+    IDirectSound8* Bare = nullptr;
+    IDirectSoundCapture* Capture = nullptr;
+    IDirectSoundBuffer* Secondary = nullptr;
+    IDirectSoundBuffer* Primary = nullptr;
+    IDirectSoundBuffer* Spatial = nullptr;
+    struct
+    {
+        GUID DeviceId;
+        ULONG Count;
+        ULONG Pad;
+        struct
+        {
+            PVOID Object;
+            GUID DeviceId;
+        } Entries[4];
+    } List;
+    WAVEFORMATEX Format;
+    HRESULT hr;
+
+    struct
+    {
+        PVOID Buffer;
+        GUID DeviceId;
+    } Owner;
+
+    for (UINT Index = 0; Index < 2; Index++)
+    {
+        if (FAILED(DcCreate8(&Sounds[Index])))
+            return;
+        Sounds[Index]->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+        Sounds[Index]->QueryInterface(IID_IDirectSound, reinterpret_cast<void**>(&Faces[Index]));
+    }
+    {
+        IClassFactory* Factory = nullptr;
+
+        if (SUCCEEDED(GetClassObject(CLSID_DirectSound8, IID_IClassFactory, reinterpret_cast<void**>(&Factory))))
+        {
+            Factory->CreateInstance(nullptr, IID_IDirectSound8, reinterpret_cast<void**>(&Bare));
+            Factory->Release();
+        }
+    }
+    if (CaptureCreate != nullptr)
+        CaptureCreate(nullptr, &Capture, nullptr);
+
+    DcFormat(&Format, WAVE_FORMAT_PCM, 1, 22050, 16);
+    DcMakeBuffer(Sounds[0], 0, 4410, &Format, &Secondary);
+    DcMakeBuffer(Sounds[0], DSBCAPS_PRIMARYBUFFER, 0, nullptr, &Primary);
+    DcMakeBuffer(Sounds[1], DSBCAPS_CTRL3D, 4410, &Format, &Spatial);
+
+    {
+        IUnknown* Other = nullptr;
+        BYTE Blank[64] = {};
+        const struct
+        {
+            PCSTR Name;
+            PVOID Pointer;
+        } Tries[] =
+        {
+            { "secondary", Secondary },
+            { "primary", Primary },
+            { "spatial", Spatial },
+            { "sound", Sounds[0] },
+            { "blank", Blank },
+            { "null", nullptr },
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Tries); Index++)
+        {
+            ULONG Returned = 0xCCCC;
+
+            memset(&Owner, 0xCC, sizeof(Owner));
+            Owner.Buffer = Tries[Index].Pointer;
+            hr = Properties->Get(DcPrivateSets[5], 0, nullptr, 0, &Owner, sizeof(Owner), &Returned);
+            printf("private bufferdevice %s = %08lX %lu", Tries[Index].Name, hr, Returned);
+            DcGuid("", SUCCEEDED(hr) ? &Owner.DeviceId : nullptr);
+        }
+        if (Spatial != nullptr && SUCCEEDED(Spatial->QueryInterface(IID_IDirectSound3DBuffer, reinterpret_cast<void**>(&Other))))
+        {
+            memset(&Owner, 0xCC, sizeof(Owner));
+            Owner.Buffer = Other;
+            hr = Properties->Get(DcPrivateSets[5], 0, nullptr, 0, &Owner, sizeof(Owner), nullptr);
+            printf("private bufferdevice spatial3d = %08lX\n", hr);
+            Other->Release();
+        }
+        if (Secondary != nullptr && SUCCEEDED(Secondary->QueryInterface(IID_IDirectSoundBuffer8, reinterpret_cast<void**>(&Other))))
+        {
+            memset(&Owner, 0xCC, sizeof(Owner));
+            Owner.Buffer = Other;
+            hr = Properties->Get(DcPrivateSets[5], 0, nullptr, 0, &Owner, sizeof(Owner), nullptr);
+            printf("private bufferdevice secondary8 = %08lX same %d\n", hr, Other == static_cast<IUnknown*>(Secondary));
+            Other->Release();
+        }
+    }
+
+    for (ULONG Id = 0; Id < 2; Id++)
+    {
+        const struct
+        {
+            PCSTR Name;
+            const GUID* Filter;
+            ULONG Room;
+        } Filters[] =
+        {
+            { "all", &GUID_NULL, sizeof(List) },
+            { "device", Playback, sizeof(List) },
+            { "default", &DSDEVID_DefaultPlayback, sizeof(List) },
+            { "head", &GUID_NULL, 24 },
+            { "one", &GUID_NULL, 48 },
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Filters); Index++)
+        {
+            ULONG Returned = 0xCCCC;
+
+            memset(&List, 0xCC, sizeof(List));
+            List.DeviceId = *Filters[Index].Filter;
+            hr = Properties->Get(DcPrivateSets[6], Id, nullptr, 0, &List, Filters[Index].Room, &Returned);
+            printf("private objects%lu %s = %08lX %lu count %lu\n", Id, Filters[Index].Name, hr, Returned, List.Count);
+            for (ULONG Entry = 0; SUCCEEDED(hr) && Entry < List.Count && Entry < 4; Entry++)
+            {
+                PVOID Object = List.Entries[Entry].Object;
+
+                if (Object == reinterpret_cast<PVOID>(static_cast<ULONG_PTR>(0xCCCCCCCCCCCCCCCCull)))
+                {
+                    printf("  entry %lu untouched\n", Entry);
+                    continue;
+                }
+                printf("  entry %lu %s", Entry, Object == Faces[0] ? "first" : Object == Faces[1] ? "second" :
+                       Object == Sounds[0] ? "first8" : Object == Capture ? "capture" : "other");
+                DcGuid("", &List.Entries[Entry].DeviceId);
+            }
+        }
+    }
+
+    if (Spatial != nullptr)
+        Spatial->Release();
+    if (Primary != nullptr)
+        Primary->Release();
+    if (Secondary != nullptr)
+        Secondary->Release();
+    if (Capture != nullptr)
+        Capture->Release();
+    if (Bare != nullptr)
+        Bare->Release();
+    for (UINT Index = 0; Index < 2; Index++)
+    {
+        if (Faces[Index] != nullptr)
+            Faces[Index]->Release();
+        Sounds[Index]->Release();
+    }
+    {
+        ULONG Returned = 0xCCCC;
+
+        memset(&List, 0xCC, sizeof(List));
+        List.DeviceId = GUID_NULL;
+        hr = Properties->Get(DcPrivateSets[6], 0, nullptr, 0, &List, sizeof(List), &Returned);
+        printf("private objects after = %08lX %lu count %lu\n", hr, Returned, List.Count);
+    }
+}
+
+/* The private properties beyond the device descriptions: old style descriptions, presence, mixer, debug and objects */
+static
+VOID
+DcCheckPrivateMore(
+    _In_ IKsPropertySet* Properties)
+{
+    static const struct
+    {
+        const GUID* Device;
+        DIRECTSOUNDDEVICE_DATAFLOW Flow;
+        PCSTR Name;
+    } Devices[] =
+    {
+        { &DSDEVID_DefaultPlayback, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "playback" },
+        { &DSDEVID_DefaultCapture, DIRECTSOUNDDEVICE_DATAFLOW_CAPTURE, "capture" },
+        { &DSDEVID_DefaultVoiceCapture, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "voicecapture" },
+        { &GUID_NULL, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "nullrender" },
+        { &GUID_NULL, DIRECTSOUNDDEVICE_DATAFLOW_CAPTURE, "nullcapture" },
+        { &IID_IUnknown, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "bogus" },
+    };
+    static DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA Data;
+    GUID Playback = GUID_NULL;
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Devices); Index++)
+    {
+        ULONG Returned = 0xCCCC;
+        CHAR Name[64];
+
+        memset(&Data, 0xCC, sizeof(Data));
+        Data.DeviceId = *Devices[Index].Device;
+        Data.DataFlow = Devices[Index].Flow;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1, nullptr, 0, &Data,
+                             sizeof(Data), &Returned);
+        printf("private %s description_1 = %08lX %lu\n", Devices[Index].Name, hr, Returned);
+        sprintf_s(Name, "private %s 1", Devices[Index].Name);
+        if (SUCCEEDED(hr))
+            DcShowDescription1(Name, &Data);
+        if (SUCCEEDED(hr) && Index == 0)
+            Playback = Data.DeviceId;
+    }
+    {
+        DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_1_DATA Enum = { DcEnumDescription1, nullptr };
+        UINT Count = 0;
+        ULONG Returned = 0xCCCC;
+
+        Enum.Context = &Count;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_1, nullptr, 0, &Enum,
+                             sizeof(Enum), &Returned);
+        printf("private enumerate_1 = %08lX %lu count %u\n", hr, Returned, Count);
+    }
+
+    DcPrivateValue(Properties, "presence_1", DcPrivateSets[1], 0, 20, FALSE);
+    DcPrivateValue(Properties, "presence", DcPrivateSets[1], 9, 24, FALSE);
+    DcPrivateValue(Properties, "srcquality", DcPrivateSets[0], 0, 20, TRUE);
+    DcPrivateValue(Properties, "mixeraccel", DcPrivateSets[0], 1, 20, TRUE);
+    DcPrivateValue(Properties, "basicaccel", DcPrivateSets[2], 0, 20, TRUE);
+    DcPrivateValue(Properties, "defaultaccel", DcPrivateSets[2], 1, 20, FALSE);
+
+    {
+        BYTE Info[532];
+        ULONG Returned = 0xCCCC;
+
+        for (ULONG Id = 0; Id < 2; Id++)
+        {
+            ULONG Size = Id == 0 ? 272 : 532;
+
+            memset(Info, 0xCC, sizeof(Info));
+            hr = Properties->Get(DcPrivateSets[3], Id, nullptr, 0, Info, Size, &Returned);
+            printf("private dpfinfo%lu = %08lX %lu\n", Id, hr, Returned);
+            DcBytes("  head", Info, 20);
+            printf("private dpfinfo%lu set = %08lX\n", Id, Properties->Set(DcPrivateSets[3], Id, nullptr, 0, Info, Size));
+        }
+    }
+    DcPrivateTranslate(Properties);
+    DcPrivateObjects(Properties, &Playback);
+}
+
 /* The DirectSoundPrivate class: its interfaces, which properties it answers and how big they are, and the device set */
 static
 VOID
@@ -2104,6 +2496,7 @@ DcCheckPrivate(VOID)
                              sizeof(MapW), nullptr);
         printf("private mapping_badflow = %08lX\n", hr);
     }
+    DcCheckPrivateMore(Properties);
     printf("private release %lu\n", Properties->Release());
 }
 
