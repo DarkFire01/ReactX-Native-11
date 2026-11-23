@@ -537,12 +537,36 @@ DcCheckArguments(
     Converter->Release();
 }
 
+/* One signature element the way the D3D12 runtime hands it to a driver (D3D12DDIARG_SIGNATURE_ENTRY_0012) */
+typedef struct _DC_DDI_ELEMENT
+{
+    ULONG SystemValue;
+    ULONG Register;
+    BYTE Mask;
+    BYTE Stream;
+    ULONG ComponentType;
+    ULONG MinPrecision;
+} DC_DDI_ELEMENT;
+
+/* The signature arrays for one shader, null pointers where a signature is left out */
+typedef struct _DC_DDI_SIGNATURES
+{
+    const DC_DDI_ELEMENT* Input;
+    UINT32 InputCount;
+    const DC_DDI_ELEMENT* Output;
+    UINT32 OutputCount;
+    const DC_DDI_ELEMENT* Patch;
+    UINT32 PatchCount;
+} DC_DDI_SIGNATURES;
+
 /* Calls ConvertInDriver and turns a fault inside it into a printable code */
 static
 HRESULT
 DcGuardedDriverConvert(
     _In_ IDxbcConverter* Converter,
     _In_opt_ const UINT32* Bytecode,
+    _In_ const DC_DDI_SIGNATURES* Signatures,
+    _In_opt_z_ PCWSTR Options,
     _Out_opt_ IDxcBlob** Blob,
     _Out_opt_ LPWSTR* Diag,
     _Out_ PULONG Fault)
@@ -550,7 +574,16 @@ DcGuardedDriverConvert(
     *Fault = 0;
     __try
     {
-        return Converter->ConvertInDriver(Bytecode, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, Blob, Diag);
+        return Converter->ConvertInDriver(Bytecode,
+                                          Signatures->Input,
+                                          Signatures->InputCount,
+                                          Signatures->Output,
+                                          Signatures->OutputCount,
+                                          Signatures->Patch,
+                                          Signatures->PatchCount,
+                                          Options,
+                                          Blob,
+                                          Diag);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -570,6 +603,7 @@ DcCheckDriverArguments(
     ULONG Parts = *reinterpret_cast<const ULONG*>(Source + 28);
     const UINT32* Program = nullptr;
     UINT32 Short[2] = { 0, 1 };
+    DC_DDI_SIGNATURES NoSignatures = {};
     const struct
     {
         PCSTR Name;
@@ -605,7 +639,7 @@ DcCheckDriverArguments(
         if (Converter == nullptr)
             return;
 
-        hr = DcGuardedDriverConvert(Converter, Bytecode, WantBlob ? &Blob : nullptr, &Diag, &Fault);
+        hr = DcGuardedDriverConvert(Converter, Bytecode, &NoSignatures, nullptr, WantBlob ? &Blob : nullptr, &Diag, &Fault);
         printf("%s: hr=%08lX fault=%08lX blob=%s diag=%s\n",
                Name,
                hr,
@@ -621,6 +655,243 @@ DcCheckDriverArguments(
 
         Converter->Release();
     }
+}
+
+/* Finds the first part with one of the codes, in preference order */
+static
+const BYTE*
+DcFindPart(
+    _In_ ID3DBlob* Code,
+    _In_reads_(Count) const ULONG* Codes,
+    _In_ ULONG Count,
+    _Out_ PULONG Found,
+    _Out_ PULONG Size)
+{
+    const BYTE* Source = static_cast<const BYTE*>(Code->GetBufferPointer());
+    ULONG Parts = *reinterpret_cast<const ULONG*>(Source + 28);
+
+    for (ULONG Choice = 0; Choice < Count; Choice++)
+    {
+        for (ULONG Part = 0; Part < Parts; Part++)
+        {
+            ULONG Offset = *reinterpret_cast<const ULONG*>(Source + 32 + Part * 4);
+
+            if (*reinterpret_cast<const ULONG*>(Source + Offset) != Codes[Choice])
+                continue;
+
+            *Found = Codes[Choice];
+            *Size = *reinterpret_cast<const ULONG*>(Source + Offset + 4);
+            return Source + Offset + 8;
+        }
+    }
+
+    *Found = 0;
+    *Size = 0;
+    return nullptr;
+}
+
+/* D3D_NAME to the token name the DDI uses; tessellation factors split per component there */
+static
+ULONG
+DcDdiSystemValue(
+    _In_ ULONG Name,
+    _In_ ULONG SemanticIndex)
+{
+    switch (Name)
+    {
+    case 11:
+        return 11 + SemanticIndex;
+    case 12:
+        return 15 + SemanticIndex;
+    case 13:
+        return 17 + SemanticIndex;
+    case 14:
+        return 20;
+    case 15:
+        return 21;
+    case 16:
+        return 22;
+    default:
+        return Name < 64 ? Name : 0;
+    }
+}
+
+/**
+ * Turns a container signature part into DDI elements. ISG1, OSG1 and PSG1 rows are 32 bytes
+ * with a leading stream and a trailing min precision; OSG5 rows are 28 with the stream only.
+ */
+static
+VOID
+DcReadSignature(
+    _In_ ID3DBlob* Code,
+    _In_reads_(Count) const ULONG* Codes,
+    _In_ ULONG Count,
+    _Out_ std::vector<DC_DDI_ELEMENT>& Elements)
+{
+    const BYTE* Data;
+    ULONG Found;
+    ULONG Size;
+    ULONG Stride;
+    ULONG Base;
+    ULONG Rows;
+
+    Elements.clear();
+    Data = DcFindPart(Code, Codes, Count, &Found, &Size);
+    if (Data == nullptr || Size < 8)
+        return;
+
+    if (Found == DXC_FOURCC('I', 'S', 'G', '1') || Found == DXC_FOURCC('O', 'S', 'G', '1') ||
+        Found == DXC_FOURCC('P', 'S', 'G', '1'))
+    {
+        Stride = 32;
+        Base = 4;
+    }
+    else if (Found == DXC_FOURCC('O', 'S', 'G', '5'))
+    {
+        Stride = 28;
+        Base = 4;
+    }
+    else
+    {
+        Stride = 24;
+        Base = 0;
+    }
+
+    Rows = *reinterpret_cast<const ULONG*>(Data);
+    for (ULONG Row = 0; Row < Rows; Row++)
+    {
+        const BYTE* At = Data + *reinterpret_cast<const ULONG*>(Data + 4) + Row * Stride;
+        DC_DDI_ELEMENT Element;
+
+        if (At + Stride > Data + Size)
+            break;
+
+        Element.SystemValue = DcDdiSystemValue(*reinterpret_cast<const ULONG*>(At + Base + 8),
+                                               *reinterpret_cast<const ULONG*>(At + Base + 4));
+        Element.ComponentType = *reinterpret_cast<const ULONG*>(At + Base + 12);
+        Element.Register = *reinterpret_cast<const ULONG*>(At + Base + 16);
+        Element.Mask = At[Base + 20];
+        Element.Stream = Base != 0 ? static_cast<BYTE>(*reinterpret_cast<const ULONG*>(At)) : 0;
+        Element.MinPrecision = Stride == 32 ? *reinterpret_cast<const ULONG*>(At + 28) : 0;
+        Elements.push_back(Element);
+    }
+}
+
+/* Runs ConvertInDriver on one shader and prints the module it returns */
+static
+VOID
+DcDriverConvert(
+    _In_z_ PCSTR Label,
+    _In_ const UINT32* Program,
+    _In_ const DC_DDI_SIGNATURES* Signatures,
+    _In_opt_z_ PCWSTR Options,
+    _In_ BOOLEAN Leak)
+{
+    IDxbcConverter* Converter = DcNewConverter();
+    IDxcBlob* Blob = reinterpret_cast<IDxcBlob*>(1);
+    LPWSTR Diag = reinterpret_cast<LPWSTR>(1);
+    ULONG Fault;
+    HRESULT hr;
+
+    if (Converter == nullptr)
+    {
+        printf("%s: no converter\n", Label);
+        return;
+    }
+
+    hr = DcGuardedDriverConvert(Converter, Program, Signatures, Options, &Blob, &Diag, &Fault);
+    if (Fault != 0)
+    {
+        /* A converter that faulted part way is not released, its state is unknown */
+        printf("%s: fault=%08lX\n", Label, Fault);
+        return;
+    }
+
+    printf("%s: hr=%08lX blob=%s\n",
+           Label,
+           hr,
+           Blob == nullptr ? "null" : (Blob == reinterpret_cast<IDxcBlob*>(1) ? "untouched" : "set"));
+
+    if (Blob != nullptr && Blob != reinterpret_cast<IDxcBlob*>(1))
+    {
+        printf("  module size=%zu fnv=%08lX\n", Blob->GetBufferSize(), DcHash(Blob->GetBufferPointer(), Blob->GetBufferSize()));
+        DcDump(Label, "bc", Blob->GetBufferPointer(), Blob->GetBufferSize());
+        Blob->Release();
+    }
+
+    if (Diag == reinterpret_cast<LPWSTR>(1))
+    {
+        printf("  diag=untouched\n");
+    }
+    else
+    {
+        DcPrintDiag(Diag);
+        if (Diag != nullptr)
+            CoTaskMemFree(Diag);
+    }
+
+    if (!Leak)
+        Converter->Release();
+}
+
+static const ULONG DcProgramCodes[] = { DXC_FOURCC('S', 'H', 'E', 'X'), DXC_FOURCC('S', 'H', 'D', 'R') };
+static const ULONG DcInputCodes[] = { DXC_FOURCC('I', 'S', 'G', '1'), DXC_FOURCC('I', 'S', 'G', 'N') };
+static const ULONG DcOutputCodes[] =
+{
+    DXC_FOURCC('O', 'S', 'G', '1'),
+    DXC_FOURCC('O', 'S', 'G', '5'),
+    DXC_FOURCC('O', 'S', 'G', 'N'),
+};
+static const ULONG DcPatchCodes[] = { DXC_FOURCC('P', 'S', 'G', '1'), DXC_FOURCC('P', 'C', 'S', 'G') };
+
+/**
+ * Feeds a compiled shader through ConvertInDriver with its signatures as DDI arrays.
+ * NullMask drops the input (1), output (2) or patch constant (4) array but keeps its count.
+ */
+static
+VOID
+DcDriverShader(
+    _In_z_ PCSTR Name,
+    _In_ ID3DBlob* Code,
+    _In_ ULONG NullMask)
+{
+    std::vector<DC_DDI_ELEMENT> Input;
+    std::vector<DC_DDI_ELEMENT> Output;
+    std::vector<DC_DDI_ELEMENT> Patch;
+    DC_DDI_SIGNATURES Signatures;
+    const UINT32* Program;
+    CHAR Label[96];
+    ULONG Found;
+    ULONG Size;
+
+    Program = reinterpret_cast<const UINT32*>(DcFindPart(Code, DcProgramCodes, _countof(DcProgramCodes), &Found, &Size));
+    if (Program == nullptr)
+        return;
+
+    DcReadSignature(Code, DcInputCodes, _countof(DcInputCodes), Input);
+    DcReadSignature(Code, DcOutputCodes, _countof(DcOutputCodes), Output);
+    DcReadSignature(Code, DcPatchCodes, _countof(DcPatchCodes), Patch);
+
+    Signatures.Input = (NullMask & 1) != 0 ? nullptr : Input.data();
+    Signatures.InputCount = static_cast<UINT32>(Input.size());
+    Signatures.Output = (NullMask & 2) != 0 ? nullptr : Output.data();
+    Signatures.OutputCount = static_cast<UINT32>(Output.size());
+    Signatures.Patch = (NullMask & 4) != 0 ? nullptr : Patch.data();
+    Signatures.PatchCount = static_cast<UINT32>(Patch.size());
+
+    if (NullMask == 0)
+    {
+        sprintf_s(Label, "%s driver", Name);
+        printf("%s signatures in=%u out=%u patch=%u\n", Label, Signatures.InputCount, Signatures.OutputCount, Signatures.PatchCount);
+        DcDriverConvert(Label, Program, &Signatures, nullptr, FALSE);
+
+        sprintf_s(Label, "%s driver nocleanup", Name);
+        DcDriverConvert(Label, Program, &Signatures, L"-no-dxil-cleanup", FALSE);
+        return;
+    }
+
+    sprintf_s(Label, "%s driver null%s%s%s", Name, (NullMask & 1) != 0 ? " in" : "", (NullMask & 2) != 0 ? " out" : "", (NullMask & 4) != 0 ? " patch" : "");
+    DcDriverConvert(Label, Program, &Signatures, nullptr, TRUE);
 }
 
 static
@@ -655,6 +926,7 @@ wmain(
     PCWSTR Runtime = L"system";
     WCHAR Loaded[MAX_PATH];
     HMODULE Module;
+    ID3DBlob* Codes[_countof(DcCorpus)] = {};
     ID3DBlob* First = nullptr;
 
     for (int Index = 1; Index < argc; Index++)
@@ -701,18 +973,29 @@ wmain(
                   static_cast<UINT32>(Code->GetBufferSize()),
                   nullptr,
                   TRUE);
+        DcDriverShader(DcCorpus[Index].Name, Code, 0);
 
+        Codes[Index] = Code;
         if (First == nullptr)
             First = Code;
-        else
-            Code->Release();
     }
 
     if (First != nullptr)
     {
         DcCheckArguments(First);
         DcCheckDriverArguments(First);
-        First->Release();
+    }
+
+    /* Null arrays with a nonzero count last, the reference faults reading them */
+    for (ULONG Index = 0; Index < _countof(DcCorpus); Index++)
+    {
+        if (Codes[Index] == nullptr)
+            continue;
+
+        for (ULONG NullMask = 1; NullMask <= 4; NullMask <<= 1)
+            DcDriverShader(DcCorpus[Index].Name, Codes[Index], NullMask);
+
+        Codes[Index]->Release();
     }
 
     return 0;
