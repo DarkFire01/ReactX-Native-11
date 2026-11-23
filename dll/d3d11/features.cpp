@@ -243,9 +243,16 @@ RxDevice::CheckFeatureSupport(
             Umd.GetCaps(D3DWDDM2_0DDICAPS_D3D11_OPTIONS2, &Options, sizeof(Options));
             Umd.GetCaps(D3DWDDM2_0DDICAPS_MEMORY_ARCHITECTURE, &Memory, sizeof(Memory));
             Answer.PSSpecifiedStencilRefSupported = (Shader.Caps & D3D11DDICAPS_SHADER_SPECIFIED_STENCIL_REF) != 0;
-            Answer.TypedUAVLoadAdditionalFormats = (Shader.Caps & D3D11DDICAPS_SHADER_TYPED_UAV_LOAD_ADDITIONAL_FORMATS) != 0;
-            Answer.ROVsSupported = (Shader.Caps & D3D11DDICAPS_SHADER_ROVS) != 0;
-            Answer.ConservativeRasterizationTier = (D3D11_CONSERVATIVE_RASTERIZATION_TIER)Options.ConservativeRasterizationTier;
+
+            /* Typed loads need feature level 11_0, ROVs and conservative rasterization 11_1 */
+            Answer.TypedUAVLoadAdditionalFormats =
+                Level >= D3D_FEATURE_LEVEL_11_0 && (Shader.Caps & D3D11DDICAPS_SHADER_TYPED_UAV_LOAD_ADDITIONAL_FORMATS) != 0;
+            if (Level >= D3D_FEATURE_LEVEL_11_1)
+            {
+                Answer.ROVsSupported = (Shader.Caps & D3D11DDICAPS_SHADER_ROVS) != 0;
+                Answer.ConservativeRasterizationTier =
+                    (D3D11_CONSERVATIVE_RASTERIZATION_TIER)Options.ConservativeRasterizationTier;
+            }
             Answer.TiledResourcesTier = D3D11_TILED_RESOURCES_NOT_SUPPORTED;
 
             /* Mapping default textures and standard swizzle need a WDDM 2 device interface */
