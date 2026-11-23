@@ -3258,6 +3258,117 @@ XcCheckEcho(VOID)
 
 static
 VOID
+XcCheckLimiter(VOID)
+{
+    static const FXMASTERINGLIMITER_PARAMETERS Fast = { 1, 1800 };
+    static const FXMASTERINGLIMITER_PARAMETERS Slow = { 20, 1 };
+    static const FXMASTERINGLIMITER_PARAMETERS Outside = { 0, 0 };
+    static const FXMASTERINGLIMITER_PARAMETERS Beyond = { 100, 5000 };
+    static const FXMASTERINGLIMITER_PARAMETERS Default = { FXMASTERINGLIMITER_DEFAULT_RELEASE, 600 };
+    static const struct
+    {
+        UINT32 Channels;
+        DWORD Rate;
+        UINT32 Frames;
+        float Amplitude;
+    } Shapes[] =
+    {
+        { 1, 44100, 441, 0.8f },
+        { 6, 48000, 480, 0.6f },
+        { 2, 16000, 960, 1.4f },
+        { 2, 96000, 960, 0.3f },
+        { 8, 192000, 960, 0.9f },
+        { 3, 22050, 7, 0.5f },
+        { 4, 32000, 1, 0.7f },
+        { 2, 11025, 300, 0.002f },
+    };
+    XcApoRun& Run = *new XcApoRun();
+    IXAPO* Apo = XcCreateFx("limiter", __uuidof(FXMasteringLimiter), &Fast, sizeof(Fast), TRUE);
+
+    if (Apo == nullptr)
+        return;
+    XcApoParameters("limiter parameters", Apo, sizeof(FXMASTERINGLIMITER_PARAMETERS));
+    printf("limiter initialize = %08lX\n", Apo->Initialize(&Fast, 1));
+    XcApoParameters("limiter parameters after initialize", Apo, sizeof(FXMASTERINGLIMITER_PARAMETERS));
+
+    /* Parameters set before the lock reach the limiter with the first Process */
+    XcApoSet(Apo, &Fast, sizeof(Fast));
+    Run.Apo = Apo;
+    Run.InChannels = 2;
+    Run.OutChannels = 2;
+    Run.Frames = 480;
+    Run.InPlace = FALSE;
+    Run.Amplitude = 0.9f;
+    Run.Seed = 11;
+    printf("limiter lock = %08lX\n", XcApoLock(&Run, 48000));
+    XcApoParameters("limiter parameters locked", Apo, sizeof(FXMASTERINGLIMITER_PARAMETERS));
+    for (UINT Block = 0; Block < 6; Block++)
+        XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoParameters("limiter parameters processed", Apo, sizeof(FXMASTERINGLIMITER_PARAMETERS));
+    Run.Amplitude = 1.7f;
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    Run.Amplitude = 0.01f;
+    for (UINT Block = 0; Block < 4; Block++)
+        XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Slow, sizeof(Slow));
+    Run.Amplitude = 0.4f;
+    for (UINT Block = 0; Block < 4; Block++)
+        XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Default, sizeof(Default));
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_SILENT, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_SILENT, FALSE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    Run.InPlace = TRUE;
+    XcApoSet(Apo, &Outside, sizeof(Outside));
+    for (UINT Block = 0; Block < 4; Block++)
+        XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Beyond, sizeof(Beyond));
+    for (UINT Block = 0; Block < 4; Block++)
+        XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->Reset();
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("limiter", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+
+    /* Each lock sizes the analysis from the rate and starts over from the default settings */
+    for (UINT Shape = 0; Shape < ARRAYSIZE(Shapes); Shape++)
+    {
+        char Name[64];
+
+        sprintf_s(Name, "limiter %u/%lu", Shapes[Shape].Channels, Shapes[Shape].Rate);
+        Run.InChannels = Shapes[Shape].Channels;
+        Run.OutChannels = Shapes[Shape].Channels;
+        Run.Frames = Shapes[Shape].Frames;
+        Run.Amplitude = Shapes[Shape].Amplitude;
+        Run.InPlace = Shape % 2 == 0;
+        Run.Block = 0;
+        printf("%s lock = %08lX\n", Name, XcApoLock(&Run, Shapes[Shape].Rate));
+        XcApoParameters(Name, Apo, sizeof(FXMASTERINGLIMITER_PARAMETERS));
+        for (UINT Block = 0; Block < 8; Block++)
+            XcApoBlock(Name, &Run, XAPO_BUFFER_VALID, TRUE);
+        XcApoSet(Apo, Shape % 2 == 0 ? &Fast : &Slow, sizeof(Fast));
+        Run.Frames = Shapes[Shape].Frames / 2 + 1;
+        for (UINT Block = 0; Block < 6; Block++)
+            XcApoBlock(Name, &Run, XAPO_BUFFER_VALID, TRUE);
+        Apo->UnlockForProcess();
+    }
+    printf("limiter release %lu\n", Apo->Release());
+    delete &Run;
+}
+
+static
+VOID
 XcCheckApos(VOID)
 {
     PXC_CREATE_APO CreateMeter = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, "CreateAudioVolumeMeter"));
@@ -3272,6 +3383,7 @@ XcCheckApos(VOID)
         return;
     XcCheckEq();
     XcCheckEcho();
+    XcCheckLimiter();
     Engine->Release();
 }
 
@@ -3459,6 +3571,44 @@ public:
     void STDMETHODCALLTYPE OnVoiceError(void*, HRESULT) override {}
 };
 
+/* Puts one FX library effect on a voice, set so the result stays quiet */
+static
+HRESULT
+XcAttachFx(
+    _In_ IXAudio2Voice* Voice,
+    _In_ UINT Kind,
+    _In_ UINT32 Channels)
+{
+    static const FXMASTERINGLIMITER_PARAMETERS Limiter = { 4, 30 };
+    static const FXEQ_PARAMETERS Eq =
+    {
+        150.0f, 0.5f, 1.0f, 900.0f, 0.3f, 0.5f, 3000.0f, 1.0f, 1.0f, 9000.0f, 0.6f, 0.7f,
+    };
+    static const FXECHO_PARAMETERS Echo = { 0.5f, 0.4f, 30.0f };
+    PXC_CREATE_FX CreateFx = reinterpret_cast<PXC_CREATE_FX>(GetProcAddress(XcModule, "CreateFX"));
+    const CLSID* Classes[] = { &__uuidof(FXMasteringLimiter), &__uuidof(FXEQ), &__uuidof(FXEcho) };
+    const VOID* Values[] = { &Limiter, &Eq, &Echo };
+    const UINT32 Sizes[] = { sizeof(Limiter), sizeof(Eq), sizeof(Echo) };
+    IUnknown* Object = nullptr;
+    XAUDIO2_EFFECT_DESCRIPTOR Effect;
+    XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
+    HRESULT hr;
+
+    if (CreateFx == nullptr)
+        return E_NOINTERFACE;
+    hr = CreateFx(*Classes[Kind], &Object, nullptr, 0);
+    if (FAILED(hr))
+        return hr;
+    Effect.pEffect = Object;
+    Effect.InitialState = TRUE;
+    Effect.OutputChannels = Channels;
+    hr = Voice->SetEffectChain(&Chain);
+    Object->Release();
+    if (SUCCEEDED(hr))
+        hr = Voice->SetEffectParameters(0, Values[Kind], Sizes[Kind]);
+    return hr;
+}
+
 /* Plays short quiet buffers and compares what reaches the endpoint, sample for sample */
 static
 VOID
@@ -3472,6 +3622,9 @@ XcCheckMix(VOID)
         XcRouteMasterSlow,
         XcRouteMasterWide,
         XcRouteMasterSix,
+        XcRouteLimiter,
+        XcRouteEq,
+        XcRouteEcho,
     };
     static const struct
     {
@@ -3527,6 +3680,11 @@ XcCheckMix(VOID)
         { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteMasterWide, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
         { WAVE_FORMAT_PCM, 6, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
         { WAVE_FORMAT_PCM, 3, 48000, 16, XcRoutePlain, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteLimiter, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 1, 44100, 16, XcRouteLimiter, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 6, 48000, 16, XcRouteLimiter, 1.0f, 1.0f, -1, 0.0f, 0.0f, 1 },
+        { WAVE_FORMAT_PCM, 2, 48000, 16, XcRouteEq, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
+        { WAVE_FORMAT_PCM, 2, 44100, 16, XcRouteEcho, 1.0f, 1.0f, -1, 0.0f, 0.0f, 0 },
     };
     static BYTE Data[48000 * 6 * 4];
 
@@ -3647,6 +3805,12 @@ XcCheckMix(VOID)
             printf("mix[%u] source = %08lX\n", Case, hr);
             Engine->Release();
             continue;
+        }
+        if (Cases[Case].Route >= XcRouteLimiter)
+        {
+            hr = XcAttachFx(Source, Cases[Case].Route - XcRouteLimiter, Cases[Case].Channels);
+            if (FAILED(hr))
+                printf("mix[%u] effect = %08lX\n", Case, hr);
         }
         Scene.Voice = Source;
         Scene.Destination = Send.pOutputVoice;
