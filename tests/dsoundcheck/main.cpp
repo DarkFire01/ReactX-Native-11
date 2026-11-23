@@ -9,6 +9,7 @@
 
 #define INITGUID
 #include <windows.h>
+#include <mmsystem.h>
 #include <mmreg.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -1886,6 +1887,226 @@ DcProbeProperties(
         printf("%s set_nullset = %08lX\n", Name, Properties->Set(*static_cast<const GUID*>(nullptr), 0, nullptr, 0, Data, sizeof(Data)));
 }
 
+/* The property sets of the DirectSoundPrivate object, private ones named by their GUID */
+static const GUID DcPrivateSets[] =
+{
+    { 0x84624F80, 0x25EC, 0x11D1, { 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+    { 0x84624F82, 0x25EC, 0x11D1, { 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+    { 0x1AEAA606, 0x35F0, 0x11D1, { 0xB1, 0x61, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+    { 0xF2957840, 0x260C, 0x11D1, { 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+    { 0x1BE55C3E, 0x36AB, 0x11D1, { 0xB1, 0x62, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+    { 0x50393DEA, 0x51AD, 0x11D2, { 0x91, 0xB2, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+    { 0x4BE334F0, 0x1C8E, 0x4D91, { 0x8C, 0x17, 0x58, 0x89, 0xD6, 0xF0, 0xB1, 0x54 } },
+    { 0x84624F81, 0x25EC, 0x11D1, { 0xA4, 0xD8, 0x00, 0xC0, 0x4F, 0xC2, 0x8A, 0xCA } },
+};
+
+static
+VOID
+DcShowDescriptionW(
+    _In_z_ PCSTR Name,
+    _In_ const DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W_DATA* Data)
+{
+    printf("%s type %d flow %d", Name, Data->Type, Data->DataFlow);
+    DcGuid(" id", &Data->DeviceId);
+    printf("%s description %ls module %ls interface %ls wave %lu\n", Name,
+           Data->Description != nullptr ? Data->Description : L"(null)", Data->Module != nullptr ? Data->Module : L"(null)",
+           Data->Interface != nullptr ? Data->Interface : L"(null)", Data->WaveDeviceId);
+}
+
+static
+VOID
+DcShowDescriptionA(
+    _In_z_ PCSTR Name,
+    _In_ const DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_A_DATA* Data)
+{
+    printf("%s type %d flow %d", Name, Data->Type, Data->DataFlow);
+    DcGuid(" id", &Data->DeviceId);
+    printf("%s description %s module %s interface %s wave %lu\n", Name,
+           Data->Description != nullptr ? Data->Description : "(null)", Data->Module != nullptr ? Data->Module : "(null)",
+           Data->Interface != nullptr ? Data->Interface : "(null)", Data->WaveDeviceId);
+}
+
+static
+BOOL
+CALLBACK
+DcEnumDescriptionW(
+    _In_ PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W_DATA Data,
+    _In_ LPVOID Context)
+{
+    DcShowDescriptionW("  enumw", Data);
+    *static_cast<UINT*>(Context) += 1;
+    return TRUE;
+}
+
+static
+BOOL
+CALLBACK
+DcEnumDescriptionA(
+    _In_ PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_A_DATA Data,
+    _In_ LPVOID Context)
+{
+    DcShowDescriptionA("  enuma", Data);
+    *static_cast<UINT*>(Context) += 1;
+    return *static_cast<UINT*>(Context) < 1;
+}
+
+/* The DirectSoundPrivate class: its interfaces, which properties it answers and how big they are, and the device set */
+static
+VOID
+DcCheckPrivate(VOID)
+{
+    PDC_GET_CLASS_OBJECT GetClassObject = reinterpret_cast<PDC_GET_CLASS_OBJECT>(GetProcAddress(DcModule, "DllGetClassObject"));
+    IClassFactory* Factory = nullptr;
+    IKsPropertySet* Properties = nullptr;
+    IUnknown* Other = nullptr;
+    HRESULT hr;
+
+    hr = GetClassObject(CLSID_DirectSoundPrivate, IID_IClassFactory, reinterpret_cast<void**>(&Factory));
+    printf("private factory = %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+    hr = Factory->CreateInstance(nullptr, IID_IKsPropertySet, reinterpret_cast<void**>(&Properties));
+    printf("private create = %08lX\n", hr);
+    Factory->Release();
+    if (FAILED(hr))
+        return;
+    hr = Properties->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&Other));
+    printf("private qi IUnknown = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+        Other->Release();
+    hr = Properties->QueryInterface(IID_IDirectSound, reinterpret_cast<void**>(&Other));
+    printf("private qi IDirectSound = %08lX %s\n", hr, Other == nullptr ? "null" : "set");
+    if (SUCCEEDED(hr))
+        Other->Release();
+
+    for (UINT Set = 0; Set < ARRAYSIZE(DcPrivateSets); Set++)
+    {
+        for (ULONG Id = 0; Id < 13; Id++)
+        {
+            ULONG Support = 0xCCCC;
+            ULONG Returned = 0xCCCC;
+            BYTE Data[4] = {};
+            HRESULT Query = Properties->QuerySupport(DcPrivateSets[Set], Id, &Support);
+
+            hr = Properties->Get(DcPrivateSets[Set], Id, nullptr, 0, Data, 0, &Returned);
+            printf("private set%u[%lu] querysupport = %08lX %lX get_empty = %08lX %lu\n", Set, Id, Query, Support, hr, Returned);
+        }
+    }
+    {
+        BYTE Data[64] = {};
+        ULONG Returned = 0xCCCC;
+
+        hr = Properties->Get(DcPrivateSets[1], DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W, nullptr, 0, Data, 40, &Returned);
+        printf("private description_short = %08lX %lu\n", hr, Returned);
+        printf("private set_nodata = %08lX\n", Properties->Set(DcPrivateSets[1], DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W, nullptr, 0, nullptr, 0));
+        printf("private querysupport_nullsupport = %08lX\n", Properties->QuerySupport(DcPrivateSets[1], 1, nullptr));
+    }
+
+    {
+        static const struct
+        {
+            const GUID* Device;
+            DIRECTSOUNDDEVICE_DATAFLOW Flow;
+            PCSTR Name;
+        } Devices[] =
+        {
+            { &DSDEVID_DefaultPlayback, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "playback" },
+            { &DSDEVID_DefaultCapture, DIRECTSOUNDDEVICE_DATAFLOW_CAPTURE, "capture" },
+            { &DSDEVID_DefaultVoicePlayback, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "voiceplayback" },
+            { &GUID_NULL, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "nullrender" },
+            { &GUID_NULL, DIRECTSOUNDDEVICE_DATAFLOW_CAPTURE, "nullcapture" },
+            { &IID_IUnknown, DIRECTSOUNDDEVICE_DATAFLOW_RENDER, "bogus" },
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Devices); Index++)
+        {
+            union
+            {
+                DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W_DATA W;
+                DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_A_DATA A;
+                BYTE Space[4096];
+            } Data;
+            ULONG Returned;
+            CHAR Name[64];
+
+            ZeroMemory(&Data, sizeof(Data));
+            Data.W.DeviceId = *Devices[Index].Device;
+            Data.W.DataFlow = Devices[Index].Flow;
+            Returned = 0xCCCC;
+            hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W, nullptr, 0, &Data,
+                                 sizeof(Data.W), &Returned);
+            printf("private %s description_w_fixed = %08lX %s\n", Devices[Index].Name, hr, Returned > sizeof(Data.W) ? "more" : "exact");
+            Returned = 0xCCCC;
+            hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W, nullptr, 0, &Data,
+                                 sizeof(Data), &Returned);
+            printf("private %s description_w = %08lX\n", Devices[Index].Name, hr);
+            sprintf_s(Name, "private %s w", Devices[Index].Name);
+            if (SUCCEEDED(hr))
+                DcShowDescriptionW(Name, &Data.W);
+
+            ZeroMemory(&Data, sizeof(Data));
+            Data.A.DeviceId = *Devices[Index].Device;
+            Data.A.DataFlow = Devices[Index].Flow;
+            hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_A, nullptr, 0, &Data,
+                                 sizeof(Data), &Returned);
+            printf("private %s description_a = %08lX\n", Devices[Index].Name, hr);
+            sprintf_s(Name, "private %s a", Devices[Index].Name);
+            if (SUCCEEDED(hr))
+                DcShowDescriptionA(Name, &Data.A);
+        }
+    }
+
+    {
+        DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_W_DATA EnumW = { DcEnumDescriptionW, nullptr };
+        DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_A_DATA EnumA = { DcEnumDescriptionA, nullptr };
+        UINT Count = 0;
+        ULONG Returned = 0xCCCC;
+
+        EnumW.Context = &Count;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_W, nullptr, 0, &EnumW,
+                             sizeof(EnumW), &Returned);
+        printf("private enumerate_w = %08lX %lu count %u\n", hr, Returned, Count);
+        Count = 0;
+        EnumA.Context = &Count;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_A, nullptr, 0, &EnumA,
+                             sizeof(EnumA), &Returned);
+        printf("private enumerate_a = %08lX %lu count %u\n", hr, Returned, Count);
+    }
+
+    {
+        WAVEOUTCAPSW Caps = {};
+        DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_W_DATA MapW = {};
+        DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_A_DATA MapA = {};
+        CHAR NameA[MAXPNAMELEN];
+        WCHAR Bogus[] = L"no such device";
+
+        waveOutGetDevCapsW(0, &Caps, sizeof(Caps));
+        WideCharToMultiByte(CP_ACP, 0, Caps.szPname, -1, NameA, sizeof(NameA), nullptr, nullptr);
+        MapW.DeviceName = Caps.szPname;
+        MapW.DataFlow = DIRECTSOUNDDEVICE_DATAFLOW_RENDER;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_W, nullptr, 0, &MapW,
+                             sizeof(MapW), nullptr);
+        printf("private mapping_w = %08lX", hr);
+        DcGuid(" id", &MapW.DeviceId);
+        MapA.DeviceName = NameA;
+        MapA.DataFlow = DIRECTSOUNDDEVICE_DATAFLOW_RENDER;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_A, nullptr, 0, &MapA,
+                             sizeof(MapA), nullptr);
+        printf("private mapping_a = %08lX", hr);
+        DcGuid(" id", &MapA.DeviceId);
+        ZeroMemory(&MapW, sizeof(MapW));
+        MapW.DeviceName = Bogus;
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_W, nullptr, 0, &MapW,
+                             sizeof(MapW), nullptr);
+        printf("private mapping_bogus = %08lX\n", hr);
+        MapW.DataFlow = static_cast<DIRECTSOUNDDEVICE_DATAFLOW>(5);
+        hr = Properties->Get(DSPROPSETID_DirectSoundDevice, DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_W, nullptr, 0, &MapW,
+                             sizeof(MapW), nullptr);
+        printf("private mapping_badflow = %08lX\n", hr);
+    }
+    printf("private release %lu\n", Properties->Release());
+}
+
 /* IKsPropertySet on primary, secondary and 3D buffers */
 static
 VOID
@@ -1931,6 +2152,7 @@ DcCheckProperties(VOID)
         Buffer->Release();
     }
     printf("release %lu\n", Sound->Release());
+    DcCheckPrivate();
 }
 
 /* Records what the default endpoint plays, which carries the mixer output */
