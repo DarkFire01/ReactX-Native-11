@@ -242,6 +242,13 @@
     Entry(D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001, pfnWaitForFence) \
 
 
+#define TR_TABLE_EXTENDED(Entry) \
+    Entry(D3D12DDI_EXTENDED_FEATURES_FUNCS_0096, pfnGetSupportedExtendedFeatures) \
+    Entry(D3D12DDI_EXTENDED_FEATURES_FUNCS_0096, pfnGetSupportedExtendedFeatureVersions) \
+    Entry(D3D12DDI_EXTENDED_FEATURES_FUNCS_0096, pfnEnableExtendedFeature) \
+    Entry(D3D12DDI_EXTENDED_FEATURES_FUNCS_0096, pfnSetExtendedFeatureCallbacks) \
+
+
 #define TR_TABLE_KERNELCALLBACK(Entry) \
     Entry(D3DDDI_DEVICECALLBACKS, pfnAllocateCb) \
     Entry(D3DDDI_DEVICECALLBACKS, pfnDeallocateCb) \

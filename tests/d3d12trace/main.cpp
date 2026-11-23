@@ -46,6 +46,7 @@ enum TrFamily
     TrFamilyList2,
     TrFamilyList3,
     TrFamilyQueue,
+    TrFamilyExtended,
     TrFamilyKernelCallback,
     TrFamilyCoreCallback,
     TrFamilyKernel,
@@ -756,6 +757,7 @@ TrRegister(
 #define TR_LIST2(Struct, Member) TR_REGISTER(TrFamilyList2, Struct, Member)
 #define TR_LIST3(Struct, Member) TR_REGISTER(TrFamilyList3, Struct, Member)
 #define TR_QUEUE(Struct, Member) TR_REGISTER(TrFamilyQueue, Struct, Member)
+#define TR_EXTENDED(Struct, Member) TR_REGISTER(TrFamilyExtended, Struct, Member)
 #define TR_KERNELCALLBACK(Struct, Member) TR_REGISTER(TrFamilyKernelCallback, Struct, Member)
 #define TR_CORECALLBACK(Struct, Member) TR_REGISTER(TrFamilyCoreCallback, Struct, Member)
 
@@ -833,6 +835,7 @@ TrRegisterAll(VOID)
     TR_TABLE_LIST(TR_LIST2)
     TR_TABLE_LIST(TR_LIST3)
     TR_TABLE_QUEUE(TR_QUEUE)
+    TR_TABLE_EXTENDED(TR_EXTENDED)
     TR_TABLE_KERNELCALLBACK(TR_KERNELCALLBACK)
     TR_TABLE_CORECALLBACK(TR_CORECALLBACK)
     TR_TABLE_KERNEL(TR_KERNEL)
@@ -929,6 +932,8 @@ struct TrAround<TrFamilyAdapter, offsetof(D3D12DDI_ADAPTERFUNCS, pfnFillDDITable
             TrWrapTable((TrFamily)(TrFamilyList0 + Index), Table, Size);
         else if (Type == D3D12DDI_TABLE_TYPE_COMMAND_QUEUE_3D)
             TrWrapTable(TrFamilyQueue, Table, Size);
+        else if (Type == D3D12DDI_TABLE_TYPE_0096_EXTENDED_FEATURES)
+            TrWrapTable(TrFamilyExtended, Table, Size);
     }
 };
 
@@ -985,6 +990,76 @@ struct TrAround<TrFamilyDevice, offsetof(D3D12DDI_DEVICE_FUNCS_CORE_0119, pfnChe
             TrCloseLine();
             printf("%*sformat %u support %08X\n", static_cast<int>(Tr.Depth * 2), "", Format, *Support);
         }
+    }
+};
+
+/* The numbers an extended feature list or version list comes back with */
+static
+VOID
+TrPrintList(
+    _In_z_ PCSTR Label,
+    _In_ const UINT32* Count,
+    _In_opt_ const UINT32* Values)
+{
+    if (!TrShouldLog() || Count == nullptr)
+        return;
+
+    TrCloseLine();
+    printf("%*s%s count %u", static_cast<int>(Tr.Depth * 2), "", Label, *Count);
+    for (UINT Index = 0; Values != nullptr && Index < *Count; Index++)
+        printf(" %u", Values[Index]);
+    printf("\n");
+}
+
+template <>
+struct TrAround<TrFamilyExtended, offsetof(D3D12DDI_EXTENDED_FEATURES_FUNCS_0096, pfnGetSupportedExtendedFeatures) /
+                                  sizeof(VOID*)>
+{
+    static
+    VOID
+    Before(
+        D3D12DDI_HDEVICE Device,
+        D3D12DDI_FEATURE_0020 Highest,
+        UINT32* Count,
+        D3D12DDI_FEATURE_0020* Features)
+    {
+    }
+
+    static
+    VOID
+    After(
+        D3D12DDI_HDEVICE Device,
+        D3D12DDI_FEATURE_0020 Highest,
+        UINT32* Count,
+        D3D12DDI_FEATURE_0020* Features)
+    {
+        TrPrintList("features", Count, reinterpret_cast<const UINT32*>(Features));
+    }
+};
+
+template <>
+struct TrAround<TrFamilyExtended, offsetof(D3D12DDI_EXTENDED_FEATURES_FUNCS_0096,
+                                           pfnGetSupportedExtendedFeatureVersions) / sizeof(VOID*)>
+{
+    static
+    VOID
+    Before(
+        D3D12DDI_HDEVICE Device,
+        D3D12DDI_FEATURE_0020 Feature,
+        UINT32* Count,
+        UINT32* Versions)
+    {
+    }
+
+    static
+    VOID
+    After(
+        D3D12DDI_HDEVICE Device,
+        D3D12DDI_FEATURE_0020 Feature,
+        UINT32* Count,
+        UINT32* Versions)
+    {
+        TrPrintList("versions", Count, Versions);
     }
 };
 
@@ -1424,6 +1499,70 @@ TrScenarioCopy(
     TrPhase("Release");
 }
 
+/* Every feature once with a zeroed buffer of the size the runtime takes, to show what reaches the driver */
+static
+VOID
+TrScenarioFeatures(
+    _In_ TrRun& Run)
+{
+    static const UINT Sizes[] =
+    {
+        60, 16, 24, 12, 16, 8, 8, 4, 24, 0, 8, 0, 4, 0, 0, 0, 20, 4, 8, 4, 12, 20, 4, 12, 8, 8, 0, 12, 8, 0,
+        20, 0, 8, 8, 0, 0, 4, 24, 0, 8, 4, 12, 24, 12, 8, 8, 8, 4, 40, 8, 4, 32, 4, 16, 4, 0, 4, 4, 0, 0,
+        4,
+    };
+    ComPtr<ID3D12Device> Device;
+    alignas(16) BYTE Buffer[512];
+    CHAR Phase[64];
+    UINT Feature;
+
+    if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))))
+        return;
+
+    for (Feature = 0; Feature < _countof(Sizes); Feature++)
+    {
+        /* Feature levels and the meta command query carry pointers */
+        if (Sizes[Feature] == 0 || Feature == D3D12_FEATURE_FEATURE_LEVELS ||
+            Feature == D3D12_FEATURE_QUERY_META_COMMAND)
+        {
+            continue;
+        }
+
+        ZeroMemory(Buffer, sizeof(Buffer));
+        if (Feature == D3D12_FEATURE_FORMAT_SUPPORT || Feature == D3D12_FEATURE_FORMAT_INFO ||
+            Feature == D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS)
+        {
+            reinterpret_cast<UINT*>(Buffer)[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+            reinterpret_cast<UINT*>(Buffer)[1] = 4;
+        }
+        else if (Feature == D3D12_FEATURE_SHADER_MODEL)
+        {
+            reinterpret_cast<UINT*>(Buffer)[0] = D3D_SHADER_MODEL_6_9;
+        }
+        else if (Feature == D3D12_FEATURE_ROOT_SIGNATURE)
+        {
+            reinterpret_cast<UINT*>(Buffer)[0] = D3D_ROOT_SIGNATURE_VERSION_1_2;
+        }
+        else if (Feature == D3D12_FEATURE_COMMAND_QUEUE_PRIORITY)
+        {
+            reinterpret_cast<UINT*>(Buffer)[1] = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+        }
+        else if (Feature == D3D12_FEATURE_PLACED_RESOURCE_SUPPORT_INFO)
+        {
+            D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO* Placed =
+                reinterpret_cast<D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO*>(Buffer);
+
+            Placed->Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            Placed->Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            Placed->DestHeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        }
+
+        sprintf_s(Phase, "CheckFeatureSupport %u", Feature);
+        TrPhase(Phase);
+        printf("result %08X\n", (UINT)Device->CheckFeatureSupport((D3D12_FEATURE)Feature, Buffer, Sizes[Feature]));
+    }
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -1436,6 +1575,7 @@ static const TrScenario TrScenarios[] =
     { "objects", TrScenarioObjects },
     { "resources", TrScenarioResources },
     { "copy", TrScenarioCopy },
+    { "features", TrScenarioFeatures },
 };
 
 int
