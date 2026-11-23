@@ -740,6 +740,11 @@ D9TextureCore::LockSubresource(
     UNREFERENCED_PARAMETER(FromLevel);
 
     ZeroMemory(Locked, sizeof(*Locked));
+    if (DcHeld)
+    {
+        D9_TRACE_ONCE(L"a texture lends a level to a device context and cannot lock");
+        return D3DERR_INVALIDCALL;
+    }
     if (Memory != nullptr)
     {
         hr = LockMemorySubresource(Index, Box, Flags, Locked);
@@ -894,6 +899,8 @@ D9CoreOf(
 BOOLEAN
 D9TextureCore::IsAnySubresourceLocked() const
 {
+    if (DcHeld)
+        return TRUE;
     for (UINT Index = 0; Index < Faces * Levels; Index++)
     {
         if (Subresources[Index].Locked)

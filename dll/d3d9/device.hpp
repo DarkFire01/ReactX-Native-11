@@ -432,6 +432,10 @@ private:
 
     BOOLEAN CountedDefault = FALSE;
     D9PrivateData Private;
+
+    /* The device context GetDC handed out and the bitmap behind it */
+    HDC HeldDc = NULL;
+    HANDLE HeldBitmap = NULL;
 };
 
 /* A level of a volume texture */
@@ -638,6 +642,14 @@ public:
     BOOLEAN
     IsAnySubresourceLocked() const;
 
+    /* A level lending its memory to a device context keeps every level of the texture from locking */
+    VOID
+    NoteDc(
+        _In_ BOOLEAN Held)
+    {
+        DcHeld = Held;
+    }
+
     /* UpdateTexture: copies what changed since the last copy into a texture of the same type */
     HRESULT
     CopyDirtyInto(
@@ -727,6 +739,7 @@ protected:
     /* Stages the texture is bound to, and whether the application released it while bound */
     LONG BindCount = 0;
     BOOLEAN Orphaned = FALSE;
+    BOOLEAN DcHeld = FALSE;
 
     D9PrivateData Private;
 
@@ -1179,6 +1192,13 @@ public:
     HRESULT
     DriverColorFill(
         _In_ const D3DDDIARG_COLORFILL* Args);
+
+    /* The display GDI device contexts over surface memory are made for */
+    PCSTR
+    DisplayName() const
+    {
+        return Adapter->DeviceName;
+    }
 
     const D3DCAPS9&
     DeviceCaps() const

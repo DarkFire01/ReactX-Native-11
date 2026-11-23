@@ -6,6 +6,7 @@
  */
 
 #include "device.hpp"
+#include "kmt.hpp"
 
 ULONG
 D9Child::AddRefChild(VOID)
@@ -700,20 +701,120 @@ D9Surface::IsBusy() const
     return IsLocked;
 }
 
+/* The formats GDI draws into */
+static
+BOOLEAN
+D9IsGdiFormat(
+    _In_ D3DFORMAT Format)
+{
+    return Format == D3DFMT_R8G8B8 || Format == D3DFMT_A8R8G8B8 || Format == D3DFMT_X8R8G8B8 ||
+           Format == D3DFMT_R5G6B5 || Format == D3DFMT_X1R5G5B5 || Format == D3DFMT_A1R5G5B5;
+}
+
+/* The surface stays locked while GDI draws into its memory */
 STDMETHODIMP
 D9Surface::GetDC(
     _Out_ HDC* Dc)
 {
-    RX_UNIMPLEMENTED();
-    if (Dc != nullptr)
-        *Dc = NULL;
-    return D3DERR_INVALIDCALL;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_CREATEDCFROMMEMORY Create = {};
+    D3DLOCKED_RECT Locked = {};
+    D3DLOCKED_BOX Box = {};
+    PCSTR Display = Device->DisplayName();
+    BOOLEAN Plain = Container == nullptr && (Desc.Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) == 0;
+    HDC DeviceDc;
+    NTSTATUS Status;
+    HRESULT hr;
+
+    if (Dc == nullptr || Kmt == nullptr || Kmt->CreateDCFromMemory == nullptr)
+        return D3DERR_INVALIDCALL;
+    if (Texture != nullptr ? Texture->IsAnySubresourceLocked() : IsLocked)
+    {
+        D9_TRACE_ONCE(L"GetDC: the surface is locked");
+        return D3DERR_INVALIDCALL;
+    }
+    if ((Desc.Usage & D3DUSAGE_DEPTHSTENCIL) != 0 || Desc.Pool == D3DPOOL_SCRATCH)
+        return D3DERR_INVALIDCALL;
+    if (Desc.Pool == D3DPOOL_DEFAULT && !((Desc.Usage & D3DUSAGE_RENDERTARGET) != 0 && Lockable) &&
+        (Desc.Usage & D3DUSAGE_DYNAMIC) == 0 && !(Texture == nullptr && Plain))
+    {
+        D9_TRACE_ONCE(L"GetDC: default pool surfaces must be lockable targets, dynamic or offscreen plains");
+        return D3DERR_INVALIDCALL;
+    }
+    if (!D9IsGdiFormat(Desc.Format))
+    {
+        D9_TRACE_ONCE(L"GetDC: format %u is not one GDI draws into", Desc.Format);
+        return D3DERR_INVALIDCALL;
+    }
+
+    if (Texture != nullptr)
+    {
+        hr = Texture->LockSubresource(Subresource, nullptr, 0, TRUE, &Box);
+        Locked.pBits = Box.pBits;
+        Locked.Pitch = Box.RowPitch;
+    }
+    else
+    {
+        hr = LockRect(&Locked, nullptr, 0);
+    }
+    if (FAILED(hr))
+        return hr;
+
+    /* A display named the way CreateDC wants a device rather than a driver */
+    if (Display[0] == '\\' && Display[1] == '\\' && Display[2] == '.')
+        DeviceDc = CreateDCA(nullptr, Display, nullptr, nullptr);
+    else
+        DeviceDc = CreateDCA(Display, nullptr, nullptr, nullptr);
+    Create.pMemory = Locked.pBits;
+    Create.Format = static_cast<D3DDDIFORMAT>(Desc.Format);
+    Create.Width = Desc.Width;
+    Create.Height = Desc.Height;
+    Create.Pitch = static_cast<UINT>(Locked.Pitch);
+    Create.hDeviceDc = DeviceDc;
+    Status = Kmt->CreateDCFromMemory(&Create);
+    if (DeviceDc != NULL)
+        DeleteDC(DeviceDc);
+    if (!NT_SUCCESS(Status))
+    {
+        D9Trace(L"GetDC: the kernel made no device context (0x%08lX)", Status);
+        if (Texture != nullptr)
+            Texture->UnlockSubresource(Subresource, TRUE);
+        else
+            UnlockRect();
+        return E_FAIL;
+    }
+
+    HeldDc = Create.hDc;
+    HeldBitmap = Create.hBitmap;
+    if (Texture != nullptr)
+        Texture->NoteDc(TRUE);
+    *Dc = HeldDc;
+    return S_OK;
 }
 
 STDMETHODIMP
 D9Surface::ReleaseDC(
     _In_ HDC Dc)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    D3DKMT_DESTROYDCFROMMEMORY Destroy = {};
+
+    if (HeldDc == NULL || Dc != HeldDc)
+    {
+        D9_TRACE_ONCE(L"ReleaseDC: the device context did not come from this surface");
+        return D3DERR_INVALIDCALL;
+    }
+
+    Destroy.hDc = HeldDc;
+    Destroy.hBitmap = HeldBitmap;
+    HeldDc = NULL;
+    HeldBitmap = NULL;
+    if (Kmt != nullptr && Kmt->DestroyDCFromMemory != nullptr)
+        Kmt->DestroyDCFromMemory(&Destroy);
+    if (Texture == nullptr)
+        return UnlockRect();
+    Texture->NoteDc(FALSE);
+    return Texture->UnlockSubresource(Subresource, TRUE);
 }
