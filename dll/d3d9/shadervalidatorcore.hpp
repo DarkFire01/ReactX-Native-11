@@ -560,6 +560,12 @@ D9SvChecker*
 D9SvCreatePixelChecker(
     _In_ DWORD Version);
 
+/* ps_1_0 through ps_1_3, or ps_1_4 when Model14 is set */
+D9SvChecker*
+D9SvCreatePixel1Checker(
+    _In_ DWORD Version,
+    _In_ BOOLEAN Model14);
+
 D9SvChecker*
 D9SvStart(
     _In_ D9SvParams* Settings,
