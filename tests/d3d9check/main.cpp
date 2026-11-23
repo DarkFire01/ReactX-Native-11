@@ -1315,6 +1315,319 @@ NcCheckDevicePlain(
     Plain->Release();
 }
 
+/* Writes a byte pattern through one lock and reads it back through another */
+static
+VOID
+NcCheckSurfaceBytes(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DSurface9* Surface)
+{
+    D3DLOCKED_RECT Locked = {};
+    RECT Part = { 1, 1, 3, 3 };
+    DWORD First = 0;
+    DWORD Second = 0;
+    HRESULT hr;
+
+    hr = Surface->LockRect(&Locked, nullptr, 0);
+    if (FAILED(hr))
+    {
+        printf("%s_bytes = %08lX\n", Name, hr);
+        return;
+    }
+    static_cast<BYTE*>(Locked.pBits)[0] = 0x5A;
+    static_cast<BYTE*>(Locked.pBits)[Locked.Pitch + 4] = 0xA5;
+    Surface->UnlockRect();
+    hr = Surface->LockRect(&Locked, &Part, D3DLOCK_READONLY);
+    if (SUCCEEDED(hr))
+    {
+        First = *static_cast<const BYTE*>(Locked.pBits);
+        Surface->UnlockRect();
+    }
+    hr = Surface->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    if (SUCCEEDED(hr))
+    {
+        Second = static_cast<const BYTE*>(Locked.pBits)[0];
+        Surface->UnlockRect();
+    }
+    printf("%s_bytes = %08lX part %02lX first %02lX\n", Name, hr, First, Second);
+}
+
+/* Lock flags, rectangles and repeated locks against one surface */
+static
+VOID
+NcCheckSurfaceLocks(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DSurface9* Surface)
+{
+    static const DWORD Flags[] =
+    {
+        0, D3DLOCK_READONLY, D3DLOCK_DISCARD, D3DLOCK_DISCARD | D3DLOCK_READONLY, D3DLOCK_NOOVERWRITE,
+        D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE, D3DLOCK_NOSYSLOCK, D3DLOCK_DONOTWAIT, D3DLOCK_NO_DIRTY_UPDATE,
+        D3DLOCK_NOOVERWRITE | D3DLOCK_READONLY, 0x00000001, 0x00040000,
+    };
+    static const RECT Rects[] =
+    {
+        { 0, 0, 1, 1 }, { 2, 2, 8, 6 }, { 3, 1, 5, 4 }, { 0, 0, 17, 8 }, { 4, 4, 4, 6 }, { -1, 0, 2, 2 },
+        { 0, 0, 16, 8 }, { 4, 4, 16, 8 },
+    };
+    D3DLOCKED_RECT Locked = {};
+    HRESULT hr;
+
+    hr = Surface->LockRect(&Locked, nullptr, 0);
+    printf("%s_lock = %08lX pitch %d\n", Name, hr, Locked.Pitch);
+    printf("%s_lock_again = %08lX\n", Name, Surface->LockRect(&Locked, nullptr, 0));
+    printf("%s_unlock = %08lX\n", Name, Surface->UnlockRect());
+    printf("%s_unlock_again = %08lX\n", Name, Surface->UnlockRect());
+    for (UINT Index = 0; Index < _countof(Flags); Index++)
+    {
+        hr = Surface->LockRect(&Locked, nullptr, Flags[Index]);
+        printf("%s_flags[%08lX] = %08lX pitch %d\n", Name, Flags[Index], hr, Locked.Pitch);
+        if (SUCCEEDED(hr))
+            Surface->UnlockRect();
+    }
+    /* Drivers may hand out new memory on every lock, so the offset is taken against a lock just before */
+    for (const RECT& Rect : Rects)
+    {
+        BYTE* Base = nullptr;
+
+        if (SUCCEEDED(Surface->LockRect(&Locked, nullptr, D3DLOCK_READONLY)))
+        {
+            Base = static_cast<BYTE*>(Locked.pBits);
+            Surface->UnlockRect();
+        }
+        hr = Surface->LockRect(&Locked, &Rect, D3DLOCK_READONLY);
+        printf("%s_rect(%ld,%ld,%ld,%ld) = %08lX offset %lld\n", Name, Rect.left, Rect.top, Rect.right, Rect.bottom,
+               hr, SUCCEEDED(hr) && Base != nullptr ? static_cast<long long>(static_cast<BYTE*>(Locked.pBits) - Base)
+                                                    : -1LL);
+        if (SUCCEEDED(hr))
+            Surface->UnlockRect();
+    }
+}
+
+/* Describes a surface creation; the surface goes back right away */
+static
+VOID
+NcPrintSurfaceMade(
+    _In_z_ PCSTR Name,
+    _In_ HRESULT Result,
+    _In_opt_ IDirect3DSurface9* Surface)
+{
+    D3DSURFACE_DESC Desc = {};
+    IDirect3DDevice9* Owner = nullptr;
+    IUnknown* Container = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    HRESULT Lock;
+
+    if (Surface == nullptr)
+    {
+        printf("%s = %08lX null\n", Name, Result);
+        return;
+    }
+    Surface->GetDesc(&Desc);
+    Lock = Surface->LockRect(&Locked, nullptr, D3DLOCK_READONLY);
+    if (SUCCEEDED(Lock))
+        Surface->UnlockRect();
+    Surface->GetDevice(&Owner);
+    Surface->GetContainer(__uuidof(IDirect3DDevice9), reinterpret_cast<VOID**>(&Container));
+    printf("%s = %08lX fmt %u type %u usage %08lX pool %u ms %u:%lu size %ux%u lock %08lX pitch %d rtype %u "
+           "container %s\n", Name, Result, Desc.Format, Desc.Type, Desc.Usage, Desc.Pool, Desc.MultiSampleType,
+           Desc.MultiSampleQuality, Desc.Width, Desc.Height, Lock, Locked.Pitch, Surface->GetType(),
+           Container != nullptr && Container == Owner ? "device" : "other");
+    if (Container != nullptr)
+        Container->Release();
+    if (Owner != nullptr)
+        Owner->Release();
+    printf("%s_release = %lu\n", Name, Surface->Release());
+}
+
+/* Every surface creation call a device offers, across formats, pools, sizes and sample types */
+static
+VOID
+NcCheckSurfacesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_opt_ IDirect3DDevice9Ex* DeviceEx)
+{
+    static const D3DPOOL Pools[] = { D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH,
+                                     static_cast<D3DPOOL>(4) };
+    static const UINT Sizes[][2] = { { 16, 8 }, { 10, 6 }, { 0, 4 }, { 4, 0 }, { 1, 1 } };
+    static const DWORD Usages[] =
+    {
+        0, D3DUSAGE_RENDERTARGET, D3DUSAGE_DEPTHSTENCIL, D3DUSAGE_DYNAMIC, D3DUSAGE_WRITEONLY,
+        D3DUSAGE_RESTRICTED_CONTENT, D3DUSAGE_RESTRICT_SHARED_RESOURCE, D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER,
+        D3DUSAGE_NONSECURE, D3DUSAGE_TEXTAPI, 0x00400000,
+    };
+    IDirect3DSurface9* Surface;
+    HANDLE Shared;
+    char Name[96];
+    HRESULT hr;
+
+    for (D3DFORMAT Format : NcFormats)
+    {
+        for (D3DPOOL Pool : Pools)
+        {
+            Surface = nullptr;
+            hr = Device->CreateOffscreenPlainSurface(16, 8, Format, Pool, &Surface, nullptr);
+            sprintf_s(Name, "%s_plain[%u,%u]", Prefix, Format, Pool);
+            NcPrintSurfaceMade(Name, hr, Surface);
+        }
+        for (BOOL Lockable = FALSE; Lockable <= TRUE; Lockable++)
+        {
+            Surface = nullptr;
+            hr = Device->CreateRenderTarget(16, 8, Format, D3DMULTISAMPLE_NONE, 0, Lockable, &Surface, nullptr);
+            sprintf_s(Name, "%s_target[%u,%d]", Prefix, Format, Lockable);
+            NcPrintSurfaceMade(Name, hr, Surface);
+            Surface = nullptr;
+            hr = Device->CreateDepthStencilSurface(16, 8, Format, D3DMULTISAMPLE_NONE, 0, Lockable, &Surface, nullptr);
+            sprintf_s(Name, "%s_depth[%u,%d]", Prefix, Format, Lockable);
+            NcPrintSurfaceMade(Name, hr, Surface);
+        }
+    }
+
+    for (const auto& Size : Sizes)
+    {
+        static const D3DFORMAT Formats[] = { D3DFMT_A8R8G8B8, D3DFMT_DXT1, D3DFMT_DXT5, D3DFMT_YUY2, D3DFMT_R5G6B5 };
+
+        for (D3DFORMAT Format : Formats)
+        {
+            Surface = nullptr;
+            hr = Device->CreateOffscreenPlainSurface(Size[0], Size[1], Format, D3DPOOL_SCRATCH, &Surface, nullptr);
+            sprintf_s(Name, "%s_size_scratch[%ux%u,%u]", Prefix, Size[0], Size[1], Format);
+            NcPrintSurfaceMade(Name, hr, Surface);
+            Surface = nullptr;
+            hr = Device->CreateOffscreenPlainSurface(Size[0], Size[1], Format, D3DPOOL_SYSTEMMEM, &Surface, nullptr);
+            sprintf_s(Name, "%s_size_sysmem[%ux%u,%u]", Prefix, Size[0], Size[1], Format);
+            NcPrintSurfaceMade(Name, hr, Surface);
+            Surface = nullptr;
+            hr = Device->CreateRenderTarget(Size[0], Size[1], Format, D3DMULTISAMPLE_NONE, 0, TRUE, &Surface,
+                                            nullptr);
+            sprintf_s(Name, "%s_size_target[%ux%u,%u]", Prefix, Size[0], Size[1], Format);
+            NcPrintSurfaceMade(Name, hr, Surface);
+        }
+    }
+
+    for (UINT Type = 0; Type <= 16; Type++)
+    {
+        for (DWORD Quality = 0; Quality <= 64; Quality += 32)
+        {
+            Surface = nullptr;
+            hr = Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, static_cast<D3DMULTISAMPLE_TYPE>(Type), Quality,
+                                            FALSE, &Surface, nullptr);
+            sprintf_s(Name, "%s_ms_target[%u,%lu]", Prefix, Type, Quality);
+            NcPrintSurfaceMade(Name, hr, Surface);
+            Surface = nullptr;
+            hr = Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, static_cast<D3DMULTISAMPLE_TYPE>(Type),
+                                                   Quality, FALSE, &Surface, nullptr);
+            sprintf_s(Name, "%s_ms_depth[%u,%lu]", Prefix, Type, Quality);
+            NcPrintSurfaceMade(Name, hr, Surface);
+        }
+    }
+
+    Shared = nullptr;
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, &Shared);
+    sprintf_s(Name, "%s_target_shared", Prefix);
+    NcPrintSurfaceMade(Name, hr, Surface);
+
+    Surface = nullptr;
+    hr = Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        sprintf_s(Name, "%s_default", Prefix);
+        NcCheckSurfaceLocks(Name, Surface);
+        NcCheckSurfaceBytes(Name, Surface);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        sprintf_s(Name, "%s_sysmem", Prefix);
+        NcCheckSurfaceLocks(Name, Surface);
+        NcCheckSurfaceBytes(Name, Surface);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_DXT1, D3DPOOL_SCRATCH, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        sprintf_s(Name, "%s_scratch_dxt1", Prefix);
+        NcCheckSurfaceLocks(Name, Surface);
+        Surface->Release();
+    }
+    Surface = nullptr;
+    hr = Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, TRUE, &Surface, nullptr);
+    if (Surface != nullptr)
+    {
+        sprintf_s(Name, "%s_target", Prefix);
+        NcCheckSurfaceLocks(Name, Surface);
+        NcCheckSurfaceBytes(Name, Surface);
+        Surface->Release();
+    }
+
+    if (DeviceEx == nullptr)
+        return;
+    for (DWORD Usage : Usages)
+    {
+        Surface = nullptr;
+        hr = DeviceEx->CreateRenderTargetEx(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr,
+                                            Usage);
+        sprintf_s(Name, "%s_target_ex[%08lX]", Prefix, Usage);
+        NcPrintSurfaceMade(Name, hr, Surface);
+        Surface = nullptr;
+        hr = DeviceEx->CreateDepthStencilSurfaceEx(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface,
+                                                   nullptr, Usage);
+        sprintf_s(Name, "%s_depth_ex[%08lX]", Prefix, Usage);
+        NcPrintSurfaceMade(Name, hr, Surface);
+        Surface = nullptr;
+        hr = DeviceEx->CreateOffscreenPlainSurfaceEx(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, nullptr,
+                                                     Usage);
+        sprintf_s(Name, "%s_plain_ex[%08lX]", Prefix, Usage);
+        NcPrintSurfaceMade(Name, hr, Surface);
+        Surface = nullptr;
+        hr = DeviceEx->CreateOffscreenPlainSurfaceEx(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, nullptr,
+                                                     Usage);
+        sprintf_s(Name, "%s_plain_ex_sysmem[%08lX]", Prefix, Usage);
+        NcPrintSurfaceMade(Name, hr, Surface);
+    }
+}
+
+/* Standalone surfaces on a windowed extended device and on a device of the plain object */
+static
+VOID
+NcCheckSurfaces(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                   nullptr, &DeviceEx);
+    printf("surfaces_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckSurfacesOn("surfaces_ex", DeviceEx, DeviceEx);
+        printf("surfaces_ex_release = %lu\n", DeviceEx->Release());
+    }
+
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    printf("surfaces_create_plain = %08lX\n", hr);
+    if (Device != nullptr)
+    {
+        NcCheckSurfacesOn("surfaces_plain", Device, nullptr);
+        printf("surfaces_plain_release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -1332,6 +1645,7 @@ static const NineCheckInfo NcChecks[] =
     { "create", NcCheckCreate },
     { "device", NcCheckDevice },
     { "device_plain", NcCheckDevicePlain },
+    { "surfaces", NcCheckSurfaces },
 };
 
 static
