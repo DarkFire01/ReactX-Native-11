@@ -960,6 +960,34 @@ struct TrAround<TrFamilyAdapter, offsetof(D3D12DDI_ADAPTERFUNCS, pfnCreateDevice
     }
 };
 
+/* The driver's format answer, which the runtime turns into the API bits */
+template <>
+struct TrAround<TrFamilyDevice, offsetof(D3D12DDI_DEVICE_FUNCS_CORE_0119, pfnCheckFormatSupport) / sizeof(VOID*)>
+{
+    static
+    VOID
+    Before(
+        D3D12DDI_HDEVICE Device,
+        DXGI_FORMAT Format,
+        UINT* Support)
+    {
+    }
+
+    static
+    VOID
+    After(
+        D3D12DDI_HDEVICE Device,
+        DXGI_FORMAT Format,
+        UINT* Support)
+    {
+        if (TrShouldLog())
+        {
+            TrCloseLine();
+            printf("%*sformat %u support %08X\n", static_cast<int>(Tr.Depth * 2), "", Format, *Support);
+        }
+    }
+};
+
 /* The driver's OpenAdapter12: adapter callbacks in, adapter table out */
 static
 HRESULT
@@ -1208,6 +1236,14 @@ TrScenarioObjects(
     TrPhase("CreateCommandQueue direct");
     QueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     printf("result %08X\n", (UINT)Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Queue)));
+    for (D3D12_COMMAND_LIST_TYPE Type : { D3D12_COMMAND_LIST_TYPE_COMPUTE, D3D12_COMMAND_LIST_TYPE_COPY })
+    {
+        ComPtr<ID3D12CommandQueue> Other;
+
+        TrPhase(Type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? "CreateCommandQueue compute" : "CreateCommandQueue copy");
+        QueueDesc.Type = Type;
+        printf("result %08X\n", (UINT)Device->CreateCommandQueue(&QueueDesc, IID_PPV_ARGS(&Other)));
+    }
     TrPhase("CreateCommandAllocator direct");
     printf("result %08X\n", (UINT)Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                                  IID_PPV_ARGS(&Allocator)));
