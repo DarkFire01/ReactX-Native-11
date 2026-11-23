@@ -560,6 +560,7 @@ D9MakeShader(
     _In_ BOOLEAN Pixel,
     _In_ DWORD Supported,
     _In_ BOOLEAN ToDriver,
+    _In_ const D9_SHADER_CHECK_DEVICE* Checked,
     _Out_ Shader** Made)
 {
     D9ShaderLayout* Shape = new (std::nothrow) D9ShaderLayout;
@@ -569,7 +570,7 @@ D9MakeShader(
     *Made = nullptr;
     if (Shape == nullptr)
         return E_OUTOFMEMORY;
-    if (!D9CheckShaderTokens(Function, Pixel, Supported, Shape))
+    if (!D9CheckShaderTokens(Function, Pixel, Supported, Checked, Shape))
     {
         delete Shape;
         return D3DERR_INVALIDCALL;
@@ -601,10 +602,11 @@ D9Device::CreateVertexShader(
     _Out_ IDirect3DVertexShader9** Shader)
 {
     D9_DEVICE_LOCK();
+    D9_SHADER_CHECK_DEVICE Checked = { &Caps, BehaviorFlags, DeviceType };
     D9VertexShader* Made;
     HRESULT hr;
 
-    hr = D9MakeShader(this, Function, FALSE, Caps.VertexShaderVersion, DriverHasVertexShaders(), &Made);
+    hr = D9MakeShader(this, Function, FALSE, Caps.VertexShaderVersion, DriverHasVertexShaders(), &Checked, &Made);
     *Shader = Made;
     return hr;
 }
@@ -615,10 +617,11 @@ D9Device::CreatePixelShader(
     _Out_ IDirect3DPixelShader9** Shader)
 {
     D9_DEVICE_LOCK();
+    D9_SHADER_CHECK_DEVICE Checked = { &Caps, BehaviorFlags, DeviceType };
     D9PixelShader* Made;
     HRESULT hr;
 
-    hr = D9MakeShader(this, Function, TRUE, Caps.PixelShaderVersion, TRUE, &Made);
+    hr = D9MakeShader(this, Function, TRUE, Caps.PixelShaderVersion, TRUE, &Checked, &Made);
     *Shader = Made;
     return hr;
 }

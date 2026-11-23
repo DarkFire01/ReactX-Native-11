@@ -11,6 +11,7 @@
 #include "kmcallbacks.hpp"
 #include "ffpixel.hpp"
 #include "ffvertex.hpp"
+#include "shadervalidator.hpp"
 
 class D9Device;
 class D9SwapChain;
@@ -1277,11 +1278,13 @@ typedef D9Buffer<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC> D9IndexBuffer;
 static constexpr UINT D9MaxShaderDefs = 256;
 
 /* What the token check learns of a shader: its sizes with and without comments, the registers it defines and,
-   for a vertex shader, a vertex format describing the outputs it writes */
+   for a vertex shader, a vertex format describing the outputs it writes and which vertex processing can run it */
 struct D9ShaderLayout
 {
     UINT Size;
     DWORD Outputs;
+    BOOLEAN HardwareCapable;
+    BOOLEAN SoftwareCapable;
     UINT StrippedSize;
     UINT Instructions;
     UINT FloatDefCount;
@@ -1297,6 +1300,7 @@ D9CheckShaderTokens(
     _In_ const DWORD* Tokens,
     _In_ BOOLEAN Pixel,
     _In_ DWORD Supported,
+    _In_ const D9_SHADER_CHECK_DEVICE* Device,
     _Out_ D9ShaderLayout* Layout);
 
 /* A vertex or pixel shader: the function the application gave, what the driver made of it and the constants

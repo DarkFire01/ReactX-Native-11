@@ -6,6 +6,7 @@
  */
 
 #include "d3d9.hpp"
+#include "shadervalidator.hpp"
 
 #include <sddl.h>
 #include <aclapi.h>
@@ -324,14 +325,13 @@ Direct3D9SetMaximizedWindowHwndOverride(
     D9State.MaximizedHwndOverride = Enable != FALSE;
 }
 
-/* Shader validation lands with the shader work; until then creation fails as if out of memory */
+/* The standalone shader validator; null when out of memory */
 extern "C"
 VOID*
 WINAPI
 Direct3DShaderValidatorCreate9(VOID)
 {
-    D9_TRACE_ONCE(L"Direct3DShaderValidatorCreate9 is not implemented yet");
-    return nullptr;
+    return D9CreateShaderValidatorObject();
 }
 
 BOOL
