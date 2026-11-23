@@ -123,6 +123,7 @@ static constexpr UINT D9RegTemp = 0;
 static constexpr UINT D9RegInput = 1;
 static constexpr UINT D9RegTexture = 3;
 static constexpr UINT D9RegRastOut = 4;
+static constexpr UINT D9RegAttrOut = 5;
 static constexpr UINT D9RegOutput = 6;
 static constexpr UINT D9RegColorOut = 8;
 static constexpr UINT D9RegDepthOut = 9;
@@ -370,6 +371,45 @@ D9FirstVersionParameters(
 }
 
 /* Walks the tokens and checks each instruction; fills in the sizes and the registers DEF instructions fix */
+/* The outputs a vs_1 or vs_2 shader writes as a vertex format: each coordinate set by its last written
+   component, the set count, the colors, the point size and fog; nothing without a position */
+static
+DWORD
+D9VertexOutputs(
+    _In_ const D9ShaderWalk* Walk)
+{
+    DWORD Format = 0;
+    INT Highest = -1;
+
+    for (UINT Set = 0; Set < 8; Set++)
+    {
+        BYTE Mask = D9RegisterMask(Walk->Written, D9RegOutput, Set);
+
+        if (Mask == 0)
+            continue;
+        Highest = static_cast<INT>(Set);
+        if ((Mask & 0x8) != 0)
+            Format |= 2u << (2 * Set + 16);
+        else if ((Mask & 0x4) != 0)
+            Format |= 1u << (2 * Set + 16);
+        else if ((Mask & 0x2) == 0)
+            Format |= 3u << (2 * Set + 16);
+    }
+    if (Highest >= 0)
+        Format |= static_cast<DWORD>(Highest + 1) << 8;
+    if (D9RegisterMask(Walk->Written, D9RegAttrOut, 0) != 0)
+        Format |= 0x40;
+    if (D9RegisterMask(Walk->Written, D9RegAttrOut, 1) != 0)
+        Format |= 0x80;
+    if (D9RegisterMask(Walk->Written, D9RegRastOut, 0) != 0)
+        Format |= 0x4;
+    if (D9RegisterMask(Walk->Written, D9RegRastOut, 1) != 0)
+        Format |= 0x2000;
+    if (D9RegisterMask(Walk->Written, D9RegRastOut, 2) != 0)
+        Format |= 0x20;
+    return (Format & 0x4) != 0 ? Format : 0;
+}
+
 BOOLEAN
 D9CheckShaderTokens(
     _In_ const DWORD* Tokens,
@@ -527,6 +567,8 @@ D9CheckShaderTokens(
         return FALSE;
     }
 
+    if (!Pixel && Walk.Version < D9V(3, 0))
+        Layout->Outputs = D9VertexOutputs(&Walk);
     Layout->Size = static_cast<UINT>(Token - Tokens + 1) * sizeof(DWORD);
     Layout->StrippedSize = Layout->Size - Comments * sizeof(DWORD);
     return TRUE;

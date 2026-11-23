@@ -647,7 +647,7 @@ D9Device::SetVertexShader(
 
     /* Without a driver copy the shader runs in the runtime's pipeline, which picks it up at the next draw */
     if (Next != nullptr && Next->DriverHandle != NULL)
-        SwitchVertexShader(Next->DriverHandle, 0);
+        SwitchVertexShader(Next->DriverHandle, Next->Shape()->Outputs);
     else if (Next != nullptr)
         DrawDirty |= D9DrawVertexInput;
     else if (DriverHasVertexShaders())

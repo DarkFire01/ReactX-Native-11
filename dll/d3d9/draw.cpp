@@ -713,7 +713,7 @@ D9Device::FlushVertexInput(VOID)
     if (Bound->Transformed)
         return S_OK;
     if (VertexShader != nullptr)
-        SwitchVertexShader(VertexShader->DriverHandle, 0);
+        SwitchVertexShader(VertexShader->DriverHandle, VertexShader->Shape()->Outputs);
     else
         SwitchVertexShader(NULL, 0);
     return S_OK;

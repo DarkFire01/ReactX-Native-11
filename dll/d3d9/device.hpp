@@ -1276,10 +1276,12 @@ typedef D9Buffer<IDirect3DIndexBuffer9, D3DINDEXBUFFER_DESC> D9IndexBuffer;
 /* Registers one shader's DEF instructions may fix, of each kind */
 static constexpr UINT D9MaxShaderDefs = 256;
 
-/* What the token check learns of a shader: its sizes with and without comments and the registers it defines */
+/* What the token check learns of a shader: its sizes with and without comments, the registers it defines and,
+   for a vertex shader, a vertex format describing the outputs it writes */
 struct D9ShaderLayout
 {
     UINT Size;
+    DWORD Outputs;
     UINT StrippedSize;
     UINT Instructions;
     UINT FloatDefCount;
