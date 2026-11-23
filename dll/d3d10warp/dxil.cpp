@@ -277,6 +277,13 @@ private:
         _In_opt_ llvm::BasicBlock *Merge);
 
     BOOLEAN
+    InputCoordinates(
+        _In_ llvm::CallInst *Call,
+        _In_ UINT First,
+        _In_ UINT Count,
+        _Out_ RxTokens *Operand);
+
+    BOOLEAN
     Leaves(
         _In_ llvm::BasicBlock *From,
         _In_ llvm::BasicBlock *Target);
@@ -287,14 +294,12 @@ private:
     RxTokens Body;
     std::unordered_map<const llvm::Value *, UINT> Slots;
     std::unordered_map<const llvm::Value *, UINT> SharedRegisters;
-    std::unordered_map<const llvm::Value *, UINT> Arrays;
+    std::unordered_map<const llvm::Value *, std::pair<UINT, UINT>> Inputs;
     UINT NextSlot = 0;
-    UINT NextArray = 0;
     llvm::DominatorTreeBase<llvm::BasicBlock> PostDominators{ true };
     llvm::DominatorTree Dominators;
     llvm::LoopInfo Loops;
     std::vector<RX_LOOP> Open;
-    std::vector<llvm::BasicBlock *> Visited;
     BOOLEAN PixelShader = FALSE;
 };
 
@@ -984,6 +989,7 @@ RxLowering::LowerCall(
 
             if (Row == nullptr || !llvm::isa<llvm::UndefValue>(Call->getArgOperand(4)))
                 return FALSE;
+            Inputs[Call] = { (UINT)Element.GetStartRow() + (UINT)Row->getZExtValue(), Column };
             Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxRegister(D3D10_SB_OPERAND_TYPE_INPUT, RxSelectMode, Column,
                                                                { (UINT)Element.GetStartRow() + (UINT)Row->getZExtValue() }) });
             return TRUE;
@@ -1108,6 +1114,30 @@ RxCoordinates(
     }
 }
 
+/* Coordinates read straight from one input register stay an input operand, which the sampler interpolates again */
+BOOLEAN
+RxLowering::InputCoordinates(
+    _In_ llvm::CallInst *Call,
+    _In_ UINT First,
+    _In_ UINT Count,
+    _Out_ RxTokens *Operand)
+{
+    UINT Swizzle = 0;
+    UINT Row = 0;
+
+    for (UINT Component = 0; Component < 4; Component++)
+    {
+        auto Found = Inputs.find(Call->getArgOperand(First + ((Component < Count) ? Component : Count - 1)));
+
+        if (!PixelShader || Found == Inputs.end() || (Component != 0 && Found->second.first != Row))
+            return FALSE;
+        Row = Found->second.first;
+        Swizzle |= Found->second.second << (Component * 2);
+    }
+    *Operand = RxRegister(D3D10_SB_OPERAND_TYPE_INPUT, RxSwizzleMode, Swizzle, { Row });
+    return TRUE;
+}
+
 /* Constant texel offsets go in the extended opcode; others are not lowered */
 BOOLEAN
 RxOffsets(
@@ -1160,28 +1190,33 @@ RxLowering::LowerResource(
             UINT Count = RxCoordinates(Handle.Kind) + ((Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
                                                         Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::TextureCubeArray) ? 1 : 0);
             RxTokens SamplerOperand;
+            RxTokens Coordinates;
 
             if (!HandleOf(Call->getArgOperand(2), &Sampler) || !RxOffsets(Call, 7, &Extended))
                 return FALSE;
-            Address = GatherRange(Call, 3, Count);
+            if (!InputCoordinates(Call, 3, Count, &Coordinates))
+            {
+                Address = GatherRange(Call, 3, Count);
+                Coordinates = Temp(Address, RxSwizzleMode, RxXyzw);
+            }
             Result = Fresh4();
             Slots[Call] = Result * 4;
             SamplerOperand = RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Sampler.Slot });
             switch (Code)
             {
                 case OpCode::Sample:
-                    Emit(D3D10_SB_OPCODE_SAMPLE, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle),
+                    Emit(D3D10_SB_OPCODE_SAMPLE, { Temp(Result, RxMaskMode, 0xF), Coordinates, ResourceOperand(Handle),
                                                    SamplerOperand }, 0, Extended.empty() ? nullptr : &Extended);
                     break;
                 case OpCode::SampleBias:
                 case OpCode::SampleLevel:
                     Emit((Code == OpCode::SampleBias) ? D3D10_SB_OPCODE_SAMPLE_B : D3D10_SB_OPCODE_SAMPLE_L,
-                         { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle), SamplerOperand,
+                         { Temp(Result, RxMaskMode, 0xF), Coordinates, ResourceOperand(Handle), SamplerOperand,
                            Source(Call->getArgOperand(10)) }, 0, Extended.empty() ? nullptr : &Extended);
                     break;
                 default:
                     Emit((Code == OpCode::SampleCmp) ? D3D10_SB_OPCODE_SAMPLE_C : D3D10_SB_OPCODE_SAMPLE_C_LZ,
-                         { Temp(Result, RxMaskMode, 1), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle, RxSelectMode, 0),
+                         { Temp(Result, RxMaskMode, 1), Coordinates, ResourceOperand(Handle, RxSelectMode, 0),
                            SamplerOperand, Source(Call->getArgOperand(10)) }, 0, Extended.empty() ? nullptr : &Extended);
                     break;
             }
