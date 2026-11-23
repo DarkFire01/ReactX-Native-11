@@ -70,6 +70,33 @@ struct RxPagingQueue12
     VOID* FenceCpuVa;
 };
 
+/* The most GPU nodes the runtime takes from a driver */
+constexpr UINT RxNodeLimit12 = 32;
+
+/* One physical node as the driver describes its memory */
+struct RxNodeCaps12
+{
+    BOOLEAN Uma;
+    BOOLEAN CacheCoherent;
+    BOOLEAN IoCoherent;
+    BOOLEAN IsolatedMmu;
+    D3D12_HEAP_SERIALIZATION_TIER HeapSerializationTier;
+};
+
+/* Protected session support of one node, read the first time it is asked for */
+struct RxSessionCaps12
+{
+    UINT Support;
+    UINT TypeCount;
+    GUID* Types;
+};
+
+/* What the driver hands back through SetCommandListDDITableCb: the table a list should use */
+struct RxListTableToken12
+{
+    const D3D12DDI_COMMAND_LIST_FUNCS_3D_0114* Table;
+};
+
 /* The kernel adapter and the Direct3D 12 user mode driver that drives it */
 class RxAdapter12
 {
@@ -261,13 +288,13 @@ public:
     ListTable(
         _In_ D3D12DDI_HRTTABLE Table) const
     {
-        return static_cast<const D3D12DDI_COMMAND_LIST_FUNCS_3D_0114*>(Table.handle);
+        return static_cast<const RxListTableToken12*>(Table.handle)->Table;
     }
 
     const D3D12DDI_COMMAND_LIST_FUNCS_3D_0114&
     DefaultListTable() const
     {
-        return ListFunctions;
+        return ListFunctions[0];
     }
 
     RxAdapter12&
@@ -306,7 +333,7 @@ public:
     SIZE_T
     DriverRtvIncrement() const
     {
-        return DescriptorSizes[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
+        return RtvDriverSize;
     }
 
     const D3D12DDI_D3D12_OPTIONS_DATA_0089&
@@ -331,7 +358,7 @@ public:
     BOOLEAN
     IsTileBased() const
     {
-        return TileBased;
+        return Architecture.TileBasedDeferredRenderer != FALSE;
     }
 
     UINT
@@ -349,13 +376,13 @@ public:
     BOOLEAN
     IsUma() const
     {
-        return MemoryArchitecture.UMA != FALSE;
+        return Nodes[ApiToPhysical[0]].Uma;
     }
 
     BOOLEAN
     IsCacheCoherentUma() const
     {
-        return MemoryArchitecture.UMA && MemoryArchitecture.CacheCoherent;
+        return Nodes[ApiToPhysical[0]].Uma && Nodes[ApiToPhysical[0]].CacheCoherent;
     }
 
     /* The most descriptors a shader visible heap of a type may hold, 0 for no limit */
@@ -401,7 +428,7 @@ public:
     UINT
     GetComputeQueuesPerGroup() const
     {
-        return ComputeQueuesPerGroup;
+        return Scheduling.ComputeQueuesPer3DQueue;
     }
 
 private:
@@ -419,13 +446,57 @@ private:
     QueryShaderModels();
 
     VOID
-    QueryVirtualAddressBits();
+    ClampOptions();
 
     HRESULT
     FillTables();
 
-    VOID
-    QueryVideoVersion();
+    HRESULT
+    EnableExtendedFeatures();
+
+    HRESULT
+    QueryLateCaps();
+
+    HRESULT
+    ApplyShaderModelRules();
+
+    HRESULT
+    CheckFormatFamilies();
+
+    HRESULT
+    QueryNodes();
+
+    HRESULT
+    QueryHeapCaps();
+
+    HRESULT
+    QueryVirtualAddressBits();
+
+    HRESULT
+    CreateInternalObjects();
+
+    HRESULT
+    QuerySessionCaps();
+
+    /* An API node mask in the driver's numbering; Single demands exactly one node */
+    HRESULT
+    TranslateNodeMask(
+        _In_ UINT Mask,
+        _In_ BOOLEAN Single,
+        _Out_ UINT* Translated) const;
+
+    /* The physical node an API node index answers for */
+    HRESULT
+    NodeForCaps(
+        _In_ UINT NodeIndex,
+        _Out_ UINT* Physical) const;
+
+    HRESULT
+    CheckPlacedSupport(
+        _Inout_ D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO* Data);
+
+    UINT
+    ShaderCacheSupport() const;
 
     /* The answers CheckFeatureSupport gives for formats depend on these */
     RxFormatContext12
@@ -437,27 +508,59 @@ private:
     RxDriverMemory12 DriverMemory;
     D3D12DDI_HDEVICE DriverDevice = {};
     BOOLEAN IsDriverDeviceCreated = FALSE;
+    UINT DdiBuild = 0;
+    D3D_FEATURE_LEVEL Level = (D3D_FEATURE_LEVEL)0;
     D3D12DDI_DEVICE_FUNCS_CORE_0116 CoreFunctions = {};
-    D3D12DDI_COMMAND_LIST_FUNCS_3D_0114 ListFunctions = {};
+    D3D12DDI_COMMAND_LIST_FUNCS_3D_0114 ListFunctions[2] = {};
+    RxListTableToken12 ListTokens[2] = {};
     D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001 QueueFunctions = {};
     D3D12DDI_EXTENDED_FEATURES_FUNCS_0096 ExtendedFunctions = {};
+    D3D12DDI_DEVICE_FUNCS_CONTENT_PROTECTION_RESOURCES_0074 SessionFunctions = {};
     UINT VideoVersion = 0;
-    LONG TypedLoadMinimal = -1;
-    D3D12DDI_D3D12_OPTIONS_DATA_0089 Options = {};
-    D3D12DDI_MEMORY_ARCHITECTURE_CAPS_0041 MemoryArchitecture = {};
+    UINT SessionVersion = 0;
+    BOOLEAN TypedLoadMinimal = FALSE;
+    UINT PreviewShaderModels = 0;
     D3D12DDI_SHADER_CAPS_0084 ShaderCaps = {};
+    D3D12DDI_D3D12_OPTIONS_DATA_0089 Options = {};
+    D3D12DDI_OPTIONS_DATA_0090 Casting = {};
+    D3D12DDI_OPTIONS_DATA_0091 CopyAndViewport = {};
+    D3D12DDI_OPTIONS_DATA_0093 TextureOps = {};
+    D3D12DDI_OPTIONS_DATA_0098 L1Access = {};
+    D3D12DDI_OPTIONS_DATA_0101 ComputeHeap = {};
     D3D12DDI_OPTIONS_DATA_0102 HeapLimits = {};
     BOOLEAN HasHeapLimits = FALSE;
+    D3D12DDI_OPTIONS_DATA_0103 WorkGraphs = {};
+    D3D12DDI_OPTIONS_DATA_0109 RecreateAt = {};
+    D3D12DDI_OPTIONS_DATA_0110 ExecuteIndirect = {};
+    D3D12DDI_OPTIONS_DATA_0118 Reordering = {};
+    D3D12DDI_SHADER_MODEL_6_8_OPTIONS_0110 Model68 = {};
+    D3D12DDI_ARCHITECTURE_INFO_DATA Architecture = {};
+    D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050 Scheduling = {};
+    D3D12DDI_TEXTURE_LAYOUT_CAPS_0026 TextureLayout = {};
+    D3D12DDI_ROW_MAJOR_LAYOUT_CAPS RowMajorLayouts[3] = {};
     D3D_SHADER_MODEL HighestShaderModel = D3D_SHADER_MODEL_5_1;
-    BOOLEAN TileBased = FALSE;
     UINT VaBitsPerResource = 0;
     UINT VaBitsPerProcess = 0;
-    UINT DescriptorSizes[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES] = {};
+    UINT RtvDriverSize = 0;
+    UINT KmdVersion = 0;
+    UINT RealtimeQueueFlags = 0;
+    BOOLEAN GlobalPriorityAvailable = FALSE;
+    BOOLEAN GpuUploadOs = FALSE;
+    BOOLEAN Displayable = FALSE;
+    BOOLEAN BatchedMarkers = FALSE;
+    BOOLEAN BackgroundProcessing = FALSE;
+    UINT PhysicalNodeCount = 0;
+    UINT ApiNodeCount = 0;
+    UINT ApiToPhysical[RxNodeLimit12] = {};
+    RxNodeCaps12 Nodes[RxNodeLimit12] = {};
+    SRWLOCK SessionLock = SRWLOCK_INIT;
+    BOOLEAN SessionsQueried = FALSE;
+    RxSessionCaps12 Sessions[RxNodeLimit12] = {};
+    RxDriverMemory12 PoolMemory;
+    D3D12DDI_HCOMMANDPOOL_0040 CommandPool = {};
     RxPagingQueue12 PagingQueue = {};
     volatile LONG64 CommandListCounter = 0;
     HRESULT RemovedReason = S_OK;
-    UINT RealtimeQueueFlags = 0;
-    UINT ComputeQueuesPerGroup = 0;
     SRWLOCK GroupLock = SRWLOCK_INIT;
     RxSchedulingGroup* OpenGroups = nullptr;
     RxPrivateDataStore PrivateData;

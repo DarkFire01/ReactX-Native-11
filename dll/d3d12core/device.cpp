@@ -155,11 +155,12 @@ RxDevice12::Initialize(
     D3D12DDIARG_CREATEDEVICE_0109 Create = {};
     D3DKMT_CREATEPAGINGQUEUE Paging = {};
     SIZE_T Size;
-    UINT Type;
     NTSTATUS Status;
     HRESULT hr;
 
     Adapter = OpenedAdapter;
+    DdiBuild = (UINT)(Adapter->GetVersion() >> 16) & 0xFFFF;
+    Level = Adapter->GetMaxFeatureLevel();
 
     CreateKm.hAdapter = Adapter->GetKmtHandle();
     CreateKm.Flags.RequestVSync = TRUE;
@@ -201,8 +202,9 @@ RxDevice12::Initialize(
     if (FAILED(hr))
         return hr;
 
-    for (Type = 0; Type < D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES; Type++)
-        DescriptorSizes[Type] = CoreFunctions.pfnGetDescriptorSizeInBytes(DriverDevice, (D3D12DDI_DESCRIPTOR_HEAP_TYPE)Type);
+    hr = QueryLateCaps();
+    if (FAILED(hr))
+        return hr;
 
     /* The paging queue every residency change of this device goes through */
     Paging.hDevice = KmDevice;
@@ -218,262 +220,16 @@ RxDevice12::Initialize(
     PagingQueue.SyncObject = Paging.hSyncObject;
     PagingQueue.FenceCpuVa = Paging.FenceValueCPUVirtualAddress;
 
-    RX_TRACE(L"Direct3D 12 device on DDI 0x%016llX, level 0x%X", Adapter->GetVersion(), Adapter->GetMaxFeatureLevel());
-    return S_OK;
-}
-
-HRESULT
-RxDevice12::QueryDeviceCaps()
-{
-    UINT Node = 0;
-    HRESULT hr;
-
-    hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_D3D12_OPTIONS, nullptr, &Options, sizeof(Options));
-    if (FAILED(hr))
-    {
-        RX_TRACE(L"driver options query failed 0x%08lX", hr);
-        return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-    }
-
-    hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_MEMORY_ARCHITECTURE, &Node, &MemoryArchitecture, sizeof(MemoryArchitecture));
-    if (FAILED(hr))
-    {
-        ZeroMemory(&MemoryArchitecture, sizeof(MemoryArchitecture));
-        hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_MEMORY_ARCHITECTURE, &Node, &MemoryArchitecture,
-                              sizeof(D3D12DDI_MEMORY_ARCHITECTURE_CAPS));
-    }
-    if (FAILED(hr))
-        return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-
-    hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_SHADER, nullptr, &ShaderCaps, sizeof(ShaderCaps));
-    if (FAILED(hr))
-    {
-        RX_TRACE(L"driver shader caps query failed 0x%08lX", hr);
-        return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-    }
-
-    {
-        D3D12DDI_ARCHITECTURE_INFO_DATA Architecture = {};
-
-        if (FAILED(Adapter->GetCaps(D3D12DDICAPS_TYPE_ARCHITECTURE_INFO, nullptr, &Architecture, sizeof(Architecture))))
-            return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-        TileBased = Architecture.TileBasedDeferredRenderer != FALSE;
-    }
-
-    hr = QueryShaderModels();
+    hr = QueryVirtualAddressBits();
     if (FAILED(hr))
         return hr;
 
-    {
-        D3D12DDICAPS_UMD_BASED_COMMAND_QUEUE_PRIORITY_DATA_0023 Priority = {};
-
-        /* Only the seven queue flag bits are allowed in the answer */
-        hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_0023_UMD_BASED_COMMAND_QUEUE_PRIORITY, nullptr, &Priority,
-                              sizeof(Priority));
-        if (FAILED(hr) || (Priority.SupportedQueueFlagsForGlobalRealtimeQueues & ~0x7F) != 0)
-        {
-            RX_TRACE(L"driver queue priority caps query failed 0x%08lX", hr);
-            return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-        }
-        RealtimeQueueFlags = Priority.SupportedQueueFlagsForGlobalRealtimeQueues;
-    }
-
-    {
-        D3D12DDICAPS_HARDWARE_SCHEDULING_CAPS_0050 Scheduling = {};
-
-        hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_0050_HARDWARE_SCHEDULING_CAPS, nullptr, &Scheduling,
-                              sizeof(Scheduling));
-        if (FAILED(hr))
-        {
-            RX_TRACE(L"driver hardware scheduling caps query failed 0x%08lX", hr);
-            return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-        }
-        ComputeQueuesPerGroup = Scheduling.ComputeQueuesPer3DQueue;
-    }
-
-    /* Shader visible heap limits; drivers without the query keep the tier limits */
-    HasHeapLimits = SUCCEEDED(Adapter->GetCaps(D3D12DDICAPS_TYPE_OPTIONS_0102, nullptr, &HeapLimits,
-                                                sizeof(HeapLimits)));
-    if (!HasHeapLimits)
-        HeapLimits.MaxSamplerDescriptorHeapSize = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
-
-    QueryVirtualAddressBits();
-    return S_OK;
-}
-
-/* The driver lists shader models; only released ones count, the newest becomes the device's */
-HRESULT
-RxDevice12::QueryShaderModels()
-{
-    D3D12DDI_D3D12_SHADER_MODELS_DATA_0011 Query = {};
-    D3D12DDI_SHADER_MODEL* Models;
-    UINT Count = 0;
-    UINT Index;
-    UINT Best = 0;
-    BOOLEAN HasModel51 = FALSE;
-    HRESULT hr;
-
-    Query.pNumShaderModelsSupported = &Count;
-    hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_0011_SHADER_MODELS, nullptr, &Query, sizeof(Query));
-    if (FAILED(hr) || Count == 0)
-        return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-
-    Models = new (std::nothrow) D3D12DDI_SHADER_MODEL[Count];
-    if (Models == nullptr)
-        return E_OUTOFMEMORY;
-
-    Query.pShaderModelsSupported = Models;
-    hr = Adapter->GetCaps(D3D12DDICAPS_TYPE_0011_SHADER_MODELS, nullptr, &Query, sizeof(Query));
-    for (Index = 0; SUCCEEDED(hr) && Index < Count; Index++)
-    {
-        UINT Model = (UINT)Models[Index];
-
-        /* Major in the high word, minor in the top nibble of the low one, 5 marks a release */
-        if ((Model & 0xF) != 5)
-            continue;
-
-        Model = ((Model >> 16) << 4) | ((Model >> 4) & 0xF);
-        if (Model == D3D_SHADER_MODEL_5_1)
-            HasModel51 = TRUE;
-
-        /* Releases newer than this runtime knows do not count */
-        if ((Model == D3D_SHADER_MODEL_5_1 || (Model >= D3D_SHADER_MODEL_6_0 && Model <= D3D_SHADER_MODEL_6_8)) &&
-            Model > Best)
-        {
-            Best = Model;
-        }
-    }
-    delete[] Models;
-
-    if (FAILED(hr) || !HasModel51 || Best == 0)
-        return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-
-    HighestShaderModel = (D3D_SHADER_MODEL)Best;
-    return S_OK;
-}
-
-/* Process wide bits come from the kernel's MMU, per resource bits are also capped by the driver */
-VOID
-RxDevice12::QueryVirtualAddressBits()
-{
-    D3DKMT_WDDM_2_0_CAPS Caps = {};
-    D3D12DDI_GPUVA_CAPS_0004 DriverCaps = {};
-    UINT Node = 0;
-
-    VaBitsPerProcess = 64;
-
-    if (SUCCEEDED(Adapter->QueryKernel(KMTQAITYPE_WDDM_2_0_CAPS, &Caps, sizeof(Caps))))
-    {
-        if (Caps.IoMmuSupported)
-        {
-            SYSTEM_INFO System;
-            UINT64 Span;
-
-            GetSystemInfo(&System);
-            Span = (UINT64)(ULONG_PTR)System.lpMaximumApplicationAddress -
-                   (UINT64)(ULONG_PTR)System.lpMinimumApplicationAddress;
-            for (VaBitsPerProcess = 0; Span != 0; Span >>= 1)
-                VaBitsPerProcess++;
-        }
-
-        if (Caps.GpuMmuSupported)
-        {
-            D3DKMT_QUERY_GPUMMU_CAPS Mmu = {};
-
-            Mmu.PhysicalAdapterIndex = 0;
-            if (SUCCEEDED(Adapter->QueryKernel(KMTQAITYPE_QUERY_GPUMMU_CAPS, &Mmu, sizeof(Mmu))))
-            {
-                if (Mmu.Caps.VirtualAddressBitCount < VaBitsPerProcess)
-                    VaBitsPerProcess = Mmu.Caps.VirtualAddressBitCount;
-            }
-            else
-            {
-                VaBitsPerProcess = 38;
-            }
-        }
-    }
-
-    VaBitsPerResource = VaBitsPerProcess;
-    if (SUCCEEDED(Adapter->GetCaps(D3D12DDICAPS_TYPE_GPUVA_CAPS, &Node, &DriverCaps, sizeof(DriverCaps))) &&
-        DriverCaps.MaxGPUVirtualAddressBitsPerResource != 0 &&
-        DriverCaps.MaxGPUVirtualAddressBitsPerResource < VaBitsPerResource)
-    {
-        VaBitsPerResource = DriverCaps.MaxGPUVirtualAddressBitsPerResource;
-    }
-}
-
-HRESULT
-RxDevice12::FillTables()
-{
-    const D3D12DDI_ADAPTERFUNCS_0109& Functions = Adapter->GetFunctions();
-    D3D12DDI_HRTTABLE NoTable = {};
-    D3D12DDI_HRTTABLE ListToken = {};
-    HRESULT hr;
-
-    hr = Functions.pfnFillDDITable(Adapter->GetDriverHandle(), D3D12DDI_TABLE_TYPE_DEVICE_CORE, &CoreFunctions,
-                                   sizeof(CoreFunctions), 0, NoTable);
+    hr = CreateInternalObjects();
     if (FAILED(hr))
         return hr;
 
-    /* The token comes back through SetCommandListDDITableCb as the table a new list dispatches through */
-    ListToken.handle = &ListFunctions;
-    hr = Functions.pfnFillDDITable(Adapter->GetDriverHandle(), D3D12DDI_TABLE_TYPE_COMMAND_LIST_3D, &ListFunctions,
-                                   sizeof(ListFunctions), 0, ListToken);
-    if (FAILED(hr))
-        return hr;
-
-    hr = Functions.pfnFillDDITable(Adapter->GetDriverHandle(), D3D12DDI_TABLE_TYPE_COMMAND_QUEUE_3D, &QueueFunctions,
-                                   sizeof(QueueFunctions), 0, NoTable);
-    if (FAILED(hr))
-        return hr;
-
-    if (ListFunctions.pfnCopyBufferRegion == nullptr || ListFunctions.pfnCopyTiles == nullptr ||
-        QueueFunctions.pfnExecuteCommandLists == nullptr)
-    {
-        RX_TRACE(L"driver tables are incomplete");
-        return DXGI_ERROR_DRIVER_INTERNAL_ERROR;
-    }
-
-    /* Optional; drivers without extended features leave video off */
-    if (SUCCEEDED(Functions.pfnFillDDITable(Adapter->GetDriverHandle(), D3D12DDI_TABLE_TYPE_0096_EXTENDED_FEATURES,
-                                            &ExtendedFunctions, sizeof(ExtendedFunctions), 0, NoTable)))
-    {
-        QueryVideoVersion();
-    }
-
+    RX_TRACE(L"Direct3D 12 device on DDI 0x%016llX, level 0x%X", Adapter->GetVersion(), Level);
     return S_OK;
-}
-
-/* The newest video feature version the driver offers */
-VOID
-RxDevice12::QueryVideoVersion()
-{
-    UINT32 Versions[32];
-    UINT32 Count = 0;
-    UINT Index;
-
-    if (ExtendedFunctions.pfnGetSupportedExtendedFeatureVersions == nullptr)
-        return;
-    if (FAILED(ExtendedFunctions.pfnGetSupportedExtendedFeatureVersions(DriverDevice, D3D12DDI_FEATURE_0020_VIDEO,
-                                                                       &Count, nullptr)))
-    {
-        return;
-    }
-
-    if (Count > _countof(Versions))
-        Count = _countof(Versions);
-    if (Count == 0 || FAILED(ExtendedFunctions.pfnGetSupportedExtendedFeatureVersions(DriverDevice,
-                                                                                    D3D12DDI_FEATURE_0020_VIDEO,
-                                                                                    &Count, Versions)))
-    {
-        return;
-    }
-
-    for (Index = 0; Index < Count; Index++)
-    {
-        if (Versions[Index] > VideoVersion)
-            VideoVersion = Versions[Index];
-    }
 }
 
 RxDevice12::~RxDevice12()
@@ -482,8 +238,14 @@ RxDevice12::~RxDevice12()
     D3DDDI_DESTROYPAGINGQUEUE DestroyPaging;
     D3DKMT_DESTROYDEVICE DestroyKm;
 
+    if (CommandPool.pDrvPrivate != nullptr)
+        CoreFunctions.pfnDestroyCommandPool(DriverDevice, CommandPool);
+
     if (IsDriverDeviceCreated)
         Adapter->GetFunctions().pfnDestroyDevice(DriverDevice);
+
+    for (RxSessionCaps12& Caps : Sessions)
+        delete[] Caps.Types;
 
     if (PagingQueue.Handle != 0)
     {
@@ -723,7 +485,7 @@ RxDevice12::GetDescriptorHandleIncrementSize(
     if ((UINT)DescriptorHeapType >= D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES)
         return 0;
 
-    return DescriptorSizes[DescriptorHeapType];
+    return CoreFunctions.pfnGetDescriptorSizeInBytes(DriverDevice, (D3D12DDI_DESCRIPTOR_HEAP_TYPE)DescriptorHeapType);
 }
 
 /* Object creation */

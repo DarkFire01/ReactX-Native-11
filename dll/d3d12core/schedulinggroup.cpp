@@ -281,7 +281,7 @@ RxDevice12::JoinSchedulingGroup(
     HRESULT hr = S_OK;
 
     *Group = nullptr;
-    if (ComputeQueuesPerGroup == 0 ||
+    if (Scheduling.ComputeQueuesPer3DQueue == 0 ||
         (Type != D3D12_COMMAND_LIST_TYPE_DIRECT && Type != D3D12_COMMAND_LIST_TYPE_COMPUTE))
     {
         return S_OK;
