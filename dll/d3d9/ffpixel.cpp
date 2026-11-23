@@ -1371,6 +1371,9 @@ D9PixelConverter::Start(
     Dirty = TRUE;
     StageCount = 0;
     Fvf = 0;
+    StageZeroTextured = FALSE;
+    ZeroMemory(TextureKinds, sizeof(TextureKinds));
+    ZeroMemory(TextureFormats, sizeof(TextureFormats));
     ZeroMemory(Constants, sizeof(Constants));
     CopyMemory(Constants, Scales, sizeof(Scales));
     ConstantMark = 0;
