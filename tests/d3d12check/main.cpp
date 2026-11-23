@@ -1797,6 +1797,19 @@ TcReportLayout(
     char Key[128];
     UINT Count = Desc.MipLevels * (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Desc.DepthOrArraySize);
 
+    /* Depth stencil and 4:2:0 formats copy as two planes */
+    switch (Desc.Format)
+    {
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        case DXGI_FORMAT_NV12:
+        case DXGI_FORMAT_P010:
+            Count *= 2;
+            break;
+        default:
+            break;
+    }
+
     if (Count == 0 || Count > 8)
         Count = 8;
 
@@ -2093,6 +2106,58 @@ TcCheckLayouts(
             Check.Report("clear_buffer", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
                                                                  D3D12_HEAP_FLAG_NONE, Buffer,
                                                                  D3D12_RESOURCE_STATE_COMMON, &Clear));
+
+            /* Typeless resources take any clear format of their family, depth must stay in range */
+            Texture.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            Texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            Clear.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            Check.Report("clear_typeless_rt", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                      D3D12_HEAP_FLAG_NONE, Texture,
+                                                                      D3D12_RESOURCE_STATE_RENDER_TARGET, &Clear));
+            Clear.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+            Check.Report("clear_typeless_value", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                         D3D12_HEAP_FLAG_NONE, Texture,
+                                                                         D3D12_RESOURCE_STATE_RENDER_TARGET, &Clear));
+            Texture.Format = DXGI_FORMAT_D32_FLOAT;
+            Texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+            Clear.Format = DXGI_FORMAT_D32_FLOAT;
+            Clear.DepthStencil.Depth = 1.0f;
+            Check.Report("clear_ds", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                             D3D12_HEAP_FLAG_NONE, Texture,
+                                                             D3D12_RESOURCE_STATE_DEPTH_WRITE, &Clear));
+            Clear.DepthStencil.Depth = 2.0f;
+            Check.Report("clear_ds_far", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                 D3D12_HEAP_FLAG_NONE, Texture,
+                                                                 D3D12_RESOURCE_STATE_DEPTH_WRITE, &Clear));
+            Check.Report("state_ds_unordered", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                       D3D12_HEAP_FLAG_NONE, Texture,
+                                                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr));
+            Texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            Texture.Flags = D3D12_RESOURCE_FLAG_NONE;
+            Check.Report("state_tex_depth", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                    D3D12_HEAP_FLAG_NONE, Texture,
+                                                                    D3D12_RESOURCE_STATE_DEPTH_READ, nullptr));
+            Check.Report("state_tex_index", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                    D3D12_HEAP_FLAG_NONE, Texture,
+                                                                    D3D12_RESOURCE_STATE_INDEX_BUFFER, nullptr));
+            Check.Report("state_tex_mixed", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                    D3D12_HEAP_FLAG_NONE, Texture,
+                                                                    (D3D12_RESOURCE_STATES)(D3D12_RESOURCE_STATE_COPY_DEST |
+                                                                    D3D12_RESOURCE_STATE_COPY_SOURCE), nullptr));
+            Check.Report("state_readback_resolve", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_READBACK,
+                                                                           D3D12_HEAP_FLAG_NONE, Buffer,
+                                                                           D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr));
+            Check.Report("state_upload_resolve", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_UPLOAD,
+                                                                         D3D12_HEAP_FLAG_NONE, Buffer,
+                                                                         D3D12_RESOURCE_STATE_RESOLVE_SOURCE, nullptr));
+            Buffer.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            Check.Report("buffer_rt_default", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                      D3D12_HEAP_FLAG_NONE, Buffer,
+                                                                      D3D12_RESOURCE_STATE_COMMON, nullptr));
+            Check.Report("buffer_rt_upload", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_UPLOAD,
+                                                                     D3D12_HEAP_FLAG_NONE, Buffer,
+                                                                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr));
+            Buffer.Flags = D3D12_RESOURCE_FLAG_NONE;
         }
 
 
