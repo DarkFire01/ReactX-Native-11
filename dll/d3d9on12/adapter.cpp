@@ -5,15 +5,9 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "d3d9on12.hpp"
+#include "device.hpp"
 
 typedef HRESULT (WINAPI* PFN_NINE_CREATE_DXCORE_FACTORY)(REFIID, void**);
-
-HRESULT
-APIENTRY
-NineCreateDevice(
-    _In_ HANDLE hAdapter,
-    _Inout_ D3DDDIARG_CREATEDEVICE* Args);
 
 /* DXCore is optional: without it the adapter is found through DXGI */
 static
@@ -313,16 +307,3 @@ NineOpenAdapter2(
     return NineOpen(Args, AdapterLuid, static_cast<NineOpenArgs*>(OpenArgs));
 }
 
-/* Devices are not implemented yet; the runtime sees the creation fail */
-HRESULT
-APIENTRY
-NineCreateDevice(
-    _In_ HANDLE hAdapter,
-    _Inout_ D3DDDIARG_CREATEDEVICE* Args)
-{
-    if (hAdapter == NULL || Args->pCallbacks == nullptr)
-        return E_INVALIDARG;
-
-    NineTrace(L"CreateDevice is not implemented yet");
-    return NineDxgiResult(E_NOTIMPL);
-}

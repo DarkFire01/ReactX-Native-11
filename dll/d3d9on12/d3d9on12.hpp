@@ -13,19 +13,26 @@
 #include <ntstatus.h>
 #include <winternl.h>
 
+/* The translation layer brings its own Direct3D 12 and DXCore headers and defines these itself */
+#undef NOMINMAX
+#undef WIN32_LEAN_AND_MEAN
+#include <D3D12TranslationLayerDependencyIncludes.h>
+#include <D3D12TranslationLayerIncludes.h>
+#include <SharedResourceHelpers.hpp>
+
 #include <dxgi1_6.h>
-#include <d3d12.h>
-#include <d3dkmthk.h>
 #include <d3d9.h>
 #include <d3dumddi.h>
-#include <dxcore.h>
 
 #include <featurestagingapi.h>
 #include <stddef.h>
 
 #include <new>
+#include <optional>
 
 #include "trace.hpp"
+
+namespace TL = D3D12TranslationLayer;
 
 /* Two values a newer runtime hands over beside the Direct3D 12 objects; kept as given */
 struct NineOpenExtras
@@ -163,3 +170,28 @@ NineCollectFormatOps(
 HRESULT
 NineDxgiResult(
     _In_ HRESULT Result);
+
+/* What SetAppCompatData hands over, in the order d3d9.dll lays it out */
+struct NineAppCompatInfo
+{
+    ULONG Flags;
+    ULONG ShaderLimits[2];
+    ULONG MaxUploadPerCommandList;
+    ULONG MaxSrvHeapSize;
+    ULONG BufferPoolTrimThreshold;
+    ULONG Options;
+};
+
+extern NineAppCompatInfo NineAppCompat;
+
+/* settings.cpp: values read once from the Direct3D9on12 registry key; ~0 when a value is absent */
+struct NineSettings
+{
+    BOOLEAN SingleThread;
+    ULONG MaxUploadPerCommandList;
+    ULONG MaxSrvHeapSize;
+    ULONG BufferPoolTrimThreshold;
+};
+
+const NineSettings&
+NineGetSettings(VOID);

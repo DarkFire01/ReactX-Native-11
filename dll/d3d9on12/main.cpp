@@ -7,8 +7,8 @@
 
 #include "d3d9on12.hpp"
 
-/* What the application compatibility layer hands over; kept for the device code */
-static BYTE NineAppCompat[28];
+/* Without SetAppCompatData every limit is left open */
+NineAppCompatInfo NineAppCompat = { 0, { ULONG_MAX, ULONG_MAX }, ULONG_MAX, ULONG_MAX, ULONG_MAX, 0 };
 
 /* Private entries without an implementation yet report it once and answer zero */
 template <UINT Slot>
@@ -123,7 +123,7 @@ APIENTRY
 SetAppCompatData(
     _In_reads_bytes_(sizeof(NineAppCompat)) const VOID* Data)
 {
-    CopyMemory(NineAppCompat, Data, sizeof(NineAppCompat));
+    CopyMemory(&NineAppCompat, Data, sizeof(NineAppCompat));
 }
 
 BOOL
