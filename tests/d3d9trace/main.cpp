@@ -865,6 +865,15 @@ TrDeviceInputs(
         TrAppend(Text, " copy %08X", Blt->CopyFlags);
         break;
     }
+    case TR_DEVICE_SLOT(pfnBufBlt1):
+    {
+        const D3DDDIARG_BUFFERBLT1* Blt = static_cast<const D3DDDIARG_BUFFERBLT1*>(Args);
+
+        TrAppend(Text, " dst %s src %s at %u range %u %u copy %08X", TrDriver(Blt->hDstResource).c_str(),
+                 TrDriver(Blt->hSrcResource).c_str(), Blt->Offset, Blt->SrcRange.Offset, Blt->SrcRange.Size,
+                 Blt->CopyFlags);
+        break;
+    }
     case TR_DEVICE_SLOT(pfnVolBlt1):
     {
         const D3DDDIARG_VOLUMEBLT1* Blt = static_cast<const D3DDDIARG_VOLUMEBLT1*>(Args);
@@ -2892,6 +2901,172 @@ TrScenarioTexturesPlain(
     Plain->Release();
 }
 
+/* Priority, private data and preloading on one resource */
+static
+VOID
+TrResourceCalls(
+    _In_z_ PCSTR Name,
+    _In_opt_ IDirect3DResource9* Resource)
+{
+    static const GUID Tag = { 0x7A7A7A7A, 0x5555, 0x6666, { 1, 3, 5, 7, 9, 11, 13, 15 } };
+    DWORD Value = 0xABCD;
+    DWORD Size = sizeof(Value);
+    DWORD First;
+    DWORD Second;
+
+    TrCloseLine();
+    if (Resource == nullptr)
+    {
+        printf("api %s none\n", Name);
+        return;
+    }
+    First = Resource->SetPriority(0x10);
+    Second = Resource->SetPriority(0x20);
+    TrCloseLine();
+    printf("api %s priority %lu %lu %lu\n", Name, First, Second, Resource->GetPriority());
+    TrApi("SetPrivateData", Resource->SetPrivateData(Tag, &Value, sizeof(Value), 0));
+    TrApi("GetPrivateData", Resource->GetPrivateData(Tag, &Value, &Size));
+    Resource->PreLoad();
+    TrApi("FreePrivateData", Resource->FreePrivateData(Tag));
+    TrCloseLine();
+    printf("api Release = %lu\n", Resource->Release());
+}
+
+/* Every kind of resource on a device, made and handed to TrResourceCalls */
+static
+VOID
+TrResourceWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSurface9* Surface = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    IDirect3DCubeTexture9* Cube = nullptr;
+
+    TrPhase("resources calls");
+    Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, nullptr);
+    TrResourceCalls("plain default", Surface);
+    Surface = nullptr;
+    Device->CreateOffscreenPlainSurface(16, 8, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Surface, nullptr);
+    TrResourceCalls("plain sysmem", Surface);
+    Surface = nullptr;
+    Device->CreateRenderTarget(16, 8, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+    TrResourceCalls("target", Surface);
+    Surface = nullptr;
+    Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Surface);
+    TrResourceCalls("back buffer", Surface);
+    Device->CreateTexture(16, 8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    TrResourceCalls("texture", Texture);
+    Texture = nullptr;
+    Device->CreateTexture(16, 8, 2, D3DUSAGE_RENDERTARGET | D3DUSAGE_AUTOGENMIPMAP, D3DFMT_A8R8G8B8,
+                          D3DPOOL_DEFAULT, &Texture, nullptr);
+    TrResourceCalls("texture autogen", Texture);
+    Texture = nullptr;
+    Device->CreateTexture(16, 8, 2, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, nullptr);
+    TrResourceCalls("texture managed", Texture);
+    Device->CreateCubeTexture(8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Cube, nullptr);
+    TrResourceCalls("cube", Cube);
+    Device->CreateVertexBuffer(64, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &Vertices, nullptr);
+    TrResourceCalls("vertices", Vertices);
+    Vertices = nullptr;
+    Device->CreateVertexBuffer(64, 0, 0, D3DPOOL_MANAGED, &Vertices, nullptr);
+    if (Vertices != nullptr)
+    {
+        VOID* Data = nullptr;
+
+        Vertices->PreLoad();
+        TrApi("Lock part", Vertices->Lock(16, 8, &Data, 0));
+        TrApi("Unlock", Vertices->Unlock());
+        TrApi("Lock again", Vertices->Lock(40, 4, &Data, 0));
+        TrApi("Unlock", Vertices->Unlock());
+        Vertices->PreLoad();
+        TrApi("Lock read", Vertices->Lock(0, 0, &Data, D3DLOCK_READONLY));
+        TrApi("Unlock", Vertices->Unlock());
+        Vertices->PreLoad();
+        TrApi("Lock whole", Vertices->Lock(0, 0, &Data, 0));
+        TrApi("Unlock", Vertices->Unlock());
+        TrApi("EvictManagedResources", Device->EvictManagedResources());
+        Vertices->PreLoad();
+    }
+    TrResourceCalls("vertices managed", Vertices);
+    Indices = nullptr;
+    Device->CreateIndexBuffer(64, 0, D3DFMT_INDEX32, D3DPOOL_MANAGED, &Indices, nullptr);
+    if (Indices != nullptr)
+    {
+        VOID* Data = nullptr;
+
+        Indices->PreLoad();
+        TrApi("Lock part", Indices->Lock(8, 8, &Data, 0));
+        TrApi("Unlock", Indices->Unlock());
+        Indices->PreLoad();
+    }
+    TrResourceCalls("indices managed", Indices);
+    Indices = nullptr;
+    Device->CreateIndexBuffer(64, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &Indices,
+                              nullptr);
+    TrResourceCalls("indices", Indices);
+}
+
+/* Resource calls on a windowed extended device */
+static
+VOID
+TrScenarioResources(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("resources create");
+    hr = Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                     nullptr, &Device);
+    TrApi("CreateDeviceEx", hr);
+    if (Device != nullptr)
+    {
+        TrResourceWork(Device);
+        TrPhase("resources release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+}
+
+/* The same calls on a device of the plain object, whose priorities stay with the runtime */
+static
+VOID
+TrScenarioResourcesPlain(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("resources create");
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters, &Device);
+    TrApi("CreateDevice", hr);
+    if (Device != nullptr)
+    {
+        TrResourceWork(Device);
+        TrPhase("resources release");
+        TrCloseLine();
+        printf("api Release = %lu\n", Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -2910,6 +3085,8 @@ static const TrScenario TrScenarios[] =
     { "buffers_plain", TrScenarioBuffersPlain },
     { "textures", TrScenarioTextures },
     { "textures_plain", TrScenarioTexturesPlain },
+    { "resources", TrScenarioResources },
+    { "resources_plain", TrScenarioResourcesPlain },
 };
 
 static
