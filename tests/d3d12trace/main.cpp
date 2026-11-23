@@ -76,6 +76,7 @@ struct TrState
     PFND3D12DDI_OPENADAPTER OpenAdapter;
     FARPROC (WINAPI* GetProcAddress)(HMODULE, LPCSTR);
     std::map<ULONG_PTR, UINT> Ids[TrKindCount];
+    std::map<ULONG_PTR, ULONG_PTR> Partners;
     UINT NextId[TrKindCount];
     SRWLOCK IdLock;
 };
@@ -1383,6 +1384,7 @@ TrForgetAfter(
     AcquireSRWLockExclusive(&Tr.IdLock);
     for (std::map<ULONG_PTR, UINT>& Ids : Tr.Ids)
         Ids.clear();
+    Tr.Partners.clear();
     ReleaseSRWLockExclusive(&Tr.IdLock);
 }
 
@@ -1396,6 +1398,12 @@ TrForgetHandle(
     if constexpr (TrIsDriverHandle<T>::value && !std::is_same_v<T, D3D12DDI_HDEVICE>)
     {
         AcquireSRWLockExclusive(&Tr.IdLock);
+        auto Partner = Tr.Partners.find((ULONG_PTR)Arg.pDrvPrivate);
+        if (Partner != Tr.Partners.end())
+        {
+            Tr.Ids[TrKindRuntime].erase(Partner->second);
+            Tr.Partners.erase(Partner);
+        }
         Tr.Ids[TrKindDriver].erase((ULONG_PTR)Arg.pDrvPrivate);
         ReleaseSRWLockExclusive(&Tr.IdLock);
     }
@@ -1411,6 +1419,54 @@ TrForgetDestroyed(
 {
     if (Family == TrFamilyDevice && strncmp(TrName(Family, Slot), "Destroy", 7) == 0)
         (TrForgetHandle(Args), ...);
+}
+
+template <typename T>
+static
+VOID
+TrNotePartner(
+    _In_ const T& Arg,
+    _In_ ULONG_PTR Runtime)
+{
+    if constexpr (TrIsDriverHandle<T>::value && !std::is_same_v<T, D3D12DDI_HDEVICE>)
+    {
+        if (Runtime != 0 && Arg.pDrvPrivate != nullptr)
+            Tr.Partners[(ULONG_PTR)Arg.pDrvPrivate] = Runtime;
+    }
+}
+
+template <typename T>
+static
+VOID
+TrFindRuntime(
+    _In_ const T& Arg,
+    _Inout_ ULONG_PTR* Runtime)
+{
+    if constexpr (TrIsRuntimeHandle<T>::value)
+    {
+        if (*Runtime == 0)
+            *Runtime = (ULONG_PTR)Arg.handle;
+    }
+}
+
+/* A runtime object's address may come back too once the driver object made with it is destroyed */
+template <typename... A>
+static
+VOID
+TrNoteCreated(
+    _In_ TrFamily Family,
+    _In_ UINT Slot,
+    _In_ const A&... Args)
+{
+    ULONG_PTR Runtime = 0;
+
+    if (Family != TrFamilyDevice || strncmp(TrName(Family, Slot), "Create", 6) != 0)
+        return;
+
+    (TrFindRuntime(Args, &Runtime), ...);
+    AcquireSRWLockExclusive(&Tr.IdLock);
+    (TrNotePartner(Args, Runtime), ...);
+    ReleaseSRWLockExclusive(&Tr.IdLock);
 }
 
 template <TrFamily Family, UINT Slot, typename Pfn>
@@ -1459,6 +1515,7 @@ struct TrHook<Family, Slot, R (APIENTRY*)(A...)>
         {
             Original(Args...);
             TrAround<Family, Slot>::After(Args...);
+            TrNoteCreated(Family, Slot, Args...);
             if (Log)
                 TrEnd("");
             TrForgetAfter(Family, Slot);
@@ -1472,6 +1529,7 @@ struct TrHook<Family, Slot, R (APIENTRY*)(A...)>
             R Result = Original(Args...);
 
             TrAround<Family, Slot>::After(Args...);
+            TrNoteCreated(Family, Slot, Args...);
             if (Log)
                 TrEnd(TrResult(Result));
             TrForgetAfter(Family, Slot);
