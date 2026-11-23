@@ -4691,6 +4691,246 @@ TrStateBlockWork(
     TrRelease(Recorded);
 }
 
+/* Prints the bindings, light and constants a detailed block touches */
+static
+VOID
+TrPrintBlockObjects(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DBaseTexture9* Texture = nullptr;
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DIndexBuffer9* Index = nullptr;
+    D3DLIGHT9 Light = {};
+    BOOL Enabled = 7;
+    FLOAT Floats[12] = {};
+    FLOAT Plane[4] = {};
+    D3DMATERIAL9 Material = {};
+    UINT Offset = 0;
+    UINT Stride = 0;
+    UINT Frequency = 0;
+    DWORD Fvf = 0;
+    HRESULT LightResult;
+
+    Device->GetTexture(0, &Texture);
+    Device->GetStreamSource(0, &Buffer, &Offset, &Stride);
+    Device->GetIndices(&Index);
+    LightResult = Device->GetLight(2, &Light);
+    Device->GetLightEnable(2, &Enabled);
+    Device->GetVertexShaderConstantF(5, Floats, 3);
+    Device->GetClipPlane(1, Plane);
+    Device->GetMaterial(&Material);
+    Device->GetStreamSourceFreq(1, &Frequency);
+    Device->GetFVF(&Fvf);
+    TrCloseLine();
+    printf("api %s = texture %d stream %d %u %u indices %d light %08lX %u enabled %d constants %08X plane %08X "
+           "material %08X frequency %u fvf %lX patch %08X\n", Name, Texture != nullptr, Buffer != nullptr, Offset,
+           Stride, Index != nullptr, LightResult, Light.Type, Enabled, TrHash(Floats, sizeof(Floats)),
+           TrHash(Plane, sizeof(Plane)), TrHash(&Material, sizeof(Material)), Frequency, Fvf,
+           TrBits(Device->GetNPatchMode()));
+    if (Texture != nullptr)
+        Texture->Release();
+    if (Buffer != nullptr)
+        Buffer->Release();
+    if (Index != nullptr)
+        Index->Release();
+}
+
+/* Records every kind of setting a block takes, with values derived from a seed */
+static
+VOID
+TrRecordBlockObjects(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DBaseTexture9* Texture,
+    _In_ IDirect3DVertexBuffer9* Buffer,
+    _In_ IDirect3DIndexBuffer9* Index,
+    _In_ UINT Seed)
+{
+    D3DLIGHT9 Light = {};
+    D3DMATERIAL9 Material = {};
+    D3DMATRIX Projection = {};
+    FLOAT Floats[12];
+    INT Ints[4] = { 1, 2, 3, static_cast<INT>(Seed) };
+    FLOAT Plane[4] = { 1.0f, static_cast<FLOAT>(Seed), 0.0f, 2.0f };
+    RECT Scissor = { 0, 0, 10 + static_cast<LONG>(Seed), 12 };
+
+    for (UINT Item = 0; Item < _countof(Floats); Item++)
+        Floats[Item] = static_cast<FLOAT>(Item + Seed);
+    Light.Type = Seed % 2 == 0 ? D3DLIGHT_DIRECTIONAL : D3DLIGHT_POINT;
+    Light.Diffuse.r = 1.0f;
+    Light.Direction.z = 1.0f;
+    Light.Range = 10.0f;
+    Material.Power = static_cast<FLOAT>(Seed);
+    Projection._11 = 1.0f;
+    Projection._22 = 1.0f;
+    Projection._33 = 2.0f + static_cast<FLOAT>(Seed);
+    Projection._34 = 1.0f;
+    Projection._43 = -1.0f;
+    TrApi("SetTexture", Device->SetTexture(0, Texture));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 16 * Seed, 16));
+    TrApi("SetIndices", Device->SetIndices(Index));
+    TrApi("SetLight", Device->SetLight(2, &Light));
+    TrApi("LightEnable", Device->LightEnable(2, Seed % 2));
+    TrApi("SetClipPlane", Device->SetClipPlane(1, Plane));
+    TrApi("SetVertexShaderConstantF", Device->SetVertexShaderConstantF(5, Floats, 3));
+    TrApi("SetPixelShaderConstantI", Device->SetPixelShaderConstantI(2, Ints, 1));
+    TrApi("SetPixelShaderConstantF", Device->SetPixelShaderConstantF(1, Floats, 2));
+    TrApi("SetVertexShaderConstantB", Device->SetVertexShaderConstantB(3, reinterpret_cast<BOOL*>(Ints), 2));
+    TrApi("SetMaterial", Device->SetMaterial(&Material));
+    TrApi("SetScissorRect", Device->SetScissorRect(&Scissor));
+    TrApi("SetNPatchMode", Device->SetNPatchMode(static_cast<FLOAT>(Seed)));
+    TrApi("SetStreamSourceFreq", Device->SetStreamSourceFreq(1, 2 + Seed));
+    TrApi("SetFVF", Device->SetFVF(Seed % 2 == 0 ? D3DFVF_XYZ : D3DFVF_XYZRHW));
+    TrApi("SetTransform", Device->SetTransform(D3DTS_PROJECTION, &Projection));
+}
+
+/* Blocks that name textures, buffers, lights, planes and constants; their interfaces; the empty kind; a light
+   capture before the light exists; and a block that outlives its device */
+static
+VOID
+TrStateBlockObjectWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DIndexBuffer9* Index = nullptr;
+    IDirect3DStateBlock9* Block = nullptr;
+    IDirect3DStateBlock9* Empty = nullptr;
+    IDirect3DStateBlock9* Lights = nullptr;
+    IDirect3DDevice9* Owner = nullptr;
+    IUnknown* Unknown = nullptr;
+    D3DLIGHT9 Light = {};
+
+    TrPhase("block objects create");
+    TrApi("CreateTexture", Device->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, nullptr));
+    TrApi("CreateVertexBuffer", Device->CreateVertexBuffer(256, 0, 0, D3DPOOL_MANAGED, &Buffer, nullptr));
+    TrApi("CreateIndexBuffer", Device->CreateIndexBuffer(64, 0, D3DFMT_INDEX16, D3DPOOL_MANAGED, &Index, nullptr));
+    TrSettle(Device);
+
+    TrPhase("block objects record");
+    TrApi("BeginStateBlock", Device->BeginStateBlock());
+    TrRecordBlockObjects(Device, Texture, Buffer, Index, 1);
+    TrApi("EndStateBlock", Device->EndStateBlock(&Block));
+    TrPrintBlockObjects("state after record", Device);
+    TrSettle(Device);
+
+    TrPhase("block objects apply");
+    if (Block != nullptr)
+    {
+        TrApi("Apply", Block->Apply());
+        TrPrintBlockObjects("state after apply", Device);
+        TrSettle(Device);
+        TrRecordBlockObjects(Device, nullptr, nullptr, nullptr, 2);
+        TrApi("Capture", Block->Capture());
+        TrSettle(Device);
+        TrRecordBlockObjects(Device, Texture, Buffer, Index, 3);
+        TrApi("Apply captured", Block->Apply());
+        TrPrintBlockObjects("state after capture apply", Device);
+        TrSettle(Device);
+    }
+
+    TrPhase("block objects release");
+    TrRelease(Texture);
+    TrRelease(Buffer);
+    TrRelease(Index);
+    if (Block != nullptr)
+    {
+        TrApi("Capture after release", Block->Capture());
+        TrApi("Apply after release", Block->Apply());
+        TrPrintBlockObjects("state after release apply", Device);
+        TrSettle(Device);
+
+        TrPhase("block interfaces");
+        TrApi("QueryInterface unknown", Block->QueryInterface(__uuidof(IUnknown), reinterpret_cast<VOID**>(&Unknown)));
+        TrCloseLine();
+        printf("api unknown same = %d\n", Unknown == static_cast<IUnknown*>(Block));
+        TrRelease(Unknown);
+        TrApi("QueryInterface device", Block->QueryInterface(__uuidof(IDirect3DDevice9),
+                                                             reinterpret_cast<VOID**>(&Unknown)));
+        TrApi("QueryInterface null", Block->QueryInterface(__uuidof(IUnknown), nullptr));
+        TrApi("GetDevice", Block->GetDevice(&Owner));
+        TrCloseLine();
+        printf("api device same = %d\n", Owner == Device);
+        TrRelease(Owner);
+
+        /* GetDevice without an output pointer is left out: the system writes through it and crashes */
+        TrCloseLine();
+        printf("api AddRef = %lu\n", Block->AddRef());
+        TrRelease(Block);
+    }
+
+    TrPhase("blocks empty and lights");
+    TrApi("CreateStateBlock zero", Device->CreateStateBlock(static_cast<D3DSTATEBLOCKTYPE>(0), &Empty));
+    if (Empty != nullptr)
+    {
+        TrApi("Apply empty", Empty->Apply());
+        TrApi("Capture empty", Empty->Capture());
+    }
+    Light.Type = D3DLIGHT_DIRECTIONAL;
+    Light.Direction.x = 1.0f;
+    TrApi("BeginStateBlock", Device->BeginStateBlock());
+    TrApi("SetLight 7", Device->SetLight(7, &Light));
+    TrApi("LightEnable 9", Device->LightEnable(9, TRUE));
+    TrApi("EndStateBlock", Device->EndStateBlock(&Lights));
+    if (Lights != nullptr)
+    {
+        TrApi("Capture missing light", Lights->Capture());
+        TrApi("Apply lights", Lights->Apply());
+        TrApi("GetLight 7", Device->GetLight(7, &Light));
+        TrApi("Capture lights", Lights->Capture());
+    }
+    TrSettle(Device);
+    TrRelease(Empty);
+
+    TrPhase("blocks outlive device");
+    TrRelease(Device);
+    TrRelease(Lights);
+}
+
+/* Blocks with objects in them on a hardware extended device and on software and mixed plain devices */
+static
+VOID
+TrScenarioStateBlockObjects(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] = { D3DCREATE_SOFTWARE_VERTEXPROCESSING, D3DCREATE_MIXED_VERTEXPROCESSING };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+
+    TrPhase("block objects extended");
+    Made = Parameters;
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Made, nullptr, &DeviceEx));
+    if (DeviceEx != nullptr)
+        TrStateBlockObjectWork(DeviceEx);
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "block objects plain %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrStateBlockObjectWork(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* State blocks on a hardware vertex processing extended device and a pure device of the plain object */
 static
 VOID
@@ -4934,6 +5174,7 @@ static const TrScenario TrScenarios[] =
     { "stateblocks", TrScenarioStateBlocks },
     { "constants", TrScenarioConstants },
     { "constants_plain", TrScenarioConstantsPlain },
+    { "stateblocks_objects", TrScenarioStateBlockObjects },
 };
 
 static
