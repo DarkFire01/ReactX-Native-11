@@ -3976,6 +3976,455 @@ DcCheckColorKeys(
     Draw7->Release();
 }
 
+/* What a duplicate starts with, next to its source */
+static
+VOID
+DcDescribeDuplicate(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAWSURFACE7 Source,
+    _In_ LPDIRECTDRAWSURFACE7 Copy)
+{
+    static const GUID Tag = { 0x1a2b3c4d, 0x1111, 0x2222, { 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x66, 0x66 } };
+    LPDIRECTDRAWCLIPPER Clipper;
+    LPDIRECTDRAWPALETTE Palette;
+    DDSURFACEDESC2 Desc;
+    DDCOLORKEY Key;
+    DDSCAPS2 Caps;
+    DWORD Value;
+    DWORD Other;
+    DWORD Count;
+    DWORD Size;
+    BYTE Data[8];
+    HRESULT hr;
+
+    printf("%s:\n", Name);
+    memset(&Caps, 0, sizeof(Caps));
+    hr = Copy->GetCaps(&Caps);
+    printf("  caps = %08lX %08lX %08lX\n", hr, Caps.dwCaps, Caps.dwCaps2);
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    hr = Copy->GetSurfaceDesc(&Desc);
+    printf("  desc = %08lX flags=%08lX %lux%lu pitch=%ld back=%lu bits=%lu\n", hr, Desc.dwFlags, Desc.dwWidth,
+           Desc.dwHeight, Desc.lPitch, Desc.dwBackBufferCount, Desc.ddpfPixelFormat.dwRGBBitCount);
+    memset(&Key, 0xCC, sizeof(Key));
+    hr = Copy->GetColorKey(DDCKEY_SRCBLT, &Key);
+    printf("  key = %08lX %08lX\n", hr, Key.dwColorSpaceLowValue);
+    Clipper = nullptr;
+    hr = Copy->GetClipper(&Clipper);
+    printf("  clipper = %08lX\n", hr);
+    if (Clipper != nullptr)
+        Clipper->Release();
+    Palette = nullptr;
+    hr = Copy->GetPalette(&Palette);
+    printf("  palette = %08lX\n", hr);
+    if (Palette != nullptr)
+        Palette->Release();
+    Size = sizeof(Data);
+    printf("  private = %08lX\n", Copy->GetPrivateData(Tag, Data, &Size));
+    Count = 0;
+    hr = Copy->EnumAttachedSurfaces(&Count, DcCountAttached);
+    printf("  attached = %08lX count=%lu\n", hr, Count);
+    Value = 0xCCCCCCCC;
+    Other = 0xDDDDDDDD;
+    Copy->GetUniquenessValue(&Value);
+    Source->GetUniquenessValue(&Other);
+    printf("  uniqueness same=%d\n", Value == Other);
+    printf("  lost = %08lX %08lX\n", Source->IsLost(), Copy->IsLost());
+}
+
+/* Reads a surface that cannot be locked by blitting it into a fresh one of the same kind */
+static
+VOID
+DcDumpThrough(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAW7 Draw7,
+    _In_ DWORD Kind,
+    _In_ LPDIRECTDRAWSURFACE7 Surface)
+{
+    LPDIRECTDRAWSURFACE7 Reader;
+
+    Reader = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 4, 2, 32);
+    if (Reader == nullptr)
+        return;
+    DcPatternBits(Reader, 0x80);
+    printf("%s_blt = %08lX\n", Name, Reader->Blt(nullptr, Surface, nullptr, DDBLT_WAIT, nullptr));
+    DcDump(Name, Reader);
+    Reader->Release();
+}
+
+/* Locks, blits and DCs through either surface of a duplicated pair */
+static
+VOID
+DcShareDuplicate(
+    _In_ LPDIRECTDRAWSURFACE7 Source,
+    _In_ LPDIRECTDRAWSURFACE7 Copy)
+{
+    DDSURFACEDESC2 First;
+    DDSURFACEDESC2 Second;
+    DDBLTFX Fx;
+    RECT Rect;
+    HRESULT hr;
+    HDC Dc;
+
+    memset(&First, 0, sizeof(First));
+    First.dwSize = sizeof(First);
+    memset(&Second, 0, sizeof(Second));
+    Second.dwSize = sizeof(Second);
+    hr = Source->Lock(nullptr, &First, DDLOCK_WAIT, NULL);
+    printf("  lock_source = %08lX\n", hr);
+    hr = Copy->Lock(nullptr, &Second, DDLOCK_WAIT, NULL);
+    printf("  lock_copy_while = %08lX same=%d\n", hr, SUCCEEDED(hr) && First.lpSurface == Second.lpSurface);
+    if (SUCCEEDED(hr))
+        printf("  unlock_copy = %08lX\n", Copy->Unlock(nullptr));
+    memset(&Fx, 0, sizeof(Fx));
+    Fx.dwSize = sizeof(Fx);
+    printf("  blt_copy_while = %08lX\n", Copy->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL, &Fx));
+    printf("  unlock_source = %08lX\n", Source->Unlock(nullptr));
+    printf("  unlock_source_again = %08lX\n", Source->Unlock(nullptr));
+
+    /* The system runtime gives a duplicate no kernel surface, so locking one through it faults */
+    memset(&Fx, 0, sizeof(Fx));
+    Fx.dwSize = sizeof(Fx);
+    Fx.dwFillColor = 0x00445566;
+    SetRect(&Rect, 0, 0, 2, 1);
+    printf("  fill_copy = %08lX\n", Copy->Blt(&Rect, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+    DcDump("  source_after_fill", Source);
+    SetRect(&Rect, 2, 0, 4, 1);
+    printf("  blt_copy_to_source = %08lX\n", Source->Blt(&Rect, Copy, nullptr, DDBLT_WAIT, nullptr));
+    DcDump("  source_after_blt", Source);
+    printf("  fast_source_to_copy = %08lX\n", Copy->BltFast(0, 0, Source, nullptr, DDBLTFAST_WAIT));
+
+    hr = Source->GetDC(&Dc);
+    printf("  dc_source = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        HDC Second2 = NULL;
+
+        printf("  lock_copy_with_dc = %08lX\n", Copy->Lock(nullptr, &Second, DDLOCK_WAIT, NULL));
+        hr = Copy->GetDC(&Second2);
+        printf("  dc_copy_with_dc = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+            printf("  release_dc_copy = %08lX\n", Copy->ReleaseDC(Second2));
+        printf("  release_dc_on_copy = %08lX\n", Copy->ReleaseDC(Dc));
+        printf("  release_dc_source = %08lX\n", Source->ReleaseDC(Dc));
+    }
+    hr = Copy->GetDC(&Dc);
+    printf("  dc_copy = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        printf("  lock_source_with_copy_dc = %08lX\n", Source->Lock(nullptr, &First, DDLOCK_WAIT, NULL));
+        printf("  dc_source_with_copy_dc = %08lX\n", Source->GetDC(&Dc));
+        printf("  release_dc_copy = %08lX\n", Copy->ReleaseDC(Dc));
+    }
+}
+
+/* DuplicateSurface: shared memory, separate keys, clippers, palettes, attachments and private data */
+static
+VOID
+DcCheckDuplicate(
+    _Inout_ DrawCheck* Check)
+{
+    static const GUID Tag = { 0x1a2b3c4d, 0x1111, 0x2222, { 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x66, 0x66 } };
+    LPDIRECTDRAWSURFACE7 Source;
+    LPDIRECTDRAWSURFACE7 Copy;
+    LPDIRECTDRAWSURFACE7 Again;
+    LPDIRECTDRAWSURFACE7 Attached;
+    LPDIRECTDRAWSURFACE7 Back;
+    LPDIRECTDRAWSURFACE Old;
+    LPDIRECTDRAWSURFACE OldCopy;
+    LPDIRECTDRAWCLIPPER Clipper;
+    LPDIRECTDRAW7 Draw7;
+    LPDIRECTDRAW7 Other;
+    LPDIRECTDRAW Draw1;
+    DDSURFACEDESC2 Desc;
+    DcEnumState State;
+    DDCOLORKEY Key;
+    DDBLTFX Fx;
+    DDSCAPS2 Caps;
+    VOID* Object;
+    DWORD Value;
+    HRESULT hr;
+    HDC Dc;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Kind : { DWORD(DDSCAPS_SYSTEMMEMORY), DWORD(DDSCAPS_VIDEOMEMORY) })
+    {
+        printf("[duplicate %08lX]\n", Kind);
+        Source = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 4, 2, 32);
+        Attached = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | Kind, 4, 2, 32);
+        if (Source == nullptr || Attached == nullptr)
+        {
+            printf("create failed\n");
+            continue;
+        }
+        DcPatternBits(Source, 1);
+        Key.dwColorSpaceLowValue = 0x11;
+        Key.dwColorSpaceHighValue = 0x11;
+        printf("set_key = %08lX\n", Source->SetColorKey(DDCKEY_SRCBLT, &Key));
+        Clipper = nullptr;
+        Draw7->CreateClipper(0, &Clipper, nullptr);
+        printf("set_clipper = %08lX\n", Clipper != nullptr ? Source->SetClipper(Clipper) : E_FAIL);
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        printf("fill_no_clip_list = %08lX\n", Source->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL, &Fx));
+        Value = 7;
+        printf("set_private = %08lX\n", Source->SetPrivateData(Tag, &Value, sizeof(Value), 0));
+        printf("attach = %08lX\n", Source->AddAttachedSurface(Attached));
+        printf("refs draw=%lu source=%lu\n", DcRefCount(Draw7), DcRefCount(Source));
+
+        Copy = nullptr;
+        hr = Draw7->DuplicateSurface(Source, &Copy);
+        printf("duplicate = %08lX same=%d\n", hr, Copy == Source);
+        if (FAILED(hr))
+        {
+            Attached->Release();
+            Source->Release();
+            if (Clipper != nullptr)
+                Clipper->Release();
+            continue;
+        }
+        printf("refs draw=%lu source=%lu copy=%lu clipper=%lu\n", DcRefCount(Draw7), DcRefCount(Source),
+               DcRefCount(Copy), Clipper != nullptr ? DcRefCount(Clipper) : 0);
+        DcDescribeDuplicate("copy", Source, Copy);
+
+        Object = nullptr;
+        hr = Copy->GetDDInterface(&Object);
+        printf("dd_interface = %08lX same=%d\n", hr, Object == Draw7);
+        if (Object != nullptr)
+            static_cast<IUnknown*>(Object)->Release();
+        Object = nullptr;
+        hr = Copy->QueryInterface(IID_IDirectDrawSurface7, &Object);
+        printf("qi7 = %08lX same=%d\n", hr, Object == Copy);
+        if (Object != nullptr)
+            static_cast<IUnknown*>(Object)->Release();
+
+        memset(&State, 0, sizeof(State));
+        State.Known[0] = Source;
+        State.Known[1] = Copy;
+        State.Known[2] = Attached;
+        DcEnumCase(Draw7, "enum_exist", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+
+        DcShareDuplicate(Source, Copy);
+
+        /* A duplicate of a duplicate */
+        Again = nullptr;
+        hr = Draw7->DuplicateSurface(Copy, &Again);
+        printf("duplicate_again = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            DcDumpThrough("  again", Draw7, Kind, Again);
+            printf("  release_again = %lu\n", Again->Release());
+        }
+
+        /* The newest interface version follows the source */
+        Old = nullptr;
+        Source->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<VOID**>(&Old));
+        Draw1 = nullptr;
+        Draw7->QueryInterface(IID_IDirectDraw, reinterpret_cast<VOID**>(&Draw1));
+        if (Old != nullptr && Draw1 != nullptr)
+        {
+            OldCopy = nullptr;
+            hr = Draw1->DuplicateSurface(Old, &OldCopy);
+            printf("duplicate_old = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                Object = nullptr;
+                hr = OldCopy->QueryInterface(IID_IDirectDrawSurface, &Object);
+                printf("  qi1 = %08lX same=%d\n", hr, Object == OldCopy);
+                if (Object != nullptr)
+                    static_cast<IUnknown*>(Object)->Release();
+                Object = nullptr;
+                hr = OldCopy->QueryInterface(IID_IDirectDrawSurface7, &Object);
+                printf("  qi7 = %08lX same_source=%d same_copy=%d\n", hr, Object == Source, Object == Copy);
+                if (Object != nullptr)
+                    static_cast<IUnknown*>(Object)->Release();
+                printf("  refs draw=%lu draw1=%lu\n", DcRefCount(Draw7), DcRefCount(Draw1));
+                printf("  release_old_copy = %lu\n", OldCopy->Release());
+            }
+            hr = Draw7->DuplicateSurface(reinterpret_cast<LPDIRECTDRAWSURFACE7>(Old), &Again);
+            printf("duplicate_old_through7 = %08lX\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                Object = nullptr;
+                hr = Again->QueryInterface(IID_IDirectDrawSurface, &Object);
+                printf("  qi1 = %08lX same=%d\n", hr, Object == Again);
+                if (Object != nullptr)
+                    static_cast<IUnknown*>(Object)->Release();
+                Again->Release();
+            }
+        }
+        if (Draw1 != nullptr)
+            Draw1->Release();
+        if (Old != nullptr)
+            Old->Release();
+
+        /* Release order: the source goes first and the copy keeps the memory */
+        DcPatternBits(Source, 70);
+        printf("release_attached = %lu\n", Attached->Release());
+        printf("release_source = %lu\n", Source->Release());
+        DcDumpThrough("  copy_after_source", Draw7, Kind, Copy);
+        printf("  copy_lost = %08lX restore=%08lX\n", Copy->IsLost(), Copy->Restore());
+        printf("  copy_set_clipper = %08lX\n", Clipper != nullptr ? Copy->SetClipper(Clipper) : E_FAIL);
+        printf("release_copy = %lu\n", Copy->Release());
+        if (Clipper != nullptr)
+            printf("release_clipper = %lu\n", Clipper->Release());
+        printf("refs draw=%lu\n", DcRefCount(Draw7));
+    }
+
+    /* Duplicates another object made die with that object */
+    Source = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 32);
+    Other = DcCreate7(Check);
+    if (Source != nullptr && Other != nullptr)
+    {
+        Other->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+        DcPatternBits(Source, 9);
+        Copy = nullptr;
+        hr = Other->DuplicateSurface(Source, &Copy);
+        printf("duplicate_other = %08lX refs other=%lu draw=%lu\n", hr, DcRefCount(Other), DcRefCount(Draw7));
+        if (SUCCEEDED(hr))
+        {
+            Object = nullptr;
+            hr = Copy->GetDDInterface(&Object);
+            printf("  dd_interface = %08lX same_other=%d same_draw=%d\n", hr, Object == Other, Object == Draw7);
+            if (Object != nullptr)
+                static_cast<IUnknown*>(Object)->Release();
+            memset(&State, 0, sizeof(State));
+            State.Known[0] = Source;
+            State.Known[1] = Copy;
+            DcEnumCase(Draw7, "  enum_draw", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+            DcEnumCase(Other, "  enum_other", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+        }
+        printf("release_other = %lu\n", Other->Release());
+        DcDump("  source_after_other", Source);
+        Other = nullptr;
+    }
+    if (Other != nullptr)
+        Other->Release();
+    if (Source != nullptr)
+        printf("release_source = %lu\n", Source->Release());
+
+    /* Primaries and implicitly created surfaces cannot be duplicated */
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    Source = nullptr;
+    hr = Draw7->CreateSurface(&Desc, &Source, nullptr);
+    printf("primary = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        Copy = reinterpret_cast<LPDIRECTDRAWSURFACE7>(1);
+        hr = Draw7->DuplicateSurface(Source, &Copy);
+        printf("duplicate_primary = %08lX cleared=%d\n", hr, Copy == nullptr);
+        Source->Release();
+    }
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_BACKBUFFERCOUNT | DDSD_PIXELFORMAT;
+    Desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_SYSTEMMEMORY;
+    Desc.dwWidth = 4;
+    Desc.dwHeight = 2;
+    Desc.dwBackBufferCount = 1;
+    Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+    Desc.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    Desc.ddpfPixelFormat.dwRGBBitCount = 32;
+    Desc.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    Desc.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    Desc.ddpfPixelFormat.dwBBitMask = 0xFF;
+    Source = nullptr;
+    hr = Draw7->CreateSurface(&Desc, &Source, nullptr);
+    printf("chain = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = DDSCAPS_BACKBUFFER;
+        Back = nullptr;
+        Source->GetAttachedSurface(&Caps, &Back);
+        if (Back != nullptr)
+        {
+            Copy = reinterpret_cast<LPDIRECTDRAWSURFACE7>(1);
+            hr = Draw7->DuplicateSurface(Back, &Copy);
+            printf("duplicate_back = %08lX cleared=%d\n", hr, Copy == nullptr);
+            Back->Release();
+        }
+        Copy = nullptr;
+        hr = Draw7->DuplicateSurface(Source, &Copy);
+        printf("duplicate_front = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            DcDescribeDuplicate("front_copy", Source, Copy);
+            printf("  flip_copy = %08lX\n", Copy->Flip(nullptr, DDFLIP_WAIT));
+            printf("  flip_source = %08lX\n", Source->Flip(nullptr, DDFLIP_WAIT));
+            printf("  release_source = %lu\n", Source->Release());
+            Source = nullptr;
+            printf("  copy_lost = %08lX\n", Copy->IsLost());
+            printf("  release_copy = %lu\n", Copy->Release());
+        }
+        if (Source != nullptr)
+            Source->Release();
+    }
+
+    /* Lost surfaces: a mode restore takes video memory from both */
+    Source = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 2, 32);
+    Copy = nullptr;
+    if (Source != nullptr)
+        hr = Draw7->DuplicateSurface(Source, &Copy);
+    Other = DcCreate7(Check);
+    if (Source != nullptr && Copy != nullptr && Other != nullptr)
+    {
+        Other->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+        printf("set_mode_bad = %08lX\n", Other->SetDisplayMode(1, 1, 7, 0, 0));
+        printf("release_other = %lu\n", Other->Release());
+        Other = nullptr;
+        DcSettleDisplay();
+        printf("lost = %08lX %08lX\n", Source->IsLost(), Copy->IsLost());
+        Again = reinterpret_cast<LPDIRECTDRAWSURFACE7>(1);
+        hr = Draw7->DuplicateSurface(Source, &Again);
+        printf("duplicate_lost = %08lX cleared=%d\n", hr, Again == nullptr);
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        printf("lock_lost = %08lX\n", Copy->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL));
+        printf("restore_source = %08lX\n", Source->Restore());
+        printf("lost = %08lX %08lX\n", Source->IsLost(), Copy->IsLost());
+        hr = Copy->Lock(nullptr, &Desc, DDLOCK_WAIT, NULL);
+        printf("lock_copy_lost = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+            Copy->Unlock(nullptr);
+        printf("blt_copy_lost = %08lX\n", Source->Blt(nullptr, Copy, nullptr, DDBLT_WAIT, nullptr));
+        printf("restore_copy = %08lX\n", Copy->Restore());
+        printf("lost = %08lX %08lX\n", Source->IsLost(), Copy->IsLost());
+        /* Restored memory holds nothing defined, so both get filled before anything is read */
+        memset(&Fx, 0, sizeof(Fx));
+        Fx.dwSize = sizeof(Fx);
+        Fx.dwFillColor = 0x00AABBCC;
+        printf("fill_source = %08lX\n", Source->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+        Fx.dwFillColor = 0x00010203;
+        printf("fill_copy = %08lX\n", Copy->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+        DcDump("  source_after_restore", Source);
+        DcDumpThrough("  copy_after_restore", Draw7, DDSCAPS_VIDEOMEMORY, Copy);
+        hr = Copy->GetDC(&Dc);
+        printf("dc_copy_restored = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+            printf("release_dc_copy = %08lX\n", Copy->ReleaseDC(Dc));
+        printf("restore_copy_again = %08lX\n", Copy->Restore());
+        DcDump("  source_after_second_restore", Source);
+    }
+    if (Other != nullptr)
+        Other->Release();
+    if (Copy != nullptr)
+        printf("release_copy = %lu\n", Copy->Release());
+    if (Source != nullptr)
+        printf("release_source = %lu\n", Source->Release());
+    DcSettleDisplay();
+
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -4011,6 +4460,7 @@ static const DrawCheckInfo DcChecks[] =
     { "primary_pitch", DcCheckPrimaryPitch },
     { "enum_creatable", DcCheckEnumCreatable },
     { "color_keys", DcCheckColorKeys },
+    { "duplicate", DcCheckDuplicate },
 };
 
 static
