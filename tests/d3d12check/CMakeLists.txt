@@ -1,5 +1,5 @@
 nt_add_console_exe(d3d12check main.cpp)
-target_link_libraries(d3d12check PRIVATE dxguid)
+target_link_libraries(d3d12check PRIVATE dxguid d3dcompiler)
 add_dependencies(d3d12check d3d12 d3d12core dxgi)
 target_include_directories(d3d12check PRIVATE "${RX_INTERNAL_SHADERS_DIR}")
 add_dependencies(d3d12check internalshaders_header)

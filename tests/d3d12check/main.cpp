@@ -9,6 +9,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -2659,6 +2660,132 @@ TcReportGraphics(
     Check.Report(Key, "0x%08lX %s", hr, State != nullptr ? "object" : "null");
 }
 
+/* A vertex shader reading four of the elements below; the normal is left unread */
+static const CHAR TcLayoutShader[] =
+    "struct In { float4 Color : COLOR; float3 Position : POSITION; float2 Uv : TEXCOORD0; uint Id : BLENDINDICES; };\n"
+    "float4 main(In I) : SV_Position { return float4(I.Position + I.Color.xyz, I.Uv.x + (float)I.Id); }\n";
+
+static const D3D12_INPUT_ELEMENT_DESC TcLayout[] =
+{
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "TEXCOORD", 0, DXGI_FORMAT_R16G16_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 1, 4, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 2 },
+    { "blendindices", 0, DXGI_FORMAT_R8_UINT, 1, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA, 2 },
+};
+
+/* Input layout rules, each case one change to a layout the shader takes */
+static
+VOID
+TcCheckInputLayouts(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device* Device,
+    _In_ ID3D12RootSignature* Root)
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc;
+    D3D12_INPUT_ELEMENT_DESC Elements[D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT + 1];
+    ComPtr<ID3DBlob> Vertex;
+    ComPtr<ID3DBlob> Errors;
+    ComPtr<ID3DBlob> Blob;
+    ComPtr<ID3D12RootSignature> Assembler;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    static const struct
+    {
+        PCSTR Name;
+        UINT Element;
+        UINT Field;
+        UINT Value;
+    } Cases[] =
+    {
+        { "layout_slot_class", 4, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA },
+        { "layout_slot_rate", 4, 1, 3 },
+        { "layout_vertex_rate", 0, 1, 1 },
+        { "layout_bad_class", 0, 0, 2 },
+        { "layout_slot32", 2, 2, 32 },
+        { "layout_slot31", 2, 2, 31 },
+        { "layout_misaligned", 3, 3, 5 },
+        { "layout_aligned", 3, 3, 8 },
+        { "layout_bad_format", 2, 4, DXGI_FORMAT_BC1_UNORM },
+        { "layout_typeless_format", 2, 4, DXGI_FORMAT_R16G16_TYPELESS },
+        { "layout_duplicate", 1, 5, 0 },
+        { "layout_trailing_digit", 1, 6, 0 },
+    };
+
+    if (FAILED(D3DCompile(TcLayoutShader, strlen(TcLayoutShader), "layout", nullptr, nullptr, "main", "vs_5_0", 0, 0,
+                          &Vertex, &Errors)))
+    {
+        Check.Report("layout_shader", "none");
+        return;
+    }
+
+    TcDefaultGraphicsDesc(Root, &Desc);
+    Desc.VS = { Vertex->GetBufferPointer(), Vertex->GetBufferSize() };
+    Desc.InputLayout = { TcLayout, _countof(TcLayout) };
+    TcReportGraphics(Check, Device, "layout_no_assembler_flag", Desc);
+
+    /* The remaining cases use a root signature that lets the input assembler read layouts */
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    RootDesc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    if (Check.SerializeVersioned == nullptr || FAILED(Check.SerializeVersioned(&RootDesc, &Blob, &Errors)) ||
+        FAILED(Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_PPV_ARGS(&Assembler))))
+    {
+        Check.Report("layout_root", "none");
+        return;
+    }
+    Desc.pRootSignature = Assembler.Get();
+    TcReportGraphics(Check, Device, "layout", Desc);
+
+    for (const auto& Case : Cases)
+    {
+        memcpy(Elements, TcLayout, sizeof(TcLayout));
+        switch (Case.Field)
+        {
+            case 0:
+                Elements[Case.Element].InputSlotClass = (D3D12_INPUT_CLASSIFICATION)Case.Value;
+                break;
+            case 1:
+                Elements[Case.Element].InstanceDataStepRate = Case.Value;
+                break;
+            case 2:
+                Elements[Case.Element].InputSlot = Case.Value;
+                break;
+            case 3:
+                Elements[Case.Element].AlignedByteOffset = Case.Value;
+                break;
+            case 4:
+                Elements[Case.Element].Format = (DXGI_FORMAT)Case.Value;
+                break;
+            case 5:
+                Elements[Case.Element].SemanticName = "POSITION";
+                break;
+            default:
+                Elements[Case.Element].SemanticName = "NORMAL1";
+                break;
+        }
+        Desc.InputLayout = { Elements, _countof(TcLayout) };
+        TcReportGraphics(Check, Device, Case.Name, Desc);
+    }
+
+    /* Every shader input must be fed; elements the shader does not read are allowed */
+    Desc.InputLayout = { TcLayout, 3 };
+    TcReportGraphics(Check, Device, "layout_unfed", Desc);
+    Desc.InputLayout = { TcLayout, 0 };
+    TcReportGraphics(Check, Device, "layout_empty", Desc);
+    Desc.VS = { RxInternalVertexDxil, sizeof(RxInternalVertexDxil) };
+    Desc.InputLayout = { TcLayout + 1, 1 };
+    TcReportGraphics(Check, Device, "layout_unread", Desc);
+
+    for (UINT Index = 0; Index < _countof(Elements); Index++)
+    {
+        Elements[Index] = TcLayout[1];
+        Elements[Index].SemanticIndex = Index;
+    }
+    Desc.InputLayout = { Elements, D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT };
+    TcReportGraphics(Check, Device, "layout_most", Desc);
+    Desc.InputLayout = { Elements, _countof(Elements) };
+    TcReportGraphics(Check, Device, "layout_too_many", Desc);
+}
+
 static
 VOID
 TcReportCompute(
@@ -2788,6 +2915,8 @@ TcCheckPipelines(
     Check.Report("compute_null_out", "0x%08lX", Device->CreateComputePipelineState(&Compute,
                                                                                     __uuidof(ID3D12PipelineState),
                                                                                     nullptr));
+
+    TcCheckInputLayouts(Check, Device.Get(), Root.Get());
 
     First.Reset();
     Check.Report("root_refs_after", "%lu", TcRefCount(Root.Get()));
