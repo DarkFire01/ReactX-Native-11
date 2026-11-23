@@ -1,0 +1,3 @@
+nt_add_console_exe(d3d9on12shaderconv main.cpp)
+target_link_libraries(d3d9on12shaderconv PRIVATE d3d9on12sc)
+set_target_properties(d3d9on12shaderconv PROPERTIES NT_CXX_EXCEPTIONS ON)
