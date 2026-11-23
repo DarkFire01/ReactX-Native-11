@@ -39,6 +39,8 @@ ScRegisterMap::ScRegisterMap()
 {
     memset(SamplerKinds, ScNoRegister, sizeof(SamplerKinds));
     ZeroMemory(Inputs, sizeof(Inputs));
+    for (UINT Slot = 0; Slot < 16; Slot += 1)
+        Inputs[Slot].Register = ScNoRegister;
     memset(Temps, ScNoRegister, sizeof(Temps));
     memset(Special, ScNoRegister, 6);
     Special[6] = 0;
