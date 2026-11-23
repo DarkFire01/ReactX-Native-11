@@ -497,4 +497,237 @@ static const ScCase ScCorpus[] =
         "ret\n",
         { ScInput(0, 0, 0, 0), ScInput(5, 0, 1, 0), ScInput(5, 1, 2, 0) }, 3
     },
+    {
+        "ps20_mov", TRUE, 0,
+        "ps_2_0\n"
+        "dcl v0\n"
+        "mov oC0, v0\n",
+        { }, 0
+    },
+    {
+        "ps20_arith", TRUE, 0,
+        "ps_2_0\n"
+        "dcl v0\n"
+        "dcl v1\n"
+        "dcl t0\n"
+        "dcl t1\n"
+        "def c0, 0.5, 1, 0, 0.25\n"
+        "add r0, v0, c0\n"
+        "mul r1, r0, v1\n"
+        "mad r2, r1, c1, -r0\n"
+        "dp3 r3.x, r2, t0\n"
+        "dp4 r3.y, r2, t1\n"
+        "rcp r3.z, r3.x\n"
+        "rsq r3.w, r3.y\n"
+        "min r4, r3, c2\n"
+        "max r5, r4, -c3\n"
+        "cmp r6, r5, v0, -r1.wzyx\n"
+        "lrp r7, v0.x, r6, r5\n"
+        "dp2add r8, t1, c0, c0.w\n"
+        "abs r9, r8\n"
+        "frc r10, r9\n"
+        "exp r11.x, r10.x\n"
+        "log r11.y, r10.y\n"
+        "pow r11.z, r10.z, c0.y\n"
+        "mov_sat r11.w, r7.w\n"
+        "nrm r9.xyz, r3\n"
+        "sincos r8.xy, r5.x, c4, c5\n"
+        "crs r6.xyz, r7, r9\n"
+        "add r6, r6, r8.y\n"
+        "mov_pp oC0, r11\n"
+        "mov oC1, r6\n",
+        { }, 0
+    },
+    {
+        "ps20_tex", TRUE, 0,
+        "ps_2_0\n"
+        "dcl t0\n"
+        "dcl t1\n"
+        "dcl_pp t2.xy\n"
+        "dcl_2d s0\n"
+        "dcl_cube s1\n"
+        "dcl_volume s2\n"
+        "dcl_2d s3\n"
+        "texld r0, t0, s0\n"
+        "texldp r1, t1, s1\n"
+        "texldb r2, t0, s2\n"
+        "texld r3, r0, s3\n"
+        "texld_pp r4, t2, s0\n"
+        "texkill t1\n"
+        "texkill r3\n"
+        "mul r0, r0, r1\n"
+        "add r0, r0, r2\n"
+        "mad r0, r3, r4, r0\n"
+        "mov oC0, r0\n",
+        { }, 0
+    },
+    {
+        "ps20_depth", TRUE, 0,
+        "ps_2_0\n"
+        "dcl v0\n"
+        "dcl v1\n"
+        "dcl t3\n"
+        "dcl_2d s5\n"
+        "texld r0, t3, s5\n"
+        "mul r1, r0, v1\n"
+        "mov oC0, v0\n"
+        "mov oC1, r1\n"
+        "mov oDepth, r0.z\n",
+        { }, 0
+    },
+    {
+        "ps2x_flow", TRUE, 0,
+        "ps_2_x\n"
+        "dcl v0\n"
+        "dcl t0\n"
+        "dcl_2d s0\n"
+        "defi i0, 3, 0, 0, 0\n"
+        "defb b0, true\n"
+        "def c0, 0, 0.5, 1, 2\n"
+        "mov r0, c0.x\n"
+        "rep i0\n"
+        "add r0, r0, v0\n"
+        "endrep\n"
+        "if b0\n"
+        "mul r0, r0, c0.y\n"
+        "else\n"
+        "add r0, r0, c1\n"
+        "endif\n"
+        "if_gt r0.x, c0.y\n"
+        "mov r0.y, c0.z\n"
+        "endif\n"
+        "setp_lt p0, r0, c0.zzzz\n"
+        "(p0) mov r0, c2\n"
+        "(!p0.x) add r0.x, r0.x, c0.w\n"
+        "dsx r1, t0\n"
+        "dsy r2, t0\n"
+        "texldd r3, t0, s0, r1, r2\n"
+        "if b1\n"
+        "texld r4, t0, s0\n"
+        "add r3, r3, r4\n"
+        "endif\n"
+        "add r0, r0, r3\n"
+        "mov oC0, r0\n",
+        { }, 0
+    },
+    {
+        "ps30_inputs", TRUE, 0,
+        "ps_3_0\n"
+        "dcl_color v0\n"
+        "dcl_color1_centroid v1.xyz\n"
+        "dcl_texcoord v2\n"
+        "dcl_texcoord3 v3.xy\n"
+        "dcl_fog v4.x\n"
+        "dcl vPos.xy\n"
+        "dcl vFace\n"
+        "dcl_2d s0\n"
+        "dcl_cube s1\n"
+        "def c0, 0, 0.5, 1, 2\n"
+        "mov r0, v1.xyzx\n"
+        "add r0, r0, v0\n"
+        "mul r0.xy, vPos, c1\n"
+        "if_lt vFace, c0.x\n"
+        "mov r0.z, -c0.z\n"
+        "endif\n"
+        "texld r1, v2, s0\n"
+        "texldl r2, v3.xyyy, s0\n"
+        "texldb r3, v2, s1\n"
+        "texldp r4, v2, s1\n"
+        "add r1, r1, r2\n"
+        "mad r1, r3, r4, r1\n"
+        "mul r0.w, v4.x, r1.w\n"
+        "mov oC0, r0\n"
+        "mov oC1, r1\n"
+        "mov oDepth, r1.x\n",
+        { }, 0
+    },
+    {
+        "ps30_loops", TRUE, 0,
+        "ps_3_0\n"
+        "dcl_texcoord v0\n"
+        "dcl_texcoord1 v1\n"
+        "dcl_texcoord2 v2\n"
+        "dcl_texcoord3 v3\n"
+        "dcl_2d s2\n"
+        "defi i0, 3, 0, 1, 0\n"
+        "def c0, 0, 0.5, 1, 2\n"
+        "mov r0, c0.x\n"
+        "loop aL, i0\n"
+        "add r0, r0, v[aL]\n"
+        "add r0, r0, c4\n"
+        "break_ge r0.x, c0.w\n"
+        "endloop\n"
+        "rep i1\n"
+        "texld r1, r0, s2\n"
+        "add r0, r0, r1\n"
+        "endrep\n"
+        "call l0\n"
+        "mov oC0, r0\n"
+        "ret\n"
+        "label l0\n"
+        "texldl r2, v1, s2\n"
+        "add r0, r0, r2\n"
+        "ret\n",
+        { }, 0
+    },
+    {
+        "ps30_misc", TRUE, 0,
+        "ps_3_0\n"
+        "dcl_texcoord v0\n"
+        "dcl_texcoord1_centroid v1\n"
+        "dcl_color v2\n"
+        "dcl_2d s0\n"
+        "dcl_volume s3\n"
+        "def c0, 0, 0.5, 1, 2\n"
+        "defb b2, false\n"
+        "defi i1, 2, 0, 1, 0\n"
+        "sincos r0.xy, v0.x\n"
+        "sincos r0.y, v0.y\n"
+        "mov_sat r0.zw, r0.xxxy\n"
+        "nrm_pp r1.xyz, v1\n"
+        "mov r1.w, c0.z\n"
+        "add r2, r1, -v2_abs\n"
+        "texkill v1.xyw\n"
+        "texkill r2.z\n"
+        "setp_ge p0.xy, r2, c0.y\n"
+        "(p0.y) texld r3, v0, s0\n"
+        "(!p0.x) texldl r3, v1, s3\n"
+        "callnz l1, b2\n"
+        "callnz l1, !p0.y\n"
+        "loop aL, i1\n"
+        "breakp p0.x\n"
+        "add r0, r0, v[aL]\n"
+        "break_ne r0.x, c0.w\n"
+        "endloop\n"
+        "dsx_pp r4, r3\n"
+        "dsy r5, r3.wzyx\n"
+        "mov oC0, r0\n"
+        "mov oC1, r1\n"
+        "mov oC2, r3\n"
+        "mad oC3, r4, r5, c1\n"
+        "ret\n"
+        "label l1\n"
+        "lrp_sat r3, c0.y, r3, v2\n"
+        "ret\n",
+        { }, 0
+    },
+    {
+        "ps20_centroid", TRUE, 0,
+        "ps_2_0\n"
+        "dcl_centroid t0\n"
+        "dcl_centroid_pp t1.xy\n"
+        "dcl v0.xyz\n"
+        "dcl v1\n"
+        "dcl_2d s0\n"
+        "texld r0, t0, s0\n"
+        "texld r1, t1, s0\n"
+        "mad r0.xyz, r0, r1, v0\n"
+        "mov r0.w, v1.w\n"
+        "mov oC0, r0\n"
+        "mov oC1, r1\n"
+        "mov oC2, t0\n"
+        "mov oC3, v1\n",
+        { }, 0
+    },
+
 };
