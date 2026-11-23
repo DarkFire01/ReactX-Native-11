@@ -174,6 +174,7 @@ D9FvfFromElements(
     BOOLEAN Transformed = FALSE;
     BYTE Aliases[MAXD3DDECLLENGTH];
     UINT AliasCount = 0;
+    UINT NextAlias = 0;
 
     for (UINT Index = 0; Index < Count; Index++)
     {
@@ -233,6 +234,7 @@ D9FvfFromElements(
             if (Element->Type != D3DDECLTYPE_FLOAT2)
                 Fvf |= (Element->Type == D3DDECLTYPE_FLOAT1 ? 3u : Element->Type - 1u) << (16 + Element->UsageIndex * 2);
             CoordinateSets |= 1u << Element->UsageIndex;
+            NextAlias = Element->UsageIndex + 1u;
             break;
         default:
             return 0;
@@ -240,17 +242,20 @@ D9FvfFromElements(
     }
 
     /* Only sets counted up from the first without a gap become texture coordinates */
-    while ((CoordinateSets & (1u << Coordinates)) != 0)
-        Coordinates += 1;
+    /* Stand ins follow the texture coordinate set named last, taking over any set already there */
     for (UINT Alias = 0; Alias < AliasCount; Alias++)
     {
         static const BYTE Codes[] = { 3, 0, 1, 2 };
+        UINT Shift = 16 + NextAlias * 2;
 
-        if (Coordinates >= 8)
+        if (NextAlias >= 8)
             return 0;
-        Fvf |= static_cast<DWORD>(Codes[Aliases[Alias] / 4 - 1]) << (16 + Coordinates * 2);
-        Coordinates += 1;
+        Fvf = (Fvf & ~(3u << Shift)) | (static_cast<DWORD>(Codes[Aliases[Alias] / 4 - 1]) << Shift);
+        CoordinateSets |= 1u << NextAlias;
+        NextAlias += 1;
     }
+    while ((CoordinateSets & (1u << Coordinates)) != 0)
+        Coordinates += 1;
     if (Transformed)
     {
         if (Weights != 0)
