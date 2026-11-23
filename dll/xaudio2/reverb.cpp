@@ -425,6 +425,76 @@ struct XaRvbPreDelay
     }
 };
 
+/* Surround feed delay with the same fade, its taps weighed the other way round */
+template <UINT32 Size>
+struct XaRvbRear
+{
+    float Line[Size];
+    UINT32 Write;
+    UINT32 Delay;
+    UINT32 Previous;
+    UINT32 Target;
+    float Rate;
+    float Fade;
+    float Last;
+
+    VOID
+    SetDelay(
+        _In_ UINT32 Samples)
+    {
+        if (Previous == Delay)
+        {
+            Delay = Samples;
+            Fade = 1.0f;
+        }
+        Target = Samples;
+    }
+
+    VOID
+    Retime(
+        _In_ float NewRate)
+    {
+        float Ratio = NewRate / Rate;
+
+        Rate = NewRate;
+        Delay = XaRvbCount(fmaf(Ratio, static_cast<float>(Delay), 0.5f));
+        Previous = Delay;
+    }
+
+    float
+    Step(
+        _In_ float Input)
+    {
+        float Before = Last;
+        float Older = Line[(Write - Previous) & (Size - 1)] * Fade;
+
+        Last = fmaf(Line[(Write - Delay) & (Size - 1)], 1.0f - Fade, Older);
+        if (Fade > 0.0f)
+        {
+            Fade = Fade - 0.000199999995f;
+        }
+        else
+        {
+            UINT32 Reached = Delay;
+
+            Previous = Reached;
+            Delay = Target;
+            Fade = Target == Reached ? 0.0f : 1.0f;
+        }
+        Line[Write] = Input;
+        Write = (Write + 1) & (Size - 1);
+        return Before;
+    }
+
+    VOID
+    Clear(VOID)
+    {
+        memset(Line, 0, sizeof(Line));
+        Write = 0;
+        Last = 0.0f;
+    }
+};
+
 /* Room filter: a gain and two matched one pole stages, also one sample late */
 struct XaRvbRoom
 {
@@ -550,6 +620,16 @@ XaRvbMeasure(
     }
 }
 
+/* Delays are counted at 48 samples a millisecond whatever the rate; zero still gives one */
+static
+inline
+UINT32
+XaRvbMilliseconds(
+    _In_ UINT32 Value)
+{
+    return Value != 0 ? XaRvbCount(static_cast<float>(Value) * 48.0f) : 1;
+}
+
 static
 inline
 UINT32
@@ -570,12 +650,13 @@ struct XaRvbBranch
     XaRvbPair Tail;
 };
 
-/* The mono reverb network */
+/* The mono reverb network, with surround feeds for 5.1 and 7.1 */
 class XaRvbMono
 {
 public:
     VOID
-    Construct(VOID);
+    Construct(
+        _In_ UINT32 NewChannels);
 
     VOID
     Tune(
@@ -591,10 +672,12 @@ public:
     VOID
     Process(
         _In_reads_(Frames) const float* Input,
-        _Out_writes_(Frames) float* Output,
+        _Out_writes_(Frames * Channels) float* Output,
         _Inout_updates_(Frames + 1) float* Scratch,
         _In_ UINT32 Frames,
         _In_ float Step);
+
+    UINT32 Channels;
 
 private:
     XaRvbPreDelay Pre;
@@ -630,10 +713,13 @@ private:
     float Wet;
     float Reflections;
     BOOL LateOff;
+    XaRvbRear<256> Side;
+    XaRvbRear<1024> Back;
 };
 
 VOID
-XaRvbMono::Construct(VOID)
+XaRvbMono::Construct(
+    _In_ UINT32 NewChannels)
 {
     XaRvbBranch* Branches[2] = { &BranchA, &BranchB };
 
@@ -663,6 +749,15 @@ XaRvbMono::Construct(VOID)
     ChainB2.SetGain(0.617999971f);
     Wet = 1.0f;
     Reflections = 1.0f;
+    Channels = NewChannels;
+    Side.Delay = 20;
+    Side.Previous = 20;
+    Side.Target = 20;
+    Side.Rate = 48000.0f;
+    Back.Delay = 80;
+    Back.Previous = 80;
+    Back.Target = 80;
+    Back.Rate = 48000.0f;
 }
 
 VOID
@@ -727,6 +822,10 @@ XaRvbMono::Tune(
     ChainB3.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0102291666f, 0.5f)));
     Outlet1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00272916653f, 0.5f)));
     Outlet2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0023541667f, 0.5f)));
+    if (Channels != 1)
+        Side.Retime(NewRate);
+    if (Channels == 8)
+        Back.Retime(NewRate);
 }
 
 VOID
@@ -852,6 +951,17 @@ XaRvbMono::Configure(
     Room.Update();
     Wet = Parameters->WetDryMix * 0.00999999978f;
     LateOff = Parameters->DisableLateField;
+
+    /* 5.1 feeds the rear pair through the rear delay; 7.1 adds the side delay and moves the rear one */
+    if (Channels == 6)
+    {
+        Side.SetDelay(XaRvbMilliseconds(Parameters->RearDelay));
+    }
+    else if (Channels == 8)
+    {
+        Side.SetDelay(XaRvbMilliseconds(Parameters->SideDelay));
+        Back.SetDelay(XaRvbMilliseconds(Parameters->RearDelay));
+    }
 }
 
 VOID
@@ -895,12 +1005,16 @@ XaRvbMono::Clear(VOID)
     ChainBTail.Clear();
     Outlet1.Clear();
     Outlet2.Clear();
+    if (Channels != 1)
+        Side.Clear();
+    if (Channels == 8)
+        Back.Clear();
 }
 
 VOID
 XaRvbMono::Process(
     _In_reads_(Frames) const float* Input,
-    _Out_writes_(Frames) float* Output,
+    _Out_writes_(Frames * Channels) float* Output,
     _Inout_updates_(Frames + 1) float* Scratch,
     _In_ UINT32 Frames,
     _In_ float Step)
@@ -925,6 +1039,7 @@ XaRvbMono::Process(
         float Fed;
         float Tapped;
         float Wetted;
+        float Surround = 0.0f;
 
         /* Early reflections */
         Reflect.Out[1] = Reflect.Read(1);
@@ -999,6 +1114,7 @@ XaRvbMono::Process(
             ChainBLoop.Out[1] = ChainBLoop.Read(1);
             ChainBLoop.Push(Through);
             Tail = LoopB + LoopA;
+            Surround = LoopA;
 
             /* The four branches cross into the inlets of the next pass */
             Tapped = InletA.Tap();
@@ -1017,7 +1133,36 @@ XaRvbMono::Process(
 
         Wetted = Outlet1.Step(fmaf(Early, Reflections + Reflections, Tail + Tail));
         Wetted = Outlet2.Step(Wetted);
-        Output[Frame] = fmaf(Wetted, Mix, (1.0f - Mix) * Input[Frame]);
+        Wetted = fmaf(Wetted, Mix, (1.0f - Mix) * Input[Frame]);
+        if (Channels == 1)
+        {
+            Output[Frame] = Wetted;
+        }
+        else
+        {
+            float* Speakers = Output + Frame * Channels;
+            float Sides = Side.Step(Surround);
+
+            /* Front pair carries the mix, center and LFE stay silent, surrounds are wet only */
+            Speakers[0] = Wetted;
+            Speakers[1] = Wetted;
+            Speakers[2] = 0.0f;
+            Speakers[3] = 0.0f;
+            if (Channels == 6)
+            {
+                Speakers[4] = (Sides + Sides) * Mix;
+                Speakers[5] = (Sides + Sides) * Mix;
+            }
+            else
+            {
+                float Backs = Back.Step(Surround);
+
+                Speakers[4] = -(Backs * Mix);
+                Speakers[5] = -(Backs * Mix);
+                Speakers[6] = (Sides + Sides) * Mix;
+                Speakers[7] = (Sides + Sides) * Mix;
+            }
+        }
         Mix = Mix + Step;
     }
 }
@@ -1228,13 +1373,18 @@ XaRvb::Build(
     _In_ UINT32 MaxFrames,
     _In_ UINT32 Rate)
 {
-    if (InputChannels != 1 || OutputChannels != 1)
+    UINT32 Layout;
+
+    if (InputChannels != 1 || OutputChannels == 2)
     {
-        XA_TRACE_ONCE(L"CreateAudioReverb: only mono to mono is available yet");
+        XA_TRACE_ONCE(L"CreateAudioReverb: stereo networks are not available yet");
         return XAPO_E_FORMAT_UNSUPPORTED;
     }
+
+    /* Any output other than mono or 5.1 gets the 7.1 network */
+    Layout = OutputChannels == 1 || OutputChannels == 6 ? OutputChannels : 8;
     Network = new (std::nothrow) XaRvbMono();
-    Scratch = static_cast<float*>(CoTaskMemAlloc(sizeof(*Scratch) * (MaxFrames + 1) * OutputChannels));
+    Scratch = static_cast<float*>(CoTaskMemAlloc(sizeof(*Scratch) * ((MaxFrames + 1) + MaxFrames * Layout)));
     Matrix = static_cast<float*>(CoTaskMemAlloc(sizeof(*Matrix) * InputChannels * OutputChannels));
     if (Network == nullptr || Scratch == nullptr || Matrix == nullptr)
         return E_OUTOFMEMORY;
@@ -1243,7 +1393,7 @@ XaRvb::Build(
     {
         return E_OUTOFMEMORY;
     }
-    Network->Construct();
+    Network->Construct(Layout);
     Network->Tune(static_cast<float>(Rate));
     return S_OK;
 }
@@ -1494,7 +1644,18 @@ XaRvb::Process(
         Step = (Wet / 100.0f) / static_cast<float>(Frames);
     else if (!Enabled)
         Step = -(Wet / 100.0f) / static_cast<float>(Frames);
-    Network->Process(Source, Target, Scratch, Frames, Step);
+    if (Network->Channels == OutputChannels)
+    {
+        Network->Process(Source, Target, Scratch, Frames, Step);
+    }
+    else
+    {
+        /* Odd layouts get the 7.1 frames laid end to end, cut at the buffer size */
+        float* Wide = Scratch + Frames + 1;
+
+        Network->Process(Source, Wide, Scratch, Frames, Step);
+        memcpy(Target, Wide, sizeof(*Target) * XaMin(OutputChannels, Network->Channels) * Frames);
+    }
     Output->BufferFlags = XAPO_BUFFER_VALID;
     Output->ValidFrameCount = Frames;
     WasEnabled = Enabled;
