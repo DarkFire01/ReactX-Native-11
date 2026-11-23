@@ -76,6 +76,7 @@ struct D9Adapter
     UINT RuntimeVersion;
     UINT DriverVersion;
     UINT DriverModel;
+    UINT FirstUmdVersion;
 
     /* What the kernel says about the adapter */
     D3DKMT_FLIPQUEUEINFO FlipQueue;
@@ -250,6 +251,14 @@ public:
         return IsEx;
     }
 
+    HRESULT
+    ValidateReset(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _In_ DWORD BehaviorFlags,
+        _Inout_ D3DPRESENT_PARAMETERS* Parameters,
+        _In_opt_ const D3DDISPLAYMODEEX* FullscreenMode);
+
 private:
     VOID
     CollectDisplays(VOID);
@@ -395,6 +404,15 @@ D9OpenDriver(
 VOID
 D9CloseDriver(
     _Inout_ D9Adapter* Adapter);
+
+HRESULT
+D9CallOpenAdapter(
+    _In_ const D9Adapter* Adapter,
+    _In_ D3DDDI_ADAPTERCALLBACKS* Callbacks,
+    _Out_ D3DDDI_ADAPTERFUNCS* Functions,
+    _Out_ HANDLE* DriverAdapter,
+    _Out_ UINT* RuntimeVersion,
+    _Out_ UINT* DriverVersion);
 
 HRESULT
 D9DriverGetCaps(

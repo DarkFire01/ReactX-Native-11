@@ -5,7 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include "d3d9.hpp"
+#include "device.hpp"
 
 D9Enum::D9Enum(
     _In_ UINT SdkVersion,
@@ -217,6 +217,7 @@ D9Enum::CreateDeviceCommon(
     _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes,
     _COM_Outptr_ IDirect3DDevice9Ex** Device)
 {
+    D9Device* Created;
     UINT Heads = 1;
     HRESULT hr;
 
@@ -256,8 +257,19 @@ D9Enum::CreateDeviceCommon(
         }
     }
 
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
+    Created = new (std::nothrow) D9Device(this, &Adapters[Adapter], DeviceType, FocusWindow, BehaviorFlags, IsEx);
+    if (Created == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Created->Initialize(Parameters);
+    if (FAILED(hr))
+    {
+        Created->Release();
+        return hr;
+    }
+
+    *Device = Created;
+    return S_OK;
 }
 
 STDMETHODIMP

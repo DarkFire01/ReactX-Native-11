@@ -3,13 +3,18 @@ nt_add_usermode_dll(d3d9
     SOURCES
         adapter.cpp
         caps.cpp
+        device.cpp
         enum.cpp
         formats.cpp
+        hardware.cpp
         identity.cpp
         main.cpp
         modes.cpp
         perf.cpp
+        present.cpp
         psgp.cpp
+        surface.cpp
+        swapchain.cpp
         umd.cpp
         validate.cpp)
 

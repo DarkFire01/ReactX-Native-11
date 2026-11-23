@@ -149,30 +149,70 @@ D9LoadDriverModule(
     return TRUE;
 }
 
+/* Opens the driver's adapter at the newest runtime version it takes, starting where the identity says to */
+HRESULT
+D9CallOpenAdapter(
+    _In_ const D9Adapter* Adapter,
+    _In_ D3DDDI_ADAPTERCALLBACKS* Callbacks,
+    _Out_ D3DDDI_ADAPTERFUNCS* Functions,
+    _Out_ HANDLE* DriverAdapter,
+    _Out_ UINT* RuntimeVersion,
+    _Out_ UINT* DriverVersion)
+{
+    PFND3DDDI_OPENADAPTER OpenAdapter;
+    D3DDDIARG_OPENADAPTER Args;
+    HRESULT hr = E_FAIL;
+
+    *DriverAdapter = NULL;
+    OpenAdapter = reinterpret_cast<PFND3DDDI_OPENADAPTER>(GetProcAddress(Adapter->Module, "OpenAdapter"));
+    if (OpenAdapter == nullptr)
+        return E_FAIL;
+
+    for (UINT Index = Adapter->FirstUmdVersion; Index < _countof(RxD3D9UmdVersions); Index++)
+    {
+        ZeroMemory(&Args, sizeof(Args));
+        ZeroMemory(Functions, sizeof(*Functions));
+        Args.hAdapter = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Adapter->KernelAdapter));
+        Args.Interface = D9UmdInterface;
+        Args.Version = RxD3D9UmdVersions[Index];
+        if (Args.Version == D3D_UMD_INTERFACE_VERSION_WDDM3_2_2)
+            Args.Version = D9UmdVersionWithoutHybrid;
+        Args.pAdapterCallbacks = Callbacks;
+        Args.pAdapterFuncs = Functions;
+
+        hr = OpenAdapter(&Args);
+        if (SUCCEEDED(hr))
+        {
+            *DriverAdapter = Args.hAdapter;
+            *RuntimeVersion = Args.Version;
+            *DriverVersion = Args.DriverVersion;
+            return S_OK;
+        }
+    }
+    return hr;
+}
+
 static
 BOOLEAN
 D9OpenDriverAdapter(
     _Inout_ D9Adapter* Adapter)
 {
     RxAdapterIdentity* Identity = new (std::nothrow) RxAdapterIdentity;
-    PFND3DDDI_OPENADAPTER OpenAdapter;
-    D3DDDIARG_OPENADAPTER Args;
-    UINT First = 0;
-    HRESULT hr = E_FAIL;
+    HRESULT hr;
 
     Adapter->DriverModel = RxDefaultDriverModel;
+    Adapter->FirstUmdVersion = 0;
     if (Identity != nullptr)
     {
         if (RxReadAdapterIdentity(Adapter->AdapterLuid, RxAnySource, Identity))
         {
             Adapter->DriverModel = Identity->DriverModel;
-            First = RxFirstD3D9UmdVersion(Identity->DriverModel, Identity->VendorId);
+            Adapter->FirstUmdVersion = RxFirstD3D9UmdVersion(Identity->DriverModel, Identity->VendorId);
         }
         delete Identity;
     }
 
-    OpenAdapter = reinterpret_cast<PFND3DDDI_OPENADAPTER>(GetProcAddress(Adapter->Module, "OpenAdapter"));
-    if (OpenAdapter == nullptr)
+    if (GetProcAddress(Adapter->Module, "OpenAdapter") == nullptr)
     {
         D9Trace(L"the user mode driver of %S has no OpenAdapter", Adapter->DeviceName);
         return FALSE;
@@ -182,29 +222,14 @@ D9OpenDriverAdapter(
     Adapter->Callbacks.pfnGetMultisampleMethodListCb = D9GetMultisampleMethodListCb;
     Adapter->Callbacks.pfnQueryAdapterInfoCb2 = D9QueryAdapterInfoCb2;
 
-    for (UINT Index = First; Index < _countof(RxD3D9UmdVersions); Index++)
+    hr = D9CallOpenAdapter(Adapter, &Adapter->Callbacks, &Adapter->Functions, &Adapter->DriverAdapter,
+                           &Adapter->RuntimeVersion, &Adapter->DriverVersion);
+    if (FAILED(hr))
     {
-        ZeroMemory(&Args, sizeof(Args));
-        Args.hAdapter = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(Adapter->KernelAdapter));
-        Args.Interface = D9UmdInterface;
-        Args.Version = RxD3D9UmdVersions[Index];
-        if (Args.Version == D3D_UMD_INTERFACE_VERSION_WDDM3_2_2)
-            Args.Version = D9UmdVersionWithoutHybrid;
-        Args.pAdapterCallbacks = &Adapter->Callbacks;
-        Args.pAdapterFuncs = &Adapter->Functions;
-
-        hr = OpenAdapter(&Args);
-        if (SUCCEEDED(hr))
-        {
-            Adapter->DriverAdapter = Args.hAdapter;
-            Adapter->RuntimeVersion = Args.Version;
-            Adapter->DriverVersion = Args.DriverVersion;
-            return TRUE;
-        }
+        D9Trace(L"OpenAdapter on %S failed 0x%08lX for every runtime version", Adapter->DeviceName, hr);
+        return FALSE;
     }
-
-    D9Trace(L"OpenAdapter on %S failed 0x%08lX for every runtime version", Adapter->DeviceName, hr);
-    return FALSE;
+    return TRUE;
 }
 
 HRESULT

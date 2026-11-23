@@ -443,6 +443,20 @@ D9Enum::ValidatePresentation(
     return S_OK;
 }
 
+/* Reset holds new parameters to the same rules creation did */
+HRESULT
+D9Enum::ValidateReset(
+    _In_ UINT Adapter,
+    _In_ D3DDEVTYPE DeviceType,
+    _In_ DWORD BehaviorFlags,
+    _Inout_ D3DPRESENT_PARAMETERS* Parameters,
+    _In_opt_ const D3DDISPLAYMODEEX* FullscreenMode)
+{
+    D9LockScope Scope(&Lock);
+
+    return ValidatePresentation(Adapter, 1, DeviceType, BehaviorFlags, Parameters, FullscreenMode);
+}
+
 /* The adapter, device type and behavior flag rules, then the presentation rules */
 HRESULT
 D9Enum::ValidateCreation(
