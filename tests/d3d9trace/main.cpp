@@ -568,8 +568,19 @@ TrDeviceInputs(
     case TR_DEVICE_SLOT(pfnSetVertexShaderConstI):
     {
         const D3DDDIARG_SETVERTEXSHADERCONST* Constants = static_cast<const D3DDDIARG_SETVERTEXSHADERCONST*>(Args);
-        TrAppend(Text, " %u %u %08X", Constants->Register, Constants->Count,
-                 TrHash(reinterpret_cast<VOID*>(A[2]), Constants->Count * 16));
+        const UINT* Values = reinterpret_cast<const UINT*>(A[2]);
+
+        /* A few registers print in full; larger blocks as a hash */
+        TrAppend(Text, " %u %u", Constants->Register, Constants->Count);
+        if (Values != nullptr && Constants->Count <= 2)
+        {
+            for (UINT Index = 0; Index < Constants->Count * 4; Index++)
+                TrAppend(Text, " %08X", Values[Index]);
+        }
+        else
+        {
+            TrAppend(Text, " %08X", TrHash(Values, Constants->Count * 16));
+        }
         break;
     }
     case TR_DEVICE_SLOT(pfnSetPixelShaderConstB):
@@ -1769,6 +1780,8 @@ TrScenarioDevice(
     IDirect3DDevice9Ex* Device = nullptr;
     D3DRECT Area = { 8, 8, 24, 16 };
     RECT Part = { 8, 8, 24, 16 };
+    INT Priority = 99;
+    UINT Latency = 99;
     HRESULT hr;
 
     Parameters.Windowed = TRUE;
@@ -1801,8 +1814,16 @@ TrScenarioDevice(
     TrPhase("device settings");
     TrApi("SetGPUThreadPriority 3", Device->SetGPUThreadPriority(3));
     TrApi("SetGPUThreadPriority -7", Device->SetGPUThreadPriority(-7));
+    TrApi("GetGPUThreadPriority", Device->GetGPUThreadPriority(&Priority));
+    TrCloseLine();
+    printf("api priority = %d\n", Priority);
     TrApi("SetMaximumFrameLatency 5", Device->SetMaximumFrameLatency(5));
+    TrApi("SetMaximumFrameLatency 30", Device->SetMaximumFrameLatency(30));
+    TrApi("SetMaximumFrameLatency 31", Device->SetMaximumFrameLatency(31));
     TrApi("SetMaximumFrameLatency 0", Device->SetMaximumFrameLatency(0));
+    TrApi("GetMaximumFrameLatency", Device->GetMaximumFrameLatency(&Latency));
+    TrCloseLine();
+    printf("api latency = %u\n", Latency);
     TrApi("Present", Device->Present(nullptr, nullptr, nullptr, nullptr));
 
     TrPhase("device reset");
