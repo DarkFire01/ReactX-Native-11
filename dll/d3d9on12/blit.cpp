@@ -308,7 +308,9 @@ NineCopySubresources(
                       CD3D11FormatHelper::GetParentFormat(Dest->DxgiFormat);
     }
 
-    if (SourceSamples > 1 && DestSamples == 1)
+    /* Only a whole, unstretched copy within one format family resolves; anything else is drawn */
+    if (SourceSamples > 1 && DestSamples == 1 && !OtherFamily && !Copy->Stretch && Copy->Whole &&
+        SourceWide == DestWide)
     {
         Device->Context->ResourceResolveSubresource(Dest->Underlying.get(), Copy->DestSub, Source->Underlying.get(),
                                                     Copy->SourceSub, Dest->DxgiFormat);
