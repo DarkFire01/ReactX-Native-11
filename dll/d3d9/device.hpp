@@ -2699,6 +2699,9 @@ private:
     BindRenderTargets(VOID);
 
     VOID
+    UnpinTargets(VOID);
+
+    VOID
     SendTargets(VOID);
 
     VOID
@@ -3025,8 +3028,12 @@ private:
     UINT QueuedPresentFirst = 0;
     UINT QueuedPresentCount = 0;
 
-    /* The bound targets reach the driver before the first operation that writes them */
+    /* The bound targets reach the driver before the first operation that writes them, with the viewport and
+       scissor rectangle a new first target brings; targets the application set are pinned while bound */
     BOOLEAN TargetsDirty = FALSE;
+    BOOLEAN ViewportPending = FALSE;
+    BOOLEAN TargetPinned[D9MaxRenderTargets] = {};
+    BOOLEAN DepthPinned = FALSE;
     D9Resource StagingBuffers[D9StagingBufferCount] = {};
 
     /* Content protection caps the driver reported, asked for once when a surface first wants them */

@@ -219,6 +219,7 @@ D9Device::~D9Device()
     ReleaseFvfDeclarations();
     UnbindTextures();
     UnbindStreams();
+    UnpinTargets();
     delete[] Lights;
     delete[] VertexFloats;
     delete[] VertexInts;
@@ -316,6 +317,7 @@ D9Device::CreateAutoDepthStencil(
 VOID
 D9Device::BindRenderTargets(VOID)
 {
+    UnpinTargets();
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     RenderTargets[0] = ImplicitChain->BackBuffer(0);
@@ -338,6 +340,44 @@ D9Device::SendTargets(VOID)
     Depth.hZBuffer = DepthStencil != nullptr ? DepthStencil->DriverResource()->DriverResource : NULL;
     DdiDepthStencil(&Depth);
     TargetsDirty = FALSE;
+    if (ViewportPending)
+    {
+        D3DDDIARG_VIEWPORTINFO Area = {};
+        D3DDDIARG_ZRANGE Range = {};
+
+        ViewportPending = FALSE;
+        Area.Width = CurrentViewport.Width;
+        Area.Height = CurrentViewport.Height;
+        Range.MinZ = CurrentViewport.MinZ;
+        Range.MaxZ = CurrentViewport.MaxZ;
+        DdiViewport(&Area);
+        DdiZRange(&Range);
+        DdiScissorRect(&ScissorRect);
+    }
+}
+
+/* Lets go of the targets the application set */
+VOID
+D9Device::UnpinTargets(VOID)
+{
+    for (UINT Index = 0; Index < D9MaxRenderTargets; Index++)
+    {
+        D9Surface* Bound = RenderTargets[Index];
+
+        if (!TargetPinned[Index])
+            continue;
+        TargetPinned[Index] = FALSE;
+        RenderTargets[Index] = nullptr;
+        Bound->Unpin();
+    }
+    if (DepthPinned)
+    {
+        D9Surface* Bound = DepthStencil;
+
+        DepthPinned = FALSE;
+        DepthStencil = nullptr;
+        Bound->Unpin();
+    }
 }
 
 /* The viewport covering the back buffer, its depth range and its scissor rectangle */
@@ -977,7 +1017,8 @@ D9Device::Clear(
     }
 
     /* The driver always gets rectangles; without any the viewport is the one */
-    SetRect(&Viewport, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
+    SetRect(&Viewport, CurrentViewport.X, CurrentViewport.Y, CurrentViewport.X + CurrentViewport.Width,
+            CurrentViewport.Y + CurrentViewport.Height);
     if (Count == 0 || Rects == nullptr)
     {
         Count = 1;
@@ -2241,21 +2282,83 @@ D9Device::GetFrontBufferData(
     return ImplicitChain->GetFrontBufferData(DestSurface);
 }
 
+/* The target reaches the driver before the next operation that writes it; a new first target brings a viewport
+   and scissor rectangle covering it */
 STDMETHODIMP
 D9Device::SetRenderTarget(
     _In_ DWORD RenderTargetIndex,
     _In_opt_ IDirect3DSurface9* RenderTarget)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9_DEVICE_LOCK();
+    D9Surface* Next = static_cast<D9Surface*>(RenderTarget);
+    D9Surface* Previous;
+
+    if (NotReset || (RenderTargetIndex == 0 && Next == nullptr) || RenderTargetIndex >= Caps.NumSimultaneousRTs)
+        return D3DERR_INVALIDCALL;
+    if (Next != nullptr)
+    {
+        if (Next->Owner() != this || (Next->Describe().Usage & D3DUSAGE_RENDERTARGET) == 0)
+            return D3DERR_INVALIDCALL;
+        for (UINT Index = 0; Index < Caps.NumSimultaneousRTs; Index++)
+        {
+            if (Index != RenderTargetIndex && RenderTargets[Index] == Next)
+                return D3DERR_INVALIDCALL;
+        }
+    }
+
+    Previous = RenderTargets[RenderTargetIndex];
+    if (Next != Previous)
+    {
+        BOOLEAN WasPinned = TargetPinned[RenderTargetIndex];
+
+        if (Next != nullptr)
+            Next->Pin();
+        RenderTargets[RenderTargetIndex] = Next;
+        TargetPinned[RenderTargetIndex] = Next != nullptr;
+        if (WasPinned)
+            Previous->Unpin();
+    }
+    TargetsDirty = TRUE;
+    if (RenderTargetIndex == 0)
+    {
+        const D3DSURFACE_DESC& Desc = Next->Describe();
+
+        CurrentViewport.X = 0;
+        CurrentViewport.Y = 0;
+        CurrentViewport.Width = Desc.Width;
+        CurrentViewport.Height = Desc.Height;
+        CurrentViewport.MinZ = 0.0f;
+        CurrentViewport.MaxZ = 1.0f;
+        SetRect(&ScissorRect, 0, 0, Desc.Width, Desc.Height);
+        ViewportPending = TRUE;
+    }
+    return S_OK;
 }
 
 STDMETHODIMP
 D9Device::SetDepthStencilSurface(
     _In_opt_ IDirect3DSurface9* NewZStencil)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9_DEVICE_LOCK();
+    D9Surface* Next = static_cast<D9Surface*>(NewZStencil);
+    D9Surface* Previous = DepthStencil;
+    BOOLEAN WasPinned = DepthPinned;
+
+    if (NotReset)
+        return D3DERR_INVALIDCALL;
+    if (Next != nullptr && (Next->Owner() != this || (Next->Describe().Usage & D3DUSAGE_DEPTHSTENCIL) == 0))
+        return D3DERR_INVALIDCALL;
+    if (Next != Previous)
+    {
+        if (Next != nullptr)
+            Next->Pin();
+        DepthStencil = Next;
+        DepthPinned = Next != nullptr;
+        if (WasPinned)
+            Previous->Unpin();
+    }
+    TargetsDirty = TRUE;
+    return S_OK;
 }
 
 STDMETHODIMP
