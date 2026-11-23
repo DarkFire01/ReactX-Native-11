@@ -612,7 +612,7 @@ RxWarpFilterLevel(
         return;
     }
 
-    /* Eight bit normalized textures filter in fixed point, horizontally first */
+    /* Eight bit normalized textures filter in fixed point: columns to 8.7 first, then across */
     if (Axes == 2 && !Request->Compare && RxWarpByteFormat(Request->View->Format))
     {
         INT Corner[2][2][4];
@@ -631,10 +631,10 @@ RxWarpFilterLevel(
         }
         for (UINT Component = 0; Component < 4; Component++)
         {
-            INT Top = Corner[0][0][Component] * 256 + (Corner[0][1][Component] - Corner[0][0][Component]) * Wx;
-            INT Bottom = Corner[1][0][Component] * 256 + (Corner[1][1][Component] - Corner[1][0][Component]) * Wx;
+            INT Left = (Corner[0][0][Component] * 256 + (Corner[1][0][Component] - Corner[0][0][Component]) * Wy) >> 1;
+            INT Right = (Corner[0][1][Component] * 256 + (Corner[1][1][Component] - Corner[0][1][Component]) * Wy) >> 1;
 
-            RxWarpByteFilterFixed[Component] = (Top + (((Bottom - Top) * Wy) >> 8)) >> 1;
+            RxWarpByteFilterFixed[Component] = Left + (((Right - Left) * Wx) >> 8);
             Result[Component] = RxWarpByteResult(RxWarpByteFilterFixed[Component]);
         }
         RxWarpByteFilterValid = TRUE;
