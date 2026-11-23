@@ -2781,6 +2781,120 @@ NcFillPattern(
     Surface->UnlockRect();
 }
 
+/* TRUE for a surface that is a level of a texture or cube texture */
+static
+BOOLEAN
+NcIsTextureLevel(
+    _In_ IDirect3DSurface9* Surface)
+{
+    IUnknown* Container = nullptr;
+
+    if (SUCCEEDED(Surface->GetContainer(__uuidof(IDirect3DBaseTexture9), reinterpret_cast<VOID**>(&Container))))
+    {
+        Container->Release();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The system's whole surface StretchRect on an extended device reads a discard flag past the end of a texture level
+   object when the other surface is a depth buffer, so its answer depends on heap contents */
+static
+BOOLEAN
+NcStretchReadsPastLevel(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Source,
+    _In_ IDirect3DSurface9* Target)
+{
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    D3DSURFACE_DESC From = {};
+    D3DSURFACE_DESC To = {};
+    BOOLEAN FromLevel;
+    BOOLEAN ToLevel;
+    BOOLEAN FromDepth;
+    BOOLEAN ToDepth;
+
+    if (FAILED(Device->QueryInterface(__uuidof(IDirect3DDevice9Ex), reinterpret_cast<VOID**>(&DeviceEx))))
+        return FALSE;
+    DeviceEx->Release();
+    if (Source == Target)
+        return FALSE;
+    Source->GetDesc(&From);
+    Target->GetDesc(&To);
+    if (From.Format != To.Format || From.Width != To.Width || From.Height != To.Height ||
+        From.Pool != D3DPOOL_DEFAULT || To.Pool != D3DPOOL_DEFAULT)
+    {
+        return FALSE;
+    }
+    FromLevel = NcIsTextureLevel(Source);
+    ToLevel = NcIsTextureLevel(Target);
+    FromDepth = !FromLevel && (From.Usage & D3DUSAGE_DEPTHSTENCIL) != 0;
+    ToDepth = !ToLevel && (To.Usage & D3DUSAGE_DEPTHSTENCIL) != 0;
+    return (FromLevel || ToLevel) && (FromDepth || ToDepth);
+}
+
+/* Depth buffer StretchRect with and without rectangles, inside a scene and with discardable buffers: whole surface
+   copies on an extended device skip the depth rules */
+static
+VOID
+NcCheckDepthStretches(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSurface9* Depth = nullptr;
+    IDirect3DSurface9* Other = nullptr;
+    IDirect3DSurface9* Discard = nullptr;
+    IDirect3DSurface9* Level = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    RECT Whole = { 0, 0, 16, 8 };
+
+    Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Depth, nullptr);
+    Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Other, nullptr);
+    Device->CreateDepthStencilSurface(16, 8, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, TRUE, &Discard, nullptr);
+    Device->CreateTexture(16, 8, 1, D3DUSAGE_DEPTHSTENCIL, D3DFMT_D24S8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    if (Texture != nullptr)
+        Texture->GetSurfaceLevel(0, &Level);
+    if (Depth == nullptr || Other == nullptr || Discard == nullptr || Level == nullptr)
+    {
+        printf("%s_depth_stretch = surfaces missing\n", Prefix);
+    }
+    else
+    {
+        printf("%s_depth_stretch[whole] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, Other, nullptr, D3DTEXF_NONE));
+        printf("%s_depth_stretch[rects] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, &Whole, Other, &Whole, D3DTEXF_NONE));
+        printf("%s_depth_stretch[point] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, Other, nullptr, D3DTEXF_POINT));
+        printf("%s_depth_stretch[discard_from] = %08lX\n", Prefix,
+               Device->StretchRect(Discard, nullptr, Other, nullptr, D3DTEXF_NONE));
+        printf("%s_depth_stretch[discard_to] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, Discard, nullptr, D3DTEXF_NONE));
+        printf("%s_depth_stretch[discard_rects] = %08lX\n", Prefix,
+               Device->StretchRect(Discard, &Whole, Other, &Whole, D3DTEXF_NONE));
+        printf("%s_depth_stretch[level_rects] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, &Whole, Level, &Whole, D3DTEXF_NONE));
+        printf("%s_depth_stretch[discard_level] = %08lX\n", Prefix,
+               Device->StretchRect(Discard, nullptr, Level, nullptr, D3DTEXF_NONE));
+        Device->BeginScene();
+        printf("%s_depth_stretch[scene_whole] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, nullptr, Other, nullptr, D3DTEXF_NONE));
+        printf("%s_depth_stretch[scene_rects] = %08lX\n", Prefix,
+               Device->StretchRect(Depth, &Whole, Other, &Whole, D3DTEXF_NONE));
+        Device->EndScene();
+    }
+    if (Level != nullptr)
+        Level->Release();
+    if (Texture != nullptr)
+        Texture->Release();
+    if (Discard != nullptr)
+        Discard->Release();
+    if (Other != nullptr)
+        Other->Release();
+    if (Depth != nullptr)
+        Depth->Release();
+}
+
 /* Every pairing of copy kinds through UpdateSurface, StretchRect and GetRenderTargetData */
 static
 VOID
@@ -2801,18 +2915,26 @@ NcCheckCopyPairs(
         for (UINT Target = 0; Target < _countof(NcCopyKinds); Target++)
         {
             HRESULT Update;
-            HRESULT Stretch;
+            HRESULT Stretch = S_OK;
             HRESULT Linear;
             HRESULT Readback;
+            BOOLEAN Unstable;
+            char StretchText[16];
 
             if (Surfaces[Source] == nullptr || Surfaces[Target] == nullptr)
                 continue;
             Update = Device->UpdateSurface(Surfaces[Source], nullptr, Surfaces[Target], nullptr);
-            Stretch = Device->StretchRect(Surfaces[Source], nullptr, Surfaces[Target], nullptr, D3DTEXF_NONE);
+            Unstable = NcStretchReadsPastLevel(Device, Surfaces[Source], Surfaces[Target]);
+            if (!Unstable)
+                Stretch = Device->StretchRect(Surfaces[Source], nullptr, Surfaces[Target], nullptr, D3DTEXF_NONE);
             Linear = Device->StretchRect(Surfaces[Source], nullptr, Surfaces[Target], nullptr, D3DTEXF_LINEAR);
             Readback = Device->GetRenderTargetData(Surfaces[Source], Surfaces[Target]);
+            if (Unstable)
+                strcpy_s(StretchText, "skipped");
+            else
+                sprintf_s(StretchText, "%08lX", Stretch);
             sprintf_s(Name, "%s[%s,%s]", Prefix, NcCopyKinds[Source].Name, NcCopyKinds[Target].Name);
-            printf("%s update %08lX stretch %08lX linear %08lX readback %08lX\n", Name, Update, Stretch, Linear,
+            printf("%s update %08lX stretch %s linear %08lX readback %08lX\n", Name, Update, StretchText, Linear,
                    Readback);
         }
     }
@@ -3297,6 +3419,7 @@ NcCheckCopiesOn(
     printf("%s_caps = stretch %08lX devcaps2 %08lX\n", Prefix, Caps.StretchRectFilterCaps, Caps.DevCaps2);
     sprintf_s(Name, "%s_pair", Prefix);
     NcCheckCopyPairs(Name, Device);
+    NcCheckDepthStretches(Prefix, Device);
     NcCheckFrontBuffer(Prefix, Device);
     NcCheckCopyRects(Prefix, Device);
     NcCheckSurfaceDcs(Prefix, Device);
