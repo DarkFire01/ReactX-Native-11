@@ -4361,6 +4361,311 @@ NcCheckPresentStats(
     Plain->Release();
 }
 
+/* FNV-1a over a block of state, so a whole table prints as one number */
+static
+UINT
+NcHashState(
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ SIZE_T Size)
+{
+    const BYTE* Bytes = static_cast<const BYTE*>(Data);
+    UINT Hash = 2166136261u;
+
+    for (SIZE_T Index = 0; Index < Size; Index++)
+    {
+        Hash ^= Bytes[Index];
+        Hash *= 16777619u;
+    }
+    return Hash;
+}
+
+/* Every render, stage and sampler state, transform, the viewport and scissor rectangle, material, clip planes,
+   clip status, patch mode and vertex processing mode, each table as one hash */
+static
+VOID
+NcPrintStateTables(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Samplers[] = { 0, 15, D3DDMAPSAMPLER, D3DVERTEXTEXTURESAMPLER0, D3DVERTEXTEXTURESAMPLER3 };
+    static const DWORD Transforms[] = { D3DTS_VIEW, D3DTS_PROJECTION, D3DTS_TEXTURE0, D3DTS_TEXTURE7, D3DTS_WORLD,
+                                        D3DTS_WORLDMATRIX(255) };
+    DWORD Values[256];
+    UINT Failed = 0;
+    D3DMATRIX Matrix;
+    D3DVIEWPORT9 Viewport = {};
+    RECT Scissor = {};
+    D3DMATERIAL9 Material = {};
+    D3DCLIPSTATUS9 Status = {};
+    FLOAT Plane[4];
+    UINT Hash;
+    DWORD Fvf = 0xDEADBEEF;
+
+    for (UINT State = 0; State < 256; State++)
+    {
+        Values[State] = 0xDEADBEEF;
+        if (FAILED(Device->GetRenderState(static_cast<D3DRENDERSTATETYPE>(State), &Values[State])))
+            Failed += 1;
+    }
+    printf("%s_render = %08X failed %u\n", Prefix, NcHashState(Values, sizeof(Values)), Failed);
+    for (UINT Stage = 0; Stage < 8; Stage++)
+    {
+        for (UINT Type = 0; Type < 33; Type++)
+        {
+            Values[Type] = 0xDEADBEEF;
+            Device->GetTextureStageState(Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(Type), &Values[Type]);
+        }
+        printf("%s_stage[%u] = %08X\n", Prefix, Stage, NcHashState(Values, 33 * sizeof(DWORD)));
+    }
+    for (DWORD Sampler : Samplers)
+    {
+        for (UINT Type = 0; Type < 14; Type++)
+        {
+            Values[Type] = 0xDEADBEEF;
+            Device->GetSamplerState(Sampler, static_cast<D3DSAMPLERSTATETYPE>(Type), &Values[Type]);
+        }
+        printf("%s_sampler[%lu] = %08X\n", Prefix, Sampler, NcHashState(Values, 14 * sizeof(DWORD)));
+    }
+    for (DWORD Type : Transforms)
+    {
+        HRESULT hr;
+
+        memset(&Matrix, 0xCD, sizeof(Matrix));
+        hr = Device->GetTransform(static_cast<D3DTRANSFORMSTATETYPE>(Type), &Matrix);
+        printf("%s_transform[%lu] = %08lX %08X\n", Prefix, Type, hr, NcHashState(&Matrix, sizeof(Matrix)));
+    }
+    Device->GetViewport(&Viewport);
+    printf("%s_viewport = %lu %lu %lu %lu %08X\n", Prefix, Viewport.X, Viewport.Y, Viewport.Width, Viewport.Height,
+           NcHashState(&Viewport.MinZ, 2 * sizeof(FLOAT)));
+    Device->GetScissorRect(&Scissor);
+    printf("%s_scissor = %ld %ld %ld %ld\n", Prefix, Scissor.left, Scissor.top, Scissor.right, Scissor.bottom);
+    Device->GetMaterial(&Material);
+    printf("%s_material = %08X\n", Prefix, NcHashState(&Material, sizeof(Material)));
+    Hash = 0;
+    for (UINT Index = 0; Index < 8; Index++)
+    {
+        memset(Plane, 0xCD, sizeof(Plane));
+        Device->GetClipPlane(Index, Plane);
+        Hash = Hash * 31 + NcHashState(Plane, sizeof(Plane));
+    }
+    printf("%s_planes = %08X\n", Prefix, Hash);
+    Device->GetClipStatus(&Status);
+    printf("%s_clipstatus = %08lX %08lX\n", Prefix, Status.ClipUnion, Status.ClipIntersection);
+    Device->GetFVF(&Fvf);
+    printf("%s_fvf = %08lX\n", Prefix, Fvf);
+    printf("%s_npatch = %.3f software %d\n", Prefix, Device->GetNPatchMode(), Device->GetSoftwareVertexProcessing());
+}
+
+/* Lights, their enables and what binding a buffer or texture does to the application's references */
+static
+VOID
+NcCheckBindingsOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DVertexBuffer9* Read = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    IDirect3DIndexBuffer9* ReadIndices = nullptr;
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DBaseTexture9* ReadTexture = nullptr;
+    D3DLIGHT9 Light = {};
+    BOOL Enabled = 7;
+    UINT Offset = 0;
+    UINT Stride = 0;
+    HRESULT hr;
+
+    hr = Device->LightEnable(3, TRUE);
+    printf("%s_light_enable = %08lX\n", Prefix, hr);
+    memset(&Light, 0xCD, sizeof(Light));
+    hr = Device->GetLight(3, &Light);
+    printf("%s_light_get = %08lX type %u diffuse %.1f %.1f %.1f %.1f direction %.1f %.1f %.1f\n", Prefix, hr,
+           Light.Type, Light.Diffuse.r, Light.Diffuse.g, Light.Diffuse.b, Light.Diffuse.a, Light.Direction.x,
+           Light.Direction.y, Light.Direction.z);
+    hr = Device->GetLightEnable(3, &Enabled);
+    printf("%s_light_enabled = %08lX %d\n", Prefix, hr, Enabled);
+    Enabled = 7;
+    hr = Device->GetLightEnable(2, &Enabled);
+    printf("%s_light_between = %08lX %d\n", Prefix, hr, Enabled);
+    hr = Device->LightEnable(3, FALSE);
+    printf("%s_light_disable = %08lX\n", Prefix, hr);
+    Enabled = 7;
+    hr = Device->GetLightEnable(3, &Enabled);
+    printf("%s_light_disabled = %08lX %d\n", Prefix, hr, Enabled);
+
+    Device->CreateVertexBuffer(64, 0, 0, D3DPOOL_DEFAULT, &Buffer, nullptr);
+    Device->CreateIndexBuffer(64, 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &Indices, nullptr);
+    Device->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    if (Buffer == nullptr || Indices == nullptr || Texture == nullptr)
+    {
+        printf("%s_binding_resources = missing\n", Prefix);
+    }
+    else
+    {
+        printf("%s_stream_set = %08lX\n", Prefix, Device->SetStreamSource(2, Buffer, 8, 4));
+        printf("%s_indices_set = %08lX\n", Prefix, Device->SetIndices(Indices));
+        printf("%s_texture_set = %08lX\n", Prefix, Device->SetTexture(3, Texture));
+        Buffer->AddRef();
+        printf("%s_stream_refs = %lu\n", Prefix, Buffer->Release());
+        Texture->AddRef();
+        printf("%s_texture_refs = %lu\n", Prefix, Texture->Release());
+
+        /* The bindings outlive the application's last references */
+        printf("%s_stream_release = %lu\n", Prefix, Buffer->Release());
+        printf("%s_indices_release = %lu\n", Prefix, Indices->Release());
+        printf("%s_texture_release = %lu\n", Prefix, Texture->Release());
+        hr = Device->GetStreamSource(2, &Read, &Offset, &Stride);
+        printf("%s_stream_get = %08lX %s %u %u\n", Prefix, hr, Read == Buffer ? "same" : "other", Offset, Stride);
+        hr = Device->GetIndices(&ReadIndices);
+        printf("%s_indices_get = %08lX %s\n", Prefix, hr, ReadIndices == Indices ? "same" : "other");
+        hr = Device->GetTexture(3, &ReadTexture);
+        printf("%s_texture_get = %08lX %s\n", Prefix, hr, ReadTexture == Texture ? "same" : "other");
+        if (Read != nullptr)
+            printf("%s_stream_get_release = %lu\n", Prefix, Read->Release());
+        if (ReadIndices != nullptr)
+            printf("%s_indices_get_release = %lu\n", Prefix, ReadIndices->Release());
+        if (ReadTexture != nullptr)
+            printf("%s_texture_get_release = %lu\n", Prefix, ReadTexture->Release());
+        Device->SetStreamSource(2, nullptr, 0, 0);
+        Device->SetIndices(nullptr);
+        Device->SetTexture(3, nullptr);
+        Buffer = nullptr;
+        Indices = nullptr;
+        Texture = nullptr;
+    }
+    if (Buffer != nullptr)
+        Buffer->Release();
+    if (Indices != nullptr)
+        Indices->Release();
+    if (Texture != nullptr)
+        Texture->Release();
+}
+
+/* Changes a little of every kind of state, so a reset can show what it puts back */
+static
+VOID
+NcChangeStates(
+    _In_ IDirect3DDevice9* Device)
+{
+    D3DMATRIX Matrix = {};
+    D3DVIEWPORT9 Viewport = { 1, 2, 3, 4, 0.25f, 0.75f };
+    RECT Scissor = { 1, 1, 5, 5 };
+    D3DMATERIAL9 Material = {};
+    D3DCLIPSTATUS9 Status = { 3, 5 };
+    D3DLIGHT9 Light = {};
+    FLOAT Plane[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+
+    Matrix._11 = 2.0f;
+    Matrix._44 = 3.0f;
+    Material.Power = 4.0f;
+    Light.Type = D3DLIGHT_POINT;
+    Light.Range = 5.0f;
+    Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    Device->SetRenderState(D3DRS_FOGENABLE, TRUE);
+    Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_ADD);
+    Device->SetTextureStageState(3, D3DTSS_CONSTANT, 0x12345678);
+    Device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    Device->SetSamplerState(D3DVERTEXTEXTURESAMPLER0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    Device->SetTransform(D3DTS_VIEW, &Matrix);
+    Device->SetTransform(D3DTS_WORLDMATRIX(255), &Matrix);
+    Device->SetViewport(&Viewport);
+    Device->SetScissorRect(&Scissor);
+    Device->SetMaterial(&Material);
+    Device->SetClipPlane(1, Plane);
+    Device->SetClipStatus(&Status);
+    Device->SetFVF(D3DFVF_XYZ);
+    Device->SetNPatchMode(2.0f);
+    Device->SetLight(1, &Light);
+    Device->LightEnable(1, TRUE);
+}
+
+static
+VOID
+NcCheckStatesOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ const D3DPRESENT_PARAMETERS* Parameters)
+{
+    D3DPRESENT_PARAMETERS Again = *Parameters;
+    D3DLIGHT9 Light = {};
+    BOOL Enabled = 7;
+    char Name[64];
+    HRESULT hr;
+
+    sprintf_s(Name, "%s_initial", Prefix);
+    NcPrintStateTables(Name, Device);
+    NcChangeStates(Device);
+    sprintf_s(Name, "%s_changed", Prefix);
+    NcPrintStateTables(Name, Device);
+    NcCheckBindingsOn(Prefix, Device);
+
+    printf("%s_reset = %08lX\n", Prefix, Device->Reset(&Again));
+    sprintf_s(Name, "%s_after_reset", Prefix);
+    NcPrintStateTables(Name, Device);
+    hr = Device->GetLight(1, &Light);
+    printf("%s_reset_light = %08lX type %u\n", Prefix, hr, Light.Type);
+    hr = Device->GetLightEnable(1, &Enabled);
+    printf("%s_reset_light_enable = %08lX %d\n", Prefix, hr, Enabled);
+}
+
+/* Pipeline state on every kind of vertex processing a windowed device can have, before and after a reset */
+static
+VOID
+NcCheckStates(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "states_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "states_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "states_sw", D3DCREATE_SOFTWARE_VERTEXPROCESSING, TRUE },
+        { "states_mixed", D3DCREATE_MIXED_VERTEXPROCESSING, TRUE },
+        { "states_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        D3DPRESENT_PARAMETERS Made;
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        Parameters.EnableAutoDepthStencil = TRUE;
+        Parameters.AutoDepthStencilFormat = D3DFMT_D24S8;
+        Made = Parameters;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Made, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Made, nullptr, &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckStatesOn(Case.Name, Device, &Parameters);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -4388,6 +4693,7 @@ static const NineCheckInfo NcChecks[] =
     { "shared", NcCheckShared },
     { "cursor", NcCheckCursor },
     { "presentstats", NcCheckPresentStats },
+    { "states", NcCheckStates },
 };
 
 static
