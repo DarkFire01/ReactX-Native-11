@@ -3136,6 +3136,270 @@ DcCheckBltBatch(
     Draw7->Release();
 }
 
+struct DcEnumState
+{
+    VOID* Known[8];
+    ULONG Count;
+    ULONG Stop;
+};
+
+/* Names the surface by its place in the known list and releases the reference enumeration gave */
+static
+HRESULT
+WINAPI
+DcEnumSurface(
+    _In_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ LPDDSURFACEDESC2 Desc,
+    _In_ LPVOID Context)
+{
+    DcEnumState* State = static_cast<DcEnumState*>(Context);
+    DDSURFACEDESC2 Copy;
+    int Which = -1;
+
+    for (ULONG Index = 0; Index < _countof(State->Known); Index++)
+    {
+        if (State->Known[Index] != nullptr && State->Known[Index] == Surface)
+            Which = static_cast<int>(Index);
+    }
+    memcpy(&Copy, Desc, sizeof(Copy));
+    Copy.lpSurface = nullptr;
+    printf("    surface %d size=%lu flags=%08lX %lux%lu caps=%08lX refs=%lu\n", Which, Copy.dwSize, Copy.dwFlags,
+           Copy.dwWidth, Copy.dwHeight, Copy.ddsCaps.dwCaps, Surface->Release());
+    State->Count += 1;
+    return State->Count == State->Stop ? DDENUMRET_CANCEL : DDENUMRET_OK;
+}
+
+static
+VOID
+DcEnumCase(
+    _In_ LPDIRECTDRAW7 Draw7,
+    _In_z_ PCSTR Name,
+    _In_ DWORD Flags,
+    _In_opt_ LPDDSURFACEDESC2 Desc,
+    _Inout_ DcEnumState* State)
+{
+    HRESULT hr;
+
+    State->Count = 0;
+    printf("%s:\n", Name);
+    hr = Draw7->EnumSurfaces(Flags, Desc, State, DcEnumSurface);
+    printf("  = %08lX count=%lu\n", hr, State->Count);
+}
+
+/* EnumSurfaces over the surfaces one DirectDraw object made, matched against a description */
+static
+VOID
+DcCheckEnumSurfaces(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Sys = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    static const DWORD Video = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY;
+    LPDIRECTDRAWSURFACE7 Surfaces[6] = {};
+    LPDIRECTDRAWSURFACE7 OtherSurface;
+    LPDIRECTDRAWSURFACE Old = nullptr;
+    LPDIRECTDRAW7 Draw7;
+    LPDIRECTDRAW7 Other;
+    LPDIRECTDRAW Draw = nullptr;
+    DcEnumState State = {};
+    DDSURFACEDESC2 Desc;
+    DDSURFACEDESC OldDesc;
+    DDCOLORKEY Key;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    Other = DcCreate7(Check);
+    if (Draw7 == nullptr || Other == nullptr)
+    {
+        if (Draw7 != nullptr)
+            Draw7->Release();
+        if (Other != nullptr)
+            Other->Release();
+        return;
+    }
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    Other->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    State.Stop = 100;
+    DcEnumCase(Draw7, "empty", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+
+    Surfaces[0] = DcMakeSurface(Draw7, Sys, 8, 4, 32);
+    Surfaces[1] = DcMakeSurface(Draw7, Video, 16, 8, 32);
+    Surfaces[2] = DcMakeSurface(Draw7, Sys, 8, 4, 16);
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    Desc.ddsCaps.dwCaps = Sys;
+    Desc.dwWidth = 8;
+    Desc.dwHeight = 4;
+    Draw7->CreateSurface(&Desc, &Surfaces[3], nullptr);
+    Desc.ddsCaps.dwCaps = Video;
+    Draw7->CreateSurface(&Desc, &Surfaces[4], nullptr);
+    Surfaces[5] = DcMakeSurface(Draw7, Video, 8, 4, 16);
+    OtherSurface = DcMakeSurface(Other, Sys, 8, 4, 32);
+    for (ULONG Index = 0; Index < _countof(Surfaces); Index++)
+        State.Known[Index] = Surfaces[Index];
+    State.Known[6] = OtherSurface;
+    if (Surfaces[0] != nullptr)
+    {
+        Surfaces[0]->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<VOID**>(&Old));
+        State.Known[7] = Old;
+    }
+
+    DcEnumCase(Draw7, "all", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+    State.Stop = 2;
+    DcEnumCase(Draw7, "all_cancel", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+    State.Stop = 100;
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_WIDTH | DDSD_HEIGHT;
+    Desc.dwWidth = 8;
+    Desc.dwHeight = 4;
+    DcEnumCase(Draw7, "match_size", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    DcEnumCase(Draw7, "nomatch_size", DDENUMSURFACES_NOMATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = Sys;
+    DcEnumCase(Draw7, "match_caps", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    if (Surfaces[1] != nullptr)
+    {
+        Surfaces[1]->GetSurfaceDesc(&Desc);
+        Desc.dwFlags = DDSD_CAPS;
+        DcEnumCase(Draw7, "match_video_caps", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    }
+    if (Surfaces[2] != nullptr)
+    {
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Surfaces[2]->GetSurfaceDesc(&Desc);
+        Desc.dwFlags = DDSD_PIXELFORMAT;
+        DcEnumCase(Draw7, "match_format16", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    }
+    if (Surfaces[3] != nullptr)
+    {
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Surfaces[3]->GetSurfaceDesc(&Desc);
+        Desc.dwFlags = DDSD_PIXELFORMAT;
+        DcEnumCase(Draw7, "match_format_display", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    }
+    if (Surfaces[5] != nullptr)
+    {
+        memset(&Desc, 0, sizeof(Desc));
+        Desc.dwSize = sizeof(Desc);
+        Surfaces[5]->GetSurfaceDesc(&Desc);
+        Desc.dwFlags = DDSD_PIXELFORMAT;
+        DcEnumCase(Draw7, "match_format_video16", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    }
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CKDESTBLT;
+    DcEnumCase(Draw7, "match_nokey", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Key.dwColorSpaceLowValue = 5;
+    Key.dwColorSpaceHighValue = 5;
+    if (Surfaces[2] != nullptr)
+        printf("set_key = %08lX\n", Surfaces[2]->SetColorKey(DDCKEY_SRCBLT, &Key));
+    Desc.dwFlags = DDSD_CKSRCBLT;
+    Desc.ddckCKSrcBlt = Key;
+    DcEnumCase(Draw7, "match_key", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = DDSD_CKDESTBLT;
+    Desc.dwFlags = DDSD_CKDESTOVERLAY;
+    DcEnumCase(Draw7, "match_overlay_key", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = DDSD_CKSRCOVERLAY;
+    DcEnumCase(Draw7, "nomatch_overlay_key", DDENUMSURFACES_NOMATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = DDSD_BACKBUFFERCOUNT | DDSD_MIPMAPCOUNT;
+    DcEnumCase(Draw7, "match_counts", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = 0;
+    DcEnumCase(Draw7, "match_nothing", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_OPTIMIZED;
+    DcEnumCase(Draw7, "optimized", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.ddsCaps.dwCaps = 0x01000000;
+    DcEnumCase(Draw7, "reserved_caps", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.ddsCaps.dwCaps = DDSCAPS_RESERVED2;
+    DcEnumCase(Draw7, "reserved2", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.ddsCaps.dwCaps = 0;
+    Desc.ddsCaps.dwCaps2 = 1;
+    DcEnumCase(Draw7, "caps2_bit0", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.ddsCaps.dwCaps2 = 0;
+    Desc.ddsCaps.dwCaps3 = 0x2000;
+    DcEnumCase(Draw7, "caps3_high", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.ddsCaps.dwCaps3 = 0;
+    Desc.ddsCaps.dwCaps4 = 1;
+    DcEnumCase(Draw7, "caps4", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.ddsCaps.dwCaps4 = 0;
+    Desc.dwFlags = DDSD_WIDTH;
+    DcEnumCase(Draw7, "width_only", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = DDSD_LPSURFACE;
+    DcEnumCase(Draw7, "lpsurface", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwFlags = DDSD_CKSRCBLT;
+    DcEnumCase(Draw7, "create_key", DDENUMSURFACES_MATCH | DDENUMSURFACES_CANBECREATED, &Desc, &State);
+    Desc.dwSize = sizeof(DDSURFACEDESC);
+    DcEnumCase(Draw7, "short_desc", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &Desc, &State);
+    Desc.dwSize = sizeof(Desc);
+
+    printf("null_callback = %08lX\n", Draw7->EnumSurfaces(DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr,
+                                                         &State, nullptr));
+    DcEnumCase(Draw7, "bad_flags", 0x20 | DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+    DcEnumCase(Draw7, "all_match", DDENUMSURFACES_ALL | DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, nullptr,
+               &State);
+    DcEnumCase(Draw7, "match_nodesc", DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+    DcEnumCase(Draw7, "both_match", DDENUMSURFACES_MATCH | DDENUMSURFACES_NOMATCH | DDENUMSURFACES_DOESEXIST, &Desc,
+               &State);
+    DcEnumCase(Draw7, "neither_exist", DDENUMSURFACES_ALL, nullptr, &State);
+    DcEnumCase(Draw7, "create_all", DDENUMSURFACES_ALL | DDENUMSURFACES_CANBECREATED, nullptr, &State);
+    DcEnumCase(Draw7, "create_nomatch", DDENUMSURFACES_NOMATCH | DDENUMSURFACES_CANBECREATED, &Desc, &State);
+    DcEnumCase(Draw7, "both_kinds", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST | DDENUMSURFACES_CANBECREATED,
+               nullptr, &State);
+
+    /* The old interface enumerates through IDirectDrawSurface with the short description */
+    if (SUCCEEDED(Draw7->QueryInterface(IID_IDirectDraw, reinterpret_cast<VOID**>(&Draw))))
+    {
+        State.Count = 0;
+        hr = Draw->EnumSurfaces(DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State,
+                                reinterpret_cast<LPDDENUMSURFACESCALLBACK>(DcEnumSurface));
+        printf("old_all = %08lX count=%lu\n", hr, State.Count);
+        memset(&OldDesc, 0, sizeof(OldDesc));
+        OldDesc.dwSize = sizeof(OldDesc);
+        OldDesc.dwFlags = DDSD_WIDTH | DDSD_HEIGHT;
+        OldDesc.dwWidth = 16;
+        OldDesc.dwHeight = 8;
+        State.Count = 0;
+        hr = Draw->EnumSurfaces(DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &OldDesc, &State,
+                                reinterpret_cast<LPDDENUMSURFACESCALLBACK>(DcEnumSurface));
+        printf("old_match = %08lX count=%lu\n", hr, State.Count);
+        OldDesc.dwSize = sizeof(Desc);
+        hr = Draw->EnumSurfaces(DDENUMSURFACES_MATCH | DDENUMSURFACES_DOESEXIST, &OldDesc, &State,
+                                reinterpret_cast<LPDDENUMSURFACESCALLBACK>(DcEnumSurface));
+        printf("old_long_desc = %08lX\n", hr);
+        Draw->Release();
+    }
+
+    if (Old != nullptr)
+        Old->Release();
+    State.Known[7] = nullptr;
+    DcEnumCase(Draw7, "after_old_release", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+    if (Surfaces[1] != nullptr)
+    {
+        Surfaces[1]->Release();
+        Surfaces[1] = nullptr;
+        State.Known[1] = nullptr;
+    }
+    DcEnumCase(Draw7, "after_release", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+    DcEnumCase(Other, "other_object", DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, &State);
+
+    for (LPDIRECTDRAWSURFACE7 Surface : Surfaces)
+    {
+        if (Surface != nullptr)
+            Surface->Release();
+    }
+    if (OtherSurface != nullptr)
+        OtherSurface->Release();
+    Other->Release();
+    Draw7->Release();
+}
+
 /* DEPTHFILL and the other fills of Z buffers, read back where the buffer can be locked */
 static
 VOID
@@ -3294,6 +3558,7 @@ static const DrawCheckInfo DcChecks[] =
     { "overlay", DcCheckOverlay },
     { "blt_batch", DcCheckBltBatch },
     { "depth_fill", DcCheckDepthFill },
+    { "enum_surfaces", DcCheckEnumSurfaces },
 };
 
 static
