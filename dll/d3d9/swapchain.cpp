@@ -26,15 +26,31 @@ D9SwapChain::~D9SwapChain()
     ReleaseBuffers();
 }
 
+/* The buffers go newest first */
 VOID
 D9SwapChain::ReleaseBuffers(VOID)
 {
-    for (UINT Buffer = 0; Buffer < BackBufferCount; Buffer++)
+    while (BackBufferCount > 0)
     {
-        delete BackBuffers[Buffer];
-        BackBuffers[Buffer] = nullptr;
+        BackBufferCount -= 1;
+        delete BackBuffers[BackBufferCount];
+        BackBuffers[BackBufferCount] = nullptr;
     }
-    BackBufferCount = 0;
+}
+
+/* A flip hands each buffer the surface of the one after it; the first one's surface moves to the last */
+VOID
+D9SwapChain::RotateBuffers(VOID)
+{
+    D9Resource* Moving;
+
+    if (BackBufferCount <= 1)
+        return;
+
+    Moving = BackBuffers[0]->DriverResource();
+    for (UINT Remaining = BackBufferCount; Remaining > 0; Remaining -= 1)
+        BackBuffers[Remaining - 1]->ExchangeResource(&Moving);
+    Device->NoteTargetsMoved();
 }
 
 /* Builds the back buffers the parameters ask for; zero sizes take the window's client area */
@@ -81,7 +97,10 @@ D9SwapChain::Reset(
     Desc.Width = Requested->BackBufferWidth;
     Desc.Height = Requested->BackBufferHeight;
 
+    /* Flip swap chains also make the buffer the window shows */
     Count = Requested->BackBufferCount;
+    if (Requested->SwapEffect == D3DSWAPEFFECT_FLIP || Requested->SwapEffect == D3DSWAPEFFECT_FLIPEX)
+        Count += 1;
     for (UINT Buffer = 0; Buffer < Count; Buffer++)
     {
         D9Surface* Surface = new (std::nothrow) D9Surface(Device, static_cast<IDirect3DSwapChain9*>(this), &Desc,
@@ -203,7 +222,10 @@ D9SwapChain::PresentWindowed(
     if (IsRectEmpty(&To))
         return D9CheckOcclusion(Target) == S_PRESENT_OCCLUDED ? S_PRESENT_OCCLUDED : S_OK;
 
-    return Device->PresentToWindow(BackBuffers[0]->DriverResource(), Target, &From, &To);
+    hr = Device->PresentToWindow(BackBuffers[0]->DriverResource(), Target, &From, &To);
+    if (SUCCEEDED(hr) && Parameters.SwapEffect == D3DSWAPEFFECT_FLIP)
+        RotateBuffers();
+    return hr;
 }
 
 STDMETHODIMP
@@ -235,7 +257,7 @@ D9SwapChain::GetBackBuffer(
         return D3DERR_INVALIDCALL;
 
     *Result = nullptr;
-    if (Buffer >= BackBufferCount)
+    if (Buffer >= BackBufferCount || Buffer >= Parameters.BackBufferCount)
     {
         D9_TRACE_ONCE(L"GetBackBuffer: back buffer %u does not exist", Buffer);
         return D3DERR_INVALIDCALL;

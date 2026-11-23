@@ -43,13 +43,31 @@ D9Surface::D9Surface(
 
 D9Surface::~D9Surface()
 {
-    Device->DestroyDriverSurface(&Resource);
+    if (Resource == nullptr)
+        return;
+    Device->DestroyDriverSurface(Resource);
+    delete Resource;
 }
 
 HRESULT
 D9Surface::Create(VOID)
 {
-    return Device->CreateDriverSurface(&Desc, Lockable, Discard, &Resource);
+    if (Resource == nullptr)
+        Resource = new (std::nothrow) D9Resource();
+    if (Resource == nullptr)
+        return E_OUTOFMEMORY;
+    return Device->CreateDriverSurface(&Desc, Lockable, Discard, Resource);
+}
+
+/* Flip swap chains move the driver surfaces between their buffers; each keeps its runtime handle */
+VOID
+D9Surface::ExchangeResource(
+    _Inout_ D9Resource** Held)
+{
+    D9Resource* Previous = Resource;
+
+    Resource = *Held;
+    *Held = Previous;
 }
 
 STDMETHODIMP
@@ -201,7 +219,7 @@ D9Surface::LockRect(
         return D3DERR_INVALIDCALL;
     }
 
-    hr = Device->LockDriverSurface(&Resource, Rect, Flags, Locked);
+    hr = Device->LockDriverSurface(Resource, Rect, Flags, Locked);
     if (SUCCEEDED(hr))
         IsLocked = TRUE;
     return hr;
@@ -215,7 +233,7 @@ D9Surface::UnlockRect()
     if (!IsLocked)
         return D3DERR_INVALIDCALL;
 
-    hr = Device->UnlockDriverSurface(&Resource);
+    hr = Device->UnlockDriverSurface(Resource);
     IsLocked = FALSE;
     return hr;
 }

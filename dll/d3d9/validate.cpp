@@ -63,7 +63,6 @@ D9RoundTelevisionRate(
 }
 
 /* Back buffer formats a flip model swap chain can share with the compositor */
-static
 BOOLEAN
 D9IsFlipExFormat(
     _In_ D3DFORMAT Format)

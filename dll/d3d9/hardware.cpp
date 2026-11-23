@@ -448,9 +448,9 @@ D9Device::CreateKernelDevice(VOID)
     if (Kmt == nullptr || Kmt->CreateDevice == nullptr)
         return D3DERR_NOTAVAILABLE;
 
-    /* Only the plain object's devices run in the kernel's legacy mode */
+    /* Only the plain object's devices run in the kernel's legacy mode, unless their swap effect was upgraded */
     Create.hAdapter = Adapter->KernelAdapter;
-    Create.Flags.LegacyMode = !IsEx;
+    Create.Flags.LegacyMode = !IsEx && !SwapEffectUpgrade;
     Create.Flags.RequestVSync = (BehaviorFlags & D3DCREATE_ENABLE_PRESENTSTATS) != 0;
     Status = Kmt->CreateDevice(&Create);
     if (!NT_SUCCESS(Status))

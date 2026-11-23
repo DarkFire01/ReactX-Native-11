@@ -39,6 +39,13 @@ struct D9Globals
     BOOLEAN ShimDecisionsMade;
     BOOLEAN ShimDecisionsApplied;
 
+    /* Where both shims stand: on, and whether they also cover adapters without game capture support */
+    BOOLEAN ShimDefaultsSeeded;
+    BOOLEAN MaximizedShimOn;
+    BOOLEAN MaximizedShimAnyAdapter;
+    BOOLEAN UpgradeShimOn;
+    BOOLEAN UpgradeShimAnyAdapter;
+
     LONG Force9On12;
     BOOLEAN VendorIdLie;
     DWORD FakeVendorId;
@@ -332,6 +339,13 @@ private:
         _In_opt_ HWND FocusWindow,
         _In_reads_(Heads) const D3DPRESENT_PARAMETERS* Parameters);
 
+    BOOLEAN
+    UpgradesSwapEffect(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _In_ DWORD BehaviorFlags,
+        _In_ const D3DPRESENT_PARAMETERS* Parameters);
+
     HRESULT
     CreateDeviceCommon(
         _In_ UINT Adapter,
@@ -502,6 +516,11 @@ BOOLEAN
 D9IsDesktopFormat(
     _In_ D3DFORMAT Format,
     _In_ BOOLEAN IsEx);
+
+/* validate.cpp */
+BOOLEAN
+D9IsFlipExFormat(
+    _In_ D3DFORMAT Format);
 
 /* formats.cpp */
 BOOLEAN

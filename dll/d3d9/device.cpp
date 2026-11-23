@@ -194,13 +194,15 @@ D9Device::D9Device(
     _In_ D3DDEVTYPE DeviceType,
     _In_opt_ HWND FocusWindow,
     _In_ DWORD BehaviorFlags,
-    _In_ BOOLEAN IsEx)
+    _In_ BOOLEAN IsEx,
+    _In_ BOOLEAN SwapEffectUpgrade)
     : Enum(Enum),
       Adapter(Adapter),
       DeviceType(DeviceType),
       FocusWindow(FocusWindow),
       BehaviorFlags(BehaviorFlags),
-      IsEx(IsEx)
+      IsEx(IsEx),
+      SwapEffectUpgrade(SwapEffectUpgrade)
 {
     InitializeCriticalSection(&Lock);
     for (DWORD& Value : RenderStates)

@@ -96,8 +96,12 @@ public:
     D9Resource*
     DriverResource()
     {
-        return &Resource;
+        return Resource;
     }
+
+    VOID
+    ExchangeResource(
+        _Inout_ D9Resource** Held);
 
     /* IUnknown */
     STDMETHOD(QueryInterface)(
@@ -159,7 +163,7 @@ public:
 private:
     IUnknown* Container;
     D3DSURFACE_DESC Desc;
-    D9Resource Resource = {};
+    D9Resource* Resource = nullptr;
     BOOLEAN Lockable;
     BOOLEAN Discard;
     BOOLEAN IsLocked = FALSE;
@@ -262,11 +266,14 @@ public:
     ReleaseBuffers(VOID);
 
 private:
+    VOID
+    RotateBuffers(VOID);
 
     UINT Index;
     HWND FocusWindow;
     D3DPRESENT_PARAMETERS Parameters = {};
-    D9Surface* BackBuffers[D3DPRESENT_BACK_BUFFERS_MAX_EX] = {};
+    /* Flip swap chains keep one buffer more than they report, the one on screen */
+    D9Surface* BackBuffers[D3DPRESENT_BACK_BUFFERS_MAX_EX + 1] = {};
     UINT BackBufferCount = 0;
 };
 
@@ -285,7 +292,8 @@ public:
         _In_ D3DDEVTYPE DeviceType,
         _In_opt_ HWND FocusWindow,
         _In_ DWORD BehaviorFlags,
-        _In_ BOOLEAN IsEx);
+        _In_ BOOLEAN IsEx,
+        _In_ BOOLEAN SwapEffectUpgrade);
 
     ~D9Device();
 
@@ -359,6 +367,13 @@ public:
 
     VOID
     ReleaseWindowSurface(VOID);
+
+    /* A flip moved the surfaces behind the bound targets */
+    VOID
+    NoteTargetsMoved(VOID)
+    {
+        TargetsDirty = TRUE;
+    }
 
     VOID
     FlushDriver(VOID);
@@ -1148,6 +1163,9 @@ private:
     HWND FocusWindow;
     DWORD BehaviorFlags;
     BOOLEAN IsEx;
+
+    /* Set when the device presents through the upgraded flip model instead of the legacy kernel mode */
+    BOOLEAN SwapEffectUpgrade;
 
     /* The kernel device and the driver's own adapter and device behind it */
     D3DKMT_HANDLE DeviceHandle = 0;
