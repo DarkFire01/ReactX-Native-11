@@ -22,7 +22,13 @@ DcEnumJoyTypes(
 VOID
 DcCheckJoyConfig(VOID)
 {
-    static const PCWSTR Types[] = { L"#2", L"#4", L"#9", L"#<", L"#=", L"VID_045E&PID_0000", L"NoSuchType", L"" };
+    static const PCWSTR Types[] =
+    {
+        L"#2", L"#4", L"#9", L"#<", L"#=", L"VID_045E&PID_0000", L"NoSuchType", L"",
+        L"{6F1D2B70-D5A0-11CF-BFC7-444553540000}", L"{6f1d2b70-d5a0-11cf-bfc7-444553540000}",
+        L"{6F1D2B70-D5A0-11CF-BFC7-44455354000}", L"{6F1D2B70-D5A0-11CF-BFC7-44455354000G}",
+    };
+    static const UINT Ids[] = { 0, 1, 2, 3, 4, 10, 16, 17, 100 };
     static const DWORD TypeSizes[] = { sizeof(DIJOYTYPEINFO_DX5), sizeof(DIJOYTYPEINFO_DX6), sizeof(DIJOYTYPEINFO), 100 };
     IDirectInput8W* Wide = DcCreateWide();
     IDirectInputJoyConfig8* Config = nullptr;
@@ -92,7 +98,7 @@ DcCheckJoyConfig(VOID)
     printf("  settypeinfo unacquired = %08lX\n", Config->SetTypeInfo(L"Test", &Type, 0, nullptr));
     printf("  deletetype unacquired = %08lX\n", Config->DeleteType(L"Test"));
 
-    for (UINT Id = 0; Id < 18; Id += (Id < 4) ? 1 : 6)
+    for (UINT Id : Ids)
     {
         memset(&Joy, 0, sizeof(Joy));
         Joy.dwSize = sizeof(Joy);
