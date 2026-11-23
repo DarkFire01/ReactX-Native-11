@@ -825,30 +825,17 @@ D9TextureCore::AddDirtyRegion(
     return S_OK;
 }
 
-/* Managed textures keep their priority for the resource manager; extended devices hand it to the driver */
 DWORD
 D9TextureCore::SetPriorityCore(
     _In_ DWORD Priority)
 {
-    DWORD Previous = ResourcePriority;
-
-    if (IsManaged())
-    {
-        ResourcePriority = Priority;
-        return Previous;
-    }
-    if (Pool != D3DPOOL_DEFAULT || !Device->IsExtended())
-        return 0;
-
-    Device->DriverSetPriority(Resource, Priority);
-    ResourcePriority = Priority;
-    return Previous;
+    return Device->ChangePriority(Resource, Pool, &ResourcePriority, Priority);
 }
 
 DWORD
 D9TextureCore::GetPriorityCore(VOID) const
 {
-    return ResourcePriority;
+    return Device->ReadPriority(Pool, ResourcePriority);
 }
 
 /* Only managed textures have a level of detail; changing it drops the video copy */
@@ -1046,8 +1033,9 @@ public:
         _In_ DWORD Size,
         _In_ DWORD Flags) override
     {
-        RX_UNIMPLEMENTED();
-        return D3DERR_INVALIDCALL;
+        D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+        return Private.Set(Guid, Data, Size, Flags);
     }
 
     STDMETHOD(GetPrivateData)(
@@ -1055,15 +1043,17 @@ public:
         _Out_writes_bytes_opt_(*Size) VOID* Data,
         _Inout_ DWORD* Size) override
     {
-        RX_UNIMPLEMENTED();
-        return D3DERR_NOTFOUND;
+        D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+        return Private.Get(Guid, Data, Size);
     }
 
     STDMETHOD(FreePrivateData)(
         _In_ REFGUID Guid) override
     {
-        RX_UNIMPLEMENTED();
-        return D3DERR_NOTFOUND;
+        D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+        return Private.Free(Guid);
     }
 
     STDMETHOD_(DWORD, SetPriority)(
@@ -1463,8 +1453,10 @@ D9Volume::SetPrivateData(
     _In_ DWORD Size,
     _In_ DWORD Flags)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9Device* Device = Texture->Device9();
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Set(Guid, Data, Size, Flags);
 }
 
 STDMETHODIMP
@@ -1473,16 +1465,20 @@ D9Volume::GetPrivateData(
     _Out_writes_bytes_opt_(*Size) VOID* Data,
     _Inout_ DWORD* Size)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTFOUND;
+    D9Device* Device = Texture->Device9();
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Get(Guid, Data, Size);
 }
 
 STDMETHODIMP
 D9Volume::FreePrivateData(
     _In_ REFGUID Guid)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTFOUND;
+    D9Device* Device = Texture->Device9();
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Free(Guid);
 }
 
 STDMETHODIMP

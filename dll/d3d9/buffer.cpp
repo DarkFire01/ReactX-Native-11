@@ -145,8 +145,9 @@ D9Buffer<Interface, Description>::SetPrivateData(
     _In_ DWORD Size,
     _In_ DWORD Flags)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Set(Guid, Data, Size, Flags);
 }
 
 template <class Interface, class Description>
@@ -156,8 +157,9 @@ D9Buffer<Interface, Description>::GetPrivateData(
     _Out_writes_bytes_opt_(*Size) VOID* Data,
     _Inout_ DWORD* Size)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTFOUND;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Get(Guid, Data, Size);
 }
 
 template <class Interface, class Description>
@@ -165,8 +167,9 @@ STDMETHODIMP
 D9Buffer<Interface, Description>::FreePrivateData(
     _In_ REFGUID Guid)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTFOUND;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Free(Guid);
 }
 
 template <class Interface, class Description>
@@ -174,17 +177,16 @@ STDMETHODIMP_(DWORD)
 D9Buffer<Interface, Description>::SetPriority(
     _In_ DWORD Priority)
 {
-    DWORD Previous = ResourcePriority;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
 
-    ResourcePriority = Priority;
-    return Previous;
+    return Device->ChangePriority(Resource, Pool, &ResourcePriority, Priority);
 }
 
 template <class Interface, class Description>
 STDMETHODIMP_(DWORD)
 D9Buffer<Interface, Description>::GetPriority()
 {
-    return ResourcePriority;
+    return Device->ReadPriority(Pool, ResourcePriority);
 }
 
 template <class Interface, class Description>

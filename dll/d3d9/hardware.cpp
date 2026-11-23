@@ -1171,6 +1171,48 @@ D9Device::DriverGenerateMips(
     DeviceFunctions.pfnGenerateMipSubLevels(DriverDevice, &Args);
 }
 
+/* The managed pool may be spelled the extended object's way */
+static
+BOOLEAN
+D9IsManagedPool(
+    _In_ D3DPOOL Pool)
+{
+    return Pool == D3DPOOL_MANAGED || Pool == static_cast<D3DPOOL>(6);
+}
+
+DWORD
+D9Device::ChangePriority(
+    _In_opt_ D9Resource* Resource,
+    _In_ D3DPOOL Pool,
+    _Inout_ DWORD* Stored,
+    _In_ DWORD Priority)
+{
+    DWORD Previous = *Stored;
+
+    if (D9IsManagedPool(Pool))
+    {
+        *Stored = Priority;
+        return Previous;
+    }
+    if (!IsEx || Pool != D3DPOOL_DEFAULT)
+        return 0;
+
+    *Stored = Priority;
+    if (Resource != nullptr && Resource->DriverResource != NULL)
+        DriverSetPriority(Resource, Priority);
+    return Previous;
+}
+
+DWORD
+D9Device::ReadPriority(
+    _In_ D3DPOOL Pool,
+    _In_ DWORD Stored) const
+{
+    if (D9IsManagedPool(Pool) || (IsEx && Pool == D3DPOOL_DEFAULT))
+        return Stored;
+    return 0;
+}
+
 VOID
 D9Device::DriverSetPriority(
     _In_ D9Resource* Resource,

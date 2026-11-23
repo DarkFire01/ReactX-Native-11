@@ -27,6 +27,153 @@ D9Child::ReleaseChild(VOID)
     return static_cast<ULONG>(Count);
 }
 
+D9PrivateData::~D9PrivateData()
+{
+    while (First != nullptr)
+    {
+        Entry* Item = First;
+
+        First = Item->Next;
+        Empty(Item);
+        delete Item;
+    }
+}
+
+/* Lets go of what an entry holds; the entry keeps its GUID */
+VOID
+D9PrivateData::Empty(
+    _Inout_ Entry* Item)
+{
+    if ((Item->Flags & D3DSPD_IUNKNOWN) != 0)
+        static_cast<IUnknown*>(Item->Data)->Release();
+    else if (Item->Data != nullptr)
+        _aligned_free(Item->Data);
+    Item->Data = nullptr;
+    Item->Size = 0;
+    Item->Flags &= ~D3DSPD_IUNKNOWN;
+}
+
+D9PrivateData::Entry*
+D9PrivateData::Find(
+    _In_ REFGUID Guid) const
+{
+    for (Entry* Item = First; Item != nullptr; Item = Item->Next)
+    {
+        if (IsEqualGUID(Item->Guid, Guid))
+            return Item;
+    }
+    return nullptr;
+}
+
+/* An interface is held by reference and must be passed with the size of a pointer; anything else is copied */
+HRESULT
+D9PrivateData::Set(
+    _In_ REFGUID Guid,
+    _In_reads_bytes_opt_(Size) const VOID* Data,
+    _In_ DWORD Size,
+    _In_ DWORD Flags)
+{
+    Entry* Item;
+    BOOLEAN Added = FALSE;
+
+    if ((Flags & ~D3DSPD_IUNKNOWN) != 0)
+        return D3DERR_INVALIDCALL;
+    if ((Flags & D3DSPD_IUNKNOWN) != 0 && Size != sizeof(IUnknown*))
+        return D3DERR_INVALIDCALL;
+
+    Item = Find(Guid);
+    if (Item != nullptr)
+    {
+        Empty(Item);
+    }
+    else
+    {
+        Item = new (std::nothrow) Entry();
+        if (Item == nullptr)
+            return E_OUTOFMEMORY;
+        Item->Guid = Guid;
+        Added = TRUE;
+    }
+    Item->Size = Size;
+    Item->Flags = Flags;
+
+    if ((Flags & D3DSPD_IUNKNOWN) != 0)
+    {
+        Item->Data = const_cast<VOID*>(Data);
+        static_cast<IUnknown*>(Item->Data)->AddRef();
+    }
+    else
+    {
+        /* An empty block cannot be allocated, as the system finds */
+        Item->Data = Size != 0 ? _aligned_malloc(Size, 16) : nullptr;
+        if (Item->Data == nullptr)
+        {
+            if (Added)
+                delete Item;
+            return E_OUTOFMEMORY;
+        }
+        CopyMemory(Item->Data, Data, Size);
+    }
+
+    if (Added)
+    {
+        Item->Next = First;
+        First = Item;
+    }
+    return S_OK;
+}
+
+HRESULT
+D9PrivateData::Get(
+    _In_ REFGUID Guid,
+    _Out_writes_bytes_opt_(*Size) VOID* Data,
+    _Inout_ DWORD* Size) const
+{
+    const Entry* Item = Find(Guid);
+    DWORD Room;
+
+    if (Item == nullptr)
+        return D3DERR_NOTFOUND;
+    if (Size == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    Room = *Size;
+    *Size = Item->Size;
+    if (Data == nullptr)
+        return S_OK;
+    if (Room < Item->Size)
+        return D3DERR_MOREDATA;
+
+    if ((Item->Flags & D3DSPD_IUNKNOWN) != 0)
+    {
+        *static_cast<IUnknown**>(Data) = static_cast<IUnknown*>(Item->Data);
+        static_cast<IUnknown*>(Item->Data)->AddRef();
+    }
+    else if (Item->Size != 0)
+    {
+        CopyMemory(Data, Item->Data, Item->Size);
+    }
+    return S_OK;
+}
+
+HRESULT
+D9PrivateData::Free(
+    _In_ REFGUID Guid)
+{
+    for (Entry** Link = &First; *Link != nullptr; Link = &(*Link)->Next)
+    {
+        Entry* Item = *Link;
+
+        if (!IsEqualGUID(Item->Guid, Guid))
+            continue;
+        *Link = Item->Next;
+        Empty(Item);
+        delete Item;
+        return S_OK;
+    }
+    return D3DERR_NOTFOUND;
+}
+
 /* Bytes between rows of a surface kept in runtime memory, rounded up to whole DWORDs */
 UINT64
 D9MemoryPitch(
@@ -338,8 +485,9 @@ D9Surface::SetPrivateData(
     _In_ DWORD Size,
     _In_ DWORD Flags)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Set(Guid, Data, Size, Flags);
 }
 
 STDMETHODIMP
@@ -348,16 +496,18 @@ D9Surface::GetPrivateData(
     _Out_writes_bytes_opt_(*Size) VOID* Data,
     _Inout_ DWORD* Size)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTFOUND;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Get(Guid, Data, Size);
 }
 
 STDMETHODIMP
 D9Surface::FreePrivateData(
     _In_ REFGUID Guid)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTFOUND;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
+
+    return Private.Free(Guid);
 }
 
 /* Texture levels take no priority of their own */
@@ -365,18 +515,19 @@ STDMETHODIMP_(DWORD)
 D9Surface::SetPriority(
     _In_ DWORD Priority)
 {
-    DWORD Previous = ResourcePriority;
+    D9DeviceLock Scope(Device->LockSection(), Device->IsMultithreaded());
 
     if (Texture != nullptr)
         return 0;
-    ResourcePriority = Priority;
-    return Previous;
+    return Device->ChangePriority(Resource, Desc.Pool, &ResourcePriority, Priority);
 }
 
 STDMETHODIMP_(DWORD)
 D9Surface::GetPriority()
 {
-    return ResourcePriority;
+    if (Texture != nullptr)
+        return 0;
+    return Device->ReadPriority(Desc.Pool, ResourcePriority);
 }
 
 STDMETHODIMP_(VOID)

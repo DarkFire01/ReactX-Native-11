@@ -178,6 +178,56 @@ private:
     HANDLE Bound[D9MaxRenderTargets + 1] = {};
 };
 
+/* Data the application attaches to a resource under a GUID, copied or as an interface it holds */
+class D9PrivateData
+{
+public:
+    D9PrivateData() = default;
+
+    ~D9PrivateData();
+
+    D9PrivateData(const D9PrivateData&) = delete;
+    D9PrivateData& operator=(const D9PrivateData&) = delete;
+
+    HRESULT
+    Set(
+        _In_ REFGUID Guid,
+        _In_reads_bytes_opt_(Size) const VOID* Data,
+        _In_ DWORD Size,
+        _In_ DWORD Flags);
+
+    HRESULT
+    Get(
+        _In_ REFGUID Guid,
+        _Out_writes_bytes_opt_(*Size) VOID* Data,
+        _Inout_ DWORD* Size) const;
+
+    HRESULT
+    Free(
+        _In_ REFGUID Guid);
+
+private:
+    struct Entry
+    {
+        GUID Guid;
+        Entry* Next;
+        DWORD Size;
+        DWORD Flags;
+        VOID* Data;
+    };
+
+    static
+    VOID
+    Empty(
+        _Inout_ Entry* Item);
+
+    Entry*
+    Find(
+        _In_ REFGUID Guid) const;
+
+    Entry* First = nullptr;
+};
+
 /* Objects a device owns hold the device while the application holds them */
 class D9Child
 {
@@ -346,6 +396,7 @@ private:
     UINT Subresource = 0;
 
     BOOLEAN CountedDefault = FALSE;
+    D9PrivateData Private;
 };
 
 /* A level of a volume texture */
@@ -405,6 +456,7 @@ private:
     D9TextureCore* Texture;
     UINT Subresource;
     D3DVOLUME_DESC Desc;
+    D9PrivateData Private;
 };
 
 /* The shapes of texture Direct3D 9 knows */
@@ -609,6 +661,8 @@ protected:
     /* Stages the texture is bound to, and whether the application released it while bound */
     LONG BindCount = 0;
     BOOLEAN Orphaned = FALSE;
+
+    D9PrivateData Private;
 
 private:
     HRESULT
@@ -823,6 +877,8 @@ private:
 
     /* Set while the buffer is locked through the driver's asynchronous lock */
     BOOLEAN LockedAsync = FALSE;
+
+    D9PrivateData Private;
 };
 
 typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
@@ -1052,6 +1108,19 @@ public:
     {
         return (BehaviorFlags & D3DCREATE_MULTITHREADED) != 0;
     }
+
+    /* Priority is kept for managed resources, and handed to the driver for default pool ones on extended devices */
+    DWORD
+    ChangePriority(
+        _In_opt_ D9Resource* Resource,
+        _In_ D3DPOOL Pool,
+        _Inout_ DWORD* Stored,
+        _In_ DWORD Priority);
+
+    DWORD
+    ReadPriority(
+        _In_ D3DPOOL Pool,
+        _In_ DWORD Stored) const;
 
     /* Counts the default pool resources the application made */
     VOID
