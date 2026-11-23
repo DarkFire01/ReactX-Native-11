@@ -287,10 +287,12 @@ D9Batch::Start(VOID)
             return hr;
     }
 
-    /* The main thread records into the second buffer first, locked before the idle one */
-    LockFills(&Buffers[1]);
-    LockFills(&Buffers[0]);
+    /* The buffer the main thread records into is locked before the idle one; a batch started again after a
+       reset keeps recording into the buffer it stopped on */
+    LockFills(&Buffers[Current]);
+    LockFills(&Buffers[Current ^ 1]);
 
+    Exiting = FALSE;
     Wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     Done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (Wake == NULL || Done == NULL)
@@ -304,11 +306,18 @@ D9Batch::Start(VOID)
     return S_OK;
 }
 
-/* The fills go first; what is still recorded then runs on the calling thread */
+/* The fills go first and what is still recorded then runs on the calling thread; a recorded draw that reads
+   a fill runs before the fills go */
 VOID
 D9Batch::Stop(VOID)
 {
+    BOOLEAN ReadsFills = FALSE;
+
     WaitForWorker();
+    for (const D9BatchFill& Fill : Buffers[Current].Fills)
+        ReadsFills |= Fill.Used != 0;
+    if (ReadsFills)
+        Drain();
     for (D9BatchBuffer& Buffer : Buffers)
         DestroyFills(&Buffer);
     if (Buffers[Current].Data != nullptr)

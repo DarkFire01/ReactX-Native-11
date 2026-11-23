@@ -316,10 +316,18 @@ D9CheckElements(
     return !(HasTransformed && OtherStream);
 }
 
+D9Declaration::D9Declaration(
+    _In_ D9Device* Owner)
+    : D9Child(Owner)
+{
+    Owner->TrackDeclaration(this);
+}
+
 D9Declaration::~D9Declaration()
 {
     if (DriverHandle != NULL)
         Device->DestroyDriverDeclaration(DriverHandle);
+    Device->UntrackDeclaration(this);
 }
 
 HRESULT
@@ -442,6 +450,43 @@ D9Device::DestroyDriverDeclaration(
 {
     DrainBatch();
     DeviceFunctions.pfnDeleteVertexShaderDecl(DriverDevice, Handle);
+}
+
+VOID
+D9Device::TrackDeclaration(
+    _Inout_ D9Declaration* Made)
+{
+    Made->NextLive = LiveDeclarations;
+    LiveDeclarations = Made;
+}
+
+VOID
+D9Device::UntrackDeclaration(
+    _In_ D9Declaration* Gone)
+{
+    D9Declaration** Link = &LiveDeclarations;
+
+    while (*Link != nullptr && *Link != Gone)
+        Link = &(*Link)->NextLive;
+    if (*Link != nullptr)
+        *Link = Gone->NextLive;
+}
+
+/* A reset of the plain object's device drops the driver's copy of every declaration, newest first; the next
+   draw that binds one makes it again */
+VOID
+D9Device::ForgetDriverDeclarations(VOID)
+{
+    for (D9Declaration* Live = LiveDeclarations; Live != nullptr; Live = Live->NextLive)
+    {
+        HANDLE Handle = Live->DriverHandle;
+
+        if (Handle == NULL)
+            continue;
+        Live->DriverHandle = NULL;
+        DestroyDriverDeclaration(Handle);
+    }
+    DrawDirty |= D9DrawVertexInput;
 }
 
 STDMETHODIMP

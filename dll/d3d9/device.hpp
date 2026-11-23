@@ -1600,10 +1600,7 @@ class D9Declaration final : public IDirect3DVertexDeclaration9, public D9Child
 public:
     explicit
     D9Declaration(
-        _In_ D9Device* Owner)
-        : D9Child(Owner)
-    {
-    }
+        _In_ D9Device* Owner);
 
     ~D9Declaration();
 
@@ -1654,6 +1651,9 @@ public:
     /* Declarations the device made for formats are kept in a list and live until the device goes */
     D9Declaration* NextKept = nullptr;
     BOOLEAN Orphaned = FALSE;
+
+    /* Every declaration of the device, newest first */
+    D9Declaration* NextLive = nullptr;
 
 private:
     LONG BindCount = 0;
@@ -1994,6 +1994,14 @@ public:
     VOID
     DestroyDriverDeclaration(
         _In_ HANDLE Handle);
+
+    VOID
+    TrackDeclaration(
+        _Inout_ D9Declaration* Made);
+
+    VOID
+    UntrackDeclaration(
+        _In_ D9Declaration* Gone);
 
     /* State blocks replay and gather through the device's own calls */
     HRESULT
@@ -3141,6 +3149,9 @@ private:
     StopBatch(VOID);
 
     VOID
+    PauseBatch(VOID);
+
+    VOID
     DdiRenderState(
         _In_ const D3DDDIARG_RENDERSTATE* Args);
 
@@ -3204,6 +3215,9 @@ private:
 
     VOID
     ReleaseFvfDeclarations(VOID);
+
+    VOID
+    ForgetDriverDeclarations(VOID);
 
     VOID
     SendVertexConstants(
@@ -3628,6 +3642,9 @@ private:
     /* Records driver calls for a worker thread when the driver leaves threading to the runtime */
     D9Batch* Batch = nullptr;
 
+    /* A batch a reset stopped, started again with the buffer it stopped on */
+    D9Batch* PausedBatch = nullptr;
+
     /* The driver's contexts in creation order; the kernel is told about them newest first */
     D3DKMT_HANDLE KernelContexts[D9MaxKernelContexts] = {};
     UINT KernelContextCount = 0;
@@ -3666,6 +3683,7 @@ private:
     /* The bound declaration, and those made for formats */
     D9Declaration* Declaration = nullptr;
     D9Declaration* FvfDeclarations = nullptr;
+    D9Declaration* LiveDeclarations = nullptr;
 
     /* What changed since the last draw, the samplers and streams among it, and whether a draw got through the
        checks the first one makes */

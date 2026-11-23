@@ -1922,7 +1922,10 @@ D9Device::StartBatch(VOID)
     if (Batch != nullptr || !WantsBatch())
         return;
 
-    Batch = new (std::nothrow) D9Batch(this, &DeviceFunctions, DriverDevice);
+    Batch = PausedBatch;
+    PausedBatch = nullptr;
+    if (Batch == nullptr)
+        Batch = new (std::nothrow) D9Batch(this, &DeviceFunctions, DriverDevice);
     if (Batch == nullptr)
         return;
     hr = Batch->Start();
@@ -1943,6 +1946,20 @@ D9Device::StopBatch(VOID)
     Batch = nullptr;
     Stopping->Stop();
     delete Stopping;
+}
+
+/* Stops the batch but keeps it, with the buffer it records into, for the next start */
+VOID
+D9Device::PauseBatch(VOID)
+{
+    D9Batch* Stopping = Batch;
+
+    if (Stopping == nullptr)
+        return;
+    Batch = nullptr;
+    Stopping->Stop();
+    delete PausedBatch;
+    PausedBatch = Stopping;
 }
 
 VOID

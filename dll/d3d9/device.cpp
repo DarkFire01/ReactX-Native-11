@@ -225,6 +225,7 @@ D9Device::~D9Device()
     delete[] PixelInts;
     delete[] PixelBools;
     StopBatch();
+    delete PausedBatch;
     delete AutoDepthStencil;
     delete ImplicitChain;
     if (DriverDevice != NULL)
@@ -1174,13 +1175,16 @@ D9Device::ResetCommon(
         return D3DERR_INVALIDCALL;
     }
 
-    /* The plain object's device starts over with its batch and drops the video copies of its managed resources;
-       the depth buffer goes before the back buffers, then the device gives up any display it owned */
+    /* The plain object's device drops the video copies of its managed resources, runs its batch, drops the
+       driver's declarations and stops the batch; the depth buffer goes before the back buffers, then the device
+       gives up any display it owned */
     if (!IsEx)
     {
-        StopBatch();
         for (D9ManagedResource* Resource = ManagedResources; Resource != nullptr; Resource = Resource->NextManaged)
             Resource->Evict();
+        DrainBatch();
+        ForgetDriverDeclarations();
+        PauseBatch();
     }
     UnpinTargets();
     for (D9Surface*& Bound : RenderTargets)
