@@ -16,6 +16,7 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <dsound.h>
+#include <dsconf.h>
 
 /* I3DL2 reverb is marked deprecated by the header that declares it */
 #pragma warning(disable: 4995)
@@ -1808,6 +1809,130 @@ DcCheckEffects(VOID)
     printf("release %lu\n", Sound->Release());
 }
 
+/* EAX, voice manager and ZoomFX sets, which games probe buffers for */
+static const GUID DcEaxListenerSet = { 0x4A4E6FC1, 0xC341, 0x11D1, { 0xB7, 0x3A, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID DcEaxBufferSet = { 0x4A4E6FC0, 0xC341, 0x11D1, { 0xB7, 0x3A, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID DcEax2ListenerSet = { 0x0306A6A8, 0xB224, 0x11D2, { 0x99, 0xE5, 0x00, 0x00, 0xE8, 0xD8, 0xC7, 0x22 } };
+static const GUID DcEax2BufferSet = { 0x0306A6A7, 0xB224, 0x11D2, { 0x99, 0xE5, 0x00, 0x00, 0xE8, 0xD8, 0xC7, 0x22 } };
+static const GUID DcVoiceManagerSet = { 0x62A69BAE, 0xDF9D, 0x11D1, { 0x99, 0xA6, 0x00, 0xC0, 0x4F, 0xC9, 0x9D, 0x46 } };
+static const GUID DcZoomFxSet = { 0xCD5368E0, 0x3450, 0x11D3, { 0x8B, 0x6E, 0x00, 0x10, 0xA4, 0xF1, 0xF1, 0x2B } };
+
+/* Asks one property set interface about each set and id, reading only, then tries writes where none are supported */
+static
+VOID
+DcProbeProperties(
+    _In_z_ PCSTR Name,
+    _In_ IKsPropertySet* Properties,
+    _In_ BOOLEAN Writes)
+{
+    static const struct
+    {
+        const GUID* Set;
+        PCSTR Name;
+    } Sets[] =
+    {
+        { &DSPROPSETID_DirectSoundDevice, "device" },
+        { &DcEaxListenerSet, "eax" },
+        { &DcEaxBufferSet, "eaxbuffer" },
+        { &DcEax2ListenerSet, "eax2" },
+        { &DcEax2BufferSet, "eax2buffer" },
+        { &DcVoiceManagerSet, "voicemanager" },
+        { &DcZoomFxSet, "zoomfx" },
+        { &KSPROPSETID_Audio, "ksaudio" },
+        { &GUID_NULL, "null" },
+    };
+    BYTE Data[64];
+    ULONG Support;
+    ULONG Returned;
+    HRESULT hr;
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Sets); Index++)
+    {
+        for (ULONG Id = 0; Id < 4; Id++)
+        {
+            Support = 0xCCCC;
+            hr = Properties->QuerySupport(*Sets[Index].Set, Id, &Support);
+            printf("%s %s[%lu] querysupport = %08lX %lX", Name, Sets[Index].Name, Id, hr, Support);
+            ZeroMemory(Data, sizeof(Data));
+            Returned = 0xCCCC;
+            hr = Properties->Get(*Sets[Index].Set, Id, nullptr, 0, Data, sizeof(Data), &Returned);
+            printf(" get = %08lX %lu", hr, Returned);
+            Returned = 0xCCCC;
+            hr = Properties->Get(*Sets[Index].Set, Id, nullptr, 0, Data, 0, &Returned);
+            printf(" get_empty = %08lX %lu\n", hr, Returned);
+            if (Writes)
+            {
+                ZeroMemory(Data, sizeof(Data));
+                printf("%s %s[%lu] set = %08lX set_null = %08lX\n", Name, Sets[Index].Name, Id,
+                       Properties->Set(*Sets[Index].Set, Id, nullptr, 0, Data, sizeof(Data)),
+                       Properties->Set(*Sets[Index].Set, Id, nullptr, 0, nullptr, 0));
+            }
+        }
+    }
+
+    Support = 0xCCCC;
+    hr = Properties->QuerySupport(*static_cast<const GUID*>(nullptr), 0, &Support);
+    printf("%s querysupport_nullset = %08lX %lX\n", Name, hr, Support);
+    printf("%s querysupport_nullsupport = %08lX\n", Name, Properties->QuerySupport(DSPROPSETID_DirectSoundDevice, 1, nullptr));
+    Returned = 0xCCCC;
+    hr = Properties->Get(*static_cast<const GUID*>(nullptr), 0, nullptr, 0, Data, sizeof(Data), &Returned);
+    printf("%s get_nullset = %08lX %lu\n", Name, hr, Returned);
+    Returned = 0xCCCC;
+    hr = Properties->Get(DSPROPSETID_DirectSoundDevice, 1, nullptr, 0, nullptr, sizeof(Data), &Returned);
+    printf("%s get_nulldata = %08lX %lu\n", Name, hr, Returned);
+    hr = Properties->Get(DcEaxBufferSet, 0, Data, sizeof(Data), Data, sizeof(Data), nullptr);
+    printf("%s get_noreturned = %08lX\n", Name, hr);
+    if (Writes)
+        printf("%s set_nullset = %08lX\n", Name, Properties->Set(*static_cast<const GUID*>(nullptr), 0, nullptr, 0, Data, sizeof(Data)));
+}
+
+/* IKsPropertySet on primary, secondary and 3D buffers */
+static
+VOID
+DcCheckProperties(VOID)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Flags;
+        WORD Channels;
+    } Buffers[] =
+    {
+        { "primary", DSBCAPS_PRIMARYBUFFER, 0 },
+        { "secondary", DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN, 2 },
+        { "buffer3d", DSBCAPS_CTRL3D, 1 },
+    };
+    IDirectSound8* Sound;
+
+    if (FAILED(DcCreate8(&Sound)))
+        return;
+    Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Buffers); Index++)
+    {
+        IDirectSoundBuffer* Buffer = nullptr;
+        IKsPropertySet* Properties = nullptr;
+        WAVEFORMATEX Format;
+        HRESULT hr;
+
+        DcFormat(&Format, WAVE_FORMAT_PCM, Buffers[Index].Channels, 44100, 16);
+        hr = DcMakeBuffer(Sound, Buffers[Index].Flags, Buffers[Index].Channels != 0 ? 8820 : 0,
+                          Buffers[Index].Channels != 0 ? &Format : nullptr, &Buffer);
+        printf("properties %s create = %08lX\n", Buffers[Index].Name, hr);
+        if (FAILED(hr))
+            continue;
+        hr = Buffer->QueryInterface(IID_IKsPropertySet, reinterpret_cast<void**>(&Properties));
+        printf("properties %s qi = %08lX\n", Buffers[Index].Name, hr);
+        if (SUCCEEDED(hr))
+        {
+            DcProbeProperties(Buffers[Index].Name, Properties, TRUE);
+            Properties->Release();
+        }
+        Buffer->Release();
+    }
+    printf("release %lu\n", Sound->Release());
+}
+
 /* Records what the default endpoint plays, which carries the mixer output */
 class DcLoopback
 {
@@ -2588,6 +2713,8 @@ wmain(
         DcCheckFullDuplex();
     if (DcWant(L"effects"))
         DcCheckEffects();
+    if (DcWant(L"properties"))
+        DcCheckProperties();
 
     /* Audible, so only on request */
     if (DcSection != nullptr && _wcsicmp(DcSection, L"mix") == 0)
