@@ -780,6 +780,9 @@ DdBlt(
     if (DdSurfaceBusy(Target) || (Source != nullptr && DdSurfaceBusy(Source)))
         return DDERR_SURFACEBUSY;
 
+    /* A clipper with neither a window nor a list has nothing to clip against */
+    if (Target->Clipper != nullptr && Target->Clipper->Window == NULL && Target->Clipper->ClipList == nullptr)
+        return DDERR_NOCLIPLIST;
     if (DdSurfaceUnbacked(Target) || (Source != nullptr && DdSurfaceUnbacked(Source)))
         return E_FAIL;
     DdTouchSurface(Target);
