@@ -3516,6 +3516,137 @@ DcCheckPrimaryPitch(
     DcSettleDisplay();
 }
 
+static
+HRESULT
+WINAPI
+DcEnumCreated(
+    _In_opt_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ LPDDSURFACEDESC2 Desc,
+    _In_ LPVOID Context)
+{
+    ULONG* Count = static_cast<ULONG*>(Context);
+
+    if (*Count < 6)
+    {
+        printf("    surface=%s size=%lu flags=%08lX %lux%lu pitch=%ld pf=%08lX/%lu/%08lX caps=%08lX\n",
+               Surface != nullptr ? "set" : "null", Desc->dwSize, Desc->dwFlags, Desc->dwWidth, Desc->dwHeight,
+               Desc->lPitch, Desc->ddpfPixelFormat.dwFlags, Desc->ddpfPixelFormat.dwRGBBitCount,
+               Desc->ddpfPixelFormat.dwRBitMask, Desc->ddsCaps.dwCaps);
+    }
+    *Count += 1;
+
+    /* The answer does not stop the walk */
+    return DDENUMRET_CANCEL;
+}
+
+static
+VOID
+DcCreatableCase(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAW7 Draw7,
+    _Inout_ LPDDSURFACEDESC2 Desc)
+{
+    ULONG Count = 0;
+    HRESULT hr;
+
+    printf("%s:\n", Name);
+    hr = Draw7->EnumSurfaces(DDENUMSURFACES_MATCH | DDENUMSURFACES_CANBECREATED, Desc, &Count,
+                             reinterpret_cast<LPDDENUMSURFACESCALLBACK7>(DcEnumCreated));
+    printf("  = %08lX count=%lu\n", hr, Count);
+    printf("  desc_after flags=%08lX %lux%lu pf=%08lX/%lu/%08lX/%08lX\n", Desc->dwFlags, Desc->dwWidth, Desc->dwHeight,
+           Desc->ddpfPixelFormat.dwFlags, Desc->ddpfPixelFormat.dwRGBBitCount, Desc->ddpfPixelFormat.dwRBitMask,
+           Desc->ddpfPixelFormat.dwFourCC);
+}
+
+/* EnumSurfaces with CANBECREATED tries the description at display sizes and depths and reports what could be made */
+static
+VOID
+DcCheckEnumCreatable(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Sys = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+    LPDIRECTDRAW7 Draw7;
+    LPDIRECTDRAW Draw = nullptr;
+    DDSURFACEDESC2 Desc;
+    DDSURFACEDESC OldDesc;
+    ULONG Count;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    Desc.ddsCaps.dwCaps = Sys;
+    Desc.dwWidth = 16;
+    Desc.dwHeight = 8;
+    DcCreatableCase("no_coop", Draw7, &Desc);
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    DcCreatableCase("sized", Draw7, &Desc);
+
+    Desc.dwFlags |= DDSD_PIXELFORMAT;
+    Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+    Desc.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    DcCreatableCase("sized_rgb", Draw7, &Desc);
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    Desc.ddsCaps.dwCaps = Sys;
+    Desc.dwWidth = 16;
+    Desc.dwHeight = 8;
+    Desc.ddpfPixelFormat.dwSize = sizeof(Desc.ddpfPixelFormat);
+    Desc.ddpfPixelFormat.dwFlags = DDPF_YUV;
+    DcCreatableCase("sized_yuv", Draw7, &Desc);
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = Sys;
+    DcCreatableCase("every_size", Draw7, &Desc);
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+    Desc.dwWidth = 32;
+    DcCreatableCase("every_size_video", Draw7, &Desc);
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    DcCreatableCase("primary", Draw7, &Desc);
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+    Desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY;
+    Desc.dwWidth = 70000;
+    Desc.dwHeight = 2;
+    DcCreatableCase("too_wide", Draw7, &Desc);
+
+    if (SUCCEEDED(Draw7->QueryInterface(IID_IDirectDraw, reinterpret_cast<VOID**>(&Draw))))
+    {
+        memset(&OldDesc, 0, sizeof(OldDesc));
+        OldDesc.dwSize = sizeof(OldDesc);
+        OldDesc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        OldDesc.ddsCaps.dwCaps = Sys;
+        OldDesc.dwWidth = 16;
+        OldDesc.dwHeight = 8;
+        Count = 0;
+        hr = Draw->EnumSurfaces(DDENUMSURFACES_MATCH | DDENUMSURFACES_CANBECREATED, &OldDesc, &Count,
+                                reinterpret_cast<LPDDENUMSURFACESCALLBACK>(DcEnumCreated));
+        printf("old_sized = %08lX count=%lu desc_after flags=%08lX %lux%lu\n", hr, Count, OldDesc.dwFlags,
+               OldDesc.dwWidth, OldDesc.dwHeight);
+        Draw->Release();
+    }
+
+    Draw7->Release();
+}
+
 /* DEPTHFILL and the other fills of Z buffers, read back where the buffer can be locked */
 static
 VOID
@@ -3878,6 +4009,7 @@ static const DrawCheckInfo DcChecks[] =
     { "depth_fill", DcCheckDepthFill },
     { "enum_surfaces", DcCheckEnumSurfaces },
     { "primary_pitch", DcCheckPrimaryPitch },
+    { "enum_creatable", DcCheckEnumCreatable },
     { "color_keys", DcCheckColorKeys },
 };
 
