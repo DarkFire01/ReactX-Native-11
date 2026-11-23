@@ -77,6 +77,8 @@ enum class D9BatchCall : UINT
     Clear,
     Present1,
     Rename,
+    Blt,
+    ColorFill,
 };
 
 /* Slots of the table that remembers which batch last used a driver resource */
@@ -1109,6 +1111,15 @@ public:
     DriverSetPriority(
         _In_ D9Resource* Resource,
         _In_ DWORD Priority);
+
+    /* Surface copies and fills, which a batch records */
+    HRESULT
+    DriverBlt(
+        _In_ const D3DDDIARG_BLT* Args);
+
+    HRESULT
+    DriverColorFill(
+        _In_ const D3DDDIARG_COLORFILL* Args);
 
     const D3DCAPS9&
     DeviceCaps() const

@@ -389,6 +389,12 @@ D9Batch::Run(
         case D9BatchCall::Rename:
             Funcs->pfnRename(Driver, reinterpret_cast<D3DDDIARG_RENAME*>(Args));
             break;
+        case D9BatchCall::Blt:
+            Funcs->pfnBlt(Driver, reinterpret_cast<D3DDDIARG_BLT*>(Args));
+            break;
+        case D9BatchCall::ColorFill:
+            Funcs->pfnColorFill(Driver, reinterpret_cast<D3DDDIARG_COLORFILL*>(Args));
+            break;
         }
         Offset += Header->Size;
     }

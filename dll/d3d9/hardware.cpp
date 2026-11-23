@@ -1491,6 +1491,48 @@ D9Device::DdiClear(
     return S_OK;
 }
 
+/* A batch records the copy and remembers both resources; a driver failure fails the call */
+HRESULT
+D9Device::DriverBlt(
+    _In_ const D3DDDIARG_BLT* Args)
+{
+    HRESULT hr;
+
+    if (D9RecordCall(Batch, D9BatchCall::Blt, Args, sizeof(*Args)))
+    {
+        Batch->Reference(Args->hSrcResource);
+        Batch->Reference(Args->hDstResource);
+        return S_OK;
+    }
+    hr = DeviceFunctions.pfnBlt(DriverDevice, Args);
+    if (FAILED(hr))
+    {
+        D9Trace(L"UMD Blt failed 0x%08lX", hr);
+        return E_FAIL;
+    }
+    return S_OK;
+}
+
+HRESULT
+D9Device::DriverColorFill(
+    _In_ const D3DDDIARG_COLORFILL* Args)
+{
+    HRESULT hr;
+
+    if (D9RecordCall(Batch, D9BatchCall::ColorFill, Args, sizeof(*Args)))
+    {
+        Batch->Reference(Args->hResource);
+        return S_OK;
+    }
+    hr = DeviceFunctions.pfnColorFill(DriverDevice, Args);
+    if (FAILED(hr))
+    {
+        D9Trace(L"UMD ColorFill failed 0x%08lX", hr);
+        return E_FAIL;
+    }
+    return S_OK;
+}
+
 /* Hands a single source present to the worker; FALSE leaves it to the caller */
 BOOLEAN
 D9Device::DdiPresent1(
