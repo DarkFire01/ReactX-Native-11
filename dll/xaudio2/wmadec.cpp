@@ -771,6 +771,13 @@ XaWmaPacketBytes(
     return Decoder->Layout.PacketBytes;
 }
 
+BOOLEAN
+XaWmaDrainsPerBuffer(
+    _In_ const XaWmaDecoder* Decoder)
+{
+    return Decoder->Layout.Version != XA_WMA_PRO;
+}
+
 UINT32
 XaWmaMaxFrames(
     _In_ const XaWmaDecoder* Decoder)

@@ -221,7 +221,7 @@ XaWmaLoadHead(
     Buffer->BeginBytes = 0;
     Wma->Looping = Buffer->LoopCount != 0;
     XaWmaPushRegion(Wma, Skip, Wma->Looping ? XA_WMA_UNBOUNDED : Buffer->LengthBytes);
-    Wma->InputLast = Wma->Looping || Buffer->Flags == XAUDIO2_END_OF_STREAM;
+    Wma->InputLast = Wma->Looping || Buffer->Flags == XAUDIO2_END_OF_STREAM || XaWmaDrainsPerBuffer(Wma->Decoder);
     if (!Wma->Started)
     {
         if (Voice->Callback != nullptr)
@@ -291,8 +291,8 @@ XaWmaTrim(
         return Bytes;
     }
 
-    /* The region ran out; the next buffer's region may still take the rest */
-    if (Length < Bytes)
+    /* The region ran out; in a stream that runs on across buffers the next buffer's region may still take the rest */
+    if (Length < Bytes && !XaWmaDrainsPerBuffer(Wma->Decoder))
     {
         while (Wma->RegionCount != 0)
         {
