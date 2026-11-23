@@ -5512,6 +5512,228 @@ NcCheckDraws(
     Plain->Release();
 }
 
+/* Transformed corners of an 8 by 4 target with diffuse, specular and two coordinate sets */
+struct NcFixedVertex
+{
+    FLOAT X;
+    FLOAT Y;
+    FLOAT Z;
+    FLOAT Rhw;
+    DWORD Diffuse;
+    DWORD Specular;
+    FLOAT U0;
+    FLOAT V0;
+    FLOAT U1;
+    FLOAT V1;
+};
+
+static const NcFixedVertex NcFixedQuad[] =
+{
+    { 0.0f, 0.0f, 0.5f, 1.0f, 0xC0FF2040, 0x40102030, 0.0f, 0.0f, 0.0f, 0.0f },
+    { 8.0f, 0.0f, 0.5f, 1.0f, 0x8040FF20, 0x20302010, 1.0f, 0.0f, 0.0f, 1.0f },
+    { 0.0f, 4.0f, 0.5f, 1.0f, 0x402040FF, 0x60203040, 0.0f, 1.0f, 1.0f, 0.0f },
+    { 8.0f, 4.0f, 0.5f, 1.0f, 0xFFFFFFFF, 0x10101010, 1.0f, 1.0f, 1.0f, 1.0f },
+};
+
+/* Stage states of one fixed function case: stage, type, value; stage 0xFF sets a render state */
+struct NcFixedState
+{
+    DWORD Stage;
+    DWORD Type;
+    DWORD Value;
+};
+
+struct NcFixedCase
+{
+    PCSTR Name;
+    NcFixedState States[6];
+};
+
+static const NcFixedCase NcFixedCases[] =
+{
+    { "default", {} },
+    { "select_diffuse", { { 0, D3DTSS_COLOROP, D3DTOP_SELECTARG2 }, { 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2 } } },
+    { "modulate2x", { { 0, D3DTSS_COLOROP, D3DTOP_MODULATE2X }, { 0, D3DTSS_ALPHAOP, D3DTOP_MODULATE } } },
+    { "modulate4x", { { 0, D3DTSS_COLOROP, D3DTOP_MODULATE4X } } },
+    { "add", { { 0, D3DTSS_COLOROP, D3DTOP_ADD }, { 0, D3DTSS_ALPHAOP, D3DTOP_ADD } } },
+    { "addsigned", { { 0, D3DTSS_COLOROP, D3DTOP_ADDSIGNED } } },
+    { "addsigned2x", { { 0, D3DTSS_COLOROP, D3DTOP_ADDSIGNED2X } } },
+    { "subtract", { { 0, D3DTSS_COLOROP, D3DTOP_SUBTRACT } } },
+    { "addsmooth", { { 0, D3DTSS_COLOROP, D3DTOP_ADDSMOOTH } } },
+    { "blend_diffuse", { { 0, D3DTSS_COLOROP, D3DTOP_BLENDDIFFUSEALPHA } } },
+    { "blend_texture", { { 0, D3DTSS_COLOROP, D3DTOP_BLENDTEXTUREALPHA } } },
+    { "blend_factor", { { 0, D3DTSS_COLOROP, D3DTOP_BLENDFACTORALPHA }, { 0xFF, D3DRS_TEXTUREFACTOR, 0x40FF8000 } } },
+    { "blend_texture_pm", { { 0, D3DTSS_COLOROP, D3DTOP_BLENDTEXTUREALPHAPM } } },
+    { "modulate_alpha_add", { { 0, D3DTSS_COLOROP, D3DTOP_MODULATEALPHA_ADDCOLOR } } },
+    { "modulate_color_add", { { 0, D3DTSS_COLOROP, D3DTOP_MODULATECOLOR_ADDALPHA } } },
+    { "dot3", { { 0, D3DTSS_COLOROP, D3DTOP_DOTPRODUCT3 } } },
+    { "multiplyadd", { { 0, D3DTSS_COLOROP, D3DTOP_MULTIPLYADD }, { 0, D3DTSS_COLORARG0, D3DTA_SPECULAR } } },
+    { "lerp", { { 0, D3DTSS_COLOROP, D3DTOP_LERP }, { 0, D3DTSS_COLORARG0, D3DTA_SPECULAR } } },
+    { "complement", { { 0, D3DTSS_COLORARG1, D3DTA_TEXTURE | D3DTA_COMPLEMENT },
+                      { 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE | D3DTA_COMPLEMENT } } },
+    { "replicate", { { 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE | D3DTA_ALPHAREPLICATE } } },
+    { "constant", { { 0, D3DTSS_COLORARG2, D3DTA_CONSTANT }, { 0, D3DTSS_CONSTANT, 0xFF2080FF } } },
+    { "specular", { { 0xFF, D3DRS_SPECULARENABLE, TRUE } } },
+    { "two_stages", { { 1, D3DTSS_COLOROP, D3DTOP_ADD }, { 1, D3DTSS_TEXCOORDINDEX, 1 },
+                      { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2 } } },
+    { "temp", { { 0, D3DTSS_RESULTARG, D3DTA_TEMP }, { 1, D3DTSS_COLOROP, D3DTOP_SUBTRACT },
+                { 1, D3DTSS_COLORARG1, D3DTA_DIFFUSE }, { 1, D3DTSS_COLORARG2, D3DTA_TEMP },
+                { 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 } } },
+    { "disabled", { { 0, D3DTSS_COLOROP, D3DTOP_DISABLE } } },
+};
+
+/* The states every case starts from */
+static const NcFixedState NcFixedBaseline[] =
+{
+    { 0, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 0, D3DTSS_COLORARG1, D3DTA_TEXTURE }, { 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE },
+    { 0, D3DTSS_COLORARG0, D3DTA_CURRENT }, { 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1 },
+    { 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE }, { 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE }, { 0, D3DTSS_RESULTARG, D3DTA_CURRENT },
+    { 1, D3DTSS_COLOROP, D3DTOP_DISABLE }, { 1, D3DTSS_COLORARG1, D3DTA_TEXTURE }, { 1, D3DTSS_COLORARG2, D3DTA_CURRENT },
+    { 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE }, { 1, D3DTSS_TEXCOORDINDEX, 1 }, { 0xFF, D3DRS_SPECULARENABLE, FALSE },
+    { 0xFF, D3DRS_TEXTUREFACTOR, 0x80406080 },
+};
+
+static
+VOID
+NcFixedSet(
+    _In_ IDirect3DDevice9* Device,
+    _In_reads_(Count) const NcFixedState* States,
+    _In_ UINT Count)
+{
+    for (UINT Index = 0; Index < Count && States[Index].Type != 0; Index++)
+    {
+        const NcFixedState& State = States[Index];
+
+        if (State.Stage == 0xFF)
+            Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(State.Type), State.Value);
+        else
+            Device->SetTextureStageState(State.Stage, static_cast<D3DTEXTURESTAGESTATETYPE>(State.Type), State.Value);
+    }
+}
+
+/* Transformed vertices through the fixed function texture stages, every pixel read back for each setup */
+static
+VOID
+NcCheckFixedPixelOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const DWORD Texels[2][4] =
+    {
+        { 0x80FF0000, 0xFF00FF00, 0x400000FF, 0xC0FFFFFF },
+        { 0xFF808080, 0x40204080, 0xC0FF8000, 0x00000000 },
+    };
+    IDirect3DTexture9* Textures[2] = {};
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    D3DLOCKED_RECT Locked = {};
+    char Name[64];
+
+    for (UINT Index = 0; Index < 2; Index++)
+    {
+        printf("%s_texture%u = %08lX\n", Prefix, Index,
+               Device->CreateTexture(2, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Textures[Index],
+                                     nullptr));
+        if (Textures[Index] != nullptr && SUCCEEDED(Textures[Index]->LockRect(0, &Locked, nullptr, 0)))
+        {
+            CopyMemory(Locked.pBits, Texels[Index], 8);
+            CopyMemory(static_cast<BYTE*>(Locked.pBits) + Locked.Pitch, Texels[Index] + 2, 8);
+            Textures[Index]->UnlockRect(0);
+        }
+    }
+    printf("%s_target = %08lX\n", Prefix, Device->CreateRenderTarget(8, 4, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0,
+                                                                     FALSE, &Target, nullptr));
+    printf("%s_original = %08lX\n", Prefix, Device->GetRenderTarget(0, &Original));
+    if (Textures[0] == nullptr || Textures[1] == nullptr || Target == nullptr || Original == nullptr)
+        goto Done;
+
+    Device->SetRenderTarget(0, Target);
+    Device->SetTexture(0, Textures[0]);
+    Device->SetTexture(1, Textures[1]);
+    Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+    printf("%s_fvf = %08lX\n", Prefix,
+           Device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX2));
+    for (const NcFixedCase& Case : NcFixedCases)
+    {
+        Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0);
+        NcFixedSet(Device, NcFixedBaseline, _countof(NcFixedBaseline));
+        NcFixedSet(Device, Case.States, _countof(Case.States));
+        Device->BeginScene();
+        printf("%s_%s_draw = %08lX\n", Prefix, Case.Name,
+               Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, NcFixedQuad, sizeof(*NcFixedQuad)));
+        Device->EndScene();
+        sprintf_s(Name, "fixed_%s", Case.Name);
+        NcPrintPixels(Prefix, Name, Device, Target, FALSE);
+    }
+
+Done:
+    if (Original != nullptr)
+    {
+        Device->SetRenderTarget(0, Original);
+        Original->Release();
+    }
+    Device->SetTexture(0, nullptr);
+    Device->SetTexture(1, nullptr);
+    for (IDirect3DTexture9* Texture : Textures)
+    {
+        if (Texture != nullptr)
+            Texture->Release();
+    }
+    if (Target != nullptr)
+        Target->Release();
+}
+
+static
+VOID
+NcCheckFixedPixel(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "ffpixel_ex", D3DCREATE_HARDWARE_VERTEXPROCESSING, FALSE },
+        { "ffpixel_hw", D3DCREATE_HARDWARE_VERTEXPROCESSING, TRUE },
+        { "ffpixel_pure", D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        Parameters.hDeviceWindow = Window;
+        Parameters.BackBufferWidth = 48;
+        Parameters.BackBufferHeight = 32;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, Case.Behavior, &Parameters, nullptr,
+                                           &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckFixedPixelOn(Case.Name, Device);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -5544,6 +5766,7 @@ static const NineCheckInfo NcChecks[] =
     { "blocks", NcCheckBlocks },
     { "shaders", NcCheckShaders },
     { "draws", NcCheckDraws },
+    { "ffpixel", NcCheckFixedPixel },
 };
 
 static
