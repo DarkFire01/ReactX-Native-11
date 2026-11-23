@@ -284,6 +284,11 @@ XaGatherFrames(
         }
         Count = XaMin(End - Buffer->Position, Needed - Gathered);
         XaReadFrames(Voice, Buffer, Buffer->Position, Count, Output + static_cast<SIZE_T>(Gathered) * Channels);
+        if (Voice->RawFrames != nullptr)
+        {
+            memcpy(Voice->RawFrames + static_cast<SIZE_T>(Gathered) * Channels,
+                   Buffer->Data + static_cast<SIZE_T>(Buffer->Position) * Voice->BlockAlign, sizeof(SHORT) * Count * Channels);
+        }
         Buffer->Position += Count;
         Gathered += Count;
         Voice->PlayedFrames += Count;
@@ -301,7 +306,11 @@ XaGatherFrames(
         XaRetireHead(Voice);
     }
     if (Gathered < Needed)
+    {
         memset(Output + static_cast<SIZE_T>(Gathered) * Channels, 0, sizeof(*Output) * (Needed - Gathered) * Channels);
+        if (Voice->RawFrames != nullptr)
+            memset(Voice->RawFrames + static_cast<SIZE_T>(Gathered) * Channels, 0, sizeof(SHORT) * (Needed - Gathered) * Channels);
+    }
     return Gathered;
 }
 
@@ -322,27 +331,14 @@ XaMixSends(
     for (XaSend* Send = Voice->Sends; Send != nullptr; Send = Send->Next)
     {
         XaVoice* Target = Send->Target;
-        const float* Matrix = reinterpret_cast<const float*>(Send->Mix.Current) + 3;
-        UINT32 Outputs = Target->InputChannels;
         UINT32 Count = XaMin(Frames, Target->InputMixFrames);
+        BOOLEAN First;
 
         if (Target->InputMix == nullptr)
             continue;
+        First = !Target->InputFed;
         Target->InputFed = TRUE;
-        for (UINT32 Frame = 0; Frame < Count; Frame++)
-        {
-            const float* In = Output + static_cast<SIZE_T>(Frame) * Inputs;
-            float* Out = Target->InputMix + static_cast<SIZE_T>(Frame) * Outputs;
-
-            for (UINT32 Row = 0; Row < Outputs; Row++)
-            {
-                float Sum = 0.0f;
-
-                for (UINT32 Column = 0; Column < Inputs; Column++)
-                    Sum += In[Column] * Matrix[Row * Inputs + Column];
-                Out[Row] += Sum;
-            }
-        }
+        XaMixThroughSend(Send, Output, Inputs, Target->InputMix, Count, Target->InputRate, !First);
     }
 }
 
@@ -373,7 +369,10 @@ XaTakeParameters(
 {
     XaParameterTake(&Voice->Filter);
     for (XaSend* Send = Voice->Sends; Send != nullptr; Send = Send->Next)
-        XaParameterTake(&Send->Mix);
+    {
+        if (XaParameterTake(&Send->Mix))
+            Send->Changed = TRUE;
+    }
 }
 
 /* Drops the queued buffers a flush asked for, keeping the one playing */
@@ -403,6 +402,25 @@ XaApplyFlush(
         Voice->QueueTail = Buffer;
 }
 
+/* 16 bit PCM through a converter keeps its integer frames for the interpolation */
+static
+VOID
+XaPrepareRaw(
+    _Inout_ XaSourceVoice* Voice,
+    _In_ UINT32 Needed)
+{
+    SIZE_T Count = static_cast<SIZE_T>(Needed) * Voice->InputChannels;
+
+    if (Voice->FormatTag != WAVE_FORMAT_PCM || Voice->Format->wBitsPerSample != 16 || !Voice->HasConverter)
+        return;
+    if (Voice->RawCapacity < Count)
+    {
+        delete[] Voice->RawFrames;
+        Voice->RawFrames = new (std::nothrow) SHORT[Count];
+        Voice->RawCapacity = Voice->RawFrames != nullptr ? Count : 0;
+    }
+}
+
 static
 VOID
 XaProcessSource(
@@ -422,7 +440,6 @@ XaProcessSource(
     if (Voice->PlayState != XaPlayRunning)
         return;
 
-    XaTakeParameters(Voice);
     if (XaParameterTake(&Voice->Ratio) && Voice->Resampler != nullptr)
         XaResamplerSetRatio(Voice->Resampler, *reinterpret_cast<float*>(Voice->Ratio.Current));
     if (Voice->ExitLoopPending && Voice->ExitLoopSet == XA_OPSET_NOW)
@@ -451,16 +468,20 @@ XaProcessSource(
     if (Voice->Callback != nullptr)
         Voice->Callback->OnVoiceProcessingPassStart(Required);
 
+    /* What the callback changed at once still applies to this pass */
+    XaTakeParameters(Voice);
+
     Input = XaScratch(&Voice->InputScratch, static_cast<SIZE_T>(Needed) * Channels);
     Output = XaScratch(&Voice->OutputScratch, static_cast<SIZE_T>(Frames) * Channels);
     if (Input != nullptr && Output != nullptr)
     {
+        XaPrepareRaw(Voice, Needed);
         Gathered = XaGatherFrames(Voice, Needed, Input);
         if (Voice->HasConverter)
         {
             if (Gathered == 0)
                 XaResamplerReset(Voice->Resampler);
-            XaResamplerProcess(Voice->Resampler, Input, Needed, Output, Frames);
+            XaResamplerProcess(Voice->Resampler, Input, Needed, Voice->RawFrames, Output, Frames);
         }
         else
         {
@@ -509,7 +530,7 @@ XaProcessSubmix(
         Converted = XaScratch(&Voice->OutputScratch, static_cast<SIZE_T>(OutputFrames) * Channels);
         if (Converted == nullptr)
             return;
-        XaResamplerProcess(Voice->Resampler, Output, Frames, Converted, OutputFrames);
+        XaResamplerProcess(Voice->Resampler, Output, Frames, nullptr, Converted, OutputFrames);
         Output = Converted;
         Frames = OutputFrames;
     }
@@ -588,7 +609,7 @@ XaProcessMaster(
             memset(Device, 0, sizeof(*Device) * DeviceFrames * DeviceChannels);
             return;
         }
-        XaResamplerProcess(Master->Resampler, Mix, Frames, Converted, DeviceFrames);
+        XaResamplerProcess(Master->Resampler, Mix, Frames, nullptr, Converted, DeviceFrames);
         Mix = Converted;
         Frames = DeviceFrames;
     }
@@ -624,6 +645,14 @@ XaEngine::RunPass(
 
     for (UINT32 Index = 0; Index < CallbackCount; Index++)
         Callbacks[Index]->OnProcessingPassStart();
+    for (XaVoice* Voice = Voices; Voice != nullptr; Voice = Voice->NextVoice)
+    {
+        XaParameterPromote(&Voice->Filter);
+        for (XaSend* Send = Voice->Sends; Send != nullptr; Send = Send->Next)
+            XaParameterPromote(&Send->Mix);
+        if (Voice->Kind == XaKindSource)
+            XaParameterPromote(&static_cast<XaSourceVoice*>(Voice)->Ratio);
+    }
 
     for (XaVoice* Voice = Voices; Voice != nullptr; Voice = Voice->NextVoice)
     {

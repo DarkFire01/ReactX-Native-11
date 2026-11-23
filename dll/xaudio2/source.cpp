@@ -28,6 +28,8 @@ XaSourceVoice::XaSourceVoice(
     FlushPending = FALSE;
     PlayedFrames = 0;
     Decoded = nullptr;
+    RawFrames = nullptr;
+    RawCapacity = 0;
     DecodedData = nullptr;
     DecodedBlock = 0;
     HasConverter = FALSE;
@@ -55,6 +57,7 @@ XaSourceVoice::~XaSourceVoice()
     XaParameterFree(&Ratio);
     delete[] reinterpret_cast<BYTE*>(Format);
     delete[] Decoded;
+    delete[] RawFrames;
 }
 
 HRESULT

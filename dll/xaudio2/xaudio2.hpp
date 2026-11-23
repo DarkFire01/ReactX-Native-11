@@ -57,6 +57,9 @@
 #define XA_MAX_BUFFER_BYTES     0x80000000u
 #define XA_MAX_LOOP_COUNT       255
 
+/* Scale from 16 bit samples to float */
+#define XA_INT16_SCALE          (1.0f / 32768.0f)
+
 /* Rates below this get the next quantum multiple up rather than down */
 #define XA_RATE_ROUND_UP_BELOW  32000
 
@@ -149,6 +152,7 @@ enum XaSlotState
 {
     XaSlotIdle,
     XaSlotWaiting,
+    XaSlotQueued,
     XaSlotReady,
 };
 
@@ -185,6 +189,10 @@ XaParameterCommit(
 
 BOOLEAN
 XaParameterTake(
+    _Inout_ XaParameterSlot* Slot);
+
+VOID
+XaParameterPromote(
     _Inout_ XaParameterSlot* Slot);
 
 /* resample.cpp: linear interpolation that carries its position and the last frames between blocks */
@@ -232,6 +240,7 @@ XaResamplerProcess(
     _Inout_ XaResampler* Resampler,
     _In_reads_(InputFrames * Resampler->Channels) const float* Input,
     _In_ UINT32 InputFrames,
+    _In_reads_opt_(InputFrames * Resampler->Channels) const SHORT* Raw,
     _Out_writes_(OutputFrames * Resampler->Channels) float* Output,
     _In_ UINT32 OutputFrames);
 
@@ -353,7 +362,35 @@ struct XaSend
     /* Mixer side state: the matrix it is ramping from and the send filter memory */
     float* MixState;
     BOOLEAN Primed;
+    BOOLEAN Changed;
 };
+
+/* mixmatrix.cpp: one block through a matrix, optionally ramping from Matrix by Delta a frame */
+struct XaMixBlock
+{
+    const float* Input;
+    float* Output;
+    UINT32 Frames;
+    UINT32 InputChannels;
+    UINT32 OutputChannels;
+    const float* Matrix;
+    const float* Delta;
+    BOOLEAN Accumulate;
+};
+
+VOID
+XaMatrixMix(
+    _In_ const XaMixBlock* Block);
+
+VOID
+XaMixThroughSend(
+    _Inout_ XaSend* Send,
+    _In_reads_(Frames * InputChannels) const float* Input,
+    _In_ UINT32 InputChannels,
+    _Out_writes_(Frames * Send->Target->InputChannels) float* Output,
+    _In_ UINT32 Frames,
+    _In_ UINT32 Rate,
+    _In_ BOOLEAN Accumulate);
 
 /* A change waiting for CommitChanges */
 enum XaDeferredKind
@@ -575,7 +612,8 @@ public:
     VOID
     ApplySendLevels(
         _Inout_ XaSend* Send,
-        _In_ UINT32 OperationSet);
+        _In_ UINT32 OperationSet,
+        _In_ BOOLEAN Immediate);
 
     HRESULT
     EnsureInputMix(VOID);
@@ -806,6 +844,8 @@ public:
     /* Mixing state, owned by the render thread */
     UINT64 PlayedFrames;
     SHORT* Decoded;
+    SHORT* RawFrames;
+    SIZE_T RawCapacity;
     const BYTE* DecodedData;
     UINT32 DecodedBlock;
 };

@@ -62,6 +62,15 @@ XaParameterCommit(
     _In_ UINT32 OperationSet)
 {
     if (Slot->State == XaSlotWaiting && (OperationSet == XAUDIO2_COMMIT_ALL || OperationSet == Slot->OperationSet))
+        Slot->State = XaSlotQueued;
+}
+
+/* Committed and queued changes reach the mixer at the start of the next pass */
+VOID
+XaParameterPromote(
+    _Inout_ XaParameterSlot* Slot)
+{
+    if (Slot->State == XaSlotQueued)
         Slot->State = XaSlotReady;
 }
 
@@ -161,7 +170,8 @@ XaVoice::SourceLevel(
 VOID
 XaVoice::ApplySendLevels(
     _Inout_ XaSend* Send,
-    _In_ UINT32 OperationSet)
+    _In_ UINT32 OperationSet,
+    _In_ BOOLEAN Immediate)
 {
     UINT32 Inputs = OutputChannels();
     UINT32 Outputs = Send->Target->InputChannels;
@@ -181,7 +191,10 @@ XaVoice::ApplySendLevels(
         }
     }
     Send->Mix.OperationSet = OperationSet;
-    Send->Mix.State = OperationSet == XA_OPSET_NOW ? XaSlotReady : XaSlotWaiting;
+    if (OperationSet != XA_OPSET_NOW)
+        Send->Mix.State = XaSlotWaiting;
+    else
+        Send->Mix.State = Immediate ? XaSlotReady : XaSlotQueued;
 }
 
 BOOLEAN
@@ -300,8 +313,10 @@ XaVoice::BuildSends(
         }
         memcpy(Initial, &XaDefaultFilter, sizeof(XaDefaultFilter));
         memset(Initial + sizeof(XaDefaultFilter), 0, BlockSize - sizeof(XaDefaultFilter));
-        if (!XaParameterInit(&Send->Mix, BlockSize, Initial))
+        Send->MixState = new (std::nothrow) float[2 * Inputs * Outputs];
+        if (Send->MixState == nullptr || !XaParameterInit(&Send->Mix, BlockSize, Initial))
         {
+            delete[] Send->MixState;
             delete[] Send->Levels;
             delete[] Initial;
             delete Send;
@@ -312,7 +327,7 @@ XaVoice::BuildSends(
         *Link = Send;
         Link = &Send->Next;
         SendCount += 1;
-        ApplySendLevels(Send, XA_OPSET_NOW);
+        ApplySendLevels(Send, XA_OPSET_NOW, TRUE);
         XaParameterTake(&Send->Mix);
     }
     return S_OK;
@@ -716,7 +731,7 @@ XaVoice::SetVolumeCommon(
         if (Kind == XaKindSource)
         {
             for (XaSend* Send = Sends; Send != nullptr; Send = Send->Next)
-                ApplySendLevels(Send, OperationSet);
+                ApplySendLevels(Send, OperationSet, FALSE);
         }
         else
         {
@@ -726,7 +741,7 @@ XaVoice::SetVolumeCommon(
                 for (XaSend* Send = Sender->Sends; Send != nullptr; Send = Send->Next)
                 {
                     if (Send->Target == this)
-                        Sender->ApplySendLevels(Send, OperationSet);
+                        Sender->ApplySendLevels(Send, OperationSet, FALSE);
                 }
             }
         }
@@ -764,7 +779,7 @@ XaVoice::SetChannelVolumesCommon(
     {
         memcpy(ChannelVolumes, Volumes, sizeof(*Volumes) * Channels);
         for (XaSend* Send = Sends; Send != nullptr; Send = Send->Next)
-            ApplySendLevels(Send, OperationSet);
+            ApplySendLevels(Send, OperationSet, FALSE);
     }
     Engine->Unlock();
     return S_OK;
@@ -824,7 +839,7 @@ XaVoice::SetOutputMatrixCommon(
     if (memcmp(Send->Levels, Matrix, sizeof(*Matrix) * SourceChannels * DestinationChannels) != 0)
     {
         memcpy(Send->Levels, Matrix, sizeof(*Matrix) * SourceChannels * DestinationChannels);
-        ApplySendLevels(Send, OperationSet);
+        ApplySendLevels(Send, OperationSet, TRUE);
     }
     Engine->Unlock();
     return S_OK;

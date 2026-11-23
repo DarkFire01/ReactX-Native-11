@@ -7,6 +7,8 @@
 
 #include "xaudio2.hpp"
 
+#include <math.h>
+
 /* The most frames of history a block can leave behind */
 #define XA_HISTORY_FRAMES   4
 
@@ -105,6 +107,7 @@ XaResamplerProcess(
     _Inout_ XaResampler* Resampler,
     _In_reads_(InputFrames * Resampler->Channels) const float* Input,
     _In_ UINT32 InputFrames,
+    _In_reads_opt_(InputFrames * Resampler->Channels) const SHORT* Raw,
     _Out_writes_(OutputFrames * Resampler->Channels) float* Output,
     _In_ UINT32 OutputFrames)
 {
@@ -132,11 +135,27 @@ XaResamplerProcess(
     Index = Resampler->Position;
     for (UINT32 Frame = 0; Frame < OutputFrames; Frame++)
     {
-        const float* Before = XaResamplerFrame(Resampler, Input, InputFrames, Index - 1);
-        const float* After = XaResamplerFrame(Resampler, Input, InputFrames, Index);
+        if (Raw != nullptr && Index >= 1)
+        {
+            /* 16 bit input interpolates on the integers and scales afterwards */
+            const SHORT* Before = Raw + static_cast<SIZE_T>(Index - 1) * Channels;
+            const SHORT* After = Before + Channels;
 
-        for (UINT32 Channel = 0; Channel < Channels; Channel++)
-            Output[Frame * Channels + Channel] = Before[Channel] + (After[Channel] - Before[Channel]) * Fraction;
+            for (UINT32 Channel = 0; Channel < Channels; Channel++)
+            {
+                float Rise = static_cast<float>(After[Channel] - Before[Channel]);
+
+                Output[Frame * Channels + Channel] = fmaf(Rise, Fraction, static_cast<float>(Before[Channel])) * XA_INT16_SCALE;
+            }
+        }
+        else
+        {
+            const float* Before = XaResamplerFrame(Resampler, Input, InputFrames, Index - 1);
+            const float* After = XaResamplerFrame(Resampler, Input, InputFrames, Index);
+
+            for (UINT32 Channel = 0; Channel < Channels; Channel++)
+                Output[Frame * Channels + Channel] = fmaf(After[Channel] - Before[Channel], Fraction, Before[Channel]);
+        }
         Fraction = Part + Fraction;
         if (Fraction < 1.0f)
         {

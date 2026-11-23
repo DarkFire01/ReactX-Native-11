@@ -9,6 +9,7 @@ nt_add_usermode_dll(xaudio2_9
         main.cpp
         matrix.cpp
         mixer.cpp
+        mixmatrix.cpp
         output.cpp
         resample.cpp
         source.cpp
