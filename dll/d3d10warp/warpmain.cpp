@@ -8,6 +8,7 @@
 #include "precomp.hpp"
 #include "adapter.hpp"
 #include "format.hpp"
+#include "dxil.hpp"
 #include <d3d12umddi.h>
 
 static CRITICAL_SECTION RxWarpDdiLock;
@@ -118,9 +119,12 @@ DllMain(
         DisableThreadLibraryCalls(Instance);
         InitializeCriticalSection(&RxWarpDdiLock);
         RxWarpInitFormats();
+        if (!RxWarpDxilAttach())
+            return FALSE;
     }
     else if (Reason == DLL_PROCESS_DETACH && Reserved == nullptr)
     {
+        RxWarpDxilDetach();
         DeleteCriticalSection(&RxWarpDdiLock);
     }
     return TRUE;

@@ -1,0 +1,1531 @@
+/*
+ * PROJECT:     ReactX WARP
+ * LICENSE:     MIT (https://spdx.org/licenses/MIT)
+ * PURPOSE:     DXIL programs lowered to the tokenized program the executor runs
+ * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
+ */
+
+/*
+ * Built with the vendored compiler's flags: LLVM stays inside this file.
+ * Every SSA scalar gets a temp component; structured flow comes back from the dominator trees.
+ */
+
+#include "llvm/Bitcode/ReaderWriter.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "dxc/Support/Global.h"
+#include "dxc/Support/WinIncludes.h"
+#include "dxc/DXIL/DxilModule.h"
+#include "dxc/DXIL/DxilOperations.h"
+#include "dxc/DXIL/DxilResource.h"
+#include "dxc/DXIL/DxilSignatureElement.h"
+#include "dxc/DXIL/DxilCBuffer.h"
+#include "dxc/DXIL/DxilSampler.h"
+
+#include <d3d11TokenizedProgramFormat.hpp>
+#include <unordered_map>
+#include <vector>
+
+#include "dxil.hpp"
+
+using hlsl::DXIL::OpCode;
+
+namespace
+{
+
+typedef std::vector<UINT> RxTokens;
+
+constexpr UINT RxMaskMode = D3D10_SB_OPERAND_4_COMPONENT_MASK_MODE;
+constexpr UINT RxSwizzleMode = D3D10_SB_OPERAND_4_COMPONENT_SWIZZLE_MODE;
+constexpr UINT RxSelectMode = D3D10_SB_OPERAND_4_COMPONENT_SELECT_1_MODE;
+
+UINT
+RxOperandHead(
+    _In_ UINT Type,
+    _In_ UINT Dimensions)
+{
+    UINT Token = ENCODE_D3D10_SB_OPERAND_TYPE(Type) | ENCODE_D3D10_SB_OPERAND_INDEX_DIMENSION(Dimensions);
+
+    for (UINT Index = 0; Index < Dimensions; Index++)
+        Token |= ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(Index, D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
+    return Token;
+}
+
+UINT
+RxFourComponents(
+    _In_ UINT Mode,
+    _In_ UINT Bits)
+{
+    UINT Token = ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_4_COMPONENT) |
+                 ENCODE_D3D10_SB_OPERAND_4_COMPONENT_SELECTION_MODE(Mode);
+
+    if (Mode == RxMaskMode)
+        Token |= Bits << D3D10_SB_OPERAND_4_COMPONENT_MASK_SHIFT;
+    else if (Mode == RxSwizzleMode)
+        Token |= ENCODE_D3D10_SB_OPERAND_4_COMPONENT_SWIZZLE(Bits & 3, (Bits >> 2) & 3, (Bits >> 4) & 3, (Bits >> 6) & 3);
+    else
+        Token |= ENCODE_D3D10_SB_OPERAND_4_COMPONENT_SELECT_1(Bits);
+    return Token;
+}
+
+constexpr UINT RxXyzw = 0xE4;
+
+/* A register operand with up to two immediate indices */
+RxTokens
+RxRegister(
+    _In_ UINT Type,
+    _In_ UINT Mode,
+    _In_ UINT Bits,
+    _In_ std::initializer_list<UINT> Indices)
+{
+    RxTokens Tokens;
+
+    Tokens.push_back(RxOperandHead(Type, (UINT)Indices.size()) | RxFourComponents(Mode, Bits));
+    Tokens.insert(Tokens.end(), Indices.begin(), Indices.end());
+    return Tokens;
+}
+
+/* Registers with no components: samplers, resources in declarations, the null destination */
+RxTokens
+RxBare(
+    _In_ UINT Type,
+    _In_ std::initializer_list<UINT> Indices)
+{
+    RxTokens Tokens;
+
+    Tokens.push_back(RxOperandHead(Type, (UINT)Indices.size()) | ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_0_COMPONENT));
+    Tokens.insert(Tokens.end(), Indices.begin(), Indices.end());
+    return Tokens;
+}
+
+RxTokens
+RxImmediate(
+    _In_ UINT Value)
+{
+    return { ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_IMMEDIATE32) |
+             ENCODE_D3D10_SB_OPERAND_INDEX_DIMENSION(D3D10_SB_OPERAND_INDEX_0D) |
+             ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT), Value };
+}
+
+RxTokens
+RxModified(
+    _In_ RxTokens Tokens,
+    _In_ D3D10_SB_OPERAND_MODIFIER Modifier)
+{
+    Tokens[0] |= ENCODE_D3D10_SB_OPERAND_EXTENDED(1);
+    Tokens.insert(Tokens.begin() + 1, ENCODE_D3D10_SB_EXTENDED_OPERAND_TYPE(D3D10_SB_EXTENDED_OPERAND_MODIFIER) |
+                                      ENCODE_D3D10_SB_EXTENDED_OPERAND_MODIFIER(Modifier));
+    return Tokens;
+}
+
+typedef struct _RX_HANDLE
+{
+    UINT Class;             /* hlsl::DXIL::ResourceClass */
+    UINT Slot;
+    UINT Kind;              /* hlsl::DXIL::ResourceKind */
+} RX_HANDLE;
+
+typedef struct _RX_LOOP
+{
+    llvm::BasicBlock *Header;
+    llvm::BasicBlock *Exit;
+    llvm::Loop *Loop;
+} RX_LOOP;
+
+class RxLowering
+{
+public:
+    RxLowering(
+        _In_ hlsl::DxilModule &Module)
+        : Dxil(Module), Op(Module.GetOP())
+    {
+    }
+
+    BOOLEAN
+    Run(
+        _Out_ RxTokens *Program);
+
+private:
+    UINT
+    Fresh(VOID)
+    {
+        return NextSlot++;
+    }
+
+    UINT
+    Fresh4(VOID)
+    {
+        NextSlot = (NextSlot + 3) & ~3u;
+        NextSlot += 4;
+        return NextSlot / 4 - 1;
+    }
+
+    UINT
+    SlotOf(
+        _In_ const llvm::Value *Value);
+
+    RxTokens
+    Source(
+        _In_ llvm::Value *Value);
+
+    RxTokens
+    Dest(
+        _In_ const llvm::Value *Value)
+    {
+        UINT Slot = SlotOf(Value);
+
+        return RxRegister(D3D10_SB_OPERAND_TYPE_TEMP, RxMaskMode, 1u << (Slot & 3), { Slot / 4 });
+    }
+
+    RxTokens
+    Temp(
+        _In_ UINT Register,
+        _In_ UINT Mode,
+        _In_ UINT Bits)
+    {
+        return RxRegister(D3D10_SB_OPERAND_TYPE_TEMP, Mode, Bits, { Register });
+    }
+
+    VOID
+    Emit(
+        _In_ UINT Opcode,
+        _In_ std::initializer_list<RxTokens> Operands,
+        _In_ UINT Flags = 0,
+        _In_opt_ const RxTokens *Extended = nullptr);
+
+    VOID
+    Declare(
+        _In_ UINT Opcode,
+        _In_ std::initializer_list<RxTokens> Operands,
+        _In_ UINT Flags = 0);
+
+    /* Moves scalars into one register's components; FALSE fills the rest with zero */
+    UINT
+    Gather(
+        _In_ std::initializer_list<llvm::Value *> Values);
+
+    UINT
+    GatherRange(
+        _In_ llvm::CallInst *Call,
+        _In_ UINT First,
+        _In_ UINT Count);
+
+    BOOLEAN
+    Declarations(VOID);
+
+    BOOLEAN
+    Signature(
+        _In_ const hlsl::DxilSignature &Elements,
+        _In_ BOOLEAN Input);
+
+    BOOLEAN
+    Resources(VOID);
+
+    BOOLEAN
+    Lower(
+        _In_ llvm::Instruction *Instruction);
+
+    BOOLEAN
+    LowerCall(
+        _In_ llvm::CallInst *Call);
+
+    BOOLEAN
+    LowerResource(
+        _In_ llvm::CallInst *Call,
+        _In_ OpCode Code);
+
+    BOOLEAN
+    HandleOf(
+        _In_ llvm::Value *Value,
+        _Out_ RX_HANDLE *Handle);
+
+    RxTokens
+    ResourceOperand(
+        _In_ const RX_HANDLE &Handle,
+        _In_ UINT Mode = RxSwizzleMode,
+        _In_ UINT Bits = RxXyzw)
+    {
+        return RxRegister((Handle.Class == (UINT)hlsl::DXIL::ResourceClass::UAV) ? D3D11_SB_OPERAND_TYPE_UNORDERED_ACCESS_VIEW :
+                                                                                   D3D10_SB_OPERAND_TYPE_RESOURCE,
+                          Mode, Bits, { Handle.Slot });
+    }
+
+    VOID
+    Edge(
+        _In_ llvm::BasicBlock *From,
+        _In_ llvm::BasicBlock *To);
+
+    BOOLEAN
+    Region(
+        _In_ llvm::BasicBlock *Block,
+        _In_opt_ llvm::BasicBlock *Stop);
+
+    BOOLEAN
+    Arm(
+        _In_ llvm::BasicBlock *From,
+        _In_ llvm::BasicBlock *Target,
+        _In_opt_ llvm::BasicBlock *Merge);
+
+    BOOLEAN
+    Leaves(
+        _In_ llvm::BasicBlock *From,
+        _In_ llvm::BasicBlock *Target);
+
+    hlsl::DxilModule &Dxil;
+    hlsl::OP *Op;
+    RxTokens Decls;
+    RxTokens Body;
+    std::unordered_map<const llvm::Value *, UINT> Slots;
+    std::unordered_map<const llvm::Value *, UINT> SharedRegisters;
+    std::unordered_map<const llvm::Value *, UINT> Arrays;
+    UINT NextSlot = 0;
+    UINT NextArray = 0;
+    llvm::DominatorTreeBase<llvm::BasicBlock> PostDominators{ true };
+    llvm::DominatorTree Dominators;
+    llvm::LoopInfo Loops;
+    std::vector<RX_LOOP> Open;
+    std::vector<llvm::BasicBlock *> Visited;
+    BOOLEAN PixelShader = FALSE;
+};
+
+UINT
+RxLowering::SlotOf(
+    _In_ const llvm::Value *Value)
+{
+    auto Found = Slots.find(Value);
+
+    if (Found != Slots.end())
+        return Found->second;
+    UINT Slot = Fresh();
+
+    Slots[Value] = Slot;
+    return Slot;
+}
+
+/* Constants become immediates; anything else reads its temp component */
+RxTokens
+RxLowering::Source(
+    _In_ llvm::Value *Value)
+{
+    UINT Slot;
+
+    if (llvm::ConstantInt *Integer = llvm::dyn_cast<llvm::ConstantInt>(Value))
+        return RxImmediate(Integer->getBitWidth() == 1 ? (Integer->isZero() ? 0u : ~0u) : (UINT)Integer->getZExtValue());
+    if (llvm::ConstantFP *Float = llvm::dyn_cast<llvm::ConstantFP>(Value))
+    {
+        llvm::APFloat Single = Float->getValueAPF();
+        bool Lost;
+
+        Single.convert(llvm::APFloat::IEEEsingle, llvm::APFloat::rmNearestTiesToEven, &Lost);
+        return RxImmediate((UINT)Single.bitcastToAPInt().getZExtValue());
+    }
+    if (llvm::isa<llvm::UndefValue>(Value) || llvm::isa<llvm::ConstantAggregateZero>(Value))
+        return RxImmediate(0);
+    Slot = SlotOf(Value);
+    return Temp(Slot / 4, RxSelectMode, Slot & 3);
+}
+
+VOID
+RxLowering::Emit(
+    _In_ UINT Opcode,
+    _In_ std::initializer_list<RxTokens> Operands,
+    _In_ UINT Flags,
+    _In_opt_ const RxTokens *Extended)
+{
+    UINT Length = 1 + (Extended ? (UINT)Extended->size() : 0);
+
+    for (const RxTokens &Operand : Operands)
+        Length += (UINT)Operand.size();
+    Body.push_back(ENCODE_D3D10_SB_OPCODE_TYPE(Opcode) | ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(Length) | Flags |
+                   (Extended ? ENCODE_D3D10_SB_OPCODE_EXTENDED(1) : 0));
+    if (Extended)
+        Body.insert(Body.end(), Extended->begin(), Extended->end());
+    for (const RxTokens &Operand : Operands)
+        Body.insert(Body.end(), Operand.begin(), Operand.end());
+}
+
+VOID
+RxLowering::Declare(
+    _In_ UINT Opcode,
+    _In_ std::initializer_list<RxTokens> Operands,
+    _In_ UINT Flags)
+{
+    UINT Length = 1;
+
+    for (const RxTokens &Operand : Operands)
+        Length += (UINT)Operand.size();
+    Decls.push_back(ENCODE_D3D10_SB_OPCODE_TYPE(Opcode) | ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(Length) | Flags);
+    for (const RxTokens &Operand : Operands)
+        Decls.insert(Decls.end(), Operand.begin(), Operand.end());
+}
+
+UINT
+RxLowering::Gather(
+    _In_ std::initializer_list<llvm::Value *> Values)
+{
+    UINT Register = Fresh4();
+    UINT Component = 0;
+
+    for (llvm::Value *Value : Values)
+    {
+        if (Component < 4)
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Register, RxMaskMode, 1u << Component), Source(Value) });
+        Component++;
+    }
+    for (; Component < 4; Component++)
+        Emit(D3D10_SB_OPCODE_MOV, { Temp(Register, RxMaskMode, 1u << Component), RxImmediate(0) });
+    return Register;
+}
+
+UINT
+RxLowering::GatherRange(
+    _In_ llvm::CallInst *Call,
+    _In_ UINT First,
+    _In_ UINT Count)
+{
+    UINT Register = Fresh4();
+
+    for (UINT Component = 0; Component < 4; Component++)
+    {
+        RxTokens Value = (Component < Count) ? Source(Call->getArgOperand(First + Component)) : RxImmediate(0);
+
+        Emit(D3D10_SB_OPCODE_MOV, { Temp(Register, RxMaskMode, 1u << Component), Value });
+    }
+    return Register;
+}
+
+UINT
+RxName(
+    _In_ hlsl::Semantic::Kind Kind)
+{
+    switch (Kind)
+    {
+        case hlsl::Semantic::Kind::Position: return D3D10_SB_NAME_POSITION;
+        case hlsl::Semantic::Kind::ClipDistance: return D3D10_SB_NAME_CLIP_DISTANCE;
+        case hlsl::Semantic::Kind::CullDistance: return D3D10_SB_NAME_CULL_DISTANCE;
+        case hlsl::Semantic::Kind::RenderTargetArrayIndex: return D3D10_SB_NAME_RENDER_TARGET_ARRAY_INDEX;
+        case hlsl::Semantic::Kind::ViewPortArrayIndex: return D3D10_SB_NAME_VIEWPORT_ARRAY_INDEX;
+        case hlsl::Semantic::Kind::VertexID: return D3D10_SB_NAME_VERTEX_ID;
+        case hlsl::Semantic::Kind::PrimitiveID: return D3D10_SB_NAME_PRIMITIVE_ID;
+        case hlsl::Semantic::Kind::InstanceID: return D3D10_SB_NAME_INSTANCE_ID;
+        case hlsl::Semantic::Kind::IsFrontFace: return D3D10_SB_NAME_IS_FRONT_FACE;
+        case hlsl::Semantic::Kind::SampleIndex: return D3D10_SB_NAME_SAMPLE_INDEX;
+        default: return D3D10_SB_NAME_UNDEFINED;
+    }
+}
+
+/* Inputs and outputs keep the rows and columns the signature packed them into */
+BOOLEAN
+RxLowering::Signature(
+    _In_ const hlsl::DxilSignature &Elements,
+    _In_ BOOLEAN Input)
+{
+    for (const std::unique_ptr<hlsl::DxilSignatureElement> &Element : Elements.GetElements())
+    {
+        hlsl::Semantic::Kind Kind = Element->GetKind();
+        UINT Name = RxName(Kind);
+        UINT Mask = (UINT)Element->GetColsAsMask();
+
+        if (!Input && (Kind == hlsl::Semantic::Kind::Depth || Kind == hlsl::Semantic::Kind::DepthLessEqual ||
+                       Kind == hlsl::Semantic::Kind::DepthGreaterEqual))
+        {
+            Declare(D3D10_SB_OPCODE_DCL_OUTPUT, { { ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_OUTPUT_DEPTH) |
+                                                    ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT) } });
+            continue;
+        }
+        if (!Input && Kind == hlsl::Semantic::Kind::Coverage)
+        {
+            Declare(D3D10_SB_OPCODE_DCL_OUTPUT, { { ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_OUTPUT_COVERAGE_MASK) |
+                                                    ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT) } });
+            continue;
+        }
+        if (Element->GetStartRow() < 0)
+            return FALSE;
+        for (UINT Row = 0; Row < Element->GetRows(); Row++)
+        {
+            RxTokens Register = RxRegister(Input ? D3D10_SB_OPERAND_TYPE_INPUT : D3D10_SB_OPERAND_TYPE_OUTPUT, RxMaskMode, Mask,
+                                           { (UINT)Element->GetStartRow() + Row });
+            UINT Opcode;
+
+            if (Input && PixelShader)
+            {
+                UINT Mode = (UINT)Element->GetInterpolationMode()->GetKind();
+
+                Opcode = (Name != D3D10_SB_NAME_UNDEFINED) ? D3D10_SB_OPCODE_DCL_INPUT_PS_SIV : D3D10_SB_OPCODE_DCL_INPUT_PS;
+                if (Kind == hlsl::Semantic::Kind::IsFrontFace || Kind == hlsl::Semantic::Kind::SampleIndex ||
+                    Kind == hlsl::Semantic::Kind::PrimitiveID)
+                {
+                    Opcode = D3D10_SB_OPCODE_DCL_INPUT_PS_SGV;
+                    Mode = D3D10_SB_INTERPOLATION_CONSTANT;
+                }
+                if (Opcode == D3D10_SB_OPCODE_DCL_INPUT_PS)
+                    Declare(Opcode, { Register }, ENCODE_D3D10_SB_INPUT_INTERPOLATION_MODE(Mode));
+                else
+                    Declare(Opcode, { Register, { ENCODE_D3D10_SB_NAME(Name) } }, ENCODE_D3D10_SB_INPUT_INTERPOLATION_MODE(Mode));
+            }
+            else if (Input)
+            {
+                Opcode = (Name != D3D10_SB_NAME_UNDEFINED) ? D3D10_SB_OPCODE_DCL_INPUT_SGV : D3D10_SB_OPCODE_DCL_INPUT;
+                if (Opcode == D3D10_SB_OPCODE_DCL_INPUT)
+                    Declare(Opcode, { Register });
+                else
+                    Declare(Opcode, { Register, { ENCODE_D3D10_SB_NAME(Name) } });
+            }
+            else
+            {
+                Opcode = (Name != D3D10_SB_NAME_UNDEFINED) ? D3D10_SB_OPCODE_DCL_OUTPUT_SIV : D3D10_SB_OPCODE_DCL_OUTPUT;
+                if (Opcode == D3D10_SB_OPCODE_DCL_OUTPUT)
+                    Declare(Opcode, { Register });
+                else
+                    Declare(Opcode, { Register, { ENCODE_D3D10_SB_NAME(Name) } });
+            }
+        }
+    }
+    return TRUE;
+}
+
+UINT
+RxDimension(
+    _In_ hlsl::DXIL::ResourceKind Kind)
+{
+    switch (Kind)
+    {
+        case hlsl::DXIL::ResourceKind::Texture1D: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE1D;
+        case hlsl::DXIL::ResourceKind::Texture2D: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE2D;
+        case hlsl::DXIL::ResourceKind::Texture2DMS: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE2DMS;
+        case hlsl::DXIL::ResourceKind::Texture3D: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE3D;
+        case hlsl::DXIL::ResourceKind::TextureCube: return D3D10_SB_RESOURCE_DIMENSION_TEXTURECUBE;
+        case hlsl::DXIL::ResourceKind::Texture1DArray: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE1DARRAY;
+        case hlsl::DXIL::ResourceKind::Texture2DArray: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE2DARRAY;
+        case hlsl::DXIL::ResourceKind::Texture2DMSArray: return D3D10_SB_RESOURCE_DIMENSION_TEXTURE2DMSARRAY;
+        case hlsl::DXIL::ResourceKind::TextureCubeArray: return D3D10_SB_RESOURCE_DIMENSION_TEXTURECUBEARRAY;
+        case hlsl::DXIL::ResourceKind::TypedBuffer: return D3D10_SB_RESOURCE_DIMENSION_BUFFER;
+        default: return D3D10_SB_RESOURCE_DIMENSION_UNKNOWN;
+    }
+}
+
+UINT
+RxReturnType(
+    _In_ hlsl::CompType Type)
+{
+    switch (Type.GetKind())
+    {
+        case hlsl::CompType::Kind::UNormF32:
+        case hlsl::CompType::Kind::UNormF16: return D3D10_SB_RETURN_TYPE_UNORM;
+        case hlsl::CompType::Kind::SNormF32:
+        case hlsl::CompType::Kind::SNormF16: return D3D10_SB_RETURN_TYPE_SNORM;
+        case hlsl::CompType::Kind::I32:
+        case hlsl::CompType::Kind::I16: return D3D10_SB_RETURN_TYPE_SINT;
+        case hlsl::CompType::Kind::U32:
+        case hlsl::CompType::Kind::U16: return D3D10_SB_RETURN_TYPE_UINT;
+        default: return D3D10_SB_RETURN_TYPE_FLOAT;
+    }
+}
+
+/* Resources declared in space 0 keep their register numbers */
+BOOLEAN
+RxLowering::Resources(VOID)
+{
+    for (const std::unique_ptr<hlsl::DxilCBuffer> &Buffer : Dxil.GetCBuffers())
+    {
+        if (Buffer->GetSpaceID() != 0)
+            return FALSE;
+        for (UINT Index = 0; Index < Buffer->GetRangeSize() && Index < 16; Index++)
+            Declare(D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER, { RxRegister(D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER, RxSwizzleMode, RxXyzw,
+                                                                      { Buffer->GetLowerBound() + Index, (Buffer->GetSize() + 15) / 16 }) });
+    }
+    for (const std::unique_ptr<hlsl::DxilSampler> &Sampler : Dxil.GetSamplers())
+    {
+        UINT Mode = (Sampler->GetSamplerKind() == hlsl::DXIL::SamplerKind::Comparison) ? D3D10_SB_SAMPLER_MODE_COMPARISON :
+                                                                                         D3D10_SB_SAMPLER_MODE_DEFAULT;
+
+        if (Sampler->GetSpaceID() != 0)
+            return FALSE;
+        for (UINT Index = 0; Index < Sampler->GetRangeSize() && Index < 16; Index++)
+            Declare(D3D10_SB_OPCODE_DCL_SAMPLER, { RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Sampler->GetLowerBound() + Index }) },
+                    ENCODE_D3D10_SB_SAMPLER_MODE(Mode));
+    }
+    for (UINT Pass = 0; Pass < 2; Pass++)
+    {
+        const std::vector<std::unique_ptr<hlsl::DxilResource>> &List = Pass ? Dxil.GetUAVs() : Dxil.GetSRVs();
+        UINT Type = Pass ? D3D11_SB_OPERAND_TYPE_UNORDERED_ACCESS_VIEW : D3D10_SB_OPERAND_TYPE_RESOURCE;
+
+        for (const std::unique_ptr<hlsl::DxilResource> &Resource : List)
+        {
+            hlsl::DXIL::ResourceKind Kind = Resource->GetKind();
+            UINT Return = RxReturnType(Resource->GetCompType());
+            RxTokens Returns = { ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 0) | ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 1) |
+                                 ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 2) | ENCODE_D3D10_SB_RESOURCE_RETURN_TYPE(Return, 3) };
+
+            if (Resource->GetSpaceID() != 0)
+                return FALSE;
+            for (UINT Index = 0; Index < Resource->GetRangeSize() && Index < 128; Index++)
+            {
+                RxTokens Register = RxBare(Type, { Resource->GetLowerBound() + Index });
+
+                if (Kind == hlsl::DXIL::ResourceKind::RawBuffer)
+                    Declare(Pass ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_RAW : D3D11_SB_OPCODE_DCL_RESOURCE_RAW, { Register });
+                else if (Kind == hlsl::DXIL::ResourceKind::StructuredBuffer)
+                    Declare(Pass ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_STRUCTURED : D3D11_SB_OPCODE_DCL_RESOURCE_STRUCTURED,
+                            { Register, { Resource->GetElementStride() } });
+                else if (RxDimension(Kind) == D3D10_SB_RESOURCE_DIMENSION_UNKNOWN)
+                    return FALSE;
+                else
+                    Declare(Pass ? D3D11_SB_OPCODE_DCL_UNORDERED_ACCESS_VIEW_TYPED : D3D10_SB_OPCODE_DCL_RESOURCE, { Register, Returns },
+                            ENCODE_D3D10_SB_RESOURCE_DIMENSION(RxDimension(Kind)) |
+                            ENCODE_D3D10_SB_RESOURCE_SAMPLE_COUNT(Resource->GetSampleCount()));
+            }
+        }
+    }
+    return TRUE;
+}
+
+BOOLEAN
+RxLowering::Declarations(VOID)
+{
+    const hlsl::ShaderModel *Model = Dxil.GetShaderModel();
+
+    PixelShader = Model->IsPS();
+    if (!Resources())
+        return FALSE;
+    if (!Model->IsCS() && (!Signature(Dxil.GetInputSignature(), TRUE) || !Signature(Dxil.GetOutputSignature(), FALSE)))
+        return FALSE;
+    if (Model->IsCS())
+        Decls.insert(Decls.end(), { ENCODE_D3D10_SB_OPCODE_TYPE(D3D11_SB_OPCODE_DCL_THREAD_GROUP) | ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(4),
+                                    Dxil.GetNumThreads(0), Dxil.GetNumThreads(1), Dxil.GetNumThreads(2) });
+
+    /* Group shared arrays become raw g# regions */
+    for (llvm::GlobalVariable &Global : Dxil.GetModule()->globals())
+    {
+        llvm::PointerType *Pointer = Global.getType();
+        UINT Bytes;
+
+        if (Pointer->getAddressSpace() != hlsl::DXIL::kTGSMAddrSpace)
+            continue;
+        Bytes = (UINT)Dxil.GetModule()->getDataLayout().getTypeAllocSize(Pointer->getElementType());
+        SharedRegisters[&Global] = (UINT)SharedRegisters.size();
+        Decls.insert(Decls.end(), { ENCODE_D3D10_SB_OPCODE_TYPE(D3D11_SB_OPCODE_DCL_THREAD_GROUP_SHARED_MEMORY_RAW) |
+                                    ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(4),
+                                    RxOperandHead(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, 1) |
+                                    ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_0_COMPONENT),
+                                    SharedRegisters[&Global], (Bytes + 3) & ~3u });
+    }
+    return TRUE;
+}
+
+BOOLEAN
+RxLowering::HandleOf(
+    _In_ llvm::Value *Value,
+    _Out_ RX_HANDLE *Handle)
+{
+    llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(Value);
+    llvm::ConstantInt *Index;
+    UINT Range;
+    const hlsl::DxilResourceBase *Base;
+
+    ZeroMemory(Handle, sizeof(*Handle));
+    if (Call == nullptr || !hlsl::OP::IsDxilOpFuncCallInst(Call) || hlsl::OP::getOpCode(Call) != OpCode::CreateHandle)
+        return FALSE;
+    Handle->Class = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue();
+    Range = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(2))->getZExtValue();
+    Index = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(3));
+    if (Index == nullptr)
+        return FALSE;
+    switch ((hlsl::DXIL::ResourceClass)Handle->Class)
+    {
+        case hlsl::DXIL::ResourceClass::SRV:
+            Base = &Dxil.GetSRV(Range);
+            Handle->Kind = (UINT)Dxil.GetSRV(Range).GetKind();
+            break;
+        case hlsl::DXIL::ResourceClass::UAV:
+            Base = &Dxil.GetUAV(Range);
+            Handle->Kind = (UINT)Dxil.GetUAV(Range).GetKind();
+            break;
+        case hlsl::DXIL::ResourceClass::CBuffer:
+            Base = &Dxil.GetCBuffer(Range);
+            break;
+        default:
+            Base = &Dxil.GetSampler(Range);
+            break;
+    }
+    Handle->Slot = (UINT)Index->getZExtValue();
+    if (Handle->Slot < Base->GetLowerBound())
+        Handle->Slot += Base->GetLowerBound();
+    return TRUE;
+}
+
+/* The executor's opcode for each LLVM operator, and whether the operands swap or the second negates */
+typedef struct _RX_BINARY
+{
+    UINT Opcode;
+    BOOLEAN Swap;
+    BOOLEAN Negate;
+} RX_BINARY;
+
+BOOLEAN
+RxBinaryOf(
+    _In_ llvm::Instruction *Instruction,
+    _Out_ RX_BINARY *Binary)
+{
+    *Binary = { 0, FALSE, FALSE };
+    switch (Instruction->getOpcode())
+    {
+        case llvm::Instruction::FAdd: Binary->Opcode = D3D10_SB_OPCODE_ADD; return TRUE;
+        case llvm::Instruction::FSub: Binary->Opcode = D3D10_SB_OPCODE_ADD; Binary->Negate = TRUE; return TRUE;
+        case llvm::Instruction::FMul: Binary->Opcode = D3D10_SB_OPCODE_MUL; return TRUE;
+        case llvm::Instruction::FDiv: Binary->Opcode = D3D10_SB_OPCODE_DIV; return TRUE;
+        case llvm::Instruction::Add: Binary->Opcode = D3D10_SB_OPCODE_IADD; return TRUE;
+        case llvm::Instruction::Sub: Binary->Opcode = D3D10_SB_OPCODE_IADD; Binary->Negate = TRUE; return TRUE;
+        case llvm::Instruction::Shl: Binary->Opcode = D3D10_SB_OPCODE_ISHL; return TRUE;
+        case llvm::Instruction::LShr: Binary->Opcode = D3D10_SB_OPCODE_USHR; return TRUE;
+        case llvm::Instruction::AShr: Binary->Opcode = D3D10_SB_OPCODE_ISHR; return TRUE;
+        case llvm::Instruction::And: Binary->Opcode = D3D10_SB_OPCODE_AND; return TRUE;
+        case llvm::Instruction::Or: Binary->Opcode = D3D10_SB_OPCODE_OR; return TRUE;
+        case llvm::Instruction::Xor: Binary->Opcode = D3D10_SB_OPCODE_XOR; return TRUE;
+        default: break;
+    }
+    if (llvm::ICmpInst *Compare = llvm::dyn_cast<llvm::ICmpInst>(Instruction))
+    {
+        switch (Compare->getPredicate())
+        {
+            case llvm::CmpInst::ICMP_EQ: Binary->Opcode = D3D10_SB_OPCODE_IEQ; return TRUE;
+            case llvm::CmpInst::ICMP_NE: Binary->Opcode = D3D10_SB_OPCODE_INE; return TRUE;
+            case llvm::CmpInst::ICMP_SLT: Binary->Opcode = D3D10_SB_OPCODE_ILT; return TRUE;
+            case llvm::CmpInst::ICMP_SGE: Binary->Opcode = D3D10_SB_OPCODE_IGE; return TRUE;
+            case llvm::CmpInst::ICMP_SGT: Binary->Opcode = D3D10_SB_OPCODE_ILT; Binary->Swap = TRUE; return TRUE;
+            case llvm::CmpInst::ICMP_SLE: Binary->Opcode = D3D10_SB_OPCODE_IGE; Binary->Swap = TRUE; return TRUE;
+            case llvm::CmpInst::ICMP_ULT: Binary->Opcode = D3D10_SB_OPCODE_ULT; return TRUE;
+            case llvm::CmpInst::ICMP_UGE: Binary->Opcode = D3D10_SB_OPCODE_UGE; return TRUE;
+            case llvm::CmpInst::ICMP_UGT: Binary->Opcode = D3D10_SB_OPCODE_ULT; Binary->Swap = TRUE; return TRUE;
+            case llvm::CmpInst::ICMP_ULE: Binary->Opcode = D3D10_SB_OPCODE_UGE; Binary->Swap = TRUE; return TRUE;
+            default: return FALSE;
+        }
+    }
+    if (llvm::FCmpInst *Compare = llvm::dyn_cast<llvm::FCmpInst>(Instruction))
+    {
+        switch (Compare->getPredicate())
+        {
+            case llvm::CmpInst::FCMP_OEQ:
+            case llvm::CmpInst::FCMP_UEQ: Binary->Opcode = D3D10_SB_OPCODE_EQ; return TRUE;
+            case llvm::CmpInst::FCMP_ONE:
+            case llvm::CmpInst::FCMP_UNE: Binary->Opcode = D3D10_SB_OPCODE_NE; return TRUE;
+            case llvm::CmpInst::FCMP_OLT:
+            case llvm::CmpInst::FCMP_ULT: Binary->Opcode = D3D10_SB_OPCODE_LT; return TRUE;
+            case llvm::CmpInst::FCMP_OGE:
+            case llvm::CmpInst::FCMP_UGE: Binary->Opcode = D3D10_SB_OPCODE_GE; return TRUE;
+            case llvm::CmpInst::FCMP_OGT:
+            case llvm::CmpInst::FCMP_UGT: Binary->Opcode = D3D10_SB_OPCODE_LT; Binary->Swap = TRUE; return TRUE;
+            case llvm::CmpInst::FCMP_OLE:
+            case llvm::CmpInst::FCMP_ULE: Binary->Opcode = D3D10_SB_OPCODE_GE; Binary->Swap = TRUE; return TRUE;
+            default: return FALSE;
+        }
+    }
+    return FALSE;
+}
+
+/* A byte offset into a group shared array from its element pointer */
+BOOLEAN
+RxSharedAddress(
+    _In_ llvm::Value *Pointer,
+    _Out_ llvm::GlobalVariable **Global,
+    _Out_ llvm::Value **Index,
+    _Out_ UINT *Scale,
+    _Out_ UINT *Base)
+{
+    llvm::GEPOperator *Element = llvm::dyn_cast<llvm::GEPOperator>(Pointer);
+
+    *Global = llvm::dyn_cast<llvm::GlobalVariable>(Pointer);
+    *Index = nullptr;
+    *Scale = 4;
+    *Base = 0;
+    if (*Global != nullptr)
+        return TRUE;
+    if (Element == nullptr || Element->getNumIndices() != 2)
+        return FALSE;
+    *Global = llvm::dyn_cast<llvm::GlobalVariable>(Element->getPointerOperand());
+    if (*Global == nullptr)
+        return FALSE;
+    *Index = Element->getOperand(2);
+    *Scale = (UINT)Element->getType()->getPointerElementType()->getPrimitiveSizeInBits() / 8;
+    return *Scale == 4;
+}
+
+BOOLEAN
+RxLowering::Lower(
+    _In_ llvm::Instruction *Instruction)
+{
+    RX_BINARY Binary;
+
+    if (llvm::isa<llvm::PHINode>(Instruction) || llvm::isa<llvm::TerminatorInst>(Instruction))
+        return TRUE;
+    if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(Instruction))
+        return LowerCall(Call);
+    if (!Instruction->getType()->isVoidTy() && !Instruction->getType()->isFloatTy() && !Instruction->getType()->isIntegerTy(32) &&
+        !Instruction->getType()->isIntegerTy(1) && !Instruction->getType()->isStructTy() && !Instruction->getType()->isPointerTy())
+    {
+        return FALSE;
+    }
+
+    if (Instruction->getOpcode() == llvm::Instruction::Mul)
+    {
+        Emit(D3D10_SB_OPCODE_IMUL, { RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}), Dest(Instruction), Source(Instruction->getOperand(0)),
+                                     Source(Instruction->getOperand(1)) });
+        return TRUE;
+    }
+    if (Instruction->getOpcode() == llvm::Instruction::UDiv || Instruction->getOpcode() == llvm::Instruction::URem)
+    {
+        BOOLEAN Quotient = Instruction->getOpcode() == llvm::Instruction::UDiv;
+
+        Emit(D3D10_SB_OPCODE_UDIV, { Quotient ? Dest(Instruction) : RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}),
+                                     Quotient ? RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}) : Dest(Instruction),
+                                     Source(Instruction->getOperand(0)), Source(Instruction->getOperand(1)) });
+        return TRUE;
+    }
+    if (RxBinaryOf(Instruction, &Binary))
+    {
+        llvm::Value *First = Instruction->getOperand(Binary.Swap ? 1 : 0);
+        llvm::Value *Second = Instruction->getOperand(Binary.Swap ? 0 : 1);
+        RxTokens Right = Source(Second);
+
+        if (Binary.Negate)
+            Right = RxModified(Right, D3D10_SB_OPERAND_MODIFIER_NEG);
+        Emit(Binary.Opcode, { Dest(Instruction), Source(First), Right });
+        return TRUE;
+    }
+
+    switch (Instruction->getOpcode())
+    {
+        case llvm::Instruction::Select:
+            Emit(D3D10_SB_OPCODE_MOVC, { Dest(Instruction), Source(Instruction->getOperand(0)), Source(Instruction->getOperand(1)),
+                                         Source(Instruction->getOperand(2)) });
+            return TRUE;
+        case llvm::Instruction::BitCast:
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::ZExt:
+            Emit(D3D10_SB_OPCODE_AND, { Dest(Instruction), Source(Instruction->getOperand(0)), RxImmediate(1) });
+            return TRUE;
+        case llvm::Instruction::SExt:
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::Trunc:
+        {
+            UINT Low = Fresh();
+
+            Emit(D3D10_SB_OPCODE_AND, { Temp(Low / 4, RxMaskMode, 1u << (Low & 3)), Source(Instruction->getOperand(0)), RxImmediate(1) });
+            Emit(D3D10_SB_OPCODE_INE, { Dest(Instruction), Temp(Low / 4, RxSelectMode, Low & 3), RxImmediate(0) });
+            return TRUE;
+        }
+        case llvm::Instruction::FPToSI:
+            Emit(D3D10_SB_OPCODE_FTOI, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::FPToUI:
+            Emit(D3D10_SB_OPCODE_FTOU, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::SIToFP:
+            Emit(D3D10_SB_OPCODE_ITOF, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::UIToFP:
+            if (Instruction->getOperand(0)->getType()->isIntegerTy(1))
+            {
+                UINT Low = Fresh();
+
+                Emit(D3D10_SB_OPCODE_AND, { Temp(Low / 4, RxMaskMode, 1u << (Low & 3)), Source(Instruction->getOperand(0)), RxImmediate(1) });
+                Emit(D3D10_SB_OPCODE_UTOF, { Dest(Instruction), Temp(Low / 4, RxSelectMode, Low & 3) });
+                return TRUE;
+            }
+            Emit(D3D10_SB_OPCODE_UTOF, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::ExtractValue:
+        {
+            llvm::ExtractValueInst *Extract = llvm::cast<llvm::ExtractValueInst>(Instruction);
+
+            Slots[Instruction] = SlotOf(Extract->getAggregateOperand()) + Extract->getIndices()[0];
+            return TRUE;
+        }
+        case llvm::Instruction::GetElementPtr:
+            return TRUE;
+        case llvm::Instruction::Load:
+        case llvm::Instruction::Store:
+        {
+            BOOLEAN Loading = Instruction->getOpcode() == llvm::Instruction::Load;
+            llvm::Value *Pointer = Loading ? Instruction->getOperand(0) : Instruction->getOperand(1);
+            llvm::GlobalVariable *Global;
+            llvm::Value *Index;
+            UINT Scale;
+            UINT Base;
+            UINT Offset = Fresh();
+            RxTokens Address;
+            RxTokens Region;
+
+            if (!RxSharedAddress(Pointer, &Global, &Index, &Scale, &Base) || SharedRegisters.count(Global) == 0)
+                return FALSE;
+            if (Index != nullptr)
+            {
+                Emit(D3D10_SB_OPCODE_ISHL, { Temp(Offset / 4, RxMaskMode, 1u << (Offset & 3)), Source(Index), RxImmediate(2) });
+                Address = Temp(Offset / 4, RxSelectMode, Offset & 3);
+            }
+            else
+            {
+                Address = RxImmediate(0);
+            }
+            if (Loading)
+            {
+                Region = RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxSelectMode, 0, { SharedRegisters[Global] });
+                Emit(D3D11_SB_OPCODE_LD_RAW, { Dest(Instruction), Address, Region });
+            }
+            else
+            {
+                Region = RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, 1, { SharedRegisters[Global] });
+                Emit(D3D11_SB_OPCODE_STORE_RAW, { Region, Address, Source(Instruction->getOperand(0)) });
+            }
+            return TRUE;
+        }
+        default:
+            return FALSE;
+    }
+}
+
+/* A call that only reads a value per lane: one DXBC instruction with the same operands */
+typedef struct _RX_SIMPLE
+{
+    OpCode Code;
+    UINT Opcode;
+    UINT Operands;
+    UINT Flags;
+    D3D10_SB_OPERAND_MODIFIER Modifier;
+} RX_SIMPLE;
+
+const RX_SIMPLE RxSimpleOps[] =
+{
+    { OpCode::FAbs, D3D10_SB_OPCODE_MOV, 1, 0, D3D10_SB_OPERAND_MODIFIER_ABS },
+    { OpCode::Saturate, D3D10_SB_OPCODE_MOV, 1, D3D10_SB_INSTRUCTION_SATURATE_MASK, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Exp, D3D10_SB_OPCODE_EXP, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Log, D3D10_SB_OPCODE_LOG, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Sqrt, D3D10_SB_OPCODE_SQRT, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Rsqrt, D3D10_SB_OPCODE_RSQ, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Frc, D3D10_SB_OPCODE_FRC, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Round_ne, D3D10_SB_OPCODE_ROUND_NE, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Round_ni, D3D10_SB_OPCODE_ROUND_NI, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Round_pi, D3D10_SB_OPCODE_ROUND_PI, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Round_z, D3D10_SB_OPCODE_ROUND_Z, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Bfrev, D3D11_SB_OPCODE_BFREV, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Countbits, D3D11_SB_OPCODE_COUNTBITS, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::FirstbitLo, D3D11_SB_OPCODE_FIRSTBIT_LO, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::FirstbitHi, D3D11_SB_OPCODE_FIRSTBIT_HI, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::FirstbitSHi, D3D11_SB_OPCODE_FIRSTBIT_SHI, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::DerivCoarseX, D3D11_SB_OPCODE_DERIV_RTX_COARSE, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::DerivCoarseY, D3D11_SB_OPCODE_DERIV_RTY_COARSE, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::DerivFineX, D3D11_SB_OPCODE_DERIV_RTX_FINE, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::DerivFineY, D3D11_SB_OPCODE_DERIV_RTY_FINE, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::LegacyF32ToF16, D3D11_SB_OPCODE_F32TOF16, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::LegacyF16ToF32, D3D11_SB_OPCODE_F16TOF32, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::FMax, D3D10_SB_OPCODE_MAX, 2, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::FMin, D3D10_SB_OPCODE_MIN, 2, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::IMax, D3D10_SB_OPCODE_IMAX, 2, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::IMin, D3D10_SB_OPCODE_IMIN, 2, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::UMax, D3D10_SB_OPCODE_UMAX, 2, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::UMin, D3D10_SB_OPCODE_UMIN, 2, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::FMad, D3D10_SB_OPCODE_MAD, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::IMad, D3D10_SB_OPCODE_IMAD, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::UMad, D3D10_SB_OPCODE_UMAD, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+};
+
+BOOLEAN
+RxLowering::LowerCall(
+    _In_ llvm::CallInst *Call)
+{
+    OpCode Code;
+    UINT Register;
+
+    if (!hlsl::OP::IsDxilOpFuncCallInst(Call))
+    {
+        llvm::StringRef Name = Call->getCalledFunction() ? Call->getCalledFunction()->getName() : llvm::StringRef();
+
+        return Name.startswith("llvm.dbg.") || Name.startswith("llvm.lifetime.");
+    }
+    Code = hlsl::OP::getOpCode(Call);
+
+    for (const RX_SIMPLE &Simple : RxSimpleOps)
+    {
+        if (Simple.Code != Code)
+            continue;
+        RxTokens First = Source(Call->getArgOperand(1));
+
+        if (Simple.Modifier != D3D10_SB_OPERAND_MODIFIER_NONE)
+            First = RxModified(First, Simple.Modifier);
+        if (Simple.Operands == 1)
+            Emit(Simple.Opcode, { Dest(Call), First }, Simple.Flags);
+        else if (Simple.Operands == 2)
+            Emit(Simple.Opcode, { Dest(Call), First, Source(Call->getArgOperand(2)) }, Simple.Flags);
+        else
+            Emit(Simple.Opcode, { Dest(Call), First, Source(Call->getArgOperand(2)), Source(Call->getArgOperand(3)) }, Simple.Flags);
+        return TRUE;
+    }
+
+    switch (Code)
+    {
+        case OpCode::LoadInput:
+        {
+            const hlsl::DxilSignatureElement &Element =
+                Dxil.GetInputSignature().GetElement((UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue());
+            llvm::ConstantInt *Row = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(2));
+            UINT Column = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(3))->getZExtValue() + Element.GetStartCol();
+
+            if (Row == nullptr || !llvm::isa<llvm::UndefValue>(Call->getArgOperand(4)))
+                return FALSE;
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxRegister(D3D10_SB_OPERAND_TYPE_INPUT, RxSelectMode, Column,
+                                                               { (UINT)Element.GetStartRow() + (UINT)Row->getZExtValue() }) });
+            return TRUE;
+        }
+        case OpCode::StoreOutput:
+        {
+            const hlsl::DxilSignatureElement &Element =
+                Dxil.GetOutputSignature().GetElement((UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue());
+            llvm::ConstantInt *Row = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(2));
+            UINT Column = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(3))->getZExtValue() + Element.GetStartCol();
+            hlsl::Semantic::Kind Kind = Element.GetKind();
+            RxTokens Target;
+
+            if (Row == nullptr)
+                return FALSE;
+            if (Kind == hlsl::Semantic::Kind::Depth || Kind == hlsl::Semantic::Kind::DepthLessEqual || Kind == hlsl::Semantic::Kind::DepthGreaterEqual)
+                Target = { ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_OUTPUT_DEPTH) | ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT) };
+            else if (Kind == hlsl::Semantic::Kind::Coverage)
+                Target = { ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_OUTPUT_COVERAGE_MASK) | ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT) };
+            else
+                Target = RxRegister(D3D10_SB_OPERAND_TYPE_OUTPUT, RxMaskMode, 1u << Column, { (UINT)Element.GetStartRow() + (UINT)Row->getZExtValue() });
+            Emit(D3D10_SB_OPCODE_MOV, { Target, Source(Call->getArgOperand(4)) });
+            return TRUE;
+        }
+        case OpCode::CreateHandle:
+            return TRUE;
+        case OpCode::CBufferLoadLegacy:
+        {
+            RX_HANDLE Handle;
+            llvm::Value *Row = Call->getArgOperand(2);
+            RxTokens Buffer;
+
+            if (!HandleOf(Call->getArgOperand(1), &Handle))
+                return FALSE;
+            Register = Fresh4();
+            Slots[Call] = Register * 4;
+            if (llvm::ConstantInt *Fixed = llvm::dyn_cast<llvm::ConstantInt>(Row))
+            {
+                Buffer = RxRegister(D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER, RxSwizzleMode, RxXyzw, { Handle.Slot, (UINT)Fixed->getZExtValue() });
+            }
+            else
+            {
+                UINT Slot = SlotOf(Row);
+
+                Buffer = { RxOperandHead(D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER, 2) | RxFourComponents(RxSwizzleMode, RxXyzw) |
+                           ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(1, D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE), Handle.Slot, 0 };
+                RxTokens Relative = Temp(Slot / 4, RxSelectMode, Slot & 3);
+
+                Buffer.insert(Buffer.end(), Relative.begin(), Relative.end());
+            }
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Register, RxMaskMode, 0xF), Buffer });
+            return TRUE;
+        }
+        case OpCode::ThreadId:
+        case OpCode::GroupId:
+        case OpCode::ThreadIdInGroup:
+        {
+            UINT Type = (Code == OpCode::ThreadId) ? D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID :
+                        (Code == OpCode::GroupId) ? D3D11_SB_OPERAND_TYPE_INPUT_THREAD_GROUP_ID : D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID_IN_GROUP;
+
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxRegister(Type, RxSelectMode,
+                                                               (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue(), {}) });
+            return TRUE;
+        }
+        case OpCode::FlattenedThreadIdInGroup:
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxRegister(D3D11_SB_OPERAND_TYPE_INPUT_THREAD_ID_IN_GROUP_FLATTENED, RxSelectMode, 0, {}) });
+            return TRUE;
+        case OpCode::Barrier:
+        {
+            UINT Mode = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(1))->getZExtValue();
+            UINT Flags = 0;
+
+            if (Mode & (UINT)hlsl::DXIL::BarrierMode::SyncThreadGroup)
+                Flags |= D3D11_SB_SYNC_THREADS_IN_GROUP;
+            if (Mode & (UINT)hlsl::DXIL::BarrierMode::TGSMFence)
+                Flags |= D3D11_SB_SYNC_THREAD_GROUP_SHARED_MEMORY;
+            if (Mode & (UINT)hlsl::DXIL::BarrierMode::UAVFenceThreadGroup)
+                Flags |= D3D11_SB_SYNC_UNORDERED_ACCESS_VIEW_MEMORY_GROUP;
+            if (Mode & (UINT)hlsl::DXIL::BarrierMode::UAVFenceGlobal)
+                Flags |= D3D11_SB_SYNC_UNORDERED_ACCESS_VIEW_MEMORY_GLOBAL;
+            Emit(D3D11_SB_OPCODE_SYNC, {}, ENCODE_D3D11_SB_SYNC_FLAGS(Flags));
+            return TRUE;
+        }
+        case OpCode::Discard:
+            Emit(D3D10_SB_OPCODE_DISCARD, { Source(Call->getArgOperand(1)) }, ENCODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(D3D10_SB_INSTRUCTION_TEST_NONZERO));
+            return TRUE;
+        case OpCode::Cos:
+        case OpCode::Sin:
+            Emit(D3D10_SB_OPCODE_SINCOS, { (Code == OpCode::Sin) ? Dest(Call) : RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}),
+                                           (Code == OpCode::Cos) ? Dest(Call) : RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}),
+                                           Source(Call->getArgOperand(1)) });
+            return TRUE;
+        case OpCode::Dot2:
+        case OpCode::Dot3:
+        case OpCode::Dot4:
+        {
+            UINT Width = (Code == OpCode::Dot2) ? 2 : (Code == OpCode::Dot3) ? 3 : 4;
+            UINT Left = GatherRange(Call, 1, Width);
+            UINT Right = GatherRange(Call, 1 + Width, Width);
+            UINT Opcode = (Width == 2) ? D3D10_SB_OPCODE_DP2 : (Width == 3) ? D3D10_SB_OPCODE_DP3 : D3D10_SB_OPCODE_DP4;
+
+            Emit(Opcode, { Dest(Call), Temp(Left, RxSwizzleMode, RxXyzw), Temp(Right, RxSwizzleMode, RxXyzw) });
+            return TRUE;
+        }
+        default:
+            return LowerResource(Call, Code);
+    }
+}
+
+UINT
+RxCoordinates(
+    _In_ UINT Kind)
+{
+    switch ((hlsl::DXIL::ResourceKind)Kind)
+    {
+        case hlsl::DXIL::ResourceKind::Texture1D:
+        case hlsl::DXIL::ResourceKind::TypedBuffer: return 1;
+        case hlsl::DXIL::ResourceKind::Texture1DArray:
+        case hlsl::DXIL::ResourceKind::Texture2D:
+        case hlsl::DXIL::ResourceKind::Texture2DMS: return 2;
+        default: return 3;
+    }
+}
+
+/* Constant texel offsets go in the extended opcode; others are not lowered */
+BOOLEAN
+RxOffsets(
+    _In_ llvm::CallInst *Call,
+    _In_ UINT First,
+    _Out_ RxTokens *Extended)
+{
+    UINT Token = ENCODE_D3D10_SB_EXTENDED_OPCODE_TYPE(D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS);
+    BOOLEAN Any = FALSE;
+
+    Extended->clear();
+    for (UINT Axis = 0; Axis < 3; Axis++)
+    {
+        llvm::Value *Value = Call->getArgOperand(First + Axis);
+        llvm::ConstantInt *Fixed = llvm::dyn_cast<llvm::ConstantInt>(Value);
+
+        if (llvm::isa<llvm::UndefValue>(Value))
+            continue;
+        if (Fixed == nullptr)
+            return FALSE;
+        Token |= ENCODE_IMMEDIATE_D3D10_SB_ADDRESS_OFFSET(Axis, (INT)Fixed->getSExtValue());
+        Any |= Fixed->getSExtValue() != 0;
+    }
+    if (Any)
+        Extended->push_back(Token);
+    return TRUE;
+}
+
+BOOLEAN
+RxLowering::LowerResource(
+    _In_ llvm::CallInst *Call,
+    _In_ OpCode Code)
+{
+    RX_HANDLE Handle;
+    RX_HANDLE Sampler = {};
+    RxTokens Extended;
+    UINT Result;
+    UINT Address;
+
+    if (Call->getNumArgOperands() < 2 || !HandleOf(Call->getArgOperand(1), &Handle))
+        return FALSE;
+    switch (Code)
+    {
+        case OpCode::Sample:
+        case OpCode::SampleBias:
+        case OpCode::SampleLevel:
+        case OpCode::SampleCmp:
+        case OpCode::SampleCmpLevelZero:
+        {
+            UINT Count = RxCoordinates(Handle.Kind) + ((Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
+                                                        Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::TextureCubeArray) ? 1 : 0);
+            RxTokens SamplerOperand;
+
+            if (!HandleOf(Call->getArgOperand(2), &Sampler) || !RxOffsets(Call, 7, &Extended))
+                return FALSE;
+            Address = GatherRange(Call, 3, Count);
+            Result = Fresh4();
+            Slots[Call] = Result * 4;
+            SamplerOperand = RxBare(D3D10_SB_OPERAND_TYPE_SAMPLER, { Sampler.Slot });
+            switch (Code)
+            {
+                case OpCode::Sample:
+                    Emit(D3D10_SB_OPCODE_SAMPLE, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle),
+                                                   SamplerOperand }, 0, Extended.empty() ? nullptr : &Extended);
+                    break;
+                case OpCode::SampleBias:
+                case OpCode::SampleLevel:
+                    Emit((Code == OpCode::SampleBias) ? D3D10_SB_OPCODE_SAMPLE_B : D3D10_SB_OPCODE_SAMPLE_L,
+                         { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle), SamplerOperand,
+                           Source(Call->getArgOperand(10)) }, 0, Extended.empty() ? nullptr : &Extended);
+                    break;
+                default:
+                    Emit((Code == OpCode::SampleCmp) ? D3D10_SB_OPCODE_SAMPLE_C : D3D10_SB_OPCODE_SAMPLE_C_LZ,
+                         { Temp(Result, RxMaskMode, 1), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle, RxSelectMode, 0),
+                           SamplerOperand, Source(Call->getArgOperand(10)) }, 0, Extended.empty() ? nullptr : &Extended);
+                    break;
+            }
+            return TRUE;
+        }
+        case OpCode::TextureLoad:
+        {
+            BOOLEAN Multisampled = Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DMS ||
+                                   Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DMSArray;
+            UINT Count = RxCoordinates(Handle.Kind) + ((Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
+                                                        Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture1DArray ||
+                                                        Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DMSArray) ? 1 : 0);
+
+            if (Count > 3 || !RxOffsets(Call, 6, &Extended))
+                return FALSE;
+            Address = Fresh4();
+            for (UINT Component = 0; Component < 3; Component++)
+                Emit(D3D10_SB_OPCODE_MOV, { Temp(Address, RxMaskMode, 1u << Component),
+                                            (Component < Count) ? Source(Call->getArgOperand(3 + Component)) : RxImmediate(0) });
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Address, RxMaskMode, 8), Multisampled ? RxImmediate(0) : Source(Call->getArgOperand(2)) });
+            Result = Fresh4();
+            Slots[Call] = Result * 4;
+            if (Multisampled)
+                Emit(D3D10_SB_OPCODE_LD_MS, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle),
+                                              Source(Call->getArgOperand(2)) }, 0, Extended.empty() ? nullptr : &Extended);
+            else
+                Emit(D3D10_SB_OPCODE_LD, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle) }, 0,
+                     Extended.empty() ? nullptr : &Extended);
+            return TRUE;
+        }
+        case OpCode::BufferLoad:
+        case OpCode::RawBufferLoad:
+        {
+            UINT Kind = Handle.Kind;
+
+            Result = Fresh4();
+            Slots[Call] = Result * 4;
+            if (Kind == (UINT)hlsl::DXIL::ResourceKind::RawBuffer)
+                Emit(D3D11_SB_OPCODE_LD_RAW, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)), ResourceOperand(Handle) });
+            else if (Kind == (UINT)hlsl::DXIL::ResourceKind::StructuredBuffer)
+                Emit(D3D11_SB_OPCODE_LD_STRUCTURED, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)),
+                                                      Source(Call->getArgOperand(3)), ResourceOperand(Handle) });
+            else if (Handle.Class == (UINT)hlsl::DXIL::ResourceClass::UAV)
+                Emit(D3D11_SB_OPCODE_LD_UAV_TYPED, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)), ResourceOperand(Handle) });
+            else
+                Emit(D3D10_SB_OPCODE_LD, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)), ResourceOperand(Handle) });
+            return TRUE;
+        }
+        case OpCode::BufferStore:
+        case OpCode::RawBufferStore:
+        case OpCode::TextureStore:
+        {
+            BOOLEAN Texture = Code == OpCode::TextureStore;
+            UINT First = Texture ? 5 : 4;
+            UINT Mask = (UINT)llvm::cast<llvm::ConstantInt>(Call->getArgOperand(First + 4))->getZExtValue();
+            UINT Values = GatherRange(Call, First, 4);
+            UINT Kind = Handle.Kind;
+
+            if (Texture)
+            {
+                Address = GatherRange(Call, 2, RxCoordinates(Kind) + ((Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
+                                                                      Kind == (UINT)hlsl::DXIL::ResourceKind::Texture1DArray) ? 1 : 0));
+                Emit(D3D11_SB_OPCODE_STORE_UAV_TYPED, { ResourceOperand(Handle, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw),
+                                                        Temp(Values, RxSwizzleMode, RxXyzw) });
+            }
+            else if (Kind == (UINT)hlsl::DXIL::ResourceKind::RawBuffer)
+            {
+                Emit(D3D11_SB_OPCODE_STORE_RAW, { ResourceOperand(Handle, RxMaskMode, Mask), Source(Call->getArgOperand(2)),
+                                                  Temp(Values, RxSwizzleMode, RxXyzw) });
+            }
+            else if (Kind == (UINT)hlsl::DXIL::ResourceKind::StructuredBuffer)
+            {
+                Emit(D3D11_SB_OPCODE_STORE_STRUCTURED, { ResourceOperand(Handle, RxMaskMode, Mask), Source(Call->getArgOperand(2)),
+                                                         Source(Call->getArgOperand(3)), Temp(Values, RxSwizzleMode, RxXyzw) });
+            }
+            else
+            {
+                Address = Gather({ Call->getArgOperand(2), Call->getArgOperand(2), Call->getArgOperand(2), Call->getArgOperand(2) });
+                Emit(D3D11_SB_OPCODE_STORE_UAV_TYPED, { ResourceOperand(Handle, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw),
+                                                        Temp(Values, RxSwizzleMode, RxXyzw) });
+            }
+            return TRUE;
+        }
+        default:
+            return FALSE;
+    }
+}
+
+/* Phi values for the edge From to To; copied through fresh temps so swaps stay right */
+VOID
+RxLowering::Edge(
+    _In_ llvm::BasicBlock *From,
+    _In_ llvm::BasicBlock *To)
+{
+    std::vector<std::pair<UINT, UINT>> Moves;
+
+    for (llvm::Instruction &Instruction : *To)
+    {
+        llvm::PHINode *Phi = llvm::dyn_cast<llvm::PHINode>(&Instruction);
+        UINT Staging;
+
+        if (Phi == nullptr)
+            break;
+        Staging = Fresh();
+        Emit(D3D10_SB_OPCODE_MOV, { Temp(Staging / 4, RxMaskMode, 1u << (Staging & 3)), Source(Phi->getIncomingValueForBlock(From)) });
+        Moves.push_back({ SlotOf(Phi), Staging });
+    }
+    for (const std::pair<UINT, UINT> &Move : Moves)
+        Emit(D3D10_SB_OPCODE_MOV, { Temp(Move.first / 4, RxMaskMode, 1u << (Move.first & 3)), Temp(Move.second / 4, RxSelectMode, Move.second & 3) });
+}
+
+/* Branching to the open loop's header continues it, to its exit breaks out */
+BOOLEAN
+RxLowering::Leaves(
+    _In_ llvm::BasicBlock *From,
+    _In_ llvm::BasicBlock *Target)
+{
+    if (Open.empty())
+        return FALSE;
+    if (Target == Open.back().Header)
+    {
+        Edge(From, Target);
+        Emit(D3D10_SB_OPCODE_CONTINUE, {});
+        return TRUE;
+    }
+    if (Target == Open.back().Exit)
+    {
+        Edge(From, Target);
+        Emit(D3D10_SB_OPCODE_BREAK, {});
+        return TRUE;
+    }
+    return FALSE;
+}
+
+BOOLEAN
+RxLowering::Arm(
+    _In_ llvm::BasicBlock *From,
+    _In_ llvm::BasicBlock *Target,
+    _In_opt_ llvm::BasicBlock *Merge)
+{
+    if (Leaves(From, Target))
+        return TRUE;
+    if (Target == Merge)
+    {
+        Edge(From, Target);
+        return TRUE;
+    }
+    Edge(From, Target);
+    return Region(Target, Merge);
+}
+
+BOOLEAN
+RxLowering::Region(
+    _In_ llvm::BasicBlock *Block,
+    _In_opt_ llvm::BasicBlock *Stop)
+{
+    while (Block != nullptr && Block != Stop)
+    {
+        llvm::Loop *Loop = Loops.getLoopFor(Block);
+        llvm::TerminatorInst *Terminator;
+
+        /* Entering a loop: its body runs until a break */
+        if (Loop != nullptr && Loop->getHeader() == Block && (Open.empty() || Open.back().Header != Block))
+        {
+            llvm::BasicBlock *Exit = Loop->getExitBlock();
+
+            if (Exit == nullptr)
+                return FALSE;
+            Open.push_back({ Block, Exit, Loop });
+            Emit(D3D10_SB_OPCODE_LOOP, {});
+            if (!Region(Block, nullptr))
+                return FALSE;
+            Emit(D3D10_SB_OPCODE_ENDLOOP, {});
+            Open.pop_back();
+            Block = Exit;
+            continue;
+        }
+
+        for (llvm::Instruction &Instruction : *Block)
+        {
+            if (!Lower(&Instruction))
+            {
+                std::string Text;
+                llvm::raw_string_ostream Stream(Text);
+
+                Instruction.print(Stream);
+                Stream.flush();
+                OutputDebugStringA(("WARP: DXIL instruction not lowered: " + Text + "\n").c_str());
+                return FALSE;
+            }
+        }
+
+        Terminator = Block->getTerminator();
+        if (llvm::isa<llvm::ReturnInst>(Terminator))
+        {
+            Emit(D3D10_SB_OPCODE_RET, {});
+            return TRUE;
+        }
+        llvm::BranchInst *Branch = llvm::dyn_cast<llvm::BranchInst>(Terminator);
+        if (Branch == nullptr)
+            return FALSE;
+        if (Branch->isUnconditional())
+        {
+            llvm::BasicBlock *Next = Branch->getSuccessor(0);
+
+            if (Leaves(Block, Next))
+                return TRUE;
+            Edge(Block, Next);
+            Block = Next;
+            continue;
+        }
+
+        llvm::DomTreeNodeBase<llvm::BasicBlock> *Node = PostDominators.getNode(Block);
+        llvm::BasicBlock *Merge = (Node && Node->getIDom()) ? Node->getIDom()->getBlock() : nullptr;
+
+        /* A merge outside the open loop means both arms leave the iteration */
+        if (Merge != nullptr && !Open.empty() && !Open.back().Loop->contains(Merge))
+            Merge = nullptr;
+        Emit(D3D10_SB_OPCODE_IF, { Source(Branch->getCondition()) }, ENCODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(D3D10_SB_INSTRUCTION_TEST_NONZERO));
+        if (!Arm(Block, Branch->getSuccessor(0), Merge))
+            return FALSE;
+        Emit(D3D10_SB_OPCODE_ELSE, {});
+        if (!Arm(Block, Branch->getSuccessor(1), Merge))
+            return FALSE;
+        Emit(D3D10_SB_OPCODE_ENDIF, {});
+        if (Merge == nullptr)
+            return TRUE;
+        Block = Merge;
+    }
+    return TRUE;
+}
+
+BOOLEAN
+RxLowering::Run(
+    _Out_ RxTokens *Program)
+{
+    llvm::Function *Entry = Dxil.GetEntryFunction();
+    const hlsl::ShaderModel *Model = Dxil.GetShaderModel();
+    UINT Type;
+
+    if (Entry == nullptr)
+        return FALSE;
+    if (Model->IsPS())
+        Type = D3D10_SB_PIXEL_SHADER;
+    else if (Model->IsVS())
+        Type = D3D10_SB_VERTEX_SHADER;
+    else if (Model->IsGS())
+        Type = D3D10_SB_GEOMETRY_SHADER;
+    else if (Model->IsCS())
+        Type = D3D11_SB_COMPUTE_SHADER;
+    else
+        return FALSE;
+
+    if (!Declarations())
+        return FALSE;
+    Dominators.recalculate(*Entry);
+    PostDominators.recalculate(*Entry);
+    Loops.Analyze(Dominators);
+    if (!Region(&Entry->getEntryBlock(), nullptr))
+        return FALSE;
+
+    Program->clear();
+    Program->push_back(ENCODE_D3D10_SB_TOKENIZED_PROGRAM_VERSION_TOKEN(Type, 5, 0));
+    Program->push_back(0);
+    Program->insert(Program->end(), Decls.begin(), Decls.end());
+    Program->insert(Program->end(), { ENCODE_D3D10_SB_OPCODE_TYPE(D3D10_SB_OPCODE_DCL_TEMPS) | ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(2),
+                                      (NextSlot + 3) / 4 });
+    Program->insert(Program->end(), Body.begin(), Body.end());
+    (*Program)[1] = (UINT)Program->size();
+    return TRUE;
+}
+
+} /* namespace */
+
+BOOLEAN
+RxWarpIsDxil(
+    _In_ const UINT *Code)
+{
+    return Code != nullptr && Code[2] == RxWarpDxilMagic;
+}
+
+BOOLEAN
+RxWarpDxilAttach(VOID)
+{
+    if (FAILED(DxcInitThreadMalloc()))
+        return FALSE;
+    DxcSetThreadMallocToDefault();
+    if (llvm::sys::fs::SetupPerThreadFileSystem())
+    {
+        DxcClearThreadMalloc();
+        DxcCleanupThreadMalloc();
+        return FALSE;
+    }
+    DxcClearThreadMalloc();
+    return TRUE;
+}
+
+VOID
+RxWarpDxilDetach(VOID)
+{
+    DxcSetThreadMallocToDefault();
+    llvm::sys::fs::CleanupPerThreadFileSystem();
+    llvm::llvm_shutdown();
+    DxcClearThreadMalloc();
+    DxcCleanupThreadMalloc();
+}
+
+UINT *
+RxWarpLowerDxil(
+    _In_ const UINT *Code)
+{
+    DxcThreadMalloc Scope(nullptr);
+    const BYTE *Bitcode = reinterpret_cast<const BYTE *>(Code) + 8 + Code[4];
+    UINT *Tokens = nullptr;
+
+    try
+    {
+        llvm::LLVMContext Context;
+        llvm::MemoryBufferRef Buffer(llvm::StringRef(reinterpret_cast<const char *>(Bitcode), Code[5]), "");
+        llvm::ErrorOr<std::unique_ptr<llvm::Module>> Module = llvm::parseBitcodeFile(Buffer, Context);
+        RxTokens Program;
+
+        if (!Module)
+            return nullptr;
+        hlsl::DxilModule &Dxil = (*Module)->GetOrCreateDxilModule();
+        RxLowering Lowering(Dxil);
+
+        if (!Lowering.Run(&Program))
+            return nullptr;
+        Tokens = static_cast<UINT *>(HeapAlloc(GetProcessHeap(), 0, Program.size() * sizeof(UINT)));
+        if (Tokens != nullptr)
+            memcpy(Tokens, Program.data(), Program.size() * sizeof(UINT));
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+    return Tokens;
+}
+
+VOID
+RxWarpFreeLowered(
+    _In_opt_ UINT *Tokens)
+{
+    if (Tokens != nullptr)
+        HeapFree(GetProcessHeap(), 0, Tokens);
+}
