@@ -4266,6 +4266,101 @@ NcCheckCursor(
     Plain->Release();
 }
 
+/* Present statistics of a windowed chain; times vary from run to run, so only the counts print */
+static
+VOID
+NcCheckPresentStatsOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSwapChain9* Chain = nullptr;
+    IDirect3DSwapChain9Ex* ChainEx = nullptr;
+    D3DPRESENTSTATS Stats;
+    UINT Count;
+    HRESULT hr;
+
+    Device->GetSwapChain(0, &Chain);
+    if (Chain == nullptr)
+        return;
+    hr = Chain->QueryInterface(__uuidof(IDirect3DSwapChain9Ex), reinterpret_cast<VOID**>(&ChainEx));
+    printf("%s_chain_ex = %08lX\n", Prefix, hr);
+    Chain->Release();
+    if (ChainEx == nullptr)
+        return;
+    for (UINT Round = 0; Round < 4; Round++)
+    {
+        Count = 0xCCCCCCCC;
+        hr = ChainEx->GetLastPresentCount(&Count);
+        printf("%s_last[%u] = %08lX %u\n", Prefix, Round, hr, Count);
+        memset(&Stats, 0xCC, sizeof(Stats));
+        hr = ChainEx->GetPresentStats(&Stats);
+        printf("%s_stats[%u] = %08lX count %u %s\n", Prefix, Round, hr, Stats.PresentCount,
+               Stats.PresentCount == 0xCCCCCCCC ? "untouched" : "written");
+        Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0);
+        printf("%s_present[%u] = %08lX\n", Prefix, Round, Device->Present(nullptr, nullptr, nullptr, nullptr));
+    }
+    /* GetLastPresentCount without an output pointer is left out: the system writes through it and crashes */
+    ChainEx->Release();
+}
+
+static
+VOID
+NcCheckPresentStats(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        D3DSWAPEFFECT SwapEffect;
+        DWORD Behavior;
+        BOOLEAN Plain;
+    } Cases[] =
+    {
+        { "stats_discard", D3DSWAPEFFECT_DISCARD, D3DCREATE_ENABLE_PRESENTSTATS, FALSE },
+        { "stats_copy", D3DSWAPEFFECT_COPY, D3DCREATE_ENABLE_PRESENTSTATS, FALSE },
+        { "stats_flipex", D3DSWAPEFFECT_FLIPEX, D3DCREATE_ENABLE_PRESENTSTATS, FALSE },
+        { "stats_flipex_off", D3DSWAPEFFECT_FLIPEX, 0, FALSE },
+        { "stats_discard_off", D3DSWAPEFFECT_DISCARD, 0, FALSE },
+        { "stats_plain", D3DSWAPEFFECT_DISCARD, D3DCREATE_ENABLE_PRESENTSTATS, TRUE },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+
+    for (const auto& Case : Cases)
+    {
+        D3DPRESENT_PARAMETERS Parameters = {};
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+        HRESULT hr;
+
+        Parameters.Windowed = TRUE;
+        Parameters.SwapEffect = Case.SwapEffect;
+        Parameters.BackBufferCount = Case.SwapEffect == D3DSWAPEFFECT_FLIPEX ? 2 : 1;
+        Parameters.hDeviceWindow = Window;
+        if (Case.Plain)
+        {
+            hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING | Case.Behavior,
+                                     &Parameters, &Device);
+        }
+        else
+        {
+            hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window,
+                                           D3DCREATE_HARDWARE_VERTEXPROCESSING | Case.Behavior, &Parameters, nullptr,
+                                           &DeviceEx);
+            Device = DeviceEx;
+        }
+        printf("%s_create = %08lX\n", Case.Name, hr);
+        if (Device == nullptr)
+            continue;
+        sprintf_s(Name, "%s", Case.Name);
+        NcCheckPresentStatsOn(Name, Device);
+        printf("%s_release = %lu\n", Case.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -4292,6 +4387,7 @@ static const NineCheckInfo NcChecks[] =
     { "gamma", NcCheckGamma },
     { "shared", NcCheckShared },
     { "cursor", NcCheckCursor },
+    { "presentstats", NcCheckPresentStats },
 };
 
 static
