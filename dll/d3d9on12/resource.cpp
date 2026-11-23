@@ -757,6 +757,7 @@ NineFreeResource(
         Resource->Underlying->ClearInputBindings();
         Resource->Underlying->ClearOutputBindings();
     }
+    NineUnbindOutputs(Resource);
     for (std::unique_ptr<TL::TDSV>& View : Resource->Dsvs)
         View.reset();
 
@@ -843,7 +844,6 @@ NineDestroyResource(
 }
 
 /* Maps a runtime subresource and plane to the translation layer's subresource */
-static
 UINT
 NineSubresourceOf(
     _In_ const NineResource* Resource,
@@ -973,9 +973,12 @@ NineLockSubresource(
     _In_reads_(6) const UINT* Region,
     _Out_ VOID** Data,
     _Out_ UINT* Pitch,
-    _Out_ UINT* SlicePitch)
+    _Out_ UINT* SlicePitch,
+    _In_ BOOLEAN Async,
+    _Out_opt_ HANDLE* Cookie)
 {
     NineDevice* Device = Resource->Device;
+    TL::Resource* RenameCookie = nullptr;
     NineLockState* Lock;
     TL::MappedSubresource Mapped = {};
     TL::Resource* Underlying;
@@ -995,6 +998,31 @@ NineLockSubresource(
         LockFlags = Lock->Flags;
     else
         Lock->Flags = LockFlags;
+
+    /* Asynchronous locks only rename or append to write only buffers */
+    if (Async)
+    {
+        if ((LockFlags & (NineLockNoOverwrite | NineLockDiscard)) == 0 ||
+            (Resource->CpuAccess & TL::RESOURCE_CPU_ACCESS_READ) != 0 ||
+            Resource->Typed.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+        {
+            return E_NOTIMPL;
+        }
+        if ((LockFlags & NineLockDiscard) != 0)
+        {
+            if (Lock->Count == 0)
+            {
+                RenameCookie = Device->Context->CreateRenameCookie(Resource->Underlying.get(),
+                                                                   TL::ResourceAllocationContext::FreeThread);
+                *Cookie = RenameCookie;
+                Resource->Renamed = RenameCookie->GetIdentity()->m_suballocation;
+            }
+        }
+        else if (!Resource->Renamed.IsInitialized())
+        {
+            return E_NOTIMPL;
+        }
+    }
 
     if ((LockFlags & NineLockRegionMask) != 0)
     {
@@ -1066,7 +1094,24 @@ NineLockSubresource(
         MapType = NineMergeDiscard(Resource, Range);
     }
 
-    switch (Underlying->AppDesc()->Usage())
+    if (Async)
+    {
+        const D3D12_RANGE NothingRead = {};
+        const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& Placement = Underlying->GetSubresourcePlacement(Sub);
+        BYTE* Base = nullptr;
+        UINT Slice = 0;
+
+        Resource->Renamed.GetResource()->Map(0, &NothingRead, reinterpret_cast<VOID**>(&Base));
+        if (Base != nullptr)
+            Base += Resource->Renamed.GetOffset();
+        *Data = Base + (Box != nullptr ? Box->left : 0);
+        *Pitch = Placement.Footprint.RowPitch;
+        CD3D11FormatHelper::CalculateMinimumRowMajorSlicePitch(Placement.Footprint.Format, Placement.Footprint.RowPitch,
+                                                                Placement.Footprint.Height, Slice);
+        *SlicePitch = Slice;
+        Done = true;
+    }
+    else switch (Underlying->AppDesc()->Usage())
     {
         case TL::RESOURCE_USAGE_DEFAULT:
             Done = Device->Context->MapDefault(Underlying, Sub, MapType, DoNotWait, Box, &Mapped);
@@ -1094,11 +1139,18 @@ NineLockSubresource(
     }
 
     if (!Done)
+    {
+        if (RenameCookie != nullptr)
+            Device->Context->DeleteRenameCookie(RenameCookie);
         return D3DERR_WASSTILLDRAWING;
+    }
 
-    *Data = Mapped.pData;
-    *Pitch = Mapped.RowPitch;
-    *SlicePitch = Mapped.DepthPitch;
+    if (!Async)
+    {
+        *Data = Mapped.pData;
+        *Pitch = Mapped.RowPitch;
+        *SlicePitch = Mapped.DepthPitch;
+    }
     if (MapType != TL::MAP_TYPE_READ)
     {
         Resource->GpuWrites = 0;
@@ -1113,7 +1165,8 @@ VOID
 NineUnlockSubresource(
     _Inout_ NineResource* Resource,
     _In_ UINT Sub,
-    _In_ UINT UnlockFlags)
+    _In_ UINT UnlockFlags,
+    _In_ BOOLEAN Async)
 {
     NineDevice* Device = Resource->Device;
     NineLockState* Lock;
@@ -1127,6 +1180,20 @@ NineUnlockSubresource(
     Lock = &Resource->Locks[Sub];
     Lock->Count -= 1;
     Box = (Lock->Flags & NineLockRegionMask) != 0 ? &Lock->Box : nullptr;
+
+    /* A renamed buffer was written through its own mapping */
+    if (Async && Resource->Renamed.IsInitialized())
+    {
+        D3D12_RANGE Written = {};
+
+        if (Resource->Desc.Width != 0)
+        {
+            Written.Begin = Resource->Renamed.GetOffset();
+            Written.End = Resource->Renamed.GetOffset() + Resource->Desc.Width;
+        }
+        Resource->Renamed.GetResource()->Unmap(0, &Written);
+        return;
+    }
 
     Underlying = Resource->Underlying.get();
     if (Underlying == nullptr)
@@ -1188,7 +1255,7 @@ NineLock(
             UINT Sub = NineSubresourceOf(Resource, Args->SubResourceIndex, Plane, FALSE);
 
             hr = NineLockSubresource(Resource, Sub, Args->Flags.Value, Region, &Data[Plane], &Pitch[Plane],
-                                     &SlicePitch[Plane]);
+                                     &SlicePitch[Plane], FALSE, nullptr);
         }
     }
     catch (_com_error& Error)
@@ -1225,7 +1292,101 @@ NineUnlock(
     {
         for (UINT Plane = 0; Plane < Resource->PlaneCount; Plane += 1)
             NineUnlockSubresource(Resource, NineSubresourceOf(Resource, Args->SubResourceIndex, Plane, FALSE),
-                                  Args->Flags.Value);
+                                  Args->Flags.Value, FALSE);
+    }
+    catch (_com_error& Error)
+    {
+        return NineDxgiResult(Error.Error());
+    }
+    catch (std::bad_alloc&)
+    {
+        return E_OUTOFMEMORY;
+    }
+    return NineDxgiResult(S_OK);
+}
+
+/* Asynchronous lock flags in the bit order of the regular lock flags; asynchronous locks always write */
+static
+UINT
+NineAsyncLockFlags(
+    _In_ UINT Flags)
+{
+    UINT Lock = (Flags & 0x1F) << 2;
+
+    if ((Flags & 0x40) != 0)
+        Lock |= NineLockNotifyOnly;
+    return Lock | 0x2;
+}
+
+HRESULT
+APIENTRY
+NineLockAsync(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_LOCKASYNC* Args)
+{
+    NineResource* Resource;
+    HANDLE Cookie = nullptr;
+    UINT Region[6];
+    HRESULT hr = S_OK;
+
+    if (hDevice == NULL || Args == nullptr)
+        return E_INVALIDARG;
+
+    Resource = NineResourceFrom(Args->hResource);
+    if (Resource == nullptr)
+    {
+        NineTrace(L"asynchronous lock of a null resource");
+        return E_INVALIDARG;
+    }
+
+    CopyMemory(Region, &Args->Box, sizeof(Region));
+    try
+    {
+        for (UINT Plane = 0; Plane < Resource->PlaneCount && SUCCEEDED(hr); Plane += 1)
+        {
+            UINT Sub = NineSubresourceOf(Resource, Args->SubResourceIndex, Plane, FALSE);
+
+            hr = NineLockSubresource(Resource, Sub, NineAsyncLockFlags(Args->Flags.Value), Region, &Args->pSurfData,
+                                     &Args->Pitch, &Args->SlicePitch, TRUE,
+                                     Resource->PlaneCount > 1 ? nullptr : &Cookie);
+        }
+    }
+    catch (_com_error& Error)
+    {
+        hr = Error.Error();
+    }
+    catch (std::bad_alloc&)
+    {
+        hr = E_OUTOFMEMORY;
+    }
+
+    Args->hCookie = Cookie;
+    return NineDxgiResult(hr);
+}
+
+HRESULT
+APIENTRY
+NineUnlockAsync(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_UNLOCKASYNC* Args)
+{
+    NineResource* Resource;
+
+    if (hDevice == NULL || Args == nullptr)
+        return E_INVALIDARG;
+
+    Resource = NineResourceFrom(Args->hResource);
+    if (Resource == nullptr)
+    {
+        NineTrace(L"asynchronous unlock of a null resource");
+        return E_INVALIDARG;
+    }
+
+    try
+    {
+        for (UINT Plane = 0; Plane < Resource->PlaneCount; Plane += 1)
+            NineUnlockSubresource(Resource, NineSubresourceOf(Resource, Args->SubResourceIndex, Plane, FALSE),
+                                  Args->Flags.Value & NineUnlockNotifyOnly, TRUE);
     }
     catch (_com_error& Error)
     {

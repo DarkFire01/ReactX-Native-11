@@ -56,9 +56,25 @@ struct NineStageConstants
     BOOLEAN Dirty[NineConstantKindCount];
 };
 
+struct NineResource;
+
+/* A render target slot: the surface and the translation layer subresource drawn to */
+struct NineTargetSlot
+{
+    NineResource* Resource;
+    UINT Sub;
+};
+
+static constexpr UINT NineTargetCount = 4;
+
 /* The fixed function and pipeline state the DDI sets between draws */
 struct NineDeviceState
 {
+    NineTargetSlot Targets[NineTargetCount];
+    UINT TargetMask;
+    UINT TargetsUsed;
+    NineResource* DepthStencil;
+
     DWORD RenderStates[NineRenderStateCount];
     DWORD StageStates[NineStageCount][NineStageStateCount];
     NineStageConstants VertexConstants;
@@ -71,8 +87,6 @@ struct NineDeviceState
     RECT Scissor;
     D3DDDIARG_WINFO WInfo;
 };
-
-struct NineResource;
 
 /* A byte range of a buffer locked with discard, kept to turn adjacent discards into no overwrite locks */
 struct NineLockRange
@@ -186,6 +200,10 @@ struct NineResource
     std::unique_ptr<TL::TSRV> SrgbSrv;
     UINT TextureType;
 
+    /* Render target slots and the depth slot this resource is bound to */
+    std::vector<UINT> TargetSlots;
+    BOOLEAN BoundAsDepth;
+
     /* The renamed allocation an asynchronous discard lock handed out */
     TL::D3D12ResourceSuballocation Renamed;
 };
@@ -214,6 +232,58 @@ APIENTRY
 NineUnlock(
     _In_ HANDLE hDevice,
     _In_ const D3DDDIARG_UNLOCK* Args);
+
+HRESULT
+APIENTRY
+NineLockAsync(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_LOCKASYNC* Args);
+
+HRESULT
+APIENTRY
+NineUnlockAsync(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_UNLOCKASYNC* Args);
+
+/* The translation layer subresource of a runtime subresource index and plane */
+UINT
+NineSubresourceOf(
+    _In_ const NineResource* Resource,
+    _In_ UINT Index,
+    _In_ UINT Plane,
+    _In_ BOOLEAN Expanded);
+
+/* output.cpp */
+HRESULT
+APIENTRY
+NineSetRenderTarget(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SETRENDERTARGET* Args);
+
+HRESULT
+APIENTRY
+NineSetDepthStencil(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_SETDEPTHSTENCIL* Args);
+
+HRESULT
+APIENTRY
+NineClear(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_CLEAR* Args,
+    _In_ UINT NumRects,
+    _In_reads_opt_(NumRects) const RECT* Rects);
+
+HRESULT
+APIENTRY
+NineColorFill(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_COLORFILL* Args);
+
+/* Takes a resource out of every render target and depth slot it is bound to */
+VOID
+NineUnbindOutputs(
+    _Inout_ NineResource* Resource);
 
 /* device.cpp */
 HRESULT

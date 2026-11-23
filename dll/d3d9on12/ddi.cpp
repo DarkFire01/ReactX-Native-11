@@ -115,7 +115,7 @@ NineFillDeviceFuncs(
     Functions->pfnTexBlt = nullptr;
     Functions->pfnStateSet = NineFixedAnswer<S_OK>;
     Functions->pfnSetPriority = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnClear, 21);
+    Functions->pfnClear = NineClear;
     Functions->pfnUpdatePalette = NineFixedAnswer<NotDone>;
     Functions->pfnSetPalette = NineFixedAnswer<NotDone>;
     Functions->pfnSetVertexShaderConst = NineSetVertexShaderConst;
@@ -150,14 +150,14 @@ NineFillDeviceFuncs(
     Functions->pfnSetConvolutionKernelMono = NineFixedAnswer<NotDone>;
     Functions->pfnComposeRects = NineFixedAnswer<NotDone>;
     NINE_MISSING(pfnBlt, 55);
-    NINE_MISSING(pfnColorFill, 56);
+    Functions->pfnColorFill = NineColorFill;
     NINE_MISSING(pfnDepthFill, 57);
     NINE_MISSING(pfnCreateQuery, 58);
     NINE_MISSING(pfnDestroyQuery, 59);
     NINE_MISSING(pfnIssueQuery, 60);
     NINE_MISSING(pfnGetQueryData, 61);
-    NINE_MISSING(pfnSetRenderTarget, 62);
-    NINE_MISSING(pfnSetDepthStencil, 63);
+    Functions->pfnSetRenderTarget = NineSetRenderTarget;
+    Functions->pfnSetDepthStencil = NineSetDepthStencil;
     NINE_MISSING(pfnGenerateMipSubLevels, 64);
     Functions->pfnSetPixelShaderConstI = NineSetPixelShaderConstI;
     Functions->pfnSetPixelShaderConstB = NineSetPixelShaderConstB;
@@ -190,8 +190,8 @@ NineFillDeviceFuncs(
     NINE_MISSING(pfnOpenResource, 93);
     Functions->pfnGetCaptureAllocationHandle = NineFixedAnswer<NotDone>;
     Functions->pfnCaptureToSysMem = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnLockAsync, 96);
-    NINE_MISSING(pfnUnlockAsync, 97);
+    Functions->pfnLockAsync = NineLockAsync;
+    Functions->pfnUnlockAsync = NineUnlockAsync;
     NINE_MISSING(pfnRename, 98);
     NINE_MISSING(pfnCreateVideoProcessor, 99);
     NINE_MISSING(pfnSetVideoProcessBltState, 100);
