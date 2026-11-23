@@ -1169,6 +1169,7 @@ D9Device::ResetCommon(
        object's device also starts over with its batch and drawing buffers */
     if (!IsEx)
         StopBatch();
+    UnpinTargets();
     for (D9Surface*& Bound : RenderTargets)
         Bound = nullptr;
     DepthStencil = nullptr;
