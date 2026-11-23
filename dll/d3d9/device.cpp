@@ -335,7 +335,8 @@ D9Device::BindRenderTargets(VOID)
         Bound = nullptr;
     RenderTargets[0] = ImplicitChain->BackBuffer(0);
     DepthStencil = AutoDepthStencil;
-    TargetsDirty = TRUE;
+    TargetsDirty |= 1;
+    DepthDirty = TRUE;
 }
 
 VOID
@@ -344,15 +345,25 @@ D9Device::SendTargets(VOID)
     D3DDDIARG_SETRENDERTARGET Target = {};
     D3DDDIARG_SETDEPTHSTENCIL Depth = {};
 
-    if (!TargetsDirty)
+    if (TargetsDirty == 0 && !DepthDirty)
         return;
 
-    Target.RenderTargetIndex = 0;
-    Target.hRenderTarget = RenderTargets[0]->DriverResource()->DriverResource;
-    DdiRenderTarget(&Target);
-    Depth.hZBuffer = DepthStencil != nullptr ? DepthStencil->DriverResource()->DriverResource : NULL;
-    DdiDepthStencil(&Depth);
-    TargetsDirty = FALSE;
+    for (UINT Index = 0; Index < D9MaxRenderTargets; Index++)
+    {
+        if ((TargetsDirty & (1UL << Index)) == 0)
+            continue;
+        Target.RenderTargetIndex = Index;
+        Target.hRenderTarget = RenderTargets[Index] != nullptr ?
+                               RenderTargets[Index]->DriverResource()->DriverResource : NULL;
+        DdiRenderTarget(&Target);
+    }
+    TargetsDirty = 0;
+    if (DepthDirty)
+    {
+        Depth.hZBuffer = DepthStencil != nullptr ? DepthStencil->DriverResource()->DriverResource : NULL;
+        DdiDepthStencil(&Depth);
+        DepthDirty = FALSE;
+    }
     if (ViewportPending)
     {
         D3DDDIARG_VIEWPORTINFO Area = {};
@@ -1194,6 +1205,14 @@ D9Device::ResetCommon(
     }
 
     NotReset = FALSE;
+
+    /* The plain object's device starts its target tracking over before the new back buffer is bound */
+    if (!IsEx)
+    {
+        TargetsDirty = 0;
+        DepthDirty = FALSE;
+        ViewportPending = FALSE;
+    }
     BindRenderTargets();
     /* An extended device keeps its state; only the viewport and scissor rectangle cover the new back buffer,
        the viewport keeping its depth range */
@@ -2350,7 +2369,7 @@ D9Device::SetRenderTarget(
         if (WasPinned)
             Previous->Unpin();
     }
-    TargetsDirty = TRUE;
+    TargetsDirty |= 1UL << RenderTargetIndex;
     if (RenderTargetIndex == 0)
     {
         const D3DSURFACE_DESC& Desc = Next->Describe();
@@ -2389,7 +2408,7 @@ D9Device::SetDepthStencilSurface(
         if (WasPinned)
             Previous->Unpin();
     }
-    TargetsDirty = TRUE;
+    DepthDirty = TRUE;
     return S_OK;
 }
 

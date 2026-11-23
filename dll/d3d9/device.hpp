@@ -2014,7 +2014,8 @@ public:
     VOID
     NoteTargetsMoved(VOID)
     {
-        TargetsDirty = TRUE;
+        TargetsDirty |= 1;
+        DepthDirty = TRUE;
     }
 
     VOID
@@ -3252,9 +3253,11 @@ private:
     UINT QueuedPresentFirst = 0;
     UINT QueuedPresentCount = 0;
 
-    /* The bound targets reach the driver before the first operation that writes them, with the viewport and
-       scissor rectangle a new first target brings; targets the application set are pinned while bound */
-    BOOLEAN TargetsDirty = FALSE;
+    /* The bound targets reach the driver before the first operation that writes them, one bit per target index,
+       with the viewport and scissor rectangle a new first target brings; targets the application set are pinned
+       while bound */
+    ULONG TargetsDirty = 0;
+    BOOLEAN DepthDirty = FALSE;
     BOOLEAN ViewportPending = FALSE;
     BOOLEAN TargetPinned[D9MaxRenderTargets] = {};
     BOOLEAN DepthPinned = FALSE;

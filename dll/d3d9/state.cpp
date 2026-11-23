@@ -497,6 +497,9 @@ D9Device::SetViewport(
             Kept->MinZ = Kept->MaxZ - 0.001f;
     }
 
+    /* A new first target's viewport is still on its way; this one goes with it */
+    if (ViewportPending)
+        return S_OK;
     Area.X = Kept->X;
     Area.Y = Kept->Y;
     Area.Width = Kept->Width;
@@ -531,7 +534,8 @@ D9Device::SetScissorRect(
     if (Recording != nullptr)
         return Recording->Add(D9BlockOp::Scissor, 0, 0, Rect, sizeof(*Rect));
     ScissorRect = *Rect;
-    DdiScissorRect(&ScissorRect);
+    if (!ViewportPending)
+        DdiScissorRect(&ScissorRect);
     return S_OK;
 }
 
