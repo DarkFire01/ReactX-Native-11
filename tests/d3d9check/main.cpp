@@ -3236,6 +3236,53 @@ NcCheckUpdateTextures(
     Dynamic->Release();
 }
 
+/* Copies of what the screen shows into surfaces of the screen's size, which only memory A8R8G8B8 surfaces take */
+static
+VOID
+NcCheckFrontBuffer(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const struct
+    {
+        PCSTR Name;
+        D3DFORMAT Format;
+        D3DPOOL Pool;
+        UINT Grow;
+    } Cases[] =
+    {
+        { "sysmem", D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 0 },
+        { "sysmem_larger", D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, 8 },
+        { "scratch", D3DFMT_A8R8G8B8, D3DPOOL_SCRATCH, 0 },
+        { "default", D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, 0 },
+        { "x8", D3DFMT_X8R8G8B8, D3DPOOL_SYSTEMMEM, 0 },
+    };
+    IDirect3DSwapChain9* Chain = nullptr;
+    D3DDISPLAYMODE Mode = {};
+
+    Device->GetDisplayMode(0, &Mode);
+    Device->GetSwapChain(0, &Chain);
+    for (const auto& Case : Cases)
+    {
+        IDirect3DSurface9* Surface = nullptr;
+        HRESULT hr = Device->CreateOffscreenPlainSurface(Mode.Width + Case.Grow, Mode.Height, Case.Format, Case.Pool,
+                                                         &Surface, nullptr);
+
+        if (Surface == nullptr)
+        {
+            printf("%s_frontbuffer[%s] = %08lX null\n", Prefix, Case.Name, hr);
+            continue;
+        }
+        printf("%s_frontbuffer[%s] = %08lX chain1 %08lX\n", Prefix, Case.Name, Device->GetFrontBufferData(0, Surface),
+               Device->GetFrontBufferData(1, Surface));
+        if (Chain != nullptr)
+            printf("%s_frontbuffer_chain[%s] = %08lX\n", Prefix, Case.Name, Chain->GetFrontBufferData(Surface));
+        Surface->Release();
+    }
+    if (Chain != nullptr)
+        Chain->Release();
+}
+
 /* The copy calls on one device */
 static
 VOID
@@ -3250,6 +3297,7 @@ NcCheckCopiesOn(
     printf("%s_caps = stretch %08lX devcaps2 %08lX\n", Prefix, Caps.StretchRectFilterCaps, Caps.DevCaps2);
     sprintf_s(Name, "%s_pair", Prefix);
     NcCheckCopyPairs(Name, Device);
+    NcCheckFrontBuffer(Prefix, Device);
     NcCheckCopyRects(Prefix, Device);
     NcCheckSurfaceDcs(Prefix, Device);
     NcCheckUpdateTextures(Prefix, Device);

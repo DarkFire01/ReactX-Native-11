@@ -3209,6 +3209,22 @@ TrCopyWork(
         TrApi("UpdateTexture volume clean", Device->UpdateTexture(VolumeSource, Volume));
         TrApi("UpdateTexture bad", Device->UpdateTexture(Texture, Source));
 
+        TrPhase("copies front buffer");
+        {
+            IDirect3DSurface9* Screen = nullptr;
+            D3DDISPLAYMODE Mode = {};
+
+            Device->GetDisplayMode(0, &Mode);
+            Device->CreateOffscreenPlainSurface(Mode.Width, Mode.Height, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Screen,
+                                                nullptr);
+            if (Screen != nullptr)
+            {
+                TrApi("GetFrontBufferData", Device->GetFrontBufferData(0, Screen));
+                TrApi("GetFrontBufferData small", Device->GetFrontBufferData(0, Memory));
+                Screen->Release();
+            }
+        }
+
         TrPhase("copies scene");
         TrApi("BeginScene", Device->BeginScene());
         TrApi("BeginScene again", Device->BeginScene());
