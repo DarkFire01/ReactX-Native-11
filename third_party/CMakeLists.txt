@@ -67,6 +67,7 @@ add_library(d3d12translationlayer STATIC
     ${_tl}/src/ShaderParser.cpp
     ${_tl}/src/SharedResourceHelpers.cpp)
 target_include_directories(d3d12translationlayer
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/DirectX-Headers/include
     PUBLIC ${_tl}/external
     PUBLIC ${_tl}/include
@@ -74,6 +75,7 @@ target_include_directories(d3d12translationlayer
 target_precompile_headers(d3d12translationlayer PRIVATE ${_tl}/include/pch.h)
 target_compile_definitions(d3d12translationlayer
     PUBLIC SUPPORTS_DXBC_PARSE
+    PUBLIC USE_PIX
     PUBLIC $<$<CONFIG:Debug>:TRANSLATION_LAYER_DBG=1>
     PUBLIC DYNAMIC_LOAD_DXCORE=1
     PRIVATE NO_IMPLEMENT_RECT_FNS)
