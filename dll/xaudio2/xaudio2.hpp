@@ -277,8 +277,17 @@ struct XaEffectChain
     UINT32 Count;
     UINT32 OutputChannels;
     DWORD OutputMask;
+    UINT32 Rate;
+    UINT32 MaxFrames;
     struct XaEffect* Entries;
 };
+
+float*
+XaEffectsProcess(
+    _Inout_ XaEffectChain* Chain,
+    _Inout_ float* Buffer,
+    _In_ UINT32 Frames,
+    _Inout_ BOOLEAN* Silent);
 
 BOOLEAN
 XaEffectsValidate(
@@ -422,6 +431,7 @@ public:
     /* Mixing state, owned by the render thread */
     float* InputMix;
     UINT32 InputMixFrames;
+    BOOLEAN InputFed;
     XaResampler* Resampler;
     float* FilterState;
     XaScratchBuffer InputScratch;

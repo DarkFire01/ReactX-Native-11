@@ -13,14 +13,23 @@ struct XaEffect
     IXAPOParameters* Parameters;
     UINT32 InputChannels;
     UINT32 OutputChannels;
+    DWORD InputMask;
+    DWORD OutputMask;
     UINT32 Flags;
+    BOOLEAN InPlace;
+    BOOLEAN Locked;
+
+    /* What the mixer runs the effect with, and the changes waiting for it */
     BOOLEAN Enabled;
     BOOLEAN PendingEnabled;
     UINT32 EnableSet;
-    BOOLEAN EnableWaiting;
-    BOOLEAN Locked;
+    XaSlotState EnableState;
+    BYTE* PendingParameters;
+    UINT32 PendingSize;
+    UINT32 ParameterSet;
+    XaSlotState ParameterState;
+
     float* Output;
-    UINT32 OutputFrames;
 };
 
 BOOLEAN
@@ -84,6 +93,69 @@ XaEffectsValidate(
     return Valid;
 }
 
+static
+VOID
+XaFloatFormat(
+    _Out_ WAVEFORMATEXTENSIBLE* Format,
+    _In_ UINT32 Channels,
+    _In_ UINT32 Rate,
+    _In_ DWORD Mask)
+{
+    memset(Format, 0, sizeof(*Format));
+    Format->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    Format->Format.nChannels = static_cast<WORD>(Channels);
+    Format->Format.nSamplesPerSec = Rate;
+    Format->Format.wBitsPerSample = 32;
+    Format->Format.nBlockAlign = static_cast<WORD>(Channels * sizeof(float));
+    Format->Format.nAvgBytesPerSec = Rate * Format->Format.nBlockAlign;
+    Format->Format.cbSize = sizeof(*Format) - sizeof(Format->Format);
+    Format->Samples.wValidBitsPerSample = 32;
+    Format->dwChannelMask = Mask;
+    Format->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+}
+
+/* Locks every effect for the rate and quantum the voice processes at */
+static
+HRESULT
+XaEffectsLock(
+    _Inout_ XaEffectChain* Chain,
+    _In_ UINT32 Rate,
+    _In_ UINT32 MaxFrames)
+{
+    for (UINT32 Index = 0; Index < Chain->Count; Index++)
+    {
+        XaEffect* Entry = &Chain->Entries[Index];
+        WAVEFORMATEXTENSIBLE InputFormat;
+        WAVEFORMATEXTENSIBLE OutputFormat;
+        XAPO_LOCKFORPROCESS_PARAMETERS Input;
+        XAPO_LOCKFORPROCESS_PARAMETERS Output;
+        HRESULT hr;
+
+        XaFloatFormat(&InputFormat, Entry->InputChannels, Rate, Entry->InputMask);
+        XaFloatFormat(&OutputFormat, Entry->OutputChannels, Rate, Entry->OutputMask);
+        Input.pFormat = &InputFormat.Format;
+        Input.MaxFrameCount = MaxFrames;
+        Output.pFormat = &OutputFormat.Format;
+        Output.MaxFrameCount = MaxFrames;
+        hr = Entry->Apo->LockForProcess(1, &Input, 1, &Output);
+        if (FAILED(hr))
+        {
+            XaTrace(L"effects: effect %u refused to lock (%08lX)", Index, hr);
+            return XAUDIO2_E_XAPO_CREATION_FAILED;
+        }
+        Entry->Locked = TRUE;
+        if (!Entry->InPlace)
+        {
+            Entry->Output = new (std::nothrow) float[static_cast<SIZE_T>(MaxFrames) * Entry->OutputChannels];
+            if (Entry->Output == nullptr)
+                return E_OUTOFMEMORY;
+        }
+    }
+    Chain->Rate = Rate;
+    Chain->MaxFrames = MaxFrames;
+    return S_OK;
+}
+
 HRESULT
 XaEffectsCreate(
     _In_ XaVoice* Voice,
@@ -92,11 +164,15 @@ XaEffectsCreate(
 {
     XaEffectChain* Effects;
     UINT32 Channels = Voice->InputChannels;
+    DWORD Mask = Voice->InputMask;
+    UINT32 Rate = Voice->Kind == XaKindSource ? Voice->OutputRate : Voice->InputRate;
+    HRESULT hr;
 
     *Result = nullptr;
     Effects = new (std::nothrow) XaEffectChain;
     if (Effects == nullptr)
         return E_OUTOFMEMORY;
+    memset(Effects, 0, sizeof(*Effects));
     Effects->Entries = new (std::nothrow) XaEffect[Chain->EffectCount];
     if (Effects->Entries == nullptr)
     {
@@ -120,12 +196,24 @@ XaEffectsCreate(
         }
         Entry->InputChannels = Channels;
         Entry->OutputChannels = Descriptor->OutputChannels;
+        Entry->InPlace = (Entry->Flags & XAPO_FLAG_INPLACE_SUPPORTED) != 0 && Channels == Descriptor->OutputChannels;
+
+        /* The layout carries through an effect that works in place, otherwise it is left open */
+        Entry->InputMask = Mask;
+        Entry->OutputMask = Entry->InPlace ? Mask : 0;
         Entry->Enabled = Descriptor->InitialState != FALSE;
         Entry->PendingEnabled = Entry->Enabled;
         Channels = Descriptor->OutputChannels;
+        Mask = Entry->OutputMask;
     }
     Effects->OutputChannels = Channels;
-    Effects->OutputMask = XaPseudoMask(Channels);
+    Effects->OutputMask = Mask;
+    hr = XaEffectsLock(Effects, Rate, XaQuantumFrames(Rate, Voice->Engine));
+    if (FAILED(hr))
+    {
+        XaEffectsFree(Effects);
+        return hr;
+    }
     *Result = Effects;
     return S_OK;
 }
@@ -147,6 +235,7 @@ XaEffectsFree(
         if (Entry->Apo != nullptr)
             Entry->Apo->Release();
         delete[] Entry->Output;
+        delete[] Entry->PendingParameters;
     }
     delete[] Chain->Entries;
     delete Chain;
@@ -163,9 +252,7 @@ XaEffectsEnable(
 
     Entry->PendingEnabled = Enable;
     Entry->EnableSet = OperationSet;
-    Entry->EnableWaiting = OperationSet != XA_OPSET_NOW;
-    if (!Entry->EnableWaiting)
-        Entry->Enabled = Enable;
+    Entry->EnableState = OperationSet == XA_OPSET_NOW ? XaSlotReady : XaSlotWaiting;
     return S_OK;
 }
 
@@ -186,11 +273,10 @@ XaEffectsCommit(
     {
         XaEffect* Entry = &Chain->Entries[Index];
 
-        if (Entry->EnableWaiting && (OperationSet == XAUDIO2_COMMIT_ALL || OperationSet == Entry->EnableSet))
-        {
-            Entry->EnableWaiting = FALSE;
-            Entry->Enabled = Entry->PendingEnabled;
-        }
+        if (Entry->EnableState == XaSlotWaiting && (OperationSet == XAUDIO2_COMMIT_ALL || OperationSet == Entry->EnableSet))
+            Entry->EnableState = XaSlotReady;
+        if (Entry->ParameterState == XaSlotWaiting && (OperationSet == XAUDIO2_COMMIT_ALL || OperationSet == Entry->ParameterSet))
+            Entry->ParameterState = XaSlotReady;
     }
 }
 
@@ -204,10 +290,21 @@ XaEffectsSetParameters(
 {
     XaEffect* Entry = &Chain->Entries[Index];
 
-    UNREFERENCED_PARAMETER(OperationSet);
     if (Entry->Parameters == nullptr)
         return E_NOTIMPL;
-    Entry->Parameters->SetParameters(Parameters, Size);
+    if (Entry->PendingSize < Size)
+    {
+        BYTE* Grown = new (std::nothrow) BYTE[Size];
+
+        if (Grown == nullptr)
+            return E_OUTOFMEMORY;
+        delete[] Entry->PendingParameters;
+        Entry->PendingParameters = Grown;
+    }
+    memcpy(Entry->PendingParameters, Parameters, Size);
+    Entry->PendingSize = Size;
+    Entry->ParameterSet = OperationSet;
+    Entry->ParameterState = OperationSet == XA_OPSET_NOW ? XaSlotReady : XaSlotWaiting;
     return S_OK;
 }
 
@@ -224,4 +321,45 @@ XaEffectsGetParameters(
         return E_NOTIMPL;
     Entry->Parameters->GetParameters(Parameters, Size);
     return S_OK;
+}
+
+/* Runs the chain over one quantum and returns the buffer the last effect wrote */
+float*
+XaEffectsProcess(
+    _Inout_ XaEffectChain* Chain,
+    _Inout_ float* Buffer,
+    _In_ UINT32 Frames,
+    _Inout_ BOOLEAN* Silent)
+{
+    float* Current = Buffer;
+    XAPO_BUFFER_FLAGS Flags = *Silent ? XAPO_BUFFER_SILENT : XAPO_BUFFER_VALID;
+
+    for (UINT32 Index = 0; Index < Chain->Count; Index++)
+    {
+        XaEffect* Entry = &Chain->Entries[Index];
+        XAPO_PROCESS_BUFFER_PARAMETERS Input;
+        XAPO_PROCESS_BUFFER_PARAMETERS Output;
+
+        if (Entry->ParameterState == XaSlotReady)
+        {
+            Entry->ParameterState = XaSlotIdle;
+            Entry->Parameters->SetParameters(Entry->PendingParameters, Entry->PendingSize);
+        }
+        if (Entry->EnableState == XaSlotReady)
+        {
+            Entry->EnableState = XaSlotIdle;
+            Entry->Enabled = Entry->PendingEnabled;
+        }
+        Input.pBuffer = Current;
+        Input.BufferFlags = Flags;
+        Input.ValidFrameCount = Frames;
+        Output.pBuffer = Entry->InPlace ? Current : Entry->Output;
+        Output.BufferFlags = Flags;
+        Output.ValidFrameCount = Frames;
+        Entry->Apo->Process(1, &Input, 1, &Output, Entry->Enabled);
+        Current = static_cast<float*>(Output.pBuffer);
+        Flags = Output.BufferFlags;
+    }
+    *Silent = Flags == XAPO_BUFFER_SILENT;
+    return Current;
 }

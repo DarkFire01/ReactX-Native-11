@@ -311,9 +311,13 @@ VOID
 XaMixSends(
     _Inout_ XaVoice* Voice,
     _In_reads_(Frames * Voice->OutputChannels()) const float* Output,
-    _In_ UINT32 Frames)
+    _In_ UINT32 Frames,
+    _In_ BOOLEAN Silent)
 {
     UINT32 Inputs = Voice->OutputChannels();
+
+    if (Silent)
+        return;
 
     for (XaSend* Send = Voice->Sends; Send != nullptr; Send = Send->Next)
     {
@@ -324,6 +328,7 @@ XaMixSends(
 
         if (Target->InputMix == nullptr)
             continue;
+        Target->InputFed = TRUE;
         for (UINT32 Frame = 0; Frame < Count; Frame++)
         {
             const float* In = Output + static_cast<SIZE_T>(Frame) * Inputs;
@@ -346,6 +351,8 @@ XaVoice::CommitParameters(
     _In_ UINT32 OperationSet)
 {
     XaParameterCommit(&Filter, OperationSet);
+    if (Effects != nullptr)
+        XaEffectsCommit(Effects, OperationSet);
     for (XaSend* Send = Sends; Send != nullptr; Send = Send->Next)
         XaParameterCommit(&Send->Mix, OperationSet);
     if (Kind == XaKindSource)
@@ -459,7 +466,14 @@ XaProcessSource(
         {
             memcpy(Output, Input, sizeof(*Output) * Frames * Channels);
         }
-        XaMixSends(Voice, Output, Frames);
+        {
+            BOOLEAN Silent = Gathered == 0;
+            float* Result = Output;
+
+            if (Voice->Effects != nullptr)
+                Result = XaEffectsProcess(Voice->Effects, Output, Frames, &Silent);
+            XaMixSends(Voice, Result, Frames, Silent);
+        }
     }
     if (Voice->Callback != nullptr)
         Voice->Callback->OnVoiceProcessingPassEnd();
@@ -474,9 +488,13 @@ XaProcessSubmix(
     UINT32 Channels = Voice->OutputChannels();
     const float* Output = Voice->InputMix;
 
+    BOOLEAN Silent = !Voice->InputFed;
+
     XaTakeParameters(Voice);
     if (Output == nullptr)
         return;
+    if (Voice->Effects != nullptr)
+        Output = XaEffectsProcess(Voice->Effects, Voice->InputMix, Frames, &Silent);
     if (Voice->OutputRate != Voice->InputRate)
     {
         UINT32 OutputFrames = XaQuantumFrames(Voice->OutputRate, Voice->Engine);
@@ -495,7 +513,7 @@ XaProcessSubmix(
         Output = Converted;
         Frames = OutputFrames;
     }
-    XaMixSends(Voice, Output, Frames);
+    XaMixSends(Voice, Output, Frames, Silent);
 }
 
 HRESULT
@@ -542,6 +560,14 @@ XaProcessMaster(
     UINT32 DeviceChannels = Master->Endpoint->Format.Format.nChannels;
     UINT32 Frames = Master->InputMixFrames;
     const float* Mix = Master->InputMix;
+    BOOLEAN Silent = !Master->InputFed;
+
+    if (Master->Effects != nullptr)
+    {
+        Mix = XaEffectsProcess(Master->Effects, Master->InputMix, Frames, &Silent);
+        if (Silent)
+            memset(const_cast<float*>(Mix), 0, sizeof(*Mix) * Frames * Channels);
+    }
 
     if (Master->Endpoint->Format.Format.nSamplesPerSec != Master->InputRate)
     {
@@ -606,6 +632,7 @@ XaEngine::RunPass(
         if (FAILED(Voice->EnsureInputMix()))
             continue;
         memset(Voice->InputMix, 0, sizeof(*Voice->InputMix) * Voice->InputMixFrames * Voice->InputChannels);
+        Voice->InputFed = FALSE;
         if (Voice->Kind == XaKindSubmix)
             HighestStage = XaMax(HighestStage, Voice->ProcessingStage);
     }

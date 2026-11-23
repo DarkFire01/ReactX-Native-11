@@ -112,6 +112,7 @@ XaVoice::XaVoice(
     Destroyed = FALSE;
     InputMix = nullptr;
     InputMixFrames = 0;
+    InputFed = FALSE;
     Resampler = nullptr;
     FilterState = nullptr;
     memset(&InputScratch, 0, sizeof(InputScratch));
