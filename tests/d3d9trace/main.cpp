@@ -3756,6 +3756,81 @@ TrScenarioCursor(
     Plain->Release();
 }
 
+/* Present statistics asked for between presents of a windowed blt model chain */
+static
+VOID
+TrPresentStatsWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DSwapChain9* Chain = nullptr;
+    IDirect3DSwapChain9Ex* ChainEx = nullptr;
+    D3DPRESENTSTATS Stats = {};
+    UINT Count = 0;
+
+    Device->GetSwapChain(0, &Chain);
+    if (Chain != nullptr)
+    {
+        TrApi("QueryInterface swap chain ex",
+              Chain->QueryInterface(__uuidof(IDirect3DSwapChain9Ex), reinterpret_cast<VOID**>(&ChainEx)));
+        Chain->Release();
+    }
+    for (UINT Round = 0; Round < 2; Round++)
+    {
+        if (ChainEx != nullptr)
+        {
+            TrApi("GetLastPresentCount", ChainEx->GetLastPresentCount(&Count));
+            TrApi("GetPresentStats", ChainEx->GetPresentStats(&Stats));
+        }
+        TrApi("Present", Device->Present(nullptr, nullptr, nullptr, nullptr));
+    }
+    TrRelease(ChainEx);
+}
+
+/* Present statistics on windowed extended devices with and without them enabled, and on a plain device */
+static
+VOID
+TrScenarioPresentStats(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] = { D3DCREATE_ENABLE_PRESENTSTATS, 0 };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9Ex* DeviceEx = nullptr;
+
+        TrPhase(Behavior != 0 ? "presentstats enabled" : "presentstats disabled");
+        Made = Parameters;
+        TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window,
+                                                            D3DCREATE_HARDWARE_VERTEXPROCESSING | Behavior, &Made,
+                                                            nullptr, &DeviceEx));
+        if (DeviceEx != nullptr)
+        {
+            TrPresentStatsWork(DeviceEx);
+            TrRelease(DeviceEx);
+        }
+    }
+    TrPhase("presentstats plain");
+    Made = Parameters;
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window,
+                                              D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_ENABLE_PRESENTSTATS,
+                                              &Made, &Device));
+    if (Device != nullptr)
+    {
+        TrPresentStatsWork(Device);
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -3780,6 +3855,7 @@ static const TrScenario TrScenarios[] =
     { "copies_plain", TrScenarioCopiesPlain },
     { "shared", TrScenarioShared },
     { "cursor", TrScenarioCursor },
+    { "presentstats", TrScenarioPresentStats },
 };
 
 static
