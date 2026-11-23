@@ -42,6 +42,11 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_subdirectory(third_party/DirectXShaderCompiler)
+# Vendored projects the D3D12 based layers build on
+if(NT_TARGET MATCHES "^win1[01]")
+    add_subdirectory(third_party)
+endif()
+
 add_subdirectory(dll)
 add_subdirectory(tests)
 add_subdirectory(NativeVideoDecode)
