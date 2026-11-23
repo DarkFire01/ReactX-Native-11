@@ -4931,6 +4931,224 @@ TrScenarioStateBlockObjects(
     Plain->Release();
 }
 
+/* Shader token streams the shader scenarios create from, valid and broken */
+struct TrShaderCode
+{
+    PCSTR Name;
+    BOOLEAN Pixel;
+    UINT Count;
+    DWORD Tokens[24];
+};
+
+static const TrShaderCode TrShaderCodes[] =
+{
+    { "vs_1_1", FALSE, 8, { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x00000001, 0xC00F0000, 0x90E40000,
+                            0x0000FFFF } },
+    { "vs_2_0", FALSE, 19, { 0xFFFE0200, 0x0002FFFE, 0x12345678, 0x9ABCDEF0, 0x05000051, 0xA00F0004, 0x3F800000,
+                             0x40000000, 0x40400000, 0x40800000, 0x0200001F, 0x80000000, 0x900F0000, 0x03000002,
+                             0xC00F0000, 0x90E40000, 0xA0E40004, 0x0000FFFF } },
+    { "vs_3_0", FALSE, 11, { 0xFFFE0300, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000000, 0xE00F0000,
+                             0x02000001, 0xE00F0000, 0x90E40000, 0x0000FFFF } },
+    { "vs_4_0", FALSE, 4, { 0xFFFE0400, 0x02000001, 0xC00F0000, 0x0000FFFF } },
+    { "vs_bad_opcode", FALSE, 5, { 0xFFFE0200, 0x02000099, 0x800F0000, 0x90E40000, 0x0000FFFF } },
+    { "vs_undeclared", FALSE, 8, { 0xFFFE0300, 0x0200001F, 0x80000000, 0xE00F0000, 0x02000001, 0xE00F0000,
+                                   0x90E40000, 0x0000FFFF } },
+    { "vs_as_ps", FALSE, 4, { 0xFFFF0200, 0x02000001, 0x800F0800, 0x0000FFFF } },
+    { "ps_1_1", TRUE, 7, { 0xFFFF0101, 0x00000042, 0xB00F0000, 0x00000001, 0x800F0000, 0xB0E40000, 0x0000FFFF } },
+    { "ps_1_4", TRUE, 7, { 0xFFFF0104, 0x00000042, 0x800F0000, 0x00000001, 0x800F0000, 0x80E40000, 0x0000FFFF } },
+    { "ps_2_0", TRUE, 11, { 0xFFFF0200, 0x05000051, 0xA00F0001, 0x3F800000, 0x00000000, 0x00000000, 0x3F800000,
+                            0x02000001, 0x800F0800, 0xA0E40001, 0x0000FFFF } },
+    { "ps_3_0", TRUE, 11, { 0xFFFF0300, 0x05000051, 0xA00F0003, 0x3F000000, 0x3F000000, 0x00000000, 0x3F800000,
+                            0x02000001, 0x800F0800, 0xA0E40000, 0x0000FFFF } },
+    { "ps_4_0", TRUE, 5, { 0xFFFF0400, 0x02000001, 0x800F0800, 0xA0E40000, 0x0000FFFF } },
+    { "ps_as_vs", TRUE, 8, { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x00000001, 0xC00F0000, 0x90E40000,
+                             0x0000FFFF } },
+};
+
+/* Creates each shader, reads its function back, binds it and sets constants around what it defines */
+static
+VOID
+TrShaderWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    IDirect3DVertexShader9* Vertex[_countof(TrShaderCodes)] = {};
+    IDirect3DPixelShader9* Pixel[_countof(TrShaderCodes)] = {};
+    IDirect3DVertexShader9* BoundVertex = nullptr;
+    IDirect3DPixelShader9* BoundPixel = nullptr;
+    IDirect3DDevice9* Owner = nullptr;
+    FLOAT Floats[4 * 6];
+    DWORD Function[32];
+    char Name[96];
+
+    for (UINT Index = 0; Index < _countof(Floats); Index++)
+        Floats[Index] = static_cast<FLOAT>(Index) + 0.5f;
+
+    TrPhase("shaders create");
+    /* Creating either kind from a null function is left out: the system reads through it and crashes */
+    for (UINT Index = 0; Index < _countof(TrShaderCodes); Index++)
+    {
+        const TrShaderCode* Code = &TrShaderCodes[Index];
+        UINT Size = 0;
+        HRESULT hr;
+
+        sprintf_s(Name, "Create %s", Code->Name);
+        if (Code->Pixel)
+            TrApi(Name, Device->CreatePixelShader(Code->Tokens, &Pixel[Index]));
+        else
+            TrApi(Name, Device->CreateVertexShader(Code->Tokens, &Vertex[Index]));
+        if (Vertex[Index] == nullptr && Pixel[Index] == nullptr)
+            continue;
+
+        if (Code->Pixel)
+            hr = Pixel[Index]->GetFunction(nullptr, &Size);
+        else
+            hr = Vertex[Index]->GetFunction(nullptr, &Size);
+        TrCloseLine();
+        printf("api GetFunction size %s = %08lX %u\n", Code->Name, hr, Size);
+        FillMemory(Function, sizeof(Function), 0xCD);
+        Size = sizeof(Function);
+        if (Code->Pixel)
+            hr = Pixel[Index]->GetFunction(Function, &Size);
+        else
+            hr = Vertex[Index]->GetFunction(Function, &Size);
+        TrCloseLine();
+        printf("api GetFunction %s = %08lX %u %08X\n", Code->Name, hr, Size, TrHash(Function, sizeof(Function)));
+        Size = 4;
+        if (Code->Pixel)
+            hr = Pixel[Index]->GetFunction(Function, &Size);
+        else
+            hr = Vertex[Index]->GetFunction(Function, &Size);
+        TrCloseLine();
+        printf("api GetFunction small %s = %08lX %u\n", Code->Name, hr, Size);
+        if (Code->Pixel)
+            hr = Pixel[Index]->GetDevice(&Owner);
+        else
+            hr = Vertex[Index]->GetDevice(&Owner);
+        TrCloseLine();
+        printf("api GetDevice %s = %08lX %d\n", Code->Name, hr, Owner == Device);
+        TrRelease(Owner);
+        Owner = nullptr;
+    }
+    TrSettle(Device);
+
+    TrPhase("shaders bind");
+    for (UINT Index = 0; Index < _countof(TrShaderCodes); Index++)
+    {
+        const TrShaderCode* Code = &TrShaderCodes[Index];
+
+        if (Vertex[Index] == nullptr && Pixel[Index] == nullptr)
+            continue;
+        sprintf_s(Name, "Set %s", Code->Name);
+        if (Code->Pixel)
+        {
+            TrApi(Name, Device->SetPixelShader(Pixel[Index]));
+            TrApi("SetPixelShader again", Device->SetPixelShader(Pixel[Index]));
+            TrApi("SetPixelShaderConstantF 0 6", Device->SetPixelShaderConstantF(0, Floats, 6));
+            TrApi("GetPixelShader", Device->GetPixelShader(&BoundPixel));
+            TrCloseLine();
+            printf("api bound %s = %d\n", Code->Name, BoundPixel == Pixel[Index]);
+            TrRelease(BoundPixel);
+            BoundPixel = nullptr;
+        }
+        else
+        {
+            TrApi(Name, Device->SetVertexShader(Vertex[Index]));
+            TrApi("SetVertexShader again", Device->SetVertexShader(Vertex[Index]));
+            TrApi("SetVertexShaderConstantF 2 6", Device->SetVertexShaderConstantF(2, Floats, 6));
+            TrApi("GetVertexShader", Device->GetVertexShader(&BoundVertex));
+            TrCloseLine();
+            printf("api bound %s = %d\n", Code->Name, BoundVertex == Vertex[Index]);
+            TrRelease(BoundVertex);
+            BoundVertex = nullptr;
+        }
+        TrSettle(Device);
+    }
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetPixelShader null", Device->SetPixelShader(nullptr));
+    TrApi("SetPixelShaderConstantF unbound", Device->SetPixelShaderConstantF(0, Floats, 2));
+    TrApi("GetVertexShader null", Device->GetVertexShader(&BoundVertex));
+    TrCloseLine();
+    printf("api unbound = %d\n", BoundVertex == nullptr);
+    TrSettle(Device);
+
+    TrPhase("shaders release");
+    for (UINT Index = 0; Index < _countof(TrShaderCodes); Index++)
+    {
+        TrRelease(Vertex[Index]);
+        TrRelease(Pixel[Index]);
+    }
+    TrSettle(Device);
+}
+
+/* Shaders on a hardware vertex processing extended device */
+static
+VOID
+TrScenarioShaders(
+    _In_ TrContext* Context)
+{
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("shaders device");
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Parameters, nullptr, &Device));
+    if (Device != nullptr)
+    {
+        TrShaderWork(Device);
+        TrPhase("shaders device release");
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+}
+
+/* Shaders on pure, software and mixed devices of the plain object */
+static
+VOID
+TrScenarioShadersPlain(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING,
+        D3DCREATE_MIXED_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "shaders plain create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            TrShaderWork(Device);
+            TrPhase("shaders plain release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* State blocks on a hardware vertex processing extended device and a pure device of the plain object */
 static
 VOID
@@ -5175,6 +5393,8 @@ static const TrScenario TrScenarios[] =
     { "constants", TrScenarioConstants },
     { "constants_plain", TrScenarioConstantsPlain },
     { "stateblocks_objects", TrScenarioStateBlockObjects },
+    { "shaders", TrScenarioShaders },
+    { "shaders_plain", TrScenarioShadersPlain },
 };
 
 static
