@@ -6633,6 +6633,33 @@ static const D3DMATRIX TrVertexMatrices[] =
 /* A case's set with this stage number sets a transform from the table */
 static constexpr DWORD TrVertexTransform = 0xFE;
 
+/* Sets with these stage numbers set a light from the table, enable a light or set a material from the table */
+static constexpr DWORD TrVertexLight = 0xFD;
+static constexpr DWORD TrVertexEnable = 0xFC;
+static constexpr DWORD TrVertexMaterial = 0xFB;
+
+/* Lights: directional, point, spot, and a second directional */
+static const D3DLIGHT9 TrVertexLights[] =
+{
+    { D3DLIGHT_DIRECTIONAL, { 0.75f, 0.5f, 0.25f, 1.0f }, { 0.5f, 0.5f, 0.5f, 1.0f }, { 0.125f, 0.25f, 0.0f, 1.0f },
+      { 0.0f, 0.0f, 0.0f }, { 0.25f, -0.5f, 0.75f }, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+    { D3DLIGHT_POINT, { 0.5f, 0.75f, 1.0f, 1.0f }, { 1.0f, 0.5f, 0.25f, 1.0f }, { 0.0f, 0.125f, 0.25f, 1.0f },
+      { 0.5f, 0.25f, -1.5f }, { 0.0f, 0.0f, 1.0f }, 8.0f, 0.0f, 0.5f, 0.25f, 0.125f, 0.0f, 0.0f },
+    { D3DLIGHT_SPOT, { 1.0f, 1.0f, 0.5f, 1.0f }, { 0.25f, 0.5f, 1.0f, 1.0f }, { 0.25f, 0.0f, 0.125f, 1.0f },
+      { -0.25f, 0.5f, -2.0f }, { 0.125f, -0.25f, 1.0f }, 10.0f, 1.5f, 1.0f, 0.125f, 0.0625f, 0.5f, 1.25f },
+    { D3DLIGHT_DIRECTIONAL, { 0.25f, 0.75f, 0.5f, 1.0f }, { 0.25f, 0.25f, 0.75f, 1.0f }, { 0.0f, 0.0f, 0.25f, 1.0f },
+      { 0.0f, 0.0f, 0.0f }, { -0.5f, -0.25f, 1.0f }, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+};
+
+/* Materials: the default, and one with every color and a power */
+static const D3DMATERIAL9 TrVertexMaterials[] =
+{
+    { { 0.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f, 0.0f },
+      0.0f },
+    { { 0.75f, 0.5f, 0.25f, 0.5f }, { 0.25f, 0.5f, 0.75f, 1.0f }, { 0.5f, 0.25f, 0.125f, 1.0f },
+      { 0.0625f, 0.125f, 0.0f, 0.0f }, 12.0f },
+};
+
 struct TrVertexCase
 {
     PCSTR Name;
@@ -6645,6 +6672,9 @@ struct TrVertexCase
 static const TrFixedSet TrVertexBaseline[] =
 {
     { TrFixedRender, D3DRS_LIGHTING, FALSE }, { TrFixedRender, D3DRS_FOGENABLE, FALSE },
+    { TrVertexEnable, 1, FALSE }, { TrVertexEnable, 2, FALSE }, { TrVertexEnable, 3, FALSE },
+    { TrVertexEnable, 4, FALSE }, { TrVertexMaterial, 1, 0 }, { TrFixedRender, D3DRS_COLORVERTEX, TRUE },
+    { TrFixedRender, D3DRS_LOCALVIEWER, TRUE }, { TrFixedRender, D3DRS_AMBIENT, 0 },
     { TrFixedRender, D3DRS_SPECULARENABLE, FALSE }, { TrFixedRender, D3DRS_NORMALIZENORMALS, FALSE },
     { TrFixedRender, D3DRS_WRAP0, 0 }, { TrFixedRender, D3DRS_WRAP1, 0 },
     { TrVertexTransform, D3DTS_WORLD, 0 }, { TrVertexTransform, D3DTS_VIEW, 0 },
@@ -6839,6 +6869,92 @@ static const TrVertexCase TrVertexCases[] =
         { TrFixedRender, D3DRS_POINTSCALE_A, 0x3F800000 }, { TrFixedRender, D3DRS_POINTSCALE_B, 0x3E800000 },
         { TrFixedRender, D3DRS_POINTSCALE_C, 0x3E000000 }, { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 }, { TrVertexTransform, D3DTS_PROJECTION, 3 } } },
     { "points scale off", D3DFVF_XYZ | D3DFVF_DIFFUSE, TRUE, { { TrFixedRender, D3DRS_POINTSCALEENABLE, FALSE } } },
+    { "lit no lights", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 } } },
+    { "lit directional", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit directional specular", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE },
+        { TrFixedRender, D3DRS_SPECULARENABLE, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit directional specular far", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE },
+        { TrFixedRender, D3DRS_SPECULARENABLE, TRUE },
+        { TrFixedRender, D3DRS_LOCALVIEWER, FALSE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit point", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 2, 1 },
+        { TrVertexEnable, 2, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit point specular", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 2, 1 },
+        { TrVertexEnable, 2, TRUE },
+        { TrFixedRender, D3DRS_SPECULARENABLE, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit spot", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 3, 2 },
+        { TrVertexEnable, 3, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit spot specular", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 3, 2 },
+        { TrVertexEnable, 3, TRUE },
+        { TrFixedRender, D3DRS_SPECULARENABLE, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit two directional", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE },
+        { TrVertexLight, 4, 3 },
+        { TrVertexEnable, 4, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit all kinds", D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_SPECULAR, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE },
+        { TrVertexLight, 2, 1 },
+        { TrVertexEnable, 2, TRUE },
+        { TrVertexLight, 3, 2 },
+        { TrVertexEnable, 3, TRUE },
+        { TrFixedRender, D3DRS_SPECULARENABLE, TRUE },
+        { TrVertexTransform, D3DTS_WORLD, 1 }, { TrVertexTransform, D3DTS_VIEW, 2 } } },
+    { "lit vertex colors", D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_DIFFUSE | D3DFVF_SPECULAR, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE },
+        { TrFixedRender, D3DRS_AMBIENTMATERIALSOURCE, D3DMCS_COLOR1 },
+        { TrFixedRender, D3DRS_EMISSIVEMATERIALSOURCE, D3DMCS_COLOR2 },
+        { TrFixedRender, D3DRS_SPECULARENABLE, TRUE } } },
+    { "lit ambient", D3DFVF_XYZ | D3DFVF_NORMAL, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrFixedRender, D3DRS_AMBIENT, 0x00402010 } } },
+    { "lit without normals", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE,
+      { { TrFixedRender, D3DRS_LIGHTING, TRUE },
+        { TrVertexMaterial, 1, 1 },
+        { TrVertexLight, 1, 0 },
+        { TrVertexEnable, 1, TRUE } } },
     { "default again", D3DFVF_XYZ | D3DFVF_DIFFUSE, FALSE, {} },
 };
 
@@ -6857,6 +6973,18 @@ TrVertexApply(
         {
             TrApi("SetTransform", Device->SetTransform(static_cast<D3DTRANSFORMSTATETYPE>(Set.Type),
                                                        &TrVertexMatrices[Set.Value]));
+        }
+        else if (Set.Stage == TrVertexLight)
+        {
+            TrApi("SetLight", Device->SetLight(Set.Type - 1, &TrVertexLights[Set.Value]));
+        }
+        else if (Set.Stage == TrVertexEnable)
+        {
+            TrApi("LightEnable", Device->LightEnable(Set.Type - 1, Set.Value));
+        }
+        else if (Set.Stage == TrVertexMaterial)
+        {
+            TrApi("SetMaterial", Device->SetMaterial(&TrVertexMaterials[Set.Value]));
         }
         else
         {
