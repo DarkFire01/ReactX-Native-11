@@ -265,6 +265,13 @@ DdPresentToPrimary(
     int Lines;
     HRESULT hr;
 
+    /* A windowed hardware primary takes blits only through a window clipper, and never from itself */
+    if (Primary->Driver->Hardware != nullptr && Primary->Driver->ExclusiveOwner == nullptr &&
+        (Window == NULL || Source == Primary))
+    {
+        return E_NOTIMPL;
+    }
+
     /* A window clipper sends the pixels to the window's redirection surface, as the system does */
     if (Window != NULL && Primary->Driver->Hardware != nullptr && Source != Primary)
     {
