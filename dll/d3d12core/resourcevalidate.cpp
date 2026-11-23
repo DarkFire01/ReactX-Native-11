@@ -759,11 +759,12 @@ RxValidateResourceDesc(
 }
 
 HRESULT
-RxValidateCommittedHeap(
+RxValidateHeapProperties(
     _In_ RxDevice12& Device,
     _In_ const D3D12_HEAP_PROPERTIES& Properties,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
-    _In_ UINT NodeIndex)
+    _In_ UINT NodeIndex,
+    _In_ BOOLEAN Committed)
 {
     const RxValidationCaps12& Caps = Device.GetValidationCaps();
     UINT Flags = HeapFlags;
@@ -833,8 +834,22 @@ RxValidateCommittedHeap(
         return E_INVALIDARG;
 
     /* A committed resource's heap gets the deny flags of its kind on its own */
-    if ((Flags & RxDenyKinds) != 0)
-        return E_INVALIDARG;
+    if (Committed || (Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0)
+    {
+        if ((Flags & RxDenyKinds) != 0)
+            return E_INVALIDARG;
+    }
+    else
+    {
+        UINT Denied = Flags & RxDenyKinds;
+
+        /* A heap leaves exactly one kind allowed, or allows all of them from tier 2 on */
+        if (Denied == 0 ? Device.GetOptions().ResourceHeapTier < D3D12DDI_RESOURCE_HEAP_TIER_2
+                        : (Denied & (Denied - 1)) == 0 || Denied == RxDenyKinds)
+        {
+            return E_INVALIDARG;
+        }
+    }
     if ((Creation & Visible) != Creation)
         return E_INVALIDARG;
 
@@ -848,6 +863,8 @@ RxValidateCommittedHeap(
         {
             return E_INVALIDARG;
         }
+        if ((Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0 && !Committed)
+            return E_INVALIDARG;
         return S_OK;
     }
 
@@ -861,7 +878,9 @@ RxValidateCommittedHeap(
         {
             return E_INVALIDARG;
         }
-        return S_OK;
+
+        /* Only committed resources may be displayed */
+        return Committed ? S_OK : E_INVALIDARG;
     }
 
     /* Shader atomics against CPU visible memory only work on custom heaps */
@@ -872,13 +891,47 @@ RxValidateCommittedHeap(
 }
 
 HRESULT
+RxValidateHeapDesc(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_HEAP_DESC& Desc,
+    _In_ UINT NodeIndex)
+{
+    constexpr UINT64 LargestHeap = 0xFFFFFFFFFFC00000ull;
+    constexpr UINT64 LargestCpuHeap = 0xFFFF0000ull;
+    constexpr UINT64 AlignmentBits = RxLargeAlignment | RxMsaaAlignment;
+    BOOLEAN GpuOnly;
+    HRESULT hr;
+
+    hr = RxValidateHeapProperties(Device, Desc.Properties, Desc.Flags, NodeIndex, FALSE);
+    if (FAILED(hr))
+        return hr;
+
+    GpuOnly = Desc.Properties.Type == D3D12_HEAP_TYPE_DEFAULT ||
+              (Desc.Properties.Type == D3D12_HEAP_TYPE_CUSTOM &&
+               Desc.Properties.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE);
+    if (Desc.SizeInBytes == 0 || Desc.SizeInBytes >= LargestHeap)
+        return E_INVALIDARG;
+    if (Desc.SizeInBytes > LargestCpuHeap && !GpuOnly)
+        return E_INVALIDARG;
+
+    /* No alignment, 64KB or 4MB */
+    if ((Desc.Alignment & ~AlignmentBits) != 0 || Desc.Alignment == AlignmentBits)
+        return E_INVALIDARG;
+
+    return S_OK;
+}
+
+HRESULT
 RxValidateHeapPlacement(
     _In_ RxDevice12& Device,
     _In_ D3D12_HEAP_TYPE Type,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ UINT64 HeapAlignment,
+    _In_ UINT64 Offset,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_opt_ const D3D12_CLEAR_VALUE* Clear)
 {
+    D3D12_RESOURCE_DESC1 Normal = Desc;
     BOOLEAN CrossAdapter = (HeapFlags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0;
     BOOLEAN CpuHeap = Type == D3D12_HEAP_TYPE_UPLOAD || Type == D3D12_HEAP_TYPE_READBACK;
     BOOLEAN PlanarOrYuv = FALSE;
@@ -948,6 +1001,11 @@ RxValidateHeapPlacement(
             return E_INVALIDARG;
         }
     }
+
+    /* Both the heap and the offset in it meet the resource's alignment */
+    RxFillResourceDefaults(Normal);
+    if (((HeapAlignment | Offset) & (Normal.Alignment - 1)) != 0)
+        return E_INVALIDARG;
 
     return S_OK;
 }

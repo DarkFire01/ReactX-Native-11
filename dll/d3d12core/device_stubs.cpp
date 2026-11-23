@@ -85,32 +85,6 @@ RxDevice12::CopyDescriptorsSimple(
 
 HRESULT
 STDMETHODCALLTYPE
-RxDevice12::CreateHeap(
-    _In_ const D3D12_HEAP_DESC* pDesc,
-    REFIID riid,
-    _COM_Outptr_opt_ void** ppvHeap)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxDevice12::CreatePlacedResource(
-    _In_ ID3D12Heap* pHeap,
-    UINT64 HeapOffset,
-    _In_ const D3D12_RESOURCE_DESC* pDesc,
-    D3D12_RESOURCE_STATES InitialState,
-    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
-    REFIID riid,
-    _COM_Outptr_opt_ void** ppvResource)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxDevice12::CreateReservedResource(
     _In_ const D3D12_RESOURCE_DESC* pDesc,
     D3D12_RESOURCE_STATES InitialState,
@@ -318,18 +292,6 @@ RxDevice12::CreateProtectedResourceSession(
 
 HRESULT
 STDMETHODCALLTYPE
-RxDevice12::CreateHeap1(
-    _In_ const D3D12_HEAP_DESC* pDesc,
-    _In_opt_ ID3D12ProtectedResourceSession* pProtectedSession,
-    REFIID riid,
-    _COM_Outptr_opt_ void** ppvHeap)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxDevice12::CreateReservedResource1(
     _In_ const D3D12_RESOURCE_DESC* pDesc,
     D3D12_RESOURCE_STATES InitialState,
@@ -457,21 +419,6 @@ RxDevice12::CreateProtectedResourceSession1(
     _In_ const D3D12_PROTECTED_RESOURCE_SESSION_DESC1* pDesc,
     _In_ REFIID riid,
     _COM_Outptr_ void** ppSession)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxDevice12::CreatePlacedResource1(
-    _In_ ID3D12Heap* pHeap,
-    UINT64 HeapOffset,
-    _In_ const D3D12_RESOURCE_DESC1* pDesc,
-    D3D12_RESOURCE_STATES InitialState,
-    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
-    REFIID riid,
-    _COM_Outptr_opt_ void** ppvResource)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

@@ -479,7 +479,84 @@ private:
     RxRtvEntry* RtvEntries = nullptr;
 };
 
-/* A committed resource: one driver heap with one resource placed at its start */
+/* An application heap; the driver backs it with a buffer that placed resources are made in */
+class RxHeap final : public RxDeviceChild12<ID3D12Heap1>
+{
+public:
+    static constexpr GUID PrivateId = {0x8e2b47d1, 0x3c96, 0x4a05, {0xb1, 0x7e, 0x5d, 0x20, 0xc4, 0x9a, 0x63, 0xf8}};
+
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_HEAP_DESC& Desc,
+        _Outptr_ RxHeap** Heap);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    D3D12_HEAP_DESC
+    STDMETHODCALLTYPE
+    GetDesc(VOID) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetProtectedResourceSession(
+        REFIID riid,
+        _COM_Outptr_opt_ void** ppProtectedSession) override;
+
+    const D3D12_HEAP_DESC&
+    GetApiDesc() const
+    {
+        return Desc;
+    }
+
+    /* The buffer spanning the heap, which placed resources name as where they live */
+    D3D12DDI_HRESOURCE
+    GetBackingResource() const
+    {
+        return DriverResource;
+    }
+
+    D3D12_GPU_VIRTUAL_ADDRESS
+    GetGpuAddress() const
+    {
+        return GpuAddress;
+    }
+
+    /* Maps the whole heap; every resource in it shares one mapping */
+    HRESULT
+    MapMemory(
+        _Outptr_ BYTE** Base);
+
+    VOID
+    UnmapMemory();
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxHeap() override;
+
+    HRESULT
+    Initialize(
+        _In_ const D3D12_HEAP_DESC& HeapDesc);
+
+    D3D12_HEAP_DESC Desc = {};
+    RxRuntimeResource12 Runtime = {};
+    RxDriverMemory12 HeapMemory;
+    RxDriverMemory12 ResourceMemory;
+    D3D12DDI_HHEAP DriverHeap = {};
+    D3D12DDI_HRESOURCE DriverResource = {};
+    BOOLEAN IsDriverHeapCreated = FALSE;
+    D3D12_GPU_VIRTUAL_ADDRESS GpuAddress = 0;
+    SRWLOCK MapLock = SRWLOCK_INIT;
+    UINT MapCount = 0;
+    BYTE* MappedBase = nullptr;
+};
+
+/* A committed resource owns one driver heap with itself at its start; a placed one lives in an RxHeap */
 class RxResource final : public RxDeviceChild12<ID3D12Resource2>
 {
 public:
@@ -491,6 +568,18 @@ public:
         _In_ RxDevice12& Device,
         _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
         _In_ D3D12_HEAP_FLAGS HeapFlags,
+        _In_ const D3D12_RESOURCE_DESC1& Desc,
+        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
+        _Outptr_ RxResource** Resource);
+
+    /* The desc is checked and has its defaults filled */
+    static
+    HRESULT
+    CreatePlaced(
+        _In_ RxDevice12& Device,
+        _In_ RxHeap& Heap,
+        _In_ UINT64 HeapOffset,
         _In_ const D3D12_RESOURCE_DESC1& Desc,
         _In_ D3D12_RESOURCE_STATES InitialState,
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
@@ -528,10 +617,20 @@ private:
         _In_ D3D12_RESOURCE_STATES InitialState,
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue);
 
+    HRESULT
+    InitializePlaced(
+        _In_ RxHeap& Heap,
+        _In_ UINT64 HeapOffset,
+        _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
+        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_opt_ const D3D12_CLEAR_VALUE* ClearValue);
+
     UINT
     SubresourceCount() const;
 
     D3D12_RESOURCE_DESC1 Desc = {};
+    RxHeap* Placement = nullptr;
+    UINT64 PlacementOffset = 0;
     D3D12_HEAP_PROPERTIES Properties = {};
     D3D12_HEAP_FLAGS Flags = D3D12_HEAP_FLAG_NONE;
     RxRuntimeResource12 Runtime = {};
@@ -631,20 +730,30 @@ RxValidateResourceDesc(
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_opt_ const D3D12_CLEAR_VALUE* Clear);
 
-/* Heap properties and flags given to a committed resource */
+/* Heap properties and flags given to a heap, or to a committed resource's own heap */
 HRESULT
-RxValidateCommittedHeap(
+RxValidateHeapProperties(
     _In_ RxDevice12& Device,
     _In_ const D3D12_HEAP_PROPERTIES& Properties,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ UINT NodeIndex,
+    _In_ BOOLEAN Committed);
+
+/* A whole heap description: its properties, size and alignment */
+HRESULT
+RxValidateHeapDesc(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_HEAP_DESC& Desc,
     _In_ UINT NodeIndex);
 
-/* Whether a resource may live in a heap of this type and these flags */
+/* Whether a resource may live in a heap of this type and these flags, at this offset */
 HRESULT
 RxValidateHeapPlacement(
     _In_ RxDevice12& Device,
     _In_ D3D12_HEAP_TYPE Type,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ UINT64 HeapAlignment,
+    _In_ UINT64 Offset,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_opt_ const D3D12_CLEAR_VALUE* Clear);
 
@@ -661,6 +770,41 @@ VOID
 RxToDdiResource(
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _Out_ D3D12DDIARG_CREATERESOURCE_0111& Ddi);
+
+/* The driver form of a heap; an implicit heap is the one a committed resource owns */
+VOID
+RxToDdiHeap(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_HEAP_PROPERTIES& Properties,
+    _In_ D3D12_HEAP_FLAGS Flags,
+    _In_ UINT64 Size,
+    _In_ UINT64 Alignment,
+    _In_ BOOLEAN Implicit,
+    _Out_ D3D12DDIARG_CREATEHEAP_0001& Ddi);
+
+/* The CPU page and memory pool a heap type stands for on this device */
+D3D12_HEAP_PROPERTIES
+RxCustomProperties(
+    _In_ const RxDevice12& Device,
+    _In_ D3D12_HEAP_TYPE Type);
+
+/* What the driver says one resource needs, and the layout it picked */
+D3D12_RESOURCE_ALLOCATION_INFO
+RxAllocationInfo(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ const D3D12DDIARG_CREATERESOURCE_0111& Ddi,
+    _In_ BOOLEAN SizeQuery,
+    _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout);
+
+/* GetResourceAllocationInfo1 for descs not yet filled in */
+D3D12_RESOURCE_ALLOCATION_INFO
+RxAllocationInfoForDescs(
+    _In_ RxDevice12& Device,
+    _In_ UINT Count,
+    _In_reads_(Count) const D3D12_RESOURCE_DESC1* Descs,
+    _Out_writes_opt_(Count) D3D12_RESOURCE_ALLOCATION_INFO1* Each);
 
 /* GetCopyableFootprints for one desc; FALSE when the desc or range is invalid */
 BOOLEAN

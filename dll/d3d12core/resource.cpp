@@ -247,8 +247,6 @@ RxOptimizationFlags(
     return Optimization;
 }
 
-/* What the driver says a resource needs, in the API's form, and the layout it picked */
-static
 D3D12_RESOURCE_ALLOCATION_INFO
 RxAllocationInfo(
     _In_ RxDevice12& Device,
@@ -287,7 +285,6 @@ RxAllocationInfo(
 }
 
 /* Sizes and alignments of several resources laid out one after another, as one heap would hold them */
-static
 D3D12_RESOURCE_ALLOCATION_INFO
 RxAllocationInfoForDescs(
     _In_ RxDevice12& Device,
@@ -339,7 +336,6 @@ RxAllocationInfoForDescs(
 
 /* Committed resources */
 
-static
 D3D12_HEAP_PROPERTIES
 RxCustomProperties(
     _In_ const RxDevice12& Device,
@@ -395,6 +391,109 @@ RxImplicitHeapFlags(
     return Flags | D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES;
 }
 
+VOID
+RxToDdiHeap(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_HEAP_PROPERTIES& Properties,
+    _In_ D3D12_HEAP_FLAGS Flags,
+    _In_ UINT64 Size,
+    _In_ UINT64 Alignment,
+    _In_ BOOLEAN Implicit,
+    _Out_ D3D12DDIARG_CREATEHEAP_0001& Ddi)
+{
+    D3D12_HEAP_PROPERTIES Custom;
+    UINT DdiFlags = 0;
+
+    ZeroMemory(&Ddi, sizeof(Ddi));
+    Custom = Properties.Type == D3D12_HEAP_TYPE_CUSTOM ? Properties : RxCustomProperties(Device, Properties.Type);
+
+    Ddi.ByteSize = Size;
+    Ddi.Alignment = Alignment;
+    Ddi.CPUPageProperty = Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ? D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE
+                          : Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE ? D3D12DDI_CPU_PAGE_PROPERTY_WRITE_COMBINE
+                                                                                            : D3D12DDI_CPU_PAGE_PROPERTY_WRITE_BACK;
+    Ddi.MemoryPool = Custom.MemoryPoolPreference == D3D12_MEMORY_POOL_L0 ? D3D12DDI_MEMORY_POOL_L0 : D3D12DDI_MEMORY_POOL_L1;
+    Ddi.CreationNodeMask = 1;
+    Ddi.VisibleNodeMask = 1;
+
+    /* Below tier 2 a heap says which kinds of resource it holds */
+    if (Device.GetOptions().ResourceHeapTier >= D3D12DDI_RESOURCE_HEAP_TIER_2)
+    {
+        DdiFlags = D3D12DDI_HEAP_FLAG_BUFFERS | D3D12DDI_HEAP_FLAG_RT_DS_TEXTURES | D3D12DDI_HEAP_FLAG_NON_RT_DS_TEXTURES;
+    }
+    else
+    {
+        if ((Flags & D3D12_HEAP_FLAG_DENY_BUFFERS) == 0)
+            DdiFlags |= D3D12DDI_HEAP_FLAG_BUFFERS;
+        if ((Flags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES) == 0)
+            DdiFlags |= D3D12DDI_HEAP_FLAG_RT_DS_TEXTURES;
+        if ((Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES) == 0)
+            DdiFlags |= D3D12DDI_HEAP_FLAG_NON_RT_DS_TEXTURES;
+    }
+    if ((Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0)
+        DdiFlags |= D3D12DDI_HEAP_FLAG_PRIMARY;
+    if ((Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0 ||
+        (Ddi.CPUPageProperty != D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE && !Device.IsCacheCoherentUma()))
+    {
+        DdiFlags |= D3D12DDI_HEAP_FLAG_COHERENT_SYSTEMWIDE;
+    }
+    if (Implicit)
+        DdiFlags |= D3D12DDI_HEAP_FLAG_0115_IMPLICIT;
+    Ddi.Flags = (D3D12DDI_HEAP_FLAGS)DdiFlags;
+}
+
+/* An optimized clear value as the driver takes it; color denormals are flushed to zero */
+static
+VOID
+RxToDdiClear(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ const D3D12_CLEAR_VALUE& Clear,
+    _Out_ D3D12DDI_CLEAR_VALUES& Ddi)
+{
+    UINT Index;
+
+    ZeroMemory(&Ddi, sizeof(Ddi));
+    Ddi.Format = Clear.Format;
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0)
+    {
+        Ddi.DepthStencil.Depth = Clear.DepthStencil.Depth;
+        Ddi.DepthStencil.Stencil = Clear.DepthStencil.Stencil;
+        return;
+    }
+
+    for (Index = 0; Index < 4; Index++)
+    {
+        UINT Bits;
+
+        memcpy(&Bits, &Clear.Color[Index], sizeof(Bits));
+        if ((Bits & 0x7F800000) == 0)
+            Bits &= 0x80000000;
+        memcpy(&Ddi.Color[Index], &Bits, sizeof(Bits));
+    }
+}
+
+/* Row major 2D textures tell the driver their pitches */
+static
+VOID
+RxFillRowMajorLayout(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _Out_ D3D12DDIARG_ROW_MAJOR_RESOURCE_LAYOUT& RowMajor,
+    _Inout_ D3D12DDIARG_CREATERESOURCE_0111& Ddi)
+{
+    UINT BlockWidth;
+    UINT BlockHeight;
+    UINT BlockBytes;
+
+    ZeroMemory(&RowMajor, sizeof(RowMajor));
+    if (Desc.Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR || Desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+        return;
+
+    RxFormatBlock(Desc.Format, &BlockWidth, &BlockHeight, &BlockBytes);
+    RowMajor.RowPitch = (UINT)RxAlignUp((Desc.Width + BlockWidth - 1) / BlockWidth * BlockBytes, 128);
+    RowMajor.SlicePitch = RowMajor.RowPitch * (UINT)RxAlignUp((Desc.Height + BlockHeight - 1) / BlockHeight, 4);
+    Ddi.pRowMajorLayout = &RowMajor;
+}
+
 HRESULT
 RxResource::CreateCommitted(
     _In_ RxDevice12& Device,
@@ -441,17 +540,14 @@ RxResource::Initialize(
 {
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3D12DDIARG_CREATERESOURCE_0111 DdiResource;
-    D3D12DDIARG_CREATEHEAP_0001 DdiHeap = {};
-    D3D12DDIARG_ROW_MAJOR_RESOURCE_LAYOUT RowMajor = {};
+    D3D12DDIARG_CREATEHEAP_0001 DdiHeap;
+    D3D12DDIARG_ROW_MAJOR_RESOURCE_LAYOUT RowMajor;
     D3D12DDI_CLEAR_VALUES DdiClear = {};
     D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Existing = {};
     D3D12DDI_HEAP_AND_RESOURCE_SIZES Sizes;
     D3D12_RESOURCE_ALLOCATION_INFO Info;
-    D3D12_HEAP_PROPERTIES Custom;
     D3D12DDI_HRTRESOURCE RuntimeHandle;
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
-    UINT DdiHeapFlags = 0;
-    UINT Index;
     HRESULT hr;
 
     Desc = ResourceDesc;
@@ -461,18 +557,7 @@ RxResource::Initialize(
     Flags = RxImplicitHeapFlags(HeapFlags, Desc);
 
     RxToDdiResource(Desc, DdiResource);
-
-    if (Desc.Layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR && Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
-    {
-        UINT BlockWidth;
-        UINT BlockHeight;
-        UINT BlockBytes;
-
-        RxFormatBlock(Desc.Format, &BlockWidth, &BlockHeight, &BlockBytes);
-        RowMajor.RowPitch = (UINT)RxAlignUp((Desc.Width + BlockWidth - 1) / BlockWidth * BlockBytes, 128);
-        RowMajor.SlicePitch = RowMajor.RowPitch * (UINT)RxAlignUp((Desc.Height + BlockHeight - 1) / BlockHeight, 4);
-        DdiResource.pRowMajorLayout = &RowMajor;
-    }
+    RxFillRowMajorLayout(Desc, RowMajor, DdiResource);
 
     /* The size check sees no initial layout; creation then takes the layout the driver chose */
     Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
@@ -480,62 +565,9 @@ RxResource::Initialize(
         return E_OUTOFMEMORY;
     DdiResource.InitialBarrierLayout = RxInitialLayout(InitialState);
 
-    Custom = Properties.Type == D3D12_HEAP_TYPE_CUSTOM ? Properties : RxCustomProperties(Device, Properties.Type);
-
-    DdiHeap.ByteSize = Info.SizeInBytes;
-    DdiHeap.Alignment = Info.Alignment;
-    DdiHeap.CPUPageProperty = Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ? D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE
-                              : Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE ? D3D12DDI_CPU_PAGE_PROPERTY_WRITE_COMBINE
-                                                                                                : D3D12DDI_CPU_PAGE_PROPERTY_WRITE_BACK;
-    DdiHeap.MemoryPool = Custom.MemoryPoolPreference == D3D12_MEMORY_POOL_L0 ? D3D12DDI_MEMORY_POOL_L0 : D3D12DDI_MEMORY_POOL_L1;
-    DdiHeap.CreationNodeMask = 1;
-    DdiHeap.VisibleNodeMask = 1;
-
-    /* Below tier 2 a heap says which kinds of resource it holds */
-    if (Device.GetOptions().ResourceHeapTier >= D3D12DDI_RESOURCE_HEAP_TIER_2)
-    {
-        DdiHeapFlags = D3D12DDI_HEAP_FLAG_BUFFERS | D3D12DDI_HEAP_FLAG_RT_DS_TEXTURES | D3D12DDI_HEAP_FLAG_NON_RT_DS_TEXTURES;
-    }
-    else
-    {
-        if ((Flags & D3D12_HEAP_FLAG_DENY_BUFFERS) == 0)
-            DdiHeapFlags |= D3D12DDI_HEAP_FLAG_BUFFERS;
-        if ((Flags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES) == 0)
-            DdiHeapFlags |= D3D12DDI_HEAP_FLAG_RT_DS_TEXTURES;
-        if ((Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES) == 0)
-            DdiHeapFlags |= D3D12DDI_HEAP_FLAG_NON_RT_DS_TEXTURES;
-    }
-    if ((Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0)
-        DdiHeapFlags |= D3D12DDI_HEAP_FLAG_PRIMARY;
-    if ((Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0 ||
-        (DdiHeap.CPUPageProperty != D3D12DDI_CPU_PAGE_PROPERTY_NOT_AVAILABLE && !Device.IsCacheCoherentUma()))
-    {
-        DdiHeapFlags |= D3D12DDI_HEAP_FLAG_COHERENT_SYSTEMWIDE;
-    }
-    DdiHeapFlags |= D3D12DDI_HEAP_FLAG_0115_IMPLICIT;
-    DdiHeap.Flags = (D3D12DDI_HEAP_FLAGS)DdiHeapFlags;
-
+    RxToDdiHeap(Device, Properties, Flags, Info.SizeInBytes, Info.Alignment, TRUE, DdiHeap);
     if (ClearValue != nullptr)
-    {
-        DdiClear.Format = ClearValue->Format;
-        if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0)
-        {
-            for (Index = 0; Index < 4; Index++)
-            {
-                UINT Bits;
-
-                memcpy(&Bits, &ClearValue->Color[Index], sizeof(Bits));
-                if ((Bits & 0x7F800000) == 0)
-                    Bits &= 0x80000000;
-                memcpy(&DdiClear.Color[Index], &Bits, sizeof(Bits));
-            }
-        }
-        else
-        {
-            DdiClear.DepthStencil.Depth = ClearValue->DepthStencil.Depth;
-            DdiClear.DepthStencil.Stencil = ClearValue->DepthStencil.Stencil;
-        }
-    }
+        RxToDdiClear(Desc, *ClearValue, DdiClear);
 
     /* Sized once for the heap object and once for the resource it carries, as the system core does */
     Sizes = Ddi.pfnCalcPrivateHeapAndResourceSizes(Device.Handle(), &DdiHeap, &DdiResource, NoSession);
@@ -563,13 +595,118 @@ RxResource::Initialize(
     return Device.MakePageableResident(DriverHeap.pDrvPrivate, D3D12DDI_HT_HEAP);
 }
 
+HRESULT
+RxResource::CreatePlaced(
+    _In_ RxDevice12& Device,
+    _In_ RxHeap& Heap,
+    _In_ UINT64 HeapOffset,
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
+    _Outptr_ RxResource** Resource)
+{
+    RxResource* Created;
+    HRESULT hr;
+
+    *Resource = nullptr;
+
+    Created = new (std::nothrow) RxResource(Device);
+    if (Created == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Created->InitializePlaced(Heap, HeapOffset, Desc, InitialState, ClearValue);
+    if (FAILED(hr))
+    {
+        Created->Release();
+        return hr;
+    }
+
+    *Resource = Created;
+    return S_OK;
+}
+
+HRESULT
+RxResource::InitializePlaced(
+    _In_ RxHeap& Heap,
+    _In_ UINT64 HeapOffset,
+    _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
+    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_opt_ const D3D12_CLEAR_VALUE* ClearValue)
+{
+    const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
+    const D3D12_HEAP_DESC& HeapDesc = Heap.GetApiDesc();
+    D3D12DDIARG_CREATERESOURCE_0111 DdiResource;
+    D3D12DDIARG_ROW_MAJOR_RESOURCE_LAYOUT RowMajor;
+    D3D12DDI_CLEAR_VALUES DdiClear = {};
+    D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Existing = {};
+    D3D12DDI_HEAP_AND_RESOURCE_SIZES Sizes;
+    D3D12_RESOURCE_ALLOCATION_INFO Info;
+    D3D12DDI_HRTRESOURCE NoRuntime = {};
+    D3D12DDI_HHEAP NoHeap = {};
+    D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
+    HRESULT hr;
+
+    Desc = ResourceDesc;
+    Placement = &Heap;
+    Placement->AddUse();
+    PlacementOffset = HeapOffset;
+    Properties = HeapDesc.Properties;
+    Flags = HeapDesc.Flags;
+
+    RxToDdiResource(Desc, DdiResource);
+    RxFillRowMajorLayout(Desc, RowMajor, DdiResource);
+
+    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
+    if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
+        return E_OUTOFMEMORY;
+    DdiResource.InitialBarrierLayout = RxInitialLayout(InitialState);
+    DdiResource.ReuseBufferGPUVA.BaseAddress.UMD.hResource = Heap.GetBackingResource();
+    DdiResource.ReuseBufferGPUVA.BaseAddress.UMD.Offset = HeapOffset;
+    if (ClearValue != nullptr)
+        RxToDdiClear(Desc, *ClearValue, DdiClear);
+
+    /* The heap is already there, so only the resource is sized and made */
+    Sizes = Ddi.pfnCalcPrivateHeapAndResourceSizes(Device.Handle(), nullptr, &DdiResource, NoSession);
+    DriverResource.pDrvPrivate = ResourceMemory.Allocate(Sizes.Resource);
+    if (DriverResource.pDrvPrivate == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Ddi.pfnCreateHeapAndResource(Device.Handle(), nullptr, NoHeap, NoRuntime, &DdiResource,
+                                      ClearValue != nullptr ? &DdiClear : nullptr, NoSession, DriverResource);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"driver CreateHeapAndResource failed for a placed resource 0x%08lX", hr);
+        return hr;
+    }
+    IsDriverResourceCreated = TRUE;
+
+    /* Placed buffers sit at their offset in the heap's own buffer */
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+    {
+        GpuAddress = Heap.GetGpuAddress() + HeapOffset;
+        Ddi.pfnCheckExistingResourceAllocationInfo(Device.Handle(), DriverResource, &Existing);
+    }
+
+    return S_OK;
+}
+
 RxResource::~RxResource()
 {
+    D3D12DDI_HHEAP NoHeap = {};
+
     if (MapCount != 0)
-        Device.Ddi().pfnUnmapHeap(Device.Handle(), DriverHeap);
+    {
+        if (Placement != nullptr)
+            Placement->UnmapMemory();
+        else
+            Device.Ddi().pfnUnmapHeap(Device.Handle(), DriverHeap);
+    }
 
     if (IsDriverResourceCreated)
-        Device.Ddi().pfnDestroyHeapAndResource(Device.Handle(), DriverHeap, DriverResource);
+        Device.Ddi().pfnDestroyHeapAndResource(Device.Handle(), Placement != nullptr ? NoHeap : DriverHeap, DriverResource);
+
+    if (Placement != nullptr)
+        Placement->ReleaseUse();
 }
 
 HRESULT
@@ -632,7 +769,16 @@ RxResource::Map(
     AcquireSRWLockExclusive(&MapLock);
     if (MapCount == 0)
     {
-        hr = Device.Ddi().pfnMapHeap(Device.Handle(), DriverHeap, reinterpret_cast<void**>(&MappedBase));
+        if (Placement != nullptr)
+        {
+            hr = Placement->MapMemory(&MappedBase);
+            if (SUCCEEDED(hr))
+                MappedBase += PlacementOffset;
+        }
+        else
+        {
+            hr = Device.Ddi().pfnMapHeap(Device.Handle(), DriverHeap, reinterpret_cast<void**>(&MappedBase));
+        }
         if (FAILED(hr))
         {
             ReleaseSRWLockExclusive(&MapLock);
@@ -663,7 +809,10 @@ RxResource::Unmap(
         MapCount -= 1;
         if (MapCount == 0)
         {
-            Device.Ddi().pfnUnmapHeap(Device.Handle(), DriverHeap);
+            if (Placement != nullptr)
+                Placement->UnmapMemory();
+            else
+                Device.Ddi().pfnUnmapHeap(Device.Handle(), DriverHeap);
             MappedBase = nullptr;
         }
     }
@@ -875,13 +1024,13 @@ RxCreateCommittedCommon(
         return E_INVALIDARG;
 
     /* One node: the creation node validation reads is always the first */
-    hr = RxValidateCommittedHeap(Device, *pHeapProperties, HeapFlags, 0);
+    hr = RxValidateHeapProperties(Device, *pHeapProperties, HeapFlags, 0, TRUE);
     if (FAILED(hr))
         return hr;
     if (pDesc == nullptr)
         return E_INVALIDARG;
 
-    hr = RxValidateHeapPlacement(Device, pHeapProperties->Type, HeapFlags, *pDesc, pOptimizedClearValue);
+    hr = RxValidateHeapPlacement(Device, pHeapProperties->Type, HeapFlags, 0, 0, *pDesc, pOptimizedClearValue);
     if (FAILED(hr))
         return hr;
     hr = RxValidateInitialState(Device, InitialResourceState, *pDesc, pHeapProperties->Type);
@@ -969,6 +1118,111 @@ RxDevice12::CreateCommittedResource2(
 {
     return RxCreateCommittedCommon(*this, pHeapProperties, HeapFlags, pDesc, InitialResourceState,
                                    pOptimizedClearValue, pProtectedSession, riidResource, ppvResource);
+}
+
+/* Placed resources: the heap's rules, the resource's own and the room left at the offset */
+static
+HRESULT
+RxCreatePlacedCommon(
+    _In_ RxDevice12& Device,
+    _In_opt_ ID3D12Heap* pHeap,
+    _In_ UINT64 HeapOffset,
+    _In_opt_ const D3D12_RESOURCE_DESC1* pDesc,
+    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
+    _In_ REFIID riidResource,
+    _COM_Outptr_opt_ void** ppvResource)
+{
+    D3D12_RESOURCE_DESC1 Normal;
+    RxResource* Resource;
+    RxHeap* Heap;
+    UINT64 Size;
+    HRESULT hr;
+
+    if (ppvResource != nullptr)
+        *ppvResource = nullptr;
+    if (pHeap == nullptr || pDesc == nullptr)
+        return E_INVALIDARG;
+
+    Heap = RxUnwrap12<RxHeap>(pHeap);
+    if (Heap == nullptr)
+        return E_INVALIDARG;
+
+    const D3D12_HEAP_DESC& HeapDesc = Heap->GetApiDesc();
+
+    hr = RxValidateHeapPlacement(Device, HeapDesc.Properties.Type, HeapDesc.Flags, HeapDesc.Alignment, HeapOffset,
+                                 *pDesc, pOptimizedClearValue);
+    if (FAILED(hr))
+        return hr;
+    hr = RxValidateInitialState(Device, InitialState, *pDesc, HeapDesc.Properties.Type);
+    if (FAILED(hr))
+        return hr;
+
+    /* Buffers take their width; textures what the driver says they need */
+    if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+        Size = pDesc->Width;
+    else
+        Size = RxAllocationInfoForDescs(Device, 1, pDesc, nullptr).SizeInBytes;
+    if (Size + HeapOffset < HeapOffset || Size + HeapOffset > HeapDesc.SizeInBytes)
+        return E_INVALIDARG;
+
+    Normal = *pDesc;
+    RxFillResourceDefaults(Normal);
+
+    /* Without an out pointer the system sizes the resource and then fails */
+    if (ppvResource == nullptr)
+    {
+        D3D12DDIARG_CREATERESOURCE_0111 Ddi;
+
+        RxToDdiResource(Normal, Ddi);
+        RxAllocationInfo(Device, Normal, Ddi, FALSE, HeapDesc.Flags, nullptr);
+        return E_UNEXPECTED;
+    }
+
+    hr = Device.CheckUsable();
+    if (FAILED(hr))
+        return hr;
+
+    hr = RxResource::CreatePlaced(Device, *Heap, HeapOffset, Normal, InitialState, pOptimizedClearValue, &Resource);
+    if (FAILED(hr))
+        return hr;
+
+    return RxHandOut12(Resource, riidResource, ppvResource);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice12::CreatePlacedResource(
+    _In_ ID3D12Heap* pHeap,
+    UINT64 HeapOffset,
+    _In_ const D3D12_RESOURCE_DESC* pDesc,
+    D3D12_RESOURCE_STATES InitialState,
+    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
+    REFIID riid,
+    _COM_Outptr_opt_ void** ppvResource)
+{
+    D3D12_RESOURCE_DESC1 Wide;
+
+    if (pDesc != nullptr)
+        Wide = RxWidenDesc(*pDesc);
+
+    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc != nullptr ? &Wide : nullptr, InitialState,
+                                pOptimizedClearValue, riid, ppvResource);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice12::CreatePlacedResource1(
+    _In_ ID3D12Heap* pHeap,
+    UINT64 HeapOffset,
+    _In_ const D3D12_RESOURCE_DESC1* pDesc,
+    D3D12_RESOURCE_STATES InitialState,
+    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
+    REFIID riid,
+    _COM_Outptr_opt_ void** ppvResource)
+{
+    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid,
+                                ppvResource);
 }
 
 D3D12_RESOURCE_ALLOCATION_INFO
