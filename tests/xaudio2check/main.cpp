@@ -3625,6 +3625,11 @@ XcCheckReverb(
         { 2, 2, 160, 22050, FALSE },
         { 1, 2, 480, 48000, FALSE },
         { 2, 1, 480, 48000, FALSE },
+        { 2, 6, 480, 48000, FALSE },
+        { 2, 6, 441, 44100, FALSE },
+        { 2, 8, 480, 48000, FALSE },
+        { 2, 8, 240, 24000, FALSE },
+        { 2, 5, 100, 32000, FALSE },
     };
     IUnknown* Object = nullptr;
     IXAPO* Apo = nullptr;
