@@ -60,6 +60,49 @@ struct D9Adapter
     D3DKMT_HANDLE KernelAdapter;
     LUID AdapterLuid;
     D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId;
+
+    /* The user mode driver, present when OpenAdapter and the capability queries succeeded */
+    BOOLEAN HasDriver;
+    HMODULE Module;
+    D3DDDI_ADAPTERCALLBACKS Callbacks;
+    D3DDDI_ADAPTERFUNCS Functions;
+    HANDLE DriverAdapter;
+    UINT RuntimeVersion;
+    UINT DriverVersion;
+    UINT DriverModel;
+
+    /* What the kernel says about the adapter */
+    D3DKMT_FLIPQUEUEINFO FlipQueue;
+    D3DKMT_ADAPTERTYPE AdapterType;
+    D3DKMT_WDDM_1_2_CAPS Wddm12Caps;
+    BOOLEAN NoOverlayCap;
+
+    /* The desktop mode when the object was created */
+    D3DDISPLAYMODEEX DesktopMode;
+    D3DDDI_ROTATION Rotation;
+
+    /* Driver answers, with the runtime's corrections applied */
+    D3DCAPS9 DriverCaps;
+    FORMATOP* Formats;
+    UINT FormatCount;
+    D3DDDIQUERYTYPE* Queries;
+    UINT QueryCount;
+
+    /* Which 16 and 32 bit desktop formats the driver can display */
+    D3DFORMAT Display16Format;
+    BOOLEAN Displays16;
+    BOOLEAN Displays32;
+
+    /* Kernel modes in the 10 bit and float desktop formats */
+    D3DDISPLAYMODE* WideModes;
+    UINT WideModeCount;
+
+    /* The mode table: listed modes, then wide format copies, then kernel modes the monitor did not validate
+       (for tables read from GDI that last count is the spare room instead) */
+    D3DDISPLAYMODEEX* Modes;
+    UINT ModeCount;
+    UINT ExtendedModeCount;
+    UINT UnvalidatedModeCount;
 };
 
 /* The IDirect3D9Ex object Direct3DCreate9 and its siblings hand out */
@@ -205,6 +248,13 @@ private:
     VOID
     CollectDisplays(VOID);
 
+    HRESULT
+    FindMode(
+        _In_ UINT Adapter,
+        _In_ const D3DDISPLAYMODEFILTER* Filter,
+        _In_ UINT Mode,
+        _Out_ D3DDISPLAYMODEEX* DisplayMode);
+
     LONG RefCount = 1;
     CRITICAL_SECTION Lock;
     UINT SdkVersion;
@@ -252,3 +302,49 @@ D9QueryUmdName(
     _In_ D3DKMT_HANDLE Adapter,
     _In_ KMTUMDVERSION Version,
     _Out_ D3DKMT_UMDFILENAMEINFO* Name);
+
+NTSTATUS
+D9QueryKernel(
+    _In_ D3DKMT_HANDLE Adapter,
+    _In_ KMTQUERYADAPTERINFOTYPE Type,
+    _Inout_updates_bytes_(Size) VOID* Data,
+    _In_ UINT Size);
+
+HRESULT
+D9HresultFromStatus(
+    _In_ NTSTATUS Status);
+
+/* umd.cpp */
+BOOLEAN
+D9OpenDriver(
+    _Inout_ D9Adapter* Adapter,
+    _In_ BOOLEAN IsEx);
+
+VOID
+D9CloseDriver(
+    _Inout_ D9Adapter* Adapter);
+
+HRESULT
+D9DriverGetCaps(
+    _In_ const D9Adapter* Adapter,
+    _In_ D3DDDICAPS_TYPE Type,
+    _In_opt_ VOID* Info,
+    _Out_writes_bytes_(Size) VOID* Data,
+    _In_ UINT Size);
+
+/* modes.cpp */
+HRESULT
+D9ReadDesktopMode(
+    _In_z_ PCSTR DeviceName,
+    _Out_ D3DDISPLAYMODEEX* Mode,
+    _Out_opt_ D3DDDI_ROTATION* Rotation);
+
+HRESULT
+D9ReadKernelModes(
+    _In_ const D9Adapter* Adapter,
+    _Outptr_result_buffer_maybenull_(*Count) D3DKMT_DISPLAYMODE** Modes,
+    _Out_ UINT* Count);
+
+VOID
+D9FreeModeTable(
+    _Inout_ D9Adapter* Adapter);

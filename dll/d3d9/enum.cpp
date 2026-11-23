@@ -20,7 +20,10 @@ D9Enum::D9Enum(
 D9Enum::~D9Enum()
 {
     for (UINT Index = 0; Index < AdapterCount; Index++)
+    {
+        D9CloseDriver(&Adapters[Index]);
         D9CloseAdapter(&Adapters[Index]);
+    }
 
     InterlockedDecrement(&D9State.LiveObjects);
     DeleteCriticalSection(&Lock);
@@ -103,6 +106,13 @@ D9Enum::Initialize(
     for (UINT Index = 0; Index < AdapterCount; Index++)
         D9OpenAdapter(&Adapters[Index]);
 
+    /* The extended object only drives displays that have a WDDM driver */
+    for (UINT Index = 0; Index < AdapterCount; Index++)
+    {
+        if (D9State.HasWddmDriver || !IsEx)
+            D9OpenDriver(&Adapters[Index], IsEx);
+    }
+
     /* The mapping layer is not part of ReactX; a request for it gets the native driver */
     for (UINT Index = 0; Overrides != nullptr && Index < OverrideCount; Index++)
     {
@@ -157,35 +167,6 @@ D9Enum::GetAdapterCount()
 STDMETHODIMP
 D9Enum::RegisterSoftwareDevice(
     _In_ VOID* InitializeFunction)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP_(UINT)
-D9Enum::GetAdapterModeCount(
-    _In_ UINT Adapter,
-    _In_ D3DFORMAT Format)
-{
-    RX_UNIMPLEMENTED();
-    return 0;
-}
-
-STDMETHODIMP
-D9Enum::EnumAdapterModes(
-    _In_ UINT Adapter,
-    _In_ D3DFORMAT Format,
-    _In_ UINT Mode,
-    _Out_ D3DDISPLAYMODE* DisplayMode)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::GetAdapterDisplayMode(
-    _In_ UINT Adapter,
-    _Out_ D3DDISPLAYMODE* DisplayMode)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_NOTAVAILABLE;
@@ -313,36 +294,6 @@ D9Enum::CreateDevice(
 {
     RX_UNIMPLEMENTED();
     *Device = nullptr;
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP_(UINT)
-D9Enum::GetAdapterModeCountEx(
-    _In_ UINT Adapter,
-    _In_ const D3DDISPLAYMODEFILTER* Filter)
-{
-    RX_UNIMPLEMENTED();
-    return 0;
-}
-
-STDMETHODIMP
-D9Enum::EnumAdapterModesEx(
-    _In_ UINT Adapter,
-    _In_ const D3DDISPLAYMODEFILTER* Filter,
-    _In_ UINT Mode,
-    _Out_ D3DDISPLAYMODEEX* DisplayMode)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::GetAdapterDisplayModeEx(
-    _In_ UINT Adapter,
-    _Out_opt_ D3DDISPLAYMODEEX* DisplayMode,
-    _Out_opt_ D3DDISPLAYROTATION* Rotation)
-{
-    RX_UNIMPLEMENTED();
     return D3DERR_NOTAVAILABLE;
 }
 

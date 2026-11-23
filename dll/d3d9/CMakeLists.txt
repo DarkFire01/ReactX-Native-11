@@ -5,8 +5,10 @@ nt_add_usermode_dll(d3d9
         enum.cpp
         identity.cpp
         main.cpp
+        modes.cpp
         perf.cpp
-        psgp.cpp)
+        psgp.cpp
+        umd.cpp)
 
 target_link_libraries(d3d9 PRIVATE rxcommon user32 gdi32 advapi32 version)
 

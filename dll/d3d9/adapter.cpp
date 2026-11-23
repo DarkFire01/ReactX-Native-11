@@ -7,7 +7,6 @@
 
 #include "d3d9.hpp"
 
-static
 NTSTATUS
 D9QueryKernel(
     _In_ D3DKMT_HANDLE Adapter,
@@ -26,6 +25,68 @@ D9QueryKernel(
     Query.pPrivateDriverData = Data;
     Query.PrivateDriverDataSize = Size;
     return Kmt->QueryAdapterInfo(&Query);
+}
+
+/* The HRESULT the runtime reports for a kernel status */
+HRESULT
+D9HresultFromStatus(
+    _In_ NTSTATUS Status)
+{
+    switch (static_cast<ULONG>(Status))
+    {
+    case STATUS_SUCCESS:
+    case 0xC01E0006:
+        return S_OK;
+    case STATUS_PENDING:
+        return E_PENDING;
+    case STATUS_INVALID_PARAMETER:
+    case STATUS_INVALID_PARAMETER_1:
+    case STATUS_INVALID_PARAMETER_2:
+    case STATUS_INVALID_PARAMETER_3:
+    case STATUS_INVALID_PARAMETER_4:
+    case STATUS_INVALID_PARAMETER_5:
+    case STATUS_INVALID_PARAMETER_6:
+    case STATUS_INVALID_PARAMETER_7:
+    case STATUS_INVALID_PARAMETER_8:
+    case STATUS_INVALID_PARAMETER_9:
+    case STATUS_INVALID_PARAMETER_10:
+    case STATUS_INVALID_PARAMETER_11:
+    case STATUS_INVALID_PARAMETER_12:
+        return E_INVALIDARG;
+    case STATUS_NO_MEMORY:
+    case STATUS_COMMITMENT_LIMIT:
+        return E_OUTOFMEMORY;
+    case STATUS_INVALID_USER_BUFFER:
+        return 0x88760879;
+    case STATUS_ACCESS_DENIED:
+        return D3DERR_NOTAVAILABLE;
+    case STATUS_PRIVILEGED_INSTRUCTION:
+        return 0x88760871;
+    case STATUS_ILLEGAL_INSTRUCTION:
+        return 0x88760872;
+    case STATUS_INVALID_HANDLE:
+    case 0xC01E0112:
+    case 0xC01E0113:
+    case 0xC01E0114:
+    case 0xC01E0115:
+        return 0x88760873;
+    case STATUS_DEVICE_REMOVED:
+        return D3DERR_DEVICEREMOVED;
+    case 0xC01E0102:
+        return 0x8876021C;
+    case 0xC01E0100:
+        return 0x8876017C;
+    case 0xC01E0109:
+        return 0xC0262109;
+    case 0xC01E0111:
+        return 0xC0262111;
+    case 0xC01E0009:
+        OutputDebugStringW(L"User/kernel-mode driver mismatch");
+        DebugBreak();
+        return E_FAIL;
+    default:
+        return E_FAIL;
+    }
 }
 
 /* Asks for the user mode driver of one runtime family; only success matters to the callers */
