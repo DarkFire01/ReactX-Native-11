@@ -162,6 +162,31 @@ public:
 
     STDMETHOD_(bool, IsMaximumFrameLatencyReached)() noexcept final;
 
+    STDMETHOD(CreateVertexShader)(
+        _In_ D3D10DDI_HSHADER Shader,
+        _In_ const D3D11On12::SHADER_DESC* Desc) noexcept final;
+
+    STDMETHOD(CreatePixelShader)(
+        _In_ D3D10DDI_HSHADER Shader,
+        _In_ const D3D11On12::SHADER_DESC* Desc) noexcept final;
+
+    STDMETHOD(CreateGeometryShader)(
+        _In_ D3D10DDI_HSHADER Shader,
+        _In_ const D3D11On12::GEOMETRY_SHADER_DESC* Desc,
+        _In_opt_ const D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT* StreamOutput) noexcept final;
+
+    STDMETHOD(CreateHullShader)(
+        _In_ D3D10DDI_HSHADER Shader,
+        _In_ const D3D11On12::SHADER_DESC* Desc) noexcept final;
+
+    STDMETHOD(CreateDomainShader)(
+        _In_ D3D10DDI_HSHADER Shader,
+        _In_ const D3D11On12::SHADER_DESC* Desc) noexcept final;
+
+    STDMETHOD(CreateComputeShader)(
+        _In_ D3D10DDI_HSHADER Shader,
+        _In_ const D3D11On12::SHADER_DESC* Desc) noexcept final;
+
 private:
     friend struct On12PresentExtension;
 
