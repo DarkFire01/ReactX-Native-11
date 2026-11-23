@@ -6469,6 +6469,69 @@ TrScenarioFixedPixelPlain(
     Plain->Release();
 }
 
+/* A plain device resets after fixed function draws that leave the back buffer bound by the application, then
+   presents and draws again */
+static
+VOID
+TrScenarioFixedReset(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9* Device = nullptr;
+    IDirect3DTexture9* Flat = nullptr;
+    IDirect3DBaseTexture9* Textures[5] = {};
+    IDirect3DSurface9* Back = nullptr;
+    const TrFixedSet Sets[] =
+    {
+        { 0, D3DTSS_COLOROP, D3DTOP_MODULATE }, { 0, D3DTSS_COLORARG1, D3DTA_TEXTURE },
+        { 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE },
+    };
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    Parameters.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+
+    TrPhase("fixed reset create");
+    Made = Parameters;
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made,
+                                              &Device));
+    if (Device != nullptr)
+    {
+        TrApi("CreateTexture", Device->CreateTexture(2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Flat, nullptr));
+        Textures[TrFixedFlat] = Flat;
+        Textures[TrFixedSecond] = Flat;
+        TrFixedFill(Flat, 1);
+        TrApi("GetBackBuffer", Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back));
+        TrApi("SetRenderState lighting", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+        TrFixedRun(Device, "before reset", TrFixedPlain, Sets, _countof(Sets), Textures, Back);
+        TrRelease(Back);
+        TrFixedPixelWork(Device);
+
+        TrPhase("fixed reset");
+        Made = Parameters;
+        TrApi("Reset", Device->Reset(&Made));
+        TrSettle(Device);
+        TrApi("GetBackBuffer", Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back));
+        TrApi("SetRenderState lighting", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+        TrFixedRun(Device, "after reset", TrFixedPlain, Sets, _countof(Sets), Textures, Back);
+        TrRelease(Back);
+
+        TrPhase("fixed reset release");
+        for (UINT Stage = 0; Stage < 3; Stage++)
+            TrApi("SetTexture null", Device->SetTexture(Stage, nullptr));
+        TrRelease(Flat);
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -6509,6 +6572,7 @@ static const TrScenario TrScenarios[] =
     { "draws_plain", TrScenarioDrawsPlain },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
+    { "fixed_reset", TrScenarioFixedReset },
 };
 
 static
