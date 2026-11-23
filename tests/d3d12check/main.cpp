@@ -782,6 +782,1293 @@ TcCheckHelpers(
     Check.Report("serialize_too_big", "0x%08lX errors %d", hr, Errors != nullptr);
 }
 
+/* Raw bytes of a structure, grouped by four */
+static
+std::string
+TcHex(
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ SIZE_T Size)
+{
+    const BYTE* Bytes = static_cast<const BYTE*>(Data);
+    std::string Text;
+    char Hex[4];
+    SIZE_T Index;
+
+    for (Index = 0; Index < Size; Index++)
+    {
+        sprintf_s(Hex, "%02x", Bytes[Index]);
+        Text += Hex;
+        if (Index % 4 == 3 && Index + 1 < Size)
+            Text += ' ';
+    }
+    return Text;
+}
+
+/* exports: names and ordinals of the loaded d3d12.dll and the core it uses */
+static
+VOID
+TcReportExports(
+    _In_ TwelveCheck& Check,
+    _In_z_ PCSTR Prefix,
+    _In_opt_ HMODULE Module)
+{
+    const BYTE* Base = reinterpret_cast<const BYTE*>(Module);
+    const IMAGE_NT_HEADERS* Nt;
+    const IMAGE_DATA_DIRECTORY* Directory;
+    const IMAGE_EXPORT_DIRECTORY* Exports;
+    const DWORD* Names;
+    const WORD* NameOrdinals;
+    const DWORD* Functions;
+    std::vector<std::string> Named;
+    char Key[96];
+    DWORD Index;
+
+    if (Module == NULL)
+    {
+        sprintf_s(Key, "%s_missing", Prefix);
+        Check.Report(Key, "1");
+        return;
+    }
+
+    Nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(Base + reinterpret_cast<const IMAGE_DOS_HEADER*>(Base)->e_lfanew);
+    Directory = &Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    Exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(Base + Directory->VirtualAddress);
+    Names = reinterpret_cast<const DWORD*>(Base + Exports->AddressOfNames);
+    NameOrdinals = reinterpret_cast<const WORD*>(Base + Exports->AddressOfNameOrdinals);
+    Functions = reinterpret_cast<const DWORD*>(Base + Exports->AddressOfFunctions);
+
+    sprintf_s(Key, "%s_count", Prefix);
+    Check.Report(Key, "base %lu functions %lu names %lu", Exports->Base, Exports->NumberOfFunctions,
+                 Exports->NumberOfNames);
+
+    for (Index = 0; Index < Exports->NumberOfFunctions; Index++)
+    {
+        PCSTR Name = nullptr;
+        BOOLEAN IsData;
+        DWORD Rva = Functions[Index];
+        DWORD NameIndex;
+
+        if (Rva == 0)
+            continue;
+
+        for (NameIndex = 0; NameIndex < Exports->NumberOfNames; NameIndex++)
+        {
+            if (NameOrdinals[NameIndex] == Index)
+                Name = reinterpret_cast<PCSTR>(Base + Names[NameIndex]);
+        }
+
+        /* Data exports live outside executable sections */
+        IsData = TRUE;
+        {
+            const IMAGE_SECTION_HEADER* Section = IMAGE_FIRST_SECTION(Nt);
+            WORD SectionIndex;
+
+            for (SectionIndex = 0; SectionIndex < Nt->FileHeader.NumberOfSections; SectionIndex++)
+            {
+                if (Rva >= Section[SectionIndex].VirtualAddress &&
+                    Rva < Section[SectionIndex].VirtualAddress + Section[SectionIndex].Misc.VirtualSize)
+                {
+                    IsData = (Section[SectionIndex].Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0;
+                }
+            }
+        }
+
+        sprintf_s(Key, "%s_%lu", Prefix, Exports->Base + Index);
+        Check.Report(Key, "%s%s", Name != nullptr ? Name : "[noname]", IsData ? " data" : "");
+    }
+}
+
+static
+VOID
+TcCheckExports(
+    _In_ TwelveCheck& Check)
+{
+    TcReportExports(Check, "d3d12", Check.D3d12);
+    TcReportExports(Check, "core", GetModuleHandleW(L"d3d12core.dll"));
+}
+
+/* interfaces: D3D12GetInterface and D3D12GetDebugInterface for each class and interface */
+static
+VOID
+TcCheckInterfaces(
+    _In_ TwelveCheck& Check)
+{
+    static const GUID Bogus = {0x12345678, 0x1234, 0x1234, {1, 2, 3, 4, 5, 6, 7, 8}};
+    static const GUID DriverVerifierClsid = {0xb7b44efa, 0x03ed, 0x4af2, {0xab, 0xc8, 0x51, 0x30, 0x04, 0x51, 0x9d, 0xcb}};
+    static const GUID DriverVerifierIid = {0x0f8258d2, 0xe908, 0x4505, {0x93, 0xe4, 0x5c, 0x17, 0xa1, 0x1b, 0x67, 0x9c}};
+    static const struct
+    {
+        PCSTR Name;
+        GUID Clsid;
+    } Classes[] =
+    {
+        { "debug", CLSID_D3D12Debug }, { "tools", CLSID_D3D12Tools },
+        { "dred", CLSID_D3D12DeviceRemovedExtendedData }, { "sdk", CLSID_D3D12SDKConfiguration },
+        { "factory", CLSID_D3D12DeviceFactory }, { "verifier", DriverVerifierClsid }, { "bogus", Bogus },
+    };
+    static const struct
+    {
+        PCSTR Name;
+        IID Iid;
+    } Interfaces[] =
+    {
+        { "unknown", __uuidof(IUnknown) }, { "debug", __uuidof(ID3D12Debug) }, { "debug1", __uuidof(ID3D12Debug1) },
+        { "debug2", __uuidof(ID3D12Debug2) }, { "debug3", __uuidof(ID3D12Debug3) },
+        { "debug6", __uuidof(ID3D12Debug6) }, { "tools", __uuidof(ID3D12Tools) },
+        { "tools1", __uuidof(ID3D12Tools1) }, { "tools2", __uuidof(ID3D12Tools2) },
+        { "dred", __uuidof(ID3D12DeviceRemovedExtendedDataSettings) },
+        { "dred1", __uuidof(ID3D12DeviceRemovedExtendedDataSettings1) },
+        { "dred2", __uuidof(ID3D12DeviceRemovedExtendedDataSettings2) },
+        { "sdk", __uuidof(ID3D12SDKConfiguration) }, { "sdk1", __uuidof(ID3D12SDKConfiguration1) },
+        { "factory", __uuidof(ID3D12DeviceFactory) }, { "config", __uuidof(ID3D12DeviceConfiguration) },
+        { "verifier", DriverVerifierIid }, { "bogus", Bogus },
+    };
+    char Key[96];
+
+    for (const auto& Class : Classes)
+    {
+        for (const auto& Each : Interfaces)
+        {
+            IUnknown* Unknown = reinterpret_cast<IUnknown*>(1);
+            HRESULT hr;
+
+            hr = Check.GetInterface(Class.Clsid, Each.Iid, reinterpret_cast<void**>(&Unknown));
+            sprintf_s(Key, "get_%s_%s", Class.Name, Each.Name);
+            Check.Report(Key, "0x%08lX %s", hr, Unknown == nullptr ? "null" : Unknown == reinterpret_cast<IUnknown*>(1) ? "kept" : "set");
+            if (SUCCEEDED(hr) && Unknown != nullptr && Unknown != reinterpret_cast<IUnknown*>(1))
+                Unknown->Release();
+
+            sprintf_s(Key, "get_%s_%s_check", Class.Name, Each.Name);
+            Check.Report(Key, "0x%08lX", Check.GetInterface(Class.Clsid, Each.Iid, nullptr));
+        }
+    }
+
+    for (const auto& Each : Interfaces)
+    {
+        IUnknown* Unknown = reinterpret_cast<IUnknown*>(1);
+        HRESULT hr;
+
+        hr = Check.GetDebugInterface(Each.Iid, reinterpret_cast<void**>(&Unknown));
+        sprintf_s(Key, "debug_%s", Each.Name);
+        Check.Report(Key, "0x%08lX %s", hr, Unknown == nullptr ? "null" : Unknown == reinterpret_cast<IUnknown*>(1) ? "kept" : "set");
+        if (SUCCEEDED(hr) && Unknown != nullptr && Unknown != reinterpret_cast<IUnknown*>(1))
+            Unknown->Release();
+
+        sprintf_s(Key, "debug_%s_check", Each.Name);
+        Check.Report(Key, "0x%08lX", Check.GetDebugInterface(Each.Iid, nullptr));
+    }
+
+    /* The same object each time, and what it answers to */
+    {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> First;
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> Second;
+        ComPtr<IUnknown> Face;
+
+        Check.GetDebugInterface(IID_PPV_ARGS(&First));
+        Check.GetDebugInterface(IID_PPV_ARGS(&Second));
+        Check.Report("dred_same", "%d", First.Get() == Second.Get());
+        if (First != nullptr)
+        {
+            Check.Report("dred_qi_unknown", "0x%08lX", First.As(&Face));
+            Check.Report("dred_qi_debug", "0x%08lX", First->QueryInterface(__uuidof(ID3D12Debug), &Face));
+            Check.Report("dred_qi_null", "0x%08lX", First->QueryInterface(__uuidof(IUnknown), nullptr));
+        }
+    }
+
+    {
+        ComPtr<ID3D12SDKConfiguration1> Sdk;
+        ComPtr<ID3D12SDKConfiguration> Sdk0;
+        ComPtr<IUnknown> Face;
+        HRESULT hr;
+
+        hr = Check.GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&Sdk));
+        Check.Report("sdk", "0x%08lX", hr);
+        if (SUCCEEDED(hr))
+        {
+            Check.GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&Sdk0));
+            Check.Report("sdk_same", "%d", Sdk0.Get() == static_cast<ID3D12SDKConfiguration*>(Sdk.Get()));
+            Check.Report("sdk_qi_unknown", "0x%08lX", Sdk.As(&Face));
+            Check.Report("sdk_qi_factory", "0x%08lX", Sdk->QueryInterface(__uuidof(ID3D12DeviceFactory), &Face));
+            Check.Report("sdk_set_null", "0x%08lX", Sdk->SetSDKVersion(616, nullptr));
+            Check.Report("sdk_set", "0x%08lX", Sdk->SetSDKVersion(616, ".\\D3D12\\"));
+            {
+                ComPtr<ID3D12DeviceFactory> Factory;
+
+                Check.Report("sdk_factory_bogus_path", "0x%08lX",
+                             Sdk->CreateDeviceFactory(616, ".\\NoSuchDir\\", IID_PPV_ARGS(&Factory)));
+            }
+        }
+    }
+}
+
+/* create: every feature level, adapter and interface the device can be asked for */
+static
+VOID
+TcCheckCreateLevels(
+    _In_ TwelveCheck& Check)
+{
+    static const UINT Levels[] = { 0, 0x9100, 0x9200, 0x9300, 0xa000, 0xa100, 0xb000, 0xb100, 0xc000, 0xc100,
+                                   0xc200, 0x1000, 0x100, 0xb001, 0xd000, 0xffffffff };
+    static const struct
+    {
+        PCSTR Name;
+        IID Iid;
+    } Interfaces[] =
+    {
+        { "unknown", __uuidof(IUnknown) }, { "device", __uuidof(ID3D12Device) },
+        { "device5", __uuidof(ID3D12Device5) }, { "device14", __uuidof(ID3D12Device14) },
+        { "object", __uuidof(ID3D12Object) }, { "debug", __uuidof(ID3D12DebugDevice) },
+        { "infoqueue", __uuidof(ID3D12InfoQueue) }, { "dxgi", __uuidof(IDXGIDevice) },
+        { "pageable", __uuidof(ID3D12Pageable) },
+    };
+    decltype(&CreateDXGIFactory1) CreateFactory;
+    ComPtr<IDXGIFactory4> Factory;
+    ComPtr<IDXGIAdapter1> Adapter;
+    char Key[96];
+
+    for (UINT Level : Levels)
+    {
+        ComPtr<ID3D12Device> Device;
+        HRESULT hr;
+
+        sprintf_s(Key, "check_%x", Level);
+        Check.Report(Key, "0x%08lX", Check.CreateDevice(nullptr, (D3D_FEATURE_LEVEL)Level, __uuidof(ID3D12Device),
+                                                         nullptr));
+        hr = Check.CreateDevice(nullptr, (D3D_FEATURE_LEVEL)Level, IID_PPV_ARGS(&Device));
+        sprintf_s(Key, "make_%x", Level);
+        Check.Report(Key, "0x%08lX %s", hr, Device != nullptr ? "set" : "null");
+    }
+
+    for (const auto& Each : Interfaces)
+    {
+        IUnknown* Unknown = reinterpret_cast<IUnknown*>(1);
+        HRESULT hr;
+
+        hr = Check.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, Each.Iid, reinterpret_cast<void**>(&Unknown));
+        sprintf_s(Key, "iid_%s", Each.Name);
+        Check.Report(Key, "0x%08lX %s", hr, Unknown == nullptr ? "null" : Unknown == reinterpret_cast<IUnknown*>(1) ? "kept" : "set");
+        if (SUCCEEDED(hr) && Unknown != nullptr && Unknown != reinterpret_cast<IUnknown*>(1))
+            Unknown->Release();
+    }
+
+    CreateFactory = reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(LoadLibraryW(L"dxgi.dll"),
+                                                                                  "CreateDXGIFactory1"));
+    if (CreateFactory == nullptr || FAILED(CreateFactory(IID_PPV_ARGS(&Factory))))
+        return;
+
+    if (SUCCEEDED(Factory->EnumAdapters1(0, &Adapter)))
+    {
+        ComPtr<ID3D12Device> Mine;
+        ComPtr<ID3D12Device> Plain;
+        LUID Luid;
+        DXGI_ADAPTER_DESC1 Desc;
+
+        Check.Report("adapter0_check", "0x%08lX", Check.CreateDevice(Adapter.Get(), D3D_FEATURE_LEVEL_11_0,
+                                                                      __uuidof(ID3D12Device), nullptr));
+        Check.Report("adapter0", "0x%08lX", Check.CreateDevice(Adapter.Get(), D3D_FEATURE_LEVEL_11_0,
+                                                                IID_PPV_ARGS(&Mine)));
+        Check.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Plain));
+        Check.Report("adapter0_same", "%d", Mine.Get() == Plain.Get());
+        Adapter->GetDesc1(&Desc);
+        if (Mine != nullptr)
+        {
+            Luid = Mine->GetAdapterLuid();
+            Check.Report("adapter0_luid", "%d", memcmp(&Luid, &Desc.AdapterLuid, sizeof(Luid)) == 0);
+        }
+    }
+
+    Check.Report("factory_as_adapter", "0x%08lX", Check.CreateDevice(Factory.Get(), D3D_FEATURE_LEVEL_11_0,
+                                                                      __uuidof(ID3D12Device), nullptr));
+}
+
+/* Sizes of the CheckFeatureSupport structures this SDK knows */
+static
+UINT
+TcFeatureSize(
+    _In_ UINT Feature)
+{
+    switch (Feature)
+    {
+        case D3D12_FEATURE_D3D12_OPTIONS: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS);
+        case D3D12_FEATURE_ARCHITECTURE: return sizeof(D3D12_FEATURE_DATA_ARCHITECTURE);
+        case D3D12_FEATURE_FEATURE_LEVELS: return sizeof(D3D12_FEATURE_DATA_FEATURE_LEVELS);
+        case D3D12_FEATURE_FORMAT_SUPPORT: return sizeof(D3D12_FEATURE_DATA_FORMAT_SUPPORT);
+        case D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS: return sizeof(D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS);
+        case D3D12_FEATURE_FORMAT_INFO: return sizeof(D3D12_FEATURE_DATA_FORMAT_INFO);
+        case D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT: return sizeof(D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT);
+        case D3D12_FEATURE_SHADER_MODEL: return sizeof(D3D12_FEATURE_DATA_SHADER_MODEL);
+        case D3D12_FEATURE_D3D12_OPTIONS1: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS1);
+        case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT:
+            return sizeof(D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_SUPPORT);
+        case D3D12_FEATURE_ROOT_SIGNATURE: return sizeof(D3D12_FEATURE_DATA_ROOT_SIGNATURE);
+        case D3D12_FEATURE_ARCHITECTURE1: return sizeof(D3D12_FEATURE_DATA_ARCHITECTURE1);
+        case D3D12_FEATURE_D3D12_OPTIONS2: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS2);
+        case D3D12_FEATURE_SHADER_CACHE: return sizeof(D3D12_FEATURE_DATA_SHADER_CACHE);
+        case D3D12_FEATURE_COMMAND_QUEUE_PRIORITY: return sizeof(D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY);
+        case D3D12_FEATURE_D3D12_OPTIONS3: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS3);
+        case D3D12_FEATURE_EXISTING_HEAPS: return sizeof(D3D12_FEATURE_DATA_EXISTING_HEAPS);
+        case D3D12_FEATURE_D3D12_OPTIONS4: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS4);
+        case D3D12_FEATURE_SERIALIZATION: return sizeof(D3D12_FEATURE_DATA_SERIALIZATION);
+        case D3D12_FEATURE_CROSS_NODE: return sizeof(D3D12_FEATURE_DATA_CROSS_NODE);
+        case D3D12_FEATURE_D3D12_OPTIONS5: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS5);
+        case D3D12_FEATURE_DISPLAYABLE: return sizeof(D3D12_FEATURE_DATA_DISPLAYABLE);
+        case D3D12_FEATURE_D3D12_OPTIONS6: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS6);
+        case D3D12_FEATURE_QUERY_META_COMMAND: return sizeof(D3D12_FEATURE_DATA_QUERY_META_COMMAND);
+        case D3D12_FEATURE_D3D12_OPTIONS7: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS7);
+        case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPE_COUNT:
+            return sizeof(D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_TYPE_COUNT);
+        case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPES:
+            return sizeof(D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_TYPES);
+        case D3D12_FEATURE_D3D12_OPTIONS8: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS8);
+        case D3D12_FEATURE_D3D12_OPTIONS9: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS9);
+        case D3D12_FEATURE_D3D12_OPTIONS10: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS10);
+        case D3D12_FEATURE_D3D12_OPTIONS11: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS11);
+        case D3D12_FEATURE_D3D12_OPTIONS12: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS12);
+        case D3D12_FEATURE_D3D12_OPTIONS13: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS13);
+        case D3D12_FEATURE_D3D12_OPTIONS14: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS14);
+        case D3D12_FEATURE_D3D12_OPTIONS15: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS15);
+        case D3D12_FEATURE_D3D12_OPTIONS16: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS16);
+        case D3D12_FEATURE_D3D12_OPTIONS17: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS17);
+        case D3D12_FEATURE_D3D12_OPTIONS18: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS18);
+        case D3D12_FEATURE_D3D12_OPTIONS19: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS19);
+        case D3D12_FEATURE_D3D12_OPTIONS20: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS20);
+        case D3D12_FEATURE_PREDICATION: return sizeof(D3D12_FEATURE_DATA_PREDICATION);
+        case D3D12_FEATURE_PLACED_RESOURCE_SUPPORT_INFO:
+            return sizeof(D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO);
+        case D3D12_FEATURE_HARDWARE_COPY: return sizeof(D3D12_FEATURE_DATA_HARDWARE_COPY);
+        case D3D12_FEATURE_D3D12_OPTIONS21: return sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS21);
+        case D3D12_FEATURE_D3D12_TIGHT_ALIGNMENT: return sizeof(D3D12_FEATURE_DATA_TIGHT_ALIGNMENT);
+        case D3D12_FEATURE_APPLICATION_SPECIFIC_DRIVER_STATE:
+            return sizeof(D3D12_FEATURE_DATA_APPLICATION_SPECIFIC_DRIVER_STATE);
+        case D3D12_FEATURE_BYTECODE_BYPASS_HASH_SUPPORTED:
+            return sizeof(D3D12_FEATURE_DATA_BYTECODE_BYPASS_HASH_SUPPORTED);
+        default: return 0;
+    }
+}
+
+/* One query: the buffer starts as 0xcd past the inputs so every byte the runtime writes shows */
+static
+VOID
+TcQueryFeature(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device* Device,
+    _In_z_ PCSTR Key,
+    _In_ UINT Feature,
+    _In_reads_bytes_(InputSize) const VOID* Input,
+    _In_ UINT InputSize,
+    _In_ UINT Size)
+{
+    alignas(16) BYTE Buffer[512];
+    HRESULT hr;
+
+    memset(Buffer, 0xcd, sizeof(Buffer));
+    memcpy(Buffer, Input, InputSize);
+    hr = Device->CheckFeatureSupport((D3D12_FEATURE)Feature, Buffer, Size);
+    Check.Report(Key, "0x%08lX %s", hr, TcHex(Buffer, Size > 0 ? (Size < 256 ? Size : 256) : 4).c_str());
+}
+
+/* featureall: every feature with the right size, a wrong size and no buffer */
+static
+VOID
+TcCheckFeatureAll(
+    _In_ TwelveCheck& Check)
+{
+    ComPtr<ID3D12Device> Device;
+    char Key[96];
+    UINT Feature;
+
+    if (FAILED(Check.MakeDevice(&Device)))
+        return;
+
+    for (Feature = 0; Feature < 70; Feature++)
+    {
+        UINT Size = TcFeatureSize(Feature);
+        BYTE Input[64] = {};
+        UINT InputSize = 0;
+
+        /* Queries carrying pointers are covered on their own */
+        if (Feature == D3D12_FEATURE_FEATURE_LEVELS || Feature == D3D12_FEATURE_QUERY_META_COMMAND ||
+            Feature == D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPES)
+        {
+            continue;
+        }
+
+        switch (Feature)
+        {
+            case D3D12_FEATURE_ARCHITECTURE:
+            case D3D12_FEATURE_ARCHITECTURE1:
+            case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT:
+            case D3D12_FEATURE_SERIALIZATION:
+            case D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPE_COUNT:
+                InputSize = 4;
+                break;
+            case D3D12_FEATURE_FORMAT_SUPPORT:
+            case D3D12_FEATURE_FORMAT_INFO:
+                *reinterpret_cast<UINT*>(Input) = DXGI_FORMAT_R8G8B8A8_UNORM;
+                InputSize = 4;
+                break;
+            case D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS:
+                reinterpret_cast<UINT*>(Input)[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                reinterpret_cast<UINT*>(Input)[1] = 4;
+                InputSize = 12;
+                break;
+            case D3D12_FEATURE_SHADER_MODEL:
+                *reinterpret_cast<UINT*>(Input) = D3D_SHADER_MODEL_6_9;
+                InputSize = 4;
+                break;
+            case D3D12_FEATURE_ROOT_SIGNATURE:
+                *reinterpret_cast<UINT*>(Input) = D3D_ROOT_SIGNATURE_VERSION_1_2;
+                InputSize = 4;
+                break;
+            case D3D12_FEATURE_COMMAND_QUEUE_PRIORITY:
+                InputSize = 8;
+                break;
+            case D3D12_FEATURE_PLACED_RESOURCE_SUPPORT_INFO:
+            {
+                D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO* Placed =
+                    reinterpret_cast<D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO*>(Input);
+
+                Placed->Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                Placed->Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                Placed->DestHeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+                InputSize = offsetof(D3D12_FEATURE_DATA_PLACED_RESOURCE_SUPPORT_INFO, Supported);
+                break;
+            }
+            default:
+                break;
+        }
+
+        if (Size == 0)
+        {
+            sprintf_s(Key, "unknown_%u_4", Feature);
+            TcQueryFeature(Check, Device.Get(), Key, Feature, Input, 0, 4);
+            sprintf_s(Key, "unknown_%u_64", Feature);
+            TcQueryFeature(Check, Device.Get(), Key, Feature, Input, 0, 64);
+            continue;
+        }
+
+        sprintf_s(Key, "f%u", Feature);
+        TcQueryFeature(Check, Device.Get(), Key, Feature, Input, InputSize, Size);
+        sprintf_s(Key, "f%u_small", Feature);
+        TcQueryFeature(Check, Device.Get(), Key, Feature, Input, InputSize < Size - 1 ? InputSize : Size - 1, Size - 1);
+        sprintf_s(Key, "f%u_big", Feature);
+        TcQueryFeature(Check, Device.Get(), Key, Feature, Input, InputSize, Size + 4);
+
+    }
+
+    /* Inputs that steer the answer */
+    for (UINT Node = 0; Node < 3; Node++)
+    {
+        UINT Nodes[1] = { Node };
+
+        sprintf_s(Key, "architecture1_node%u", Node);
+        TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_ARCHITECTURE1, Nodes, 4,
+                       sizeof(D3D12_FEATURE_DATA_ARCHITECTURE1));
+        sprintf_s(Key, "serialization_node%u", Node);
+        TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_SERIALIZATION, Nodes, 4,
+                       sizeof(D3D12_FEATURE_DATA_SERIALIZATION));
+        sprintf_s(Key, "session_support_node%u", Node);
+        TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_SUPPORT, Nodes, 4,
+                       sizeof(D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_SUPPORT));
+        sprintf_s(Key, "session_count_node%u", Node);
+        TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPE_COUNT, Nodes, 4,
+                       sizeof(D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_TYPE_COUNT));
+    }
+
+    for (UINT Type = 0; Type < 8; Type++)
+    {
+        static const UINT Priorities[] = { 0, 100, 10000, 7 };
+
+        for (UINT Priority : Priorities)
+        {
+            UINT Input[2] = { Type, Priority };
+
+            sprintf_s(Key, "queue_priority_%u_%u", Type, Priority);
+            TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_COMMAND_QUEUE_PRIORITY, Input, sizeof(Input),
+                           sizeof(D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY));
+        }
+    }
+
+    for (UINT Model = 0x50; Model <= 0x6a; Model++)
+    {
+        UINT Input[1] = { Model };
+
+        sprintf_s(Key, "shader_model_%x", Model);
+        TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_SHADER_MODEL, Input, 4,
+                       sizeof(D3D12_FEATURE_DATA_SHADER_MODEL));
+    }
+
+    for (UINT Version = 0; Version < 6; Version++)
+    {
+        UINT Input[1] = { Version };
+
+        sprintf_s(Key, "root_signature_%u", Version);
+        TcQueryFeature(Check, Device.Get(), Key, D3D12_FEATURE_ROOT_SIGNATURE, Input, 4,
+                       sizeof(D3D12_FEATURE_DATA_ROOT_SIGNATURE));
+    }
+
+    {
+        static const D3D_FEATURE_LEVEL All[] = { D3D_FEATURE_LEVEL_1_0_CORE, D3D_FEATURE_LEVEL_9_1,
+                                                 D3D_FEATURE_LEVEL_9_3, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_11_0,
+                                                 D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_12_1,
+                                                 D3D_FEATURE_LEVEL_12_2, (D3D_FEATURE_LEVEL)0xd000 };
+        D3D12_FEATURE_DATA_FEATURE_LEVELS Levels;
+        UINT Count;
+
+        for (Count = 1; Count <= _countof(All); Count++)
+        {
+            Levels.NumFeatureLevels = Count;
+            Levels.pFeatureLevelsRequested = All;
+            Levels.MaxSupportedFeatureLevel = (D3D_FEATURE_LEVEL)0xcdcdcdcd;
+            sprintf_s(Key, "levels_%u", Count);
+            Check.Report(Key, "0x%08lX 0x%x", Device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &Levels,
+                                                                           sizeof(Levels)),
+                         Levels.MaxSupportedFeatureLevel);
+        }
+
+        Levels.NumFeatureLevels = 2;
+        Levels.pFeatureLevelsRequested = nullptr;
+        Levels.MaxSupportedFeatureLevel = (D3D_FEATURE_LEVEL)0xcdcdcdcd;
+        Check.Report("levels_null_list", "0x%08lX 0x%x", Device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS,
+                                                                                      &Levels, sizeof(Levels)),
+                     Levels.MaxSupportedFeatureLevel);
+        Levels.NumFeatureLevels = 1;
+        Levels.pFeatureLevelsRequested = &All[_countof(All) - 1];
+        Levels.MaxSupportedFeatureLevel = (D3D_FEATURE_LEVEL)0xcdcdcdcd;
+        Check.Report("levels_unknown_only", "0x%08lX 0x%x", Device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS,
+                                                                                         &Levels, sizeof(Levels)),
+                     Levels.MaxSupportedFeatureLevel);
+    }
+
+    {
+        D3D12_FEATURE_DATA_PROTECTED_RESOURCE_SESSION_TYPES Types = {};
+        GUID Found[4] = {};
+
+        Types.Count = 0;
+        Types.pTypes = nullptr;
+        Check.Report("session_types_zero", "0x%08lX", Device->CheckFeatureSupport(
+                                                          D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPES, &Types,
+                                                          sizeof(Types)));
+        Types.Count = 4;
+        Types.pTypes = Found;
+        Check.Report("session_types_four", "0x%08lX %s", Device->CheckFeatureSupport(
+                                                             D3D12_FEATURE_PROTECTED_RESOURCE_SESSION_TYPES, &Types,
+                                                             sizeof(Types)),
+                     TcHex(Found, sizeof(Found)).c_str());
+    }
+
+    {
+        D3D12_FEATURE_DATA_QUERY_META_COMMAND Meta = {};
+        BYTE Output[16] = {};
+
+        Check.Report("meta_null", "0x%08lX", Device->CheckFeatureSupport(D3D12_FEATURE_QUERY_META_COMMAND, &Meta,
+                                                                          sizeof(Meta)));
+        Meta.pQueryOutputData = Output;
+        Meta.QueryOutputDataSizeInBytes = sizeof(Output);
+        Check.Report("meta_unknown", "0x%08lX", Device->CheckFeatureSupport(D3D12_FEATURE_QUERY_META_COMMAND, &Meta,
+                                                                             sizeof(Meta)));
+    }
+}
+
+/* formats: support, plane count and sample quality for every format value */
+static
+VOID
+TcCheckFormats(
+    _In_ TwelveCheck& Check)
+{
+    static const UINT Counts[] = { 0, 1, 2, 4, 8, 16, 32 };
+    ComPtr<ID3D12Device> Device;
+    char Key[96];
+
+    if (FAILED(Check.MakeDevice(&Device)))
+        return;
+
+    for (UINT Format = 0; Format < 200; Format++)
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT Support;
+        D3D12_FEATURE_DATA_FORMAT_INFO Info;
+        std::string Quality;
+        HRESULT SupportResult;
+        HRESULT InfoResult;
+
+        memset(&Support, 0xcd, sizeof(Support));
+        Support.Format = (DXGI_FORMAT)Format;
+        SupportResult = Device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &Support, sizeof(Support));
+
+        memset(&Info, 0xcd, sizeof(Info));
+        Info.Format = (DXGI_FORMAT)Format;
+        InfoResult = Device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_INFO, &Info, sizeof(Info));
+
+        for (UINT Count : Counts)
+        {
+            for (UINT Flags = 0; Flags < 3; Flags++)
+            {
+                D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS Levels;
+                HRESULT hr;
+                char Part[48];
+
+                memset(&Levels, 0xcd, sizeof(Levels));
+                Levels.Format = (DXGI_FORMAT)Format;
+                Levels.SampleCount = Count;
+                Levels.Flags = (D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS)Flags;
+                hr = Device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &Levels, sizeof(Levels));
+                sprintf_s(Part, " %u/%u:%lx:%x", Count, Flags, hr & 0xffff, Levels.NumQualityLevels);
+                Quality += Part;
+            }
+        }
+
+        sprintf_s(Key, "format_%u", Format);
+        Check.Report(Key, "0x%08lX %s info 0x%08lX %s ms%s", SupportResult, TcHex(&Support, sizeof(Support)).c_str(),
+                     InfoResult, TcHex(&Info, sizeof(Info)).c_str(), Quality.c_str());
+    }
+}
+
+/* queues: command queue, allocator and list creation checks */
+static
+VOID
+TcCheckQueues(
+    _In_ TwelveCheck& Check)
+{
+    static const INT Priorities[] = { 0, 100, 10000, 50, -1 };
+    static const UINT Flags[] = { 0, 1, 2, 4 };
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12Device4> Device4;
+    char Key[96];
+
+    if (FAILED(Check.MakeDevice(&Device)))
+        return;
+
+    Check.Report("queue_null_desc", "0x%08lX", Device->CreateCommandQueue(nullptr, __uuidof(ID3D12CommandQueue),
+                                                                           nullptr));
+
+    for (UINT Type = 0; Type < 9; Type++)
+    {
+        for (INT Priority : Priorities)
+        {
+            for (UINT Flag : Flags)
+            {
+                for (UINT Node = 0; Node < 3; Node++)
+                {
+                    D3D12_COMMAND_QUEUE_DESC Desc = {};
+                    HRESULT hr;
+
+                    Desc.Type = (D3D12_COMMAND_LIST_TYPE)Type;
+                    Desc.Priority = Priority;
+                    Desc.Flags = (D3D12_COMMAND_QUEUE_FLAGS)Flag;
+                    Desc.NodeMask = Node;
+                    hr = Device->CreateCommandQueue(&Desc, __uuidof(ID3D12CommandQueue), nullptr);
+                    sprintf_s(Key, "queue_%u_%d_%u_%u", Type, Priority, Flag, Node);
+                    Check.Report(Key, "0x%08lX", hr);
+                }
+            }
+        }
+    }
+
+    for (UINT Type = 0; Type < 9; Type++)
+    {
+        D3D12_COMMAND_QUEUE_DESC Desc = {};
+        ComPtr<ID3D12CommandQueue> Queue;
+        HRESULT hr;
+
+        Desc.Type = (D3D12_COMMAND_LIST_TYPE)Type;
+        hr = Device->CreateCommandQueue(&Desc, IID_PPV_ARGS(&Queue));
+        sprintf_s(Key, "queue_make_%u", Type);
+        if (SUCCEEDED(hr))
+        {
+            D3D12_COMMAND_QUEUE_DESC Got = Queue->GetDesc();
+            UINT64 Frequency = 0;
+            UINT64 Gpu = 0;
+            UINT64 Cpu = 0;
+            HRESULT FrequencyResult = Queue->GetTimestampFrequency(&Frequency);
+            HRESULT ClockResult = Queue->GetClockCalibration(&Gpu, &Cpu);
+
+            Check.Report(Key, "0x%08lX desc %d %d 0x%x %u frequency 0x%08lX %d clock 0x%08lX %d", hr, Got.Type,
+                         Got.Priority, Got.Flags, Got.NodeMask, FrequencyResult, Frequency != 0, ClockResult, Cpu != 0);
+        }
+        else
+        {
+            Check.Report(Key, "0x%08lX %s", hr, Queue != nullptr ? "set" : "null");
+        }
+    }
+
+    {
+        D3D12_COMMAND_QUEUE_DESC Desc = {};
+        ComPtr<ID3D12CommandQueue> Queue;
+        ComPtr<IUnknown> Face;
+
+        Device->CreateCommandQueue(&Desc, IID_PPV_ARGS(&Queue));
+        if (Queue != nullptr)
+        {
+            static const struct
+            {
+                PCSTR Name;
+                IID Iid;
+            } Faces[] =
+            {
+                { "unknown", __uuidof(IUnknown) }, { "object", __uuidof(ID3D12Object) },
+                { "child", __uuidof(ID3D12DeviceChild) }, { "pageable", __uuidof(ID3D12Pageable) },
+                { "queue", __uuidof(ID3D12CommandQueue) },
+                { "debug", __uuidof(ID3D12DebugCommandQueue) }, { "device", __uuidof(ID3D12Device) },
+            };
+
+            for (const auto& Each : Faces)
+            {
+                sprintf_s(Key, "queue_qi_%s", Each.Name);
+                Check.Report(Key, "0x%08lX", Queue->QueryInterface(Each.Iid, &Face));
+            }
+        }
+    }
+
+    for (UINT Type = 0; Type < 9; Type++)
+    {
+        ComPtr<ID3D12CommandAllocator> Allocator;
+        HRESULT hr;
+
+        sprintf_s(Key, "allocator_check_%u", Type);
+        Check.Report(Key, "0x%08lX", Device->CreateCommandAllocator((D3D12_COMMAND_LIST_TYPE)Type,
+                                                                     __uuidof(ID3D12CommandAllocator), nullptr));
+        hr = Device->CreateCommandAllocator((D3D12_COMMAND_LIST_TYPE)Type, IID_PPV_ARGS(&Allocator));
+        sprintf_s(Key, "allocator_%u", Type);
+        Check.Report(Key, "0x%08lX %s", hr, Allocator != nullptr ? "set" : "null");
+        if (Allocator == nullptr)
+            continue;
+
+        for (UINT ListType = 0; ListType < 9; ListType++)
+        {
+            ComPtr<ID3D12GraphicsCommandList> List;
+
+            hr = Device->CreateCommandList(0, (D3D12_COMMAND_LIST_TYPE)ListType, Allocator.Get(), nullptr,
+                                           IID_PPV_ARGS(&List));
+            sprintf_s(Key, "list_%u_on_%u", ListType, Type);
+            Check.Report(Key, "0x%08lX %s", hr, List != nullptr ? "set" : "null");
+            if (List != nullptr)
+                List->Close();
+        }
+    }
+
+    {
+        ComPtr<ID3D12CommandAllocator> Allocator;
+        ComPtr<ID3D12GraphicsCommandList> List;
+        ComPtr<ID3D12GraphicsCommandList> Other;
+        ComPtr<IUnknown> Face;
+        HRESULT hr;
+
+        Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&Allocator));
+        Check.Report("list_null_allocator", "0x%08lX", Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                                 nullptr, nullptr,
+                                                                                 IID_PPV_ARGS(&List)));
+        Check.Report("list_node2", "0x%08lX", Device->CreateCommandList(2, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                        Allocator.Get(), nullptr, IID_PPV_ARGS(&List)));
+        Check.Report("list_check", "0x%08lX", Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                        Allocator.Get(), nullptr,
+                                                                        __uuidof(ID3D12GraphicsCommandList), nullptr));
+        hr = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, Allocator.Get(), nullptr,
+                                       IID_PPV_ARGS(&List));
+        Check.Report("list", "0x%08lX", hr);
+        hr = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, Allocator.Get(), nullptr,
+                                       IID_PPV_ARGS(&Other));
+        Check.Report("list_same_allocator", "0x%08lX %s", hr, Other != nullptr ? "set" : "null");
+        Check.Report("allocator_reset_recording", "0x%08lX", Allocator->Reset());
+        if (List != nullptr)
+        {
+            static const struct
+            {
+                PCSTR Name;
+                IID Iid;
+            } Faces[] =
+            {
+                { "list", __uuidof(ID3D12CommandList) }, { "gfx", __uuidof(ID3D12GraphicsCommandList) },
+                { "gfx1", __uuidof(ID3D12GraphicsCommandList1) }, { "gfx4", __uuidof(ID3D12GraphicsCommandList4) },
+                { "gfx7", __uuidof(ID3D12GraphicsCommandList7) }, { "gfx10", __uuidof(ID3D12GraphicsCommandList10) },
+                { "debug", __uuidof(ID3D12DebugCommandList) }, { "pageable", __uuidof(ID3D12Pageable) },
+                { "child", __uuidof(ID3D12DeviceChild) },
+            };
+
+            for (const auto& Each : Faces)
+            {
+                sprintf_s(Key, "list_qi_%s", Each.Name);
+                Check.Report(Key, "0x%08lX", List->QueryInterface(Each.Iid, &Face));
+            }
+
+            Check.Report("list_reset_open", "0x%08lX", List->Reset(Allocator.Get(), nullptr));
+            Check.Report("list_close", "0x%08lX", List->Close());
+            Check.Report("list_close_closed", "0x%08lX", List->Close());
+            Check.Report("list_reset", "0x%08lX", List->Reset(Allocator.Get(), nullptr));
+            List->Close();
+            Check.Report("allocator_reset", "0x%08lX", Allocator->Reset());
+        }
+    }
+
+    if (SUCCEEDED(Device.As(&Device4)))
+    {
+        for (UINT Type = 0; Type < 9; Type++)
+        {
+            ComPtr<ID3D12GraphicsCommandList> List;
+            HRESULT hr;
+
+            hr = Device4->CreateCommandList1(0, (D3D12_COMMAND_LIST_TYPE)Type, D3D12_COMMAND_LIST_FLAG_NONE,
+                                             IID_PPV_ARGS(&List));
+            sprintf_s(Key, "list1_%u", Type);
+            Check.Report(Key, "0x%08lX %s", hr, List != nullptr ? "set" : "null");
+            if (List != nullptr)
+            {
+                sprintf_s(Key, "list1_%u_close", Type);
+                Check.Report(Key, "0x%08lX", List->Close());
+            }
+        }
+        Check.Report("list1_flags", "0x%08lX", Device4->CreateCommandList1(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                           (D3D12_COMMAND_LIST_FLAGS)1,
+                                                                           __uuidof(ID3D12GraphicsCommandList),
+                                                                           nullptr));
+    }
+}
+
+/* heaps: descriptor heap creation, starts and descriptor sizes */
+static
+VOID
+TcCheckDescriptorHeaps(
+    _In_ TwelveCheck& Check)
+{
+    static const UINT Counts[] = { 0, 1, 2048, 2049, 1000000, 1000001, 2000000 };
+    ComPtr<ID3D12Device> Device;
+    char Key[96];
+
+    if (FAILED(Check.MakeDevice(&Device)))
+        return;
+
+    for (UINT Type = 0; Type < 6; Type++)
+    {
+        sprintf_s(Key, "increment_%u", Type);
+        Check.Report(Key, "%u", Device->GetDescriptorHandleIncrementSize((D3D12_DESCRIPTOR_HEAP_TYPE)Type));
+    }
+
+    Check.Report("null_desc", "0x%08lX", Device->CreateDescriptorHeap(nullptr, __uuidof(ID3D12DescriptorHeap),
+                                                                       nullptr));
+
+    for (UINT Type = 0; Type < 6; Type++)
+    {
+        for (UINT Count : Counts)
+        {
+            for (UINT Flags = 0; Flags < 3; Flags++)
+            {
+                for (UINT Node = 0; Node < 3; Node += 2)
+                {
+                    D3D12_DESCRIPTOR_HEAP_DESC Desc = {};
+
+                    Desc.Type = (D3D12_DESCRIPTOR_HEAP_TYPE)Type;
+                    Desc.NumDescriptors = Count;
+                    Desc.Flags = (D3D12_DESCRIPTOR_HEAP_FLAGS)Flags;
+                    Desc.NodeMask = Node;
+                    sprintf_s(Key, "heap_%u_%u_%u_%u", Type, Count, Flags, Node);
+                    Check.Report(Key, "0x%08lX", Device->CreateDescriptorHeap(&Desc, __uuidof(ID3D12DescriptorHeap),
+                                                                               nullptr));
+                }
+            }
+        }
+    }
+
+    for (UINT Type = 0; Type < 4; Type++)
+    {
+        for (UINT Flags = 0; Flags < 2; Flags++)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC Desc = {};
+            ComPtr<ID3D12DescriptorHeap> Heap;
+            HRESULT hr;
+
+            Desc.Type = (D3D12_DESCRIPTOR_HEAP_TYPE)Type;
+            Desc.NumDescriptors = 16;
+            Desc.Flags = (D3D12_DESCRIPTOR_HEAP_FLAGS)Flags;
+            hr = Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap));
+            sprintf_s(Key, "heap_make_%u_%u", Type, Flags);
+            if (FAILED(hr))
+            {
+                Check.Report(Key, "0x%08lX", hr);
+                continue;
+            }
+
+            {
+                D3D12_DESCRIPTOR_HEAP_DESC Got = Heap->GetDesc();
+                D3D12_CPU_DESCRIPTOR_HANDLE Cpu = Heap->GetCPUDescriptorHandleForHeapStart();
+                D3D12_GPU_DESCRIPTOR_HANDLE Gpu = Heap->GetGPUDescriptorHandleForHeapStart();
+
+                Check.Report(Key, "0x%08lX desc %d %u 0x%x %u cpu %d gpu %d", hr, Got.Type, Got.NumDescriptors,
+                             Got.Flags, Got.NodeMask, Cpu.ptr != 0, Gpu.ptr != 0);
+            }
+        }
+    }
+}
+
+/* Footprints and allocation info for one description */
+static
+VOID
+TcReportLayout(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device* Device,
+    _In_z_ PCSTR Name,
+    _In_ const D3D12_RESOURCE_DESC& Desc)
+{
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT Layouts[8];
+    UINT Rows[8];
+    UINT64 RowBytes[8];
+    UINT64 Total;
+    D3D12_RESOURCE_ALLOCATION_INFO Info;
+    D3D12_RESOURCE_ALLOCATION_INFO1 Info1[2];
+    ComPtr<ID3D12Device4> Device4;
+    std::string Text;
+    char Key[128];
+    UINT Count = Desc.MipLevels * (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Desc.DepthOrArraySize);
+
+    if (Count == 0 || Count > 8)
+        Count = 8;
+
+    Info = Device->GetResourceAllocationInfo(0, 1, &Desc);
+    sprintf_s(Key, "%s_info", Name);
+    Check.Report(Key, "%llu %llu", Info.SizeInBytes, Info.Alignment);
+
+    if (SUCCEEDED(Device->QueryInterface(IID_PPV_ARGS(&Device4))))
+    {
+        D3D12_RESOURCE_DESC Pair[2] = { Desc, Desc };
+
+        memset(Info1, 0xcd, sizeof(Info1));
+        Info = Device4->GetResourceAllocationInfo1(0, 2, Pair, Info1);
+        sprintf_s(Key, "%s_info1", Name);
+        Check.Report(Key, "%llu %llu [%llu %llu %llu] [%llu %llu %llu]", Info.SizeInBytes, Info.Alignment,
+                     Info1[0].Offset, Info1[0].Alignment, Info1[0].SizeInBytes, Info1[1].Offset, Info1[1].Alignment,
+                     Info1[1].SizeInBytes);
+    }
+
+    memset(Layouts, 0xcd, sizeof(Layouts));
+    memset(Rows, 0xcd, sizeof(Rows));
+    memset(RowBytes, 0xcd, sizeof(RowBytes));
+    Total = 0xcdcdcdcd;
+    Device->GetCopyableFootprints(&Desc, 0, Count, 256, Layouts, Rows, RowBytes, &Total);
+    sprintf_s(Key, "%s_total", Name);
+    Check.Report(Key, "%llu", Total);
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        sprintf_s(Key, "%s_footprint_%u", Name, Index);
+        Check.Report(Key, "%llu fmt %u %ux%ux%u pitch %u rows %u bytes %llu", Layouts[Index].Offset,
+                     Layouts[Index].Footprint.Format, Layouts[Index].Footprint.Width, Layouts[Index].Footprint.Height,
+                     Layouts[Index].Footprint.Depth, Layouts[Index].Footprint.RowPitch, Rows[Index], RowBytes[Index]);
+    }
+}
+
+/* Committed creation answered without making anything */
+static
+HRESULT
+TcCommitted(
+    _In_ ID3D12Device* Device,
+    _In_ D3D12_HEAP_TYPE HeapType,
+    _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ const D3D12_RESOURCE_DESC& Desc,
+    _In_ D3D12_RESOURCE_STATES State,
+    _In_opt_ const D3D12_CLEAR_VALUE* Clear)
+{
+    D3D12_HEAP_PROPERTIES Properties = {};
+
+    Properties.Type = HeapType;
+    return Device->CreateCommittedResource(&Properties, HeapFlags, &Desc, State, Clear, __uuidof(ID3D12Resource),
+                                           nullptr);
+}
+
+/* layouts: allocation info, footprints and committed resource checks for many descriptions */
+static
+VOID
+TcCheckLayouts(
+    _In_ TwelveCheck& Check)
+{
+    struct LayoutCase
+    {
+        PCSTR Name;
+        D3D12_RESOURCE_DIMENSION Dimension;
+        UINT64 Width;
+        UINT Height;
+        UINT16 Depth;
+        UINT16 Mips;
+        DXGI_FORMAT Format;
+        UINT Samples;
+        D3D12_TEXTURE_LAYOUT Layout;
+        D3D12_RESOURCE_FLAGS Flags;
+        UINT64 Alignment;
+    };
+    static const LayoutCase Cases[] =
+    {
+        { "buf1", D3D12_RESOURCE_DIMENSION_BUFFER, 1, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+          D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "buf64k", D3D12_RESOURCE_DIMENSION_BUFFER, 65536, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "buf_uav", D3D12_RESOURCE_DIMENSION_BUFFER, 70000, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 65536 },
+        { "buf_4m", D3D12_RESOURCE_DIMENSION_BUFFER, 4096, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 4194304 },
+        { "buf_badalign", D3D12_RESOURCE_DIMENSION_BUFFER, 4096, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 4096 },
+        { "buf_unknown_layout", D3D12_RESOURCE_DIMENSION_BUFFER, 4096, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "buf_format", D3D12_RESOURCE_DIMENSION_BUFFER, 4096, 1, 1, 1, DXGI_FORMAT_R8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "buf_height", D3D12_RESOURCE_DIMENSION_BUFFER, 4096, 2, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "buf_zero", D3D12_RESOURCE_DIMENSION_BUFFER, 0, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex1d", D3D12_RESOURCE_DIMENSION_TEXTURE1D, 300, 1, 4, 0, DXGI_FORMAT_R16G16B16A16_FLOAT, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_rgba", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 256, 256, 1, 0, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_small", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 4096 },
+        { "tex2d_small_rt", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 4096 },
+        { "tex2d_array", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 100, 50, 3, 2, DXGI_FORMAT_B8G8R8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_r8", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 333, 77, 1, 0, DXGI_FORMAT_R8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_bc1", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 130, 66, 1, 0, DXGI_FORMAT_BC1_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_bc7", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 0, DXGI_FORMAT_BC7_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_bc_odd", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 65, 63, 1, 1, DXGI_FORMAT_BC3_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_d24", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 128, 128, 1, 1, DXGI_FORMAT_D24_UNORM_S8_UINT, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 0 },
+        { "tex2d_d32s8", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 32, 1, 1, DXGI_FORMAT_D32_FLOAT_S8X24_UINT, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 0 },
+        { "tex2d_nv12", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 640, 480, 1, 1, DXGI_FORMAT_NV12, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_nv12_odd", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 641, 481, 1, 1, DXGI_FORMAT_NV12, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_p010", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 320, 240, 1, 1, DXGI_FORMAT_P010, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_yuy2", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 320, 240, 1, 1, DXGI_FORMAT_YUY2, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_r32g32b32", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 17, 9, 1, 0, DXGI_FORMAT_R32G32B32_FLOAT, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_msaa4", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 256, 256, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 4,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 0 },
+        { "tex2d_msaa4_small", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 4,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 65536 },
+        { "tex2d_rowmajor", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_64kb_swizzle", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_toomanymips", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 16, 16, 1, 6, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_huge", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 16385, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_unknown_format", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 16, 16, 1, 1, DXGI_FORMAT_UNKNOWN, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex2d_typeless", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 32, 32, 1, 1, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex3d", D3D12_RESOURCE_DIMENSION_TEXTURE3D, 64, 32, 16, 0, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex3d_bc1", D3D12_RESOURCE_DIMENSION_TEXTURE3D, 32, 32, 5, 0, DXGI_FORMAT_BC1_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "tex3d_uav", D3D12_RESOURCE_DIMENSION_TEXTURE3D, 32, 32, 32, 1, DXGI_FORMAT_R32_FLOAT, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 0 },
+        { "bad_dimension", (D3D12_RESOURCE_DIMENSION)7, 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE, 0 },
+        { "bad_flags", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN, (D3D12_RESOURCE_FLAGS)0x8000, 0 },
+        { "rt_and_ds", D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, 1,
+          D3D12_TEXTURE_LAYOUT_UNKNOWN,
+          D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 0 },
+    };
+    ComPtr<ID3D12Device> Device;
+    D3D12_RESOURCE_DESC Desc;
+    char Key[128];
+
+    if (FAILED(Check.MakeDevice(&Device)))
+        return;
+
+    for (const LayoutCase& Each : Cases)
+    {
+        Desc = {};
+        Desc.Dimension = Each.Dimension;
+        Desc.Alignment = Each.Alignment;
+        Desc.Width = Each.Width;
+        Desc.Height = Each.Height;
+        Desc.DepthOrArraySize = Each.Depth;
+        Desc.MipLevels = Each.Mips;
+        Desc.Format = Each.Format;
+        Desc.SampleDesc.Count = Each.Samples;
+        Desc.Layout = Each.Layout;
+        Desc.Flags = Each.Flags;
+        TcReportLayout(Check, Device.Get(), Each.Name, Desc);
+
+        sprintf_s(Key, "%s_default", Each.Name);
+        Check.Report(Key, "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, Desc,
+                                                  D3D12_RESOURCE_STATE_COMMON, nullptr));
+        sprintf_s(Key, "%s_upload", Each.Name);
+        Check.Report(Key, "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_FLAG_NONE, Desc,
+                                                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr));
+        sprintf_s(Key, "%s_readback", Each.Name);
+        Check.Report(Key, "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_FLAG_NONE, Desc,
+                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr));
+    }
+
+    /* Ranges and outputs of GetCopyableFootprints */
+    Desc = {};
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Desc.Width = 64;
+    Desc.Height = 64;
+    Desc.DepthOrArraySize = 2;
+    Desc.MipLevels = 3;
+    Desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Desc.SampleDesc.Count = 1;
+    {
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT Layouts[8];
+        UINT64 Total;
+
+        Total = 7;
+        Device->GetCopyableFootprints(&Desc, 4, 3, 0, Layouts, nullptr, nullptr, &Total);
+        Check.Report("range_past_end", "%llu", Total);
+        Total = 7;
+        Device->GetCopyableFootprints(&Desc, 3, 3, 1, Layouts, nullptr, nullptr, &Total);
+        Check.Report("range_tail_offset1", "%llu first %llu", Total, Layouts[0].Offset);
+        Total = 7;
+        Device->GetCopyableFootprints(&Desc, 0, 0, 0, nullptr, nullptr, nullptr, &Total);
+        Check.Report("range_empty", "%llu", Total);
+        Total = 7;
+        Desc.Width = 0;
+        memset(Layouts, 0xcd, sizeof(Layouts));
+        Device->GetCopyableFootprints(&Desc, 0, 1, 0, Layouts, nullptr, nullptr, &Total);
+        Check.Report("range_bad_desc", "%llu %s", Total, TcHex(&Layouts[0], sizeof(Layouts[0])).c_str());
+    }
+
+    /* Committed creation rules on a plain texture and buffer */
+    {
+        static const struct
+        {
+            PCSTR Name;
+            D3D12_HEAP_TYPE Heap;
+            UINT HeapFlags;
+            UINT State;
+        } Rules[] =
+        {
+            { "default_common", D3D12_HEAP_TYPE_DEFAULT, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "default_rt", D3D12_HEAP_TYPE_DEFAULT, 0, D3D12_RESOURCE_STATE_RENDER_TARGET },
+            { "default_genread", D3D12_HEAP_TYPE_DEFAULT, 0, D3D12_RESOURCE_STATE_GENERIC_READ },
+            { "default_bogus_state", D3D12_HEAP_TYPE_DEFAULT, 0, 0x80000000 },
+            { "upload_common", D3D12_HEAP_TYPE_UPLOAD, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "upload_copydest", D3D12_HEAP_TYPE_UPLOAD, 0, D3D12_RESOURCE_STATE_COPY_DEST },
+            { "readback_genread", D3D12_HEAP_TYPE_READBACK, 0, D3D12_RESOURCE_STATE_GENERIC_READ },
+            { "custom", D3D12_HEAP_TYPE_CUSTOM, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "gpu_upload", D3D12_HEAP_TYPE_GPU_UPLOAD, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "bogus_heap", (D3D12_HEAP_TYPE)9, 0, D3D12_RESOURCE_STATE_COMMON },
+            { "flag_shared", D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_SHARED, D3D12_RESOURCE_STATE_COMMON },
+            { "flag_deny_buffers", D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_DENY_BUFFERS,
+              D3D12_RESOURCE_STATE_COMMON },
+            { "flag_deny_textures", D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES,
+              D3D12_RESOURCE_STATE_COMMON },
+            { "flag_allow_all", D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
+              D3D12_RESOURCE_STATE_COMMON },
+            { "flag_zeroed", D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+              D3D12_RESOURCE_STATE_COMMON },
+            { "flag_bogus", D3D12_HEAP_TYPE_DEFAULT, 0x40000000, D3D12_RESOURCE_STATE_COMMON },
+        };
+        D3D12_RESOURCE_DESC Buffer = {};
+        D3D12_RESOURCE_DESC Texture = {};
+
+        Buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        Buffer.Width = 4096;
+        Buffer.Height = 1;
+        Buffer.DepthOrArraySize = 1;
+        Buffer.MipLevels = 1;
+        Buffer.SampleDesc.Count = 1;
+        Buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        Texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        Texture.Width = 64;
+        Texture.Height = 64;
+        Texture.DepthOrArraySize = 1;
+        Texture.MipLevels = 1;
+        Texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        Texture.SampleDesc.Count = 1;
+
+        for (const auto& Rule : Rules)
+        {
+            sprintf_s(Key, "rule_buffer_%s", Rule.Name);
+            Check.Report(Key, "0x%08lX", TcCommitted(Device.Get(), Rule.Heap, (D3D12_HEAP_FLAGS)Rule.HeapFlags, Buffer,
+                                                      (D3D12_RESOURCE_STATES)Rule.State, nullptr));
+            sprintf_s(Key, "rule_texture_%s", Rule.Name);
+            Check.Report(Key, "0x%08lX", TcCommitted(Device.Get(), Rule.Heap, (D3D12_HEAP_FLAGS)Rule.HeapFlags,
+                                                      Texture, (D3D12_RESOURCE_STATES)Rule.State, nullptr));
+        }
+
+        {
+            D3D12_CLEAR_VALUE Clear = {};
+
+            Texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            Clear.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            Check.Report("clear_rt", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                             D3D12_HEAP_FLAG_NONE, Texture,
+                                                             D3D12_RESOURCE_STATE_RENDER_TARGET, &Clear));
+            Clear.Format = DXGI_FORMAT_R16_FLOAT;
+            Check.Report("clear_rt_wrong_format", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                          D3D12_HEAP_FLAG_NONE, Texture,
+                                                                          D3D12_RESOURCE_STATE_RENDER_TARGET, &Clear));
+            Texture.Flags = D3D12_RESOURCE_FLAG_NONE;
+            Clear.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            Check.Report("clear_plain", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                D3D12_HEAP_FLAG_NONE, Texture,
+                                                                D3D12_RESOURCE_STATE_COMMON, &Clear));
+            Check.Report("clear_buffer", "0x%08lX", TcCommitted(Device.Get(), D3D12_HEAP_TYPE_DEFAULT,
+                                                                 D3D12_HEAP_FLAG_NONE, Buffer,
+                                                                 D3D12_RESOURCE_STATE_COMMON, &Clear));
+        }
+
+
+        {
+            D3D12_HEAP_PROPERTIES Properties = {};
+
+            Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+            Properties.CreationNodeMask = 2;
+            Check.Report("committed_node2", "0x%08lX", Device->CreateCommittedResource(
+                                                           &Properties, D3D12_HEAP_FLAG_NONE, &Buffer,
+                                                           D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                           __uuidof(ID3D12Resource), nullptr));
+            Properties.CreationNodeMask = 0;
+            Properties.VisibleNodeMask = 3;
+            Check.Report("committed_visible3", "0x%08lX", Device->CreateCommittedResource(
+                                                              &Properties, D3D12_HEAP_FLAG_NONE, &Buffer,
+                                                              D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                              __uuidof(ID3D12Resource), nullptr));
+            Properties = {};
+            Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+            Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+            Check.Report("committed_default_page", "0x%08lX", Device->CreateCommittedResource(
+                                                                  &Properties, D3D12_HEAP_FLAG_NONE, &Buffer,
+                                                                  D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                  __uuidof(ID3D12Resource), nullptr));
+            Properties = {};
+            Properties.Type = D3D12_HEAP_TYPE_CUSTOM;
+            Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+            Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+            Check.Report("committed_custom_wc_l0", "0x%08lX", Device->CreateCommittedResource(
+                                                                  &Properties, D3D12_HEAP_FLAG_NONE, &Buffer,
+                                                                  D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                  __uuidof(ID3D12Resource), nullptr));
+            Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_L1;
+            Check.Report("committed_custom_wc_l1", "0x%08lX", Device->CreateCommittedResource(
+                                                                  &Properties, D3D12_HEAP_FLAG_NONE, &Buffer,
+                                                                  D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                                  __uuidof(ID3D12Resource), nullptr));
+            {
+                D3D12_HEAP_PROPERTIES Custom;
+
+                for (UINT Type = 0; Type < 7; Type++)
+                {
+                    memset(&Custom, 0xcd, sizeof(Custom));
+                    Custom = Device->GetCustomHeapProperties(0, (D3D12_HEAP_TYPE)Type);
+                    sprintf_s(Key, "custom_props_%u", Type);
+                    Check.Report(Key, "%d %d %d %u %u", Custom.Type, Custom.CPUPageProperty,
+                                 Custom.MemoryPoolPreference, Custom.CreationNodeMask, Custom.VisibleNodeMask);
+                }
+            }
+        }
+    }
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -797,6 +2084,14 @@ static const CheckInfo Checks[] =
     { "resources", TcCheckResources },
     { "clear", TcCheckClear },
     { "helpers", TcCheckHelpers },
+    { "exports", TcCheckExports },
+    { "interfaces", TcCheckInterfaces },
+    { "levels", TcCheckCreateLevels },
+    { "featureall", TcCheckFeatureAll },
+    { "formats", TcCheckFormats },
+    { "queues", TcCheckQueues },
+    { "heaps", TcCheckDescriptorHeaps },
+    { "layouts", TcCheckLayouts },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
@@ -888,6 +2183,17 @@ wmain(
 
         Check.CheckName = Info.Name;
         Info.Run(Check);
+    }
+
+    /* Which runtime really ran, kept out of the compared output */
+    for (PCWSTR Each : { L"d3d12.dll", L"d3d12core.dll" })
+    {
+        WCHAR Path[MAX_PATH] = L"(not loaded)";
+        HMODULE Loaded = GetModuleHandleW(Each);
+
+        if (Loaded != NULL)
+            GetModuleFileNameW(Loaded, Path, _countof(Path));
+        fwprintf(stderr, L"%s: %s\n", Each, Path);
     }
 
     printf("failures = 0\n");
