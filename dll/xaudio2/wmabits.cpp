@@ -23,7 +23,7 @@ UINT32
 XaWmaHeaderBits(
     _In_ const XaWmaDecoder* Decoder)
 {
-    return Decoder->Standard.OffsetBits + 11;
+    return Decoder->Reader.HeaderBits;
 }
 
 static
@@ -52,6 +52,19 @@ XaWmaStoreField(
     return Value;
 }
 
+/* Bits that hold any value below Limit */
+static
+UINT32
+XaWmaFieldBits(
+    _In_ UINT32 Limit)
+{
+    UINT32 Bits = 1;
+
+    while ((Limit >> Bits) != 0)
+        Bits += 1;
+    return Bits;
+}
+
 /* Pulls one packet into the next free slot and queues its header */
 static
 BOOLEAN
@@ -60,6 +73,7 @@ XaWmaLoadPacket(
 {
     XaWmaReader* Reader = &Decoder->Reader;
     UINT32 HeaderBits = XaWmaHeaderBits(Decoder);
+    XaWmaPacketHead* Head;
     XaWmaInput Input;
     UINT32 Slot;
     UINT32 Bytes;
@@ -84,8 +98,18 @@ XaWmaLoadPacket(
         Reader->Heads[0] = Reader->Heads[1];
         Reader->HeadCount = 1;
     }
-    Reader->Heads[Reader->HeadCount].Frames = XaWmaStoreField(Reader, Slot, 4, 4);
-    Reader->Heads[Reader->HeadCount].Offset = XaWmaStoreField(Reader, Slot, 8, Decoder->Standard.OffsetBits + 3);
+    Head = &Reader->Heads[Reader->HeadCount];
+    Head->Offset = XaWmaStoreField(Reader, Slot, Reader->OffsetAt, Reader->OffsetBits);
+    if (Decoder->Layout.Version == XA_WMA_PRO)
+    {
+        Head->Frames = 0;
+        Head->Starts = XaWmaStoreBit(Reader, Slot, 4) != 0;
+    }
+    else
+    {
+        Head->Frames = XaWmaStoreField(Reader, Slot, 4, 4);
+        Head->Starts = Head->Frames != 0;
+    }
     Reader->HeadCount += 1;
     if (Slot == 0)
         Reader->Position = HeaderBits;
@@ -180,6 +204,20 @@ XaWmaReaderCreate(
 {
     XaWmaReader* Reader = &Decoder->Reader;
 
+    if (Decoder->Layout.Version == XA_WMA_PRO)
+    {
+        Reader->OffsetAt = 6;
+        Reader->OffsetBits = XaWmaFieldBits(Decoder->Layout.PacketBytes * 8);
+        Reader->HeaderBits = Reader->OffsetBits + 6;
+        if ((Decoder->Layout.Options & XA_WMA_PRO_OPT_LONG) != 0)
+            Reader->HeaderBits += 11;
+    }
+    else
+    {
+        Reader->OffsetAt = 8;
+        Reader->OffsetBits = Decoder->Standard.OffsetBits + 3;
+        Reader->HeaderBits = Decoder->Standard.OffsetBits + 11;
+    }
     for (UINT32 Index = 0; Index < ARRAYSIZE(Reader->Store); Index++)
     {
         Reader->Store[Index] = new (std::nothrow) BYTE[Decoder->Layout.PacketBytes];
@@ -254,6 +292,33 @@ XaWmaNextPacket(
     return TRUE;
 }
 
+/**
+ * @brief Finds the first WMA Pro packet a frame starts in and moves reading to that frame.
+ *
+ * Packets that only carry the end of a frame from before the stream position are skipped.
+ */
+BOOLEAN
+XaWmaProSeek(
+    _Inout_ XaWmaDecoder* Decoder)
+{
+    XaWmaReader* Reader = &Decoder->Reader;
+    UINT32 PacketBits = Decoder->Layout.PacketBytes * 8;
+
+    for (;;)
+    {
+        XaWmaPacketHead Head;
+
+        Reader->Held = 0;
+        Reader->HeadCount = 0;
+        if (!XaWmaLoadPacket(Decoder))
+            return FALSE;
+        Head = Reader->Heads[0];
+        Reader->HeadCount = 0;
+        if (Head.Starts && Reader->OffsetBits + 6 + Head.Offset < PacketBits)
+            return XaWmaSkipBits(Decoder, Head.Offset);
+    }
+}
+
 BOOLEAN
 XaWmaGetBits(
     _Inout_ XaWmaDecoder* Decoder,
@@ -272,6 +337,7 @@ XaWmaGetBits(
         }
         Result = (Result << 1) | XaWmaStoreBit(Reader, 0, Reader->Position);
         Reader->Position += 1;
+        Reader->Taken += 1;
     }
     *Value = Result;
     return TRUE;
@@ -292,6 +358,7 @@ XaWmaSkipBits(
             return FALSE;
         Step = XaMin(Count, Reader->StoreBits[0] - Reader->Position);
         Reader->Position += Step;
+        Reader->Taken += Step;
         Count -= Step;
     }
     return TRUE;

@@ -76,8 +76,12 @@ BOOLEAN
 XaWmaDecodable(
     _In_ const XaWmaDecoder* Decoder)
 {
+    if (Decoder->Layout.Channels < 1 || Decoder->Layout.Channels > XA_WMA_MAX_CHANNELS)
+        return FALSE;
+    if (Decoder->Layout.Version == XA_WMA_PRO)
+        return Decoder->Layout.FrameSamples != 0;
     return Decoder->Layout.Version == XA_WMA_STANDARD_MAX && Decoder->Standard.SuperFrames && Decoder->Standard.Bark &&
-           !XaWmaNoiseFilled(Decoder) && Decoder->Layout.Channels >= 1 && Decoder->Layout.Channels <= XA_WMA_MAX_CHANNELS;
+           !XaWmaNoiseFilled(Decoder);
 }
 
 static
@@ -119,6 +123,8 @@ XaWmaRestart(
     Decoder->Read = 0;
     Decoder->End = 0;
     Decoder->Discard = 0;
+    Decoder->Seeking = TRUE;
+    Decoder->EndTrim = 0;
     for (UINT32 Index = 0; Index < Decoder->Layout.Channels; Index++)
     {
         XaWmaChannel* Channel = &Decoder->Channels[Index];
@@ -576,6 +582,34 @@ XaWmaDecodeFrame(
     return XaWmaFinishFrame(Decoder);
 }
 
+/* Sizes the WMA Pro buffers and tables of a decoder whose layout is set */
+static
+HRESULT
+XaWmaCreatePro(
+    _Inout_ XaWmaDecoder* Decoder)
+{
+    HRESULT hr = S_OK;
+
+    Decoder->FrameSize = static_cast<INT32>(Decoder->Layout.FrameSamples);
+    Decoder->MinTile = Decoder->FrameSize / static_cast<INT32>(Decoder->Pro.MaxSplits);
+    Decoder->Levels = XaMin(XaWmaLog2(Decoder->Pro.MaxSplits) + 1, static_cast<UINT32>(XA_WMA_MAX_LEVELS));
+    if (Decoder->MinTile < XA_WMA_XFORM_MIN_SIZE)
+        return XA_WMA_E_FORMAT;
+    XaWmaBuildProBands(Decoder);
+    for (UINT32 Index = 0; Index < Decoder->Layout.Channels && SUCCEEDED(hr); Index++)
+    {
+        Decoder->Channels[Index].Pcm = new (std::nothrow) float[3 * Decoder->FrameSize / 2];
+        if (Decoder->Channels[Index].Pcm == nullptr)
+            hr = E_OUTOFMEMORY;
+    }
+    if (SUCCEEDED(hr))
+        hr = XaWmaReaderCreate(Decoder);
+    if (SUCCEEDED(hr))
+        hr = XaWmaCreateTransform(static_cast<UINT32>(Decoder->MinTile), static_cast<UINT32>(Decoder->FrameSize),
+                                  &Decoder->Transform);
+    return hr;
+}
+
 HRESULT
 XaWmaCreate(
     _In_ const WAVEFORMATEX* Format,
@@ -590,9 +624,10 @@ XaWmaCreate(
     *Decoder = nullptr;
     if (!XaWmaDescribe(Format, &Layout))
     {
-        /* WMA Pro is not decoded yet, so it keeps the header's packet size meanwhile */
+        /* A WMA Pro header the rate table has no entry for only drains, with the header's packet size */
         if (XaFormatTag(Format) != XA_TAG_WMA3)
             return XA_WMA_E_FORMAT;
+        memset(&Layout, 0, sizeof(Layout));
         Layout.Version = XA_WMA_PRO;
         Layout.Channels = Format->nChannels;
         Layout.Rate = Format->nSamplesPerSec;
@@ -607,8 +642,20 @@ XaWmaCreate(
     Created->Context = Context;
     if (Layout.Version <= XA_WMA_STANDARD_MAX)
         XaWmaSetupStandard(&Created->Layout, &Created->Standard);
+    else
+        XaWmaSetupPro(&Created->Layout, &Created->Pro);
 
-    if (XaWmaDecodable(Created))
+    if (XaWmaDecodable(Created) && Layout.Version == XA_WMA_PRO)
+    {
+        hr = XaWmaCreatePro(Created);
+        if (FAILED(hr))
+        {
+            XaWmaFree(Created);
+            return hr;
+        }
+        XaWmaRestart(Created);
+    }
+    else if (XaWmaDecodable(Created))
     {
         XaWmaStandard* Standard = &Created->Standard;
         UINT32 BookIndex = static_cast<UINT32>(Standard->RateClass) - 1;
@@ -707,6 +754,30 @@ XaWmaDecode(
             *Frames = static_cast<UINT32>(Decoder->End - Decoder->Read);
             *State = XaWmaHasPcm;
             return S_OK;
+        }
+        if (Decoder->Layout.Version == XA_WMA_PRO)
+        {
+            if (Decoder->Seeking)
+            {
+                if (!XaWmaProSeek(Decoder))
+                {
+                    *State = XaWmaIdle;
+                    return S_OK;
+                }
+                Decoder->Seeking = FALSE;
+            }
+            hr = XaWmaDecodeProFrame(Decoder);
+            if (hr == XA_WMA_E_STARVED)
+            {
+                *State = XaWmaIdle;
+                return S_OK;
+            }
+            if (FAILED(hr))
+            {
+                XaTrace(L"WMA Pro frame failed %08lX, restarting at the next packet", hr);
+                XaWmaRestart(Decoder);
+            }
+            continue;
         }
         if (Decoder->FramesLeft == 0)
         {

@@ -22,11 +22,21 @@ struct XaWmaTransform;
 #define XA_WMA_OPT_TILE_SHIFT   3
 #define XA_WMA_OPT_LPC          0x0020
 
+/* Encoder option bits of WMA Pro */
+#define XA_WMA_PRO_OPT_SPLITS   3
+#define XA_WMA_PRO_OPT_LENGTH   0x0040
+#define XA_WMA_PRO_OPT_DRC      0x0080
+#define XA_WMA_PRO_OPT_LONG     0x1000
+
 /* Limits of WMA Standard streams */
 #define XA_WMA_MAX_CHANNELS     2
 #define XA_WMA_MAX_BANDS        29
 #define XA_WMA_MAX_LEVELS       8
 #define XA_WMA_MAX_TILES        64
+
+/* Limits of WMA Pro streams */
+#define XA_WMA_PRO_BANDS        28
+#define XA_WMA_PRO_SUBFRAMES    32
 
 /* Sample rate class of WMA Standard, from the bits spent per sample */
 enum XaWmaRateClass
@@ -70,11 +80,25 @@ struct XaWmaStandard
     XaWmaRateClass RateClass;
 };
 
+/* Fixed parameters of a WMA Pro stream */
+struct XaWmaPro
+{
+    UINT32 MaxSplits;
+    UINT32 FrameLengthBits;
+    BOOLEAN FrameLength;
+    BOOLEAN DrcByte;
+    UINT32 TrimBits;
+    INT32 BaseQuant;
+};
+
 /* Where the frames of one packet sit */
 struct XaWmaPacketHead
 {
     UINT32 Frames;
     UINT32 Offset;
+
+    /* WMA Pro: a frame starts in the packet */
+    BOOLEAN Starts;
 };
 
 /* Packets the bit reader holds: the one it reads from and at most one after it */
@@ -87,6 +111,54 @@ struct XaWmaReader
     XaWmaPacketHead Heads[2];
     UINT32 HeadCount;
     BOOLEAN Dry;
+
+    /* Header layout of the stream's packets */
+    UINT32 HeaderBits;
+    UINT32 OffsetAt;
+    UINT32 OffsetBits;
+
+    /* Bits taken since the counter was last cleared, packet headers left out */
+    UINT32 Taken;
+};
+
+/* A set of channels coded through one inverse transform */
+struct XaWmaGroup
+{
+    INT32 Count;
+    BOOLEAN Members[XA_WMA_MAX_CHANNELS];
+
+    /* Which of the two transform passes runs it */
+    BOOLEAN Early;
+    BOOLEAN Fixed;
+    INT32 Kind;
+    BOOLEAN BandOn[XA_WMA_PRO_BANDS];
+    INT8 Angles[XA_WMA_MAX_CHANNELS * (XA_WMA_MAX_CHANNELS - 1) / 2];
+    UINT8 Signs[XA_WMA_MAX_CHANNELS];
+    float Matrix[XA_WMA_MAX_CHANNELS * XA_WMA_MAX_CHANNELS];
+};
+
+/* Where the WMA Pro coefficient coder is between symbols */
+enum XaWmaCoderStep
+{
+    XaCoderPickBook,
+    XaCoderQuad,
+    XaCoderPair,
+    XaCoderSingle,
+    XaCoderLarge,
+    XaCoderSigns,
+    XaCoderEmit,
+    XaCoderRunLevel,
+};
+
+struct XaWmaCoder
+{
+    XaWmaCoderStep Step;
+    INT32 Slot;
+    INT32 Zeros;
+    BOOLEAN Leave;
+    INT32 Values[4];
+    INT32 Signs[4];
+    INT32 Vectors;
 };
 
 /* A Huffman code book and the run and level each symbol stands for */
@@ -132,6 +204,18 @@ struct XaWmaChannel
     float* Pcm;
     float* Coefs;
     INT32 Fill;
+
+    /* WMA Pro: the mask as sent, at MaskSize, and resampled to the current subframe */
+    BOOLEAN HasMask;
+    BOOLEAN MaskSent;
+    INT32 MaskStep;
+    INT32 MaskSize;
+    INT32 Resampled[XA_WMA_PRO_BANDS];
+    UINT32 QuantShift;
+    INT32 CodedLength;
+    INT32 Vectors;
+    BOOLEAN Grouped;
+    BOOLEAN MaskRead;
 };
 
 /* The run level symbol last decoded */
@@ -190,6 +274,25 @@ struct XaWmaDecoder
     INT32 Read;
     INT32 End;
     INT32 Discard;
+
+    /* WMA Pro stream and frame state */
+    XaWmaPro Pro;
+    BOOLEAN SameTiling;
+    BOOLEAN Counted;
+    BOOLEAN FrameDone;
+    BOOLEAN Seeking;
+    BOOLEAN StartTrimmed;
+    INT32 StartTrim;
+    INT32 EndTrim;
+    UINT32 FrameBits;
+    UINT32 Picked[XA_WMA_MAX_CHANNELS];
+    UINT32 PickedCount;
+    INT32 CodedLimit;
+    INT32 RunBitsPro;
+    UINT8 Resample[XA_WMA_MAX_LEVELS][XA_WMA_MAX_LEVELS][XA_WMA_PRO_BANDS];
+    XaWmaGroup Groups[XA_WMA_MAX_CHANNELS];
+    INT32 GroupCount;
+    XaWmaCoder Coder;
 };
 
 BOOLEAN
@@ -201,6 +304,20 @@ VOID
 XaWmaSetupStandard(
     _In_ const XaWmaLayout* Layout,
     _Out_ XaWmaStandard* Standard);
+
+VOID
+XaWmaSetupPro(
+    _In_ const XaWmaLayout* Layout,
+    _Out_ XaWmaPro* Pro);
+
+/* WMA Pro frames */
+VOID
+XaWmaBuildProBands(
+    _Inout_ XaWmaDecoder* Decoder);
+
+HRESULT
+XaWmaDecodeProFrame(
+    _Inout_ XaWmaDecoder* Decoder);
 
 /* Bit reader */
 HRESULT
@@ -217,6 +334,10 @@ XaWmaReaderReset(
 
 BOOLEAN
 XaWmaNextPacket(
+    _Inout_ XaWmaDecoder* Decoder);
+
+BOOLEAN
+XaWmaProSeek(
     _Inout_ XaWmaDecoder* Decoder);
 
 BOOLEAN

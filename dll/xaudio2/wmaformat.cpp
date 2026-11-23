@@ -229,6 +229,19 @@ XaWmaStandardOptions(
     return Options & 0xFFFF;
 }
 
+/* WMA Pro sends each frame's length; rates above 48 kbps add a dynamic range byte */
+static
+UINT32
+XaWmaProOptions(
+    _In_ const XaWmaRateEntry* Entry)
+{
+    UINT32 Options = (XaWmaFloorLog2(Entry->Subframes) << XA_WMA_PRO_OPT_SPLITS) | XA_WMA_PRO_OPT_LENGTH;
+
+    if (Entry->BitRate > 48000)
+        Options |= XA_WMA_PRO_OPT_DRC;
+    return Options;
+}
+
 BOOLEAN
 XaWmaDescribe(
     _In_ const WAVEFORMATEX* Format,
@@ -239,7 +252,7 @@ XaWmaDescribe(
 
     memset(Layout, 0, sizeof(*Layout));
     Layout->Version = XaWmaVersionOf(Tag);
-    if (Layout->Version != 2)
+    if (Layout->Version != 2 && Layout->Version != XA_WMA_PRO)
         return FALSE;
     Entry = XaWmaNearestEntry(Format, Layout->Version);
     if (Entry == nullptr)
@@ -249,7 +262,10 @@ XaWmaDescribe(
     Layout->Rate = Format->nSamplesPerSec;
     Layout->Bits = Entry->Bits;
     Layout->BitRate = Entry->BitRate;
-    Layout->Options = XaWmaStandardOptions(Entry, Layout->Channels);
+    if (Layout->Version == XA_WMA_PRO)
+        Layout->Options = XaWmaProOptions(Entry);
+    else
+        Layout->Options = XaWmaStandardOptions(Entry, Layout->Channels);
     Layout->BytesPerSecond = XaWmaBytesPerSecondFor(Layout->Rate, Layout->Channels, Entry->BitRate, Entry->PacketFrames,
                                                     Layout->Version, Layout->Options);
     Layout->PacketBytes = static_cast<UINT16>(XaWmaPacketBytesFor(Layout->Rate, Layout->Channels, Entry->BitRate,
@@ -312,4 +328,22 @@ XaWmaSetupStandard(
     /* Each packet starts with a sequence number, a frame count and where its first new frame begins */
     Standard->OffsetBits = XaWmaFloorLog2(static_cast<UINT32>(XaWmaRound(static_cast<float>(static_cast<INT32>(Frame)) *
                                                                          Standard->BitsPerSample * 0.125f))) + 2;
+}
+
+VOID
+XaWmaSetupPro(
+    _In_ const XaWmaLayout* Layout,
+    _Out_ XaWmaPro* Pro)
+{
+    UINT32 PacketBits = Layout->PacketBytes * 8;
+
+    memset(Pro, 0, sizeof(*Pro));
+    Pro->MaxSplits = 1u << ((Layout->Options >> XA_WMA_PRO_OPT_SPLITS) & 7);
+    Pro->FrameLength = (Layout->Options & XA_WMA_PRO_OPT_LENGTH) != 0;
+    Pro->DrcByte = (Layout->Options & XA_WMA_PRO_OPT_DRC) != 0;
+    Pro->FrameLengthBits = XaWmaFloorLog2(PacketBits) + 1;
+    Pro->TrimBits = XaWmaFloorLog2(2 * Layout->FrameSamples);
+
+    /* Quantizer indexes count from a level that grows with the sample width */
+    Pro->BaseQuant = static_cast<INT32>(90 * Layout->Bits) / 16;
 }
