@@ -4,13 +4,14 @@
  * PURPOSE:     Direct3D 12 runtime traffic to its user mode driver and the kernel, printed for comparison
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  *
- * d3d12trace [-runtime system|reactx|<dir>] [-threads] [-ddi] [scenario ...]
+ * d3d12trace [-runtime system|reactx|<dir>] [-threads] [-ddi] [-nokernel] [scenario ...]
  *
  * The core's imports of GetProcAddress and the D3DKMT thunks are pointed at wrappers in this process
  * only. The wrapper for the driver's OpenAdapter12 wraps the adapter table, every DDI table the driver
  * fills and the callback tables handed to it, so each call prints with its arguments. Handles print as
  * ids in the order they first appear: r for runtime handles, d for driver handles, k for kernel handles.
- * With -ddi the driver's callbacks and what they call are left out.
+ * With -ddi the driver's callbacks and what they call are left out. With -nokernel the D3DKMT thunks are left
+ * out, since the system core reaches the kernel through calls the tracer does not see.
  */
 
 #define WIN32_NO_STATUS
@@ -66,6 +67,7 @@ struct TrState
     DWORD MainThread;
     BOOLEAN AllThreads;
     BOOLEAN DdiOnly;
+    BOOLEAN NoKernel;
     BOOLEAN LineOpen;
     UINT Depth;
     VOID* Originals[TrFamilyCount][TrSlotLimit];
@@ -481,6 +483,82 @@ TrDescribe(
              Args->Info.Flags.Value);
 }
 
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_QUERYADAPTERINFO* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{size %u}", Args->PrivateDriverDataSize);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_QUERYADAPTERINFO2* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{type %u size %u}", Args->QueryType, Args->PrivateDriverDataSize);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_ESCAPE* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{device %s flags %08X size %u data #%08X context %s}",
+             TrId(TrKindRuntime, (ULONG_PTR)Args->hDevice).c_str(), Args->Flags.Value, Args->PrivateDriverDataSize,
+             TrHash(Args->pPrivateDriverData, Args->PrivateDriverDataSize),
+             TrId(TrKindRuntime, (ULONG_PTR)Args->hContext).c_str());
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_CREATESYNCHRONIZATIONOBJECT* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{type %u}", Args->Info.Type);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_CREATECONTEXTVIRTUAL* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{node %u affinity %u flags %08X size %u data #%08X}", Args->NodeOrdinal, Args->EngineAffinity,
+             Args->Flags.Value, Args->PrivateDriverDataSize, TrHash(Args->pPrivateDriverData,
+                                                                    Args->PrivateDriverDataSize));
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_LOCK2* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{alloc %s flags %08X}", TrId(TrKindKernel, Args->hAllocation).c_str(), Args->Flags.Value);
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3DDDICB_DEALLOCATE2* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{res %s count %u flags %08X}", TrId(TrKindRuntime, (ULONG_PTR)Args->hResource).c_str(),
+             Args->NumAllocations, Args->Flags.Value);
+}
+
 template <typename T>
 static
 VOID
@@ -497,10 +575,11 @@ TrArg(
 
         if (Value == nullptr)
             Text->append("0");
-        else if constexpr (std::is_void_v<Pointee> || std::is_function_v<Pointee> || !TrIsComplete<Pointee>::value)
+        else if constexpr (std::is_void_v<Pointee>)
+            Text->append(TrId(TrKindRuntime, (ULONG_PTR)Value));
+        else if constexpr (std::is_function_v<Pointee> || !TrIsComplete<Pointee>::value || std::is_arithmetic_v<Pointee> ||
+                           std::is_enum_v<Pointee>)
             Text->append("p");
-        else if constexpr (std::is_arithmetic_v<Pointee> || std::is_enum_v<Pointee>)
-            TrAppend(Text, "*%llu", (UINT64)*Value);
         else
             TrDescribe(Text, Value, sizeof(Pointee));
     }
@@ -600,7 +679,7 @@ struct TrHook<Family, Slot, R (APIENTRY*)(A...)>
 
         if (Callback)
             TrCallbackDepth += 1;
-        Log = TrShouldLog();
+        Log = TrShouldLog() && !(Family == TrFamilyKernel && Tr.NoKernel);
         TrQuiet = !Log;
 
         if (Log)
@@ -955,6 +1034,43 @@ TrGetProcAddress(
     return Found;
 }
 
+/* The exported name of a function, found in the module that holds it */
+static
+LPCSTR
+TrExportName(
+    _In_opt_ FARPROC Function)
+{
+    HMODULE Owner = NULL;
+    BYTE* Base;
+    IMAGE_NT_HEADERS* Nt;
+    IMAGE_EXPORT_DIRECTORY* Exports;
+    DWORD* Names;
+    WORD* Ordinals;
+    DWORD* Functions;
+
+    if (Function == nullptr ||
+        !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCSTR>(Function), &Owner))
+    {
+        return nullptr;
+    }
+
+    Base = reinterpret_cast<BYTE*>(Owner);
+    Nt = reinterpret_cast<IMAGE_NT_HEADERS*>(Base + reinterpret_cast<IMAGE_DOS_HEADER*>(Base)->e_lfanew);
+    Exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
+        Base + Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+    Names = reinterpret_cast<DWORD*>(Base + Exports->AddressOfNames);
+    Ordinals = reinterpret_cast<WORD*>(Base + Exports->AddressOfNameOrdinals);
+    Functions = reinterpret_cast<DWORD*>(Base + Exports->AddressOfFunctions);
+
+    for (DWORD Index = 0; Index < Exports->NumberOfNames; Index++)
+    {
+        if (Base + Functions[Ordinals[Index]] == reinterpret_cast<BYTE*>(Function))
+            return reinterpret_cast<LPCSTR>(Base + Names[Index]);
+    }
+    return nullptr;
+}
+
 /* Points a module's imports of GetProcAddress and the D3DKMT thunks at the wrappers */
 static
 VOID
@@ -997,6 +1113,56 @@ TrPatchImports(
                 continue;
             VirtualProtect(&Slots->u1.Function, sizeof(VOID*), PAGE_READWRITE, &Old);
             Slots->u1.Function = reinterpret_cast<ULONG_PTR>(Replacement);
+            VirtualProtect(&Slots->u1.Function, sizeof(VOID*), Old, &Old);
+        }
+    }
+
+    /* Delay loaded thunks are resolved here so the loader stub never replaces the wrapper */
+    Directory = &Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+    if (Directory->VirtualAddress == 0)
+        return;
+
+    for (IMAGE_DELAYLOAD_DESCRIPTOR* Delay = reinterpret_cast<IMAGE_DELAYLOAD_DESCRIPTOR*>(Base + Directory->VirtualAddress);
+         Delay->DllNameRVA != 0;
+         Delay++)
+    {
+        IMAGE_THUNK_DATA* Names = reinterpret_cast<IMAGE_THUNK_DATA*>(Base + Delay->ImportNameTableRVA);
+        IMAGE_THUNK_DATA* Slots = reinterpret_cast<IMAGE_THUNK_DATA*>(Base + Delay->ImportAddressTableRVA);
+        HMODULE Target = NULL;
+
+        for (; Names->u1.AddressOfData != 0; Names++, Slots++)
+        {
+            LPCSTR Name;
+            FARPROC Real;
+            DWORD Old;
+            INT Slot;
+
+            if (Target == NULL)
+                Target = LoadLibraryA(reinterpret_cast<LPCSTR>(Base + Delay->DllNameRVA));
+            if (Target == NULL)
+                break;
+
+            /* The system core imports these by ordinal; the name comes from the target's exports */
+            if (IMAGE_SNAP_BY_ORDINAL(Names->u1.Ordinal))
+            {
+                Real = GetProcAddress(Target, MAKEINTRESOURCEA(IMAGE_ORDINAL(Names->u1.Ordinal)));
+                Name = TrExportName(Real);
+            }
+            else
+            {
+                Name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(Base + Names->u1.AddressOfData)->Name;
+                Real = GetProcAddress(Target, Name);
+            }
+
+            if (Real == nullptr || Name == nullptr || strncmp(Name, "D3DKMT", 6) != 0 ||
+                (Slot = TrKernelSlot(Name)) < 0)
+            {
+                continue;
+            }
+
+            Tr.Originals[TrFamilyKernel][Slot] = reinterpret_cast<VOID*>(Real);
+            VirtualProtect(&Slots->u1.Function, sizeof(VOID*), PAGE_READWRITE, &Old);
+            Slots->u1.Function = reinterpret_cast<ULONG_PTR>(TrTables[TrFamilyKernel].Thunks[Slot]);
             VirtualProtect(&Slots->u1.Function, sizeof(VOID*), Old, &Old);
         }
     }
@@ -1270,6 +1436,10 @@ wmain(
         else if (_wcsicmp(argv[Index], L"-ddi") == 0)
         {
             Tr.DdiOnly = TRUE;
+        }
+        else if (_wcsicmp(argv[Index], L"-nokernel") == 0)
+        {
+            Tr.NoKernel = TRUE;
         }
         else
         {
