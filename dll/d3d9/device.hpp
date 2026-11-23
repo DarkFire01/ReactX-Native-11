@@ -56,7 +56,11 @@ enum class D9BatchCall : UINT
     DepthStencil,
     Clear,
     Present1,
+    Rename,
 };
+
+/* Slots of the table that remembers which batch last used a driver resource */
+static constexpr UINT D9BatchReferenceSlots = 0x1FFF;
 
 /* One recording buffer, with the system memory vertex and index buffers drawing from application memory fills */
 struct D9BatchBuffer
@@ -103,7 +107,23 @@ public:
     VOID
     Drain(VOID);
 
+    VOID
+    Reference(
+        _In_opt_ HANDLE Resource);
+
+    BOOLEAN
+    IsReferenced(
+        _In_ HANDLE Resource) const;
+
+    VOID
+    NoteBound(
+        _In_ UINT Slot,
+        _In_opt_ HANDLE Resource);
+
 private:
+    VOID
+    Advance(VOID);
+
     static
     DWORD
     WINAPI
@@ -140,6 +160,13 @@ private:
     volatile LONG Busy = 0;
     BOOLEAN Pending = FALSE;
     BOOLEAN Exiting = FALSE;
+
+    /* Each handed over or drained batch starts a generation; a resource remembers the last one that used it */
+    UINT64 Generation = 0;
+    BYTE References[D9BatchReferenceSlots] = {};
+
+    /* The bound targets every new generation uses again, the depth buffer last */
+    HANDLE Bound[D9MaxRenderTargets + 1] = {};
 };
 
 /* Objects a device owns hold the device while the application holds them */
@@ -481,6 +508,9 @@ private:
 
     /* Buffers lock any number of times; every unlock the driver accepts takes one away */
     LONG LockCount = 0;
+
+    /* Set while the buffer is locked through the driver's asynchronous lock */
+    BOOLEAN LockedAsync = FALSE;
 };
 
 typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
@@ -610,7 +640,14 @@ public:
         _In_ UINT Size,
         _In_ BOOLEAN Ranged,
         _In_ DWORD Flags,
+        _In_ UINT LockCount,
+        _Inout_ BOOLEAN* Asynchronous,
         _Outptr_ VOID** Data);
+
+    HRESULT
+    UnlockDriverBuffer(
+        _In_ D9Resource* Resource,
+        _In_ BOOLEAN Asynchronous);
 
     HRESULT
     PresentToWindow(
@@ -1488,6 +1525,13 @@ private:
         _In_ BOOLEAN Lockable,
         _In_ BOOLEAN Discard,
         _Out_ IDirect3DSurface9** Surface);
+
+    HRESULT
+    LockAsyncBuffer(
+        _In_ D9Resource* Resource,
+        _In_ const D3DDDIARG_LOCK* Request,
+        _In_ UINT LockCount,
+        _Outptr_ VOID** Data);
 
     D3DDDI_POOL
     BufferPlacement(

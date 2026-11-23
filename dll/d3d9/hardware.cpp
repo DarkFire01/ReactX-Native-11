@@ -798,6 +798,26 @@ D9Device::DestroyDriverSurface(
     Resource->DriverResource = NULL;
 }
 
+/* Copies a call into the batch; FALSE leaves it to the caller to make */
+static
+BOOLEAN
+D9RecordCall(
+    _In_opt_ D9Batch* Batch,
+    _In_ D9BatchCall Call,
+    _In_reads_bytes_(Size) const VOID* Args,
+    _In_ UINT Size)
+{
+    VOID* Slot;
+
+    if (Batch == nullptr)
+        return FALSE;
+    Slot = Batch->Record(Call, Size);
+    if (Slot == nullptr)
+        return FALSE;
+    CopyMemory(Slot, Args, Size);
+    return TRUE;
+}
+
 /* The lock flags the driver sees for an application lock */
 static
 VOID
@@ -815,6 +835,60 @@ D9DriverLockFlags(
     Driver->NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
 }
 
+/* A batching device locks dynamic and system memory buffers asynchronously when the lock discards, does not
+   overwrite or only tells the driver; a discard renames the buffer in the batch */
+HRESULT
+D9Device::LockAsyncBuffer(
+    _In_ D9Resource* Resource,
+    _In_ const D3DDDIARG_LOCK* Request,
+    _In_ UINT LockCount,
+    _Outptr_ VOID** Data)
+{
+    D3DDDIARG_LOCKASYNC Args = {};
+    D3DDDIARG_RENAME Rename = {};
+    HRESULT hr;
+
+    if (!Request->Flags.NotifyOnly && LockCount == 0 && Request->Flags.Discard == Request->Flags.NoOverwrite)
+        return E_FAIL;
+
+    Args.hResource = Request->hResource;
+    Args.Flags.NoOverwrite = Request->Flags.NoOverwrite;
+    Args.Flags.Discard = Request->Flags.Discard && !Request->Flags.NotifyOnly;
+    Args.Flags.NotifyOnly = Request->Flags.NotifyOnly;
+    if (Request->Flags.RangeValid)
+    {
+        Args.Flags.RangeValid = TRUE;
+        Args.Range = Request->Range;
+    }
+
+    /* Notifying the driver of a buffer the batch still uses waits for the batch */
+    if (!Request->Flags.NotifyOnly || Request->Flags.NoOverwrite)
+    {
+        Args.Flags.NoExistingReferences = !Batch->IsReferenced(Request->hResource);
+    }
+    else
+    {
+        if (Batch->IsReferenced(Request->hResource))
+            Batch->Drain();
+        Args.Flags.NoExistingReferences = TRUE;
+    }
+
+    hr = DeviceFunctions.pfnLockAsync(DriverDevice, &Args);
+    if (FAILED(hr))
+        return hr;
+    *Data = Args.pSurfData;
+
+    if (Args.Flags.Discard && LockCount == 0)
+    {
+        Rename.hResource = Request->hResource;
+        Rename.hCookie = Args.hCookie;
+        if (!D9RecordCall(Batch, D9BatchCall::Rename, &Rename, sizeof(Rename)))
+            DeviceFunctions.pfnRename(DriverDevice, &Rename);
+        Batch->Reference(Request->hResource);
+    }
+    return S_OK;
+}
+
 HRESULT
 D9Device::LockDriverBuffer(
     _In_ D9Resource* Resource,
@@ -822,6 +896,8 @@ D9Device::LockDriverBuffer(
     _In_ UINT Size,
     _In_ BOOLEAN Ranged,
     _In_ DWORD Flags,
+    _In_ UINT LockCount,
+    _Inout_ BOOLEAN* Asynchronous,
     _Outptr_ VOID** Data)
 {
     D3DDDIARG_LOCK Args = {};
@@ -835,6 +911,14 @@ D9Device::LockDriverBuffer(
         Args.Range.Offset = Offset;
         Args.Range.Size = Size;
     }
+
+    if (*Asynchronous && Batch != nullptr)
+    {
+        hr = LockAsyncBuffer(Resource, &Args, LockCount, Data);
+        if (SUCCEEDED(hr))
+            return S_OK;
+    }
+    *Asynchronous = FALSE;
 
     DrainBatch();
     hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
@@ -878,6 +962,21 @@ D9Device::LockDriverSurface(
     Locked->pBits = Args.pSurfData;
     Locked->Pitch = static_cast<INT>(Args.Pitch);
     return S_OK;
+}
+
+HRESULT
+D9Device::UnlockDriverBuffer(
+    _In_ D9Resource* Resource,
+    _In_ BOOLEAN Asynchronous)
+{
+    D3DDDIARG_UNLOCKASYNC Unlock = {};
+
+    if (!Asynchronous)
+        return UnlockDriverSurface(Resource);
+
+    Unlock.hResource = Resource->DriverResource;
+    Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
+    return DeviceFunctions.pfnUnlockAsync(DriverDevice, &Unlock);
 }
 
 HRESULT
@@ -1000,26 +1099,6 @@ D9Device::DrainBatch(VOID)
         Batch->Drain();
 }
 
-/* Copies a call into the batch; FALSE leaves it to the caller to make */
-static
-BOOLEAN
-D9RecordCall(
-    _In_opt_ D9Batch* Batch,
-    _In_ D9BatchCall Call,
-    _In_reads_bytes_(Size) const VOID* Args,
-    _In_ UINT Size)
-{
-    VOID* Slot;
-
-    if (Batch == nullptr)
-        return FALSE;
-    Slot = Batch->Record(Call, Size);
-    if (Slot == nullptr)
-        return FALSE;
-    CopyMemory(Slot, Args, Size);
-    return TRUE;
-}
-
 VOID
 D9Device::DdiRenderState(
     _In_ const D3DDDIARG_RENDERSTATE* Args)
@@ -1100,7 +1179,11 @@ D9Device::DdiRenderTarget(
     _In_ const D3DDDIARG_SETRENDERTARGET* Args)
 {
     if (!D9RecordCall(Batch, D9BatchCall::RenderTarget, Args, sizeof(*Args)))
+    {
         DeviceFunctions.pfnSetRenderTarget(DriverDevice, Args);
+        return;
+    }
+    Batch->NoteBound(Args->RenderTargetIndex, Args->hRenderTarget);
 }
 
 VOID
@@ -1108,7 +1191,11 @@ D9Device::DdiDepthStencil(
     _In_ const D3DDDIARG_SETDEPTHSTENCIL* Args)
 {
     if (!D9RecordCall(Batch, D9BatchCall::DepthStencil, Args, sizeof(*Args)))
+    {
         DeviceFunctions.pfnSetDepthStencil(DriverDevice, Args);
+        return;
+    }
+    Batch->NoteBound(D9MaxRenderTargets, Args->hZBuffer);
 }
 
 /* A recorded clear keeps its rectangle count and then the rectangles after the arguments */

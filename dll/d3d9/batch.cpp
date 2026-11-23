@@ -251,6 +251,7 @@ D9Batch::Submit(VOID)
     InterlockedExchange(&Busy, 1);
     Pending = TRUE;
     SetEvent(Wake);
+    Advance();
 }
 
 /* Waits for the worker, then runs what is recorded on the calling thread */
@@ -259,6 +260,45 @@ D9Batch::Drain(VOID)
 {
     WaitForWorker();
     Run(&Buffers[Current]);
+    Advance();
+}
+
+/* A new generation starts with the bound targets already in use */
+VOID
+D9Batch::Advance(VOID)
+{
+    Generation += 1;
+    for (HANDLE Resource : Bound)
+        Reference(Resource);
+}
+
+VOID
+D9Batch::Reference(
+    _In_opt_ HANDLE Resource)
+{
+    if (Resource != NULL)
+        References[reinterpret_cast<ULONG_PTR>(Resource) % D9BatchReferenceSlots] = static_cast<BYTE>(Generation);
+}
+
+/* Used by the generation being recorded, or by the one the worker may still be running */
+BOOLEAN
+D9Batch::IsReferenced(
+    _In_ HANDLE Resource) const
+{
+    BYTE Last = References[reinterpret_cast<ULONG_PTR>(Resource) % D9BatchReferenceSlots];
+
+    if (Last == static_cast<BYTE>(Generation))
+        return TRUE;
+    return Pending && Last == static_cast<BYTE>(Generation - 1);
+}
+
+VOID
+D9Batch::NoteBound(
+    _In_ UINT Slot,
+    _In_opt_ HANDLE Resource)
+{
+    Bound[Slot] = Resource;
+    Reference(Resource);
 }
 
 VOID
@@ -326,6 +366,9 @@ D9Batch::Run(
             Funcs->pfnPresent1(Driver, Present);
             break;
         }
+        case D9BatchCall::Rename:
+            Funcs->pfnRename(Driver, reinterpret_cast<D3DDDIARG_RENAME*>(Args));
+            break;
         }
         Offset += Header->Size;
     }

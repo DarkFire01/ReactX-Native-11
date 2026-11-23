@@ -206,6 +206,7 @@ D9Buffer<Interface, Description>::Lock(
     _In_ DWORD Flags)
 {
     BOOLEAN Ranged = IsVertex() && SizeToLock != 0;
+    BOOLEAN Asynchronous = LockCount > 0 ? LockedAsync : Resource->Flags.Dynamic || Memory != nullptr;
     VOID* Base = nullptr;
     HRESULT hr;
 
@@ -213,12 +214,14 @@ D9Buffer<Interface, Description>::Lock(
         *Data = nullptr;
 
     LockCount += 1;
-    hr = Device->LockDriverBuffer(Resource, OffsetToLock, SizeToLock, Ranged, Flags, &Base);
+    hr = Device->LockDriverBuffer(Resource, OffsetToLock, SizeToLock, Ranged, Flags,
+                                  static_cast<UINT>(LockCount - 1), &Asynchronous, &Base);
     if (FAILED(hr))
     {
         LockCount -= 1;
         return hr;
     }
+    LockedAsync = Asynchronous;
 
     /* The driver already moved a ranged vertex buffer lock to its offset */
     if (Memory != nullptr)
@@ -234,11 +237,13 @@ template <class Interface, class Description>
 STDMETHODIMP
 D9Buffer<Interface, Description>::Unlock()
 {
-    HRESULT hr = Device->UnlockDriverSurface(Resource);
+    HRESULT hr = Device->UnlockDriverBuffer(Resource, LockedAsync);
 
     if (FAILED(hr))
         return hr;
     LockCount -= 1;
+    if (LockCount <= 0)
+        LockedAsync = FALSE;
     return S_OK;
 }
 
