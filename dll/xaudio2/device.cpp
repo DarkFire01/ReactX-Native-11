@@ -232,6 +232,8 @@ XaEndpoint::XaEndpoint()
     memset(&Format, 0, sizeof(Format));
     BufferFrames = 0;
     LatencyFrames = 0;
+    PeriodFrames = 0;
+    QueueFrames = 0;
     Ready = nullptr;
     Running = FALSE;
 }
@@ -300,6 +302,8 @@ XaEndpoint::Open(
     Packets = DefaultPeriod >= XA_LOCAL_PERIOD_LOW && DefaultPeriod < XA_LOCAL_PERIOD_HIGH ? XA_LOCAL_PACKETS : XA_REMOTE_PACKETS;
     Duration = static_cast<REFERENCE_TIME>(Format.Format.nSamplesPerSec) * DefaultPeriod / 10000000;
     Duration = Duration * 10000000 / Format.Format.nSamplesPerSec;
+    PeriodFrames = static_cast<UINT32>(Format.Format.nSamplesPerSec * Duration / 10000000);
+    QueueFrames = static_cast<UINT32>(Format.Format.nSamplesPerSec * (Packets * Duration) / 10000000);
     hr = Client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, Packets * Duration, 0,
                             &Format.Format, nullptr);
     if (FAILED(hr))
@@ -327,6 +331,29 @@ XaEndpoint::Start(VOID)
 
     if (Running)
         return S_OK;
+
+    /* Silence fills all but one period ahead of the first pass */
+    {
+        UINT32 Ahead = QueueFrames > PeriodFrames ? QueueFrames - PeriodFrames : 0;
+        UINT32 Padding = 0;
+        BYTE* Data;
+
+        hr = Client->GetCurrentPadding(&Padding);
+        if (FAILED(hr))
+            return hr;
+        Ahead -= XaMin(Padding, Ahead);
+        if (Ahead != 0)
+        {
+            hr = Render->GetBuffer(Ahead, &Data);
+            if (SUCCEEDED(hr))
+                hr = Render->ReleaseBuffer(Ahead, AUDCLNT_BUFFERFLAGS_SILENT);
+            if (FAILED(hr))
+            {
+                XaTrace(L"endpoint: prefill failed (%08lX)", hr);
+                return hr;
+            }
+        }
+    }
     hr = Client->Start();
     if (SUCCEEDED(hr))
         Running = TRUE;
@@ -341,6 +368,7 @@ XaEndpoint::Stop(VOID)
     if (!Running)
         return;
     Client->Stop();
+    Client->Reset();
     Running = FALSE;
 }
 

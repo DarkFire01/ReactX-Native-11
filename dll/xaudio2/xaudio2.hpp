@@ -1001,6 +1001,10 @@ public:
     WAVEFORMATEXTENSIBLE Format;
     UINT32 BufferFrames;
     UINT32 LatencyFrames;
+
+    /* One device period and the periods the stream keeps queued, in frames */
+    UINT32 PeriodFrames;
+    UINT32 QueueFrames;
     HANDLE Ready;
     BOOLEAN Running;
 };
