@@ -666,3 +666,33 @@ SceneOpsAddress(
 {
     return TcOpsRun(Device, Result, TcOpsAddressSource, "address", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
 }
+
+/* Gradient samples under a lowest level of detail, and the residency status every sample form returns */
+static const char TcOpsClampSource[] =
+    "[numthreads(64, 1, 1)] void clamp(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 256;\n"
+    "    float2 Uv = float2((t % 8) * 0.137 - 0.2, (t / 8) * 0.161 - 0.3);\n"
+    "    float2 Across = float2(0.03 * (t % 5), 0.02);\n"
+    "    float2 Down = float2(0.01, 0.07 * (t % 3));\n"
+    "    float Lowest = (t % 6) * 0.3 - 0.4;\n"
+    "    uint Status[6];\n"
+    "    Out.Store4(Base, asuint(Image.SampleGrad(Smooth, Uv, Across, Down, int2(0, 0), Lowest)));\n"
+    "    Out.Store4(Base + 16, asuint(Image.SampleGrad(Mirror, Uv * 1.7, Across * 2.0, Down, int2(1, -1), Lowest + 0.5, Status[0])));\n"
+    "    Out.Store4(Base + 32, asuint(Image.SampleLevel(Smooth, Uv, (t % 4) * 0.4, int2(0, 0), Status[1])));\n"
+    "    Out.Store(Base + 48, asuint(Floats.SampleCmpLevelZero(Compare, Uv, (t % 7) * 1.5 - 4.0, int2(0, 0), Status[2])));\n"
+    "    Out.Store(Base + 52, asuint(Floats.SampleGrad(Smooth, Uv, Across, Down, int2(0, 0), 2.0)));\n"
+    "    Out.Store4(Base + 64, asuint(Layers.SampleGrad(Smooth, float3(Uv, t % 3), Across * 9.0, Down * 9.0, int2(0, 0), Lowest * 2.0, Status[3])));\n"
+    "    Out.Store4(Base + 80, uint4(Status[0], Status[1], Status[2], Status[3]));\n"
+    "    Out.Store4(Base + 96, uint4(CheckAccessFullyMapped(Status[0]), CheckAccessFullyMapped(Status[1]),\n"
+    "                                CheckAccessFullyMapped(Status[2]), CheckAccessFullyMapped(Status[3])));\n"
+    "}\n";
+
+static
+HRESULT
+SceneOpsClamp(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsClampSource, "clamp", TcOpsBoth, ARRAYSIZE(TcOpsBoth), 1);
+}

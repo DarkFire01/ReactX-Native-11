@@ -2784,6 +2784,7 @@ static const TcScene Scenes[] =
     { "opsread", SceneOpsRead },
     { "opsatom", SceneOpsAtom },
     { "opsaddr", SceneOpsAddress },
+    { "opsclamp", SceneOpsClamp },
 };
 
 static
