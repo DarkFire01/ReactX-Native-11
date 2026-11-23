@@ -16,4 +16,5 @@ d3d12translationlayer and dxbcparser static libraries against ../DirectX-Headers
 
 ## Patches
 
-None.
+1. src/ImmediateContext.cpp: the null RTV description is zeroed. Upstream leaves the
+   rest of the view union uninitialized; the system layer passes zeros there.

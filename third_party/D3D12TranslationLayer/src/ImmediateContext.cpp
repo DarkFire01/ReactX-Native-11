@@ -338,7 +338,7 @@ ImmediateContext::ImmediateContext(UINT nodeIndex, D3D12_FEATURE_DATA_D3D12_OPTI
     if (!ComputeOnly())
     {
         m_NullRTV = m_RTVAllocator.AllocateHeapSlot(); // throw( _com_error )
-        D3D12_RENDER_TARGET_VIEW_DESC NullRTVDesc;
+        D3D12_RENDER_TARGET_VIEW_DESC NullRTVDesc = {};
         NullRTVDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         NullRTVDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         NullRTVDesc.Texture2D.MipSlice = 0;
