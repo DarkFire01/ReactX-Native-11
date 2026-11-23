@@ -12,6 +12,7 @@
 #include <mmreg.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <mediaobj.h>
 #include <ks.h>
 #include <ksmedia.h>
 #include <xaudio2.h>
@@ -4753,6 +4754,323 @@ XcCheckDevice(VOID)
     XcCheckRouting();
 }
 
+/* xWMA material comes from the WMA encoder DMO that ships with Windows, packet by packet */
+static const GUID XcWmaEncoder = { 0x70F598E9, 0xF4AB, 0x495A, { 0x99, 0xE2, 0xA7, 0xC4, 0xD3, 0xD8, 0x9A, 0xBF } };
+static const GUID XcAudioMajor = { 0x73647561, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
+static const GUID XcPcmSubtype = { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
+static const GUID XcWaveFormatType = { 0x05589F81, 0xC356, 0x11CE, { 0xBF, 0x01, 0x00, 0xAA, 0x00, 0x55, 0x59, 0x5A } };
+
+class XcMediaBuffer final : public IMediaBuffer
+{
+public:
+    XcMediaBuffer(
+        _In_ BYTE* NewData,
+        _In_ DWORD NewCapacity,
+        _In_ DWORD NewLength) : Data(NewData), Capacity(NewCapacity), Length(NewLength)
+    {
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        REFIID Iid,
+        _COM_Outptr_ void** Object) override
+    {
+        if (IsEqualIID(Iid, IID_IUnknown) || IsEqualIID(Iid, __uuidof(IMediaBuffer)))
+        {
+            *Object = static_cast<IMediaBuffer*>(this);
+            return S_OK;
+        }
+        *Object = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    AddRef() override
+    {
+        return 2;
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    Release() override
+    {
+        return 1;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    SetLength(
+        DWORD NewLength) override
+    {
+        if (NewLength > Capacity)
+            return E_INVALIDARG;
+        Length = NewLength;
+        return S_OK;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetMaxLength(
+        _Out_ DWORD* MaxLength) override
+    {
+        *MaxLength = Capacity;
+        return S_OK;
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetBufferAndLength(
+        _Outptr_opt_ BYTE** Buffer,
+        _Out_opt_ DWORD* Used) override
+    {
+        if (Buffer != nullptr)
+            *Buffer = Data;
+        if (Used != nullptr)
+            *Used = Length;
+        return S_OK;
+    }
+
+    BYTE* Data;
+    DWORD Capacity;
+    DWORD Length;
+};
+
+/* The packets and the decoded byte count after each one, as an xWMA file carries them */
+struct XcWmaStream
+{
+    WAVEFORMATEX Format;
+    BYTE* Packets;
+    UINT32* Cumulative;
+    UINT32 PacketCount;
+};
+
+static
+HRESULT
+XcEncodeWma(
+    _In_reads_bytes_(Bytes) BYTE* Pcm,
+    _In_ DWORD Bytes,
+    _In_ const WAVEFORMATEX* PcmFormat,
+    _In_ WORD Tag,
+    _In_ DWORD AverageBytes,
+    _In_ WORD BlockAlign,
+    _Out_ XcWmaStream* Stream)
+{
+    IMediaObject* Encoder = nullptr;
+    DMO_MEDIA_TYPE Type = {};
+    WAVEFORMATEX Input = *PcmFormat;
+    BOOLEAN Chosen = FALSE;
+    UINT32 Capacity = 256;
+    REFERENCE_TIME Elapsed = 0;
+    HRESULT hr;
+
+    memset(Stream, 0, sizeof(*Stream));
+    hr = CoCreateInstance(XcWmaEncoder, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&Encoder));
+    if (FAILED(hr))
+        return hr;
+    Input.cbSize = 0;
+    Type.majortype = XcAudioMajor;
+    Type.subtype = XcPcmSubtype;
+    Type.bFixedSizeSamples = TRUE;
+    Type.lSampleSize = PcmFormat->nBlockAlign;
+    Type.formattype = XcWaveFormatType;
+    Type.cbFormat = sizeof(Input);
+    Type.pbFormat = reinterpret_cast<BYTE*>(&Input);
+    hr = Encoder->SetInputType(0, &Type, 0);
+    for (DWORD Index = 0; SUCCEEDED(hr) && !Chosen; Index++)
+    {
+        DMO_MEDIA_TYPE Offered = {};
+        const WAVEFORMATEX* Format;
+
+        hr = Encoder->GetOutputType(0, Index, &Offered);
+        if (FAILED(hr))
+            break;
+        Format = reinterpret_cast<const WAVEFORMATEX*>(Offered.pbFormat);
+        if (XcVerbose && Offered.cbFormat >= sizeof(WAVEFORMATEX))
+            fprintf(stderr, "offered %04X %u %lu %lu %u\n", Format->wFormatTag, Format->nChannels, Format->nSamplesPerSec,
+                    Format->nAvgBytesPerSec, Format->nBlockAlign);
+        if (Offered.cbFormat >= sizeof(WAVEFORMATEX) && Format->wFormatTag == Tag && Format->nBlockAlign == BlockAlign &&
+            Format->nChannels == PcmFormat->nChannels && Format->nSamplesPerSec == PcmFormat->nSamplesPerSec &&
+            Format->nAvgBytesPerSec - AverageBytes < 16)
+        {
+            /* The encoder states a few bytes more than the rounded rate an xWMA header carries */
+            hr = Encoder->SetOutputType(0, &Offered, 0);
+            Stream->Format = *Format;
+            Stream->Format.cbSize = 0;
+            Stream->Format.nAvgBytesPerSec = AverageBytes;
+            Chosen = SUCCEEDED(hr);
+        }
+        CoTaskMemFree(Offered.pbFormat);
+        if (Offered.pUnk != nullptr)
+            Offered.pUnk->Release();
+    }
+    if (SUCCEEDED(hr) && !Chosen)
+        hr = E_FAIL;
+    if (SUCCEEDED(hr))
+    {
+        Stream->Packets = new (std::nothrow) BYTE[static_cast<SIZE_T>(Capacity) * Stream->Format.nBlockAlign];
+        Stream->Cumulative = new (std::nothrow) UINT32[Capacity];
+        if (Stream->Packets == nullptr || Stream->Cumulative == nullptr)
+            hr = E_OUTOFMEMORY;
+    }
+    if (SUCCEEDED(hr))
+    {
+        XcMediaBuffer Source(Pcm, Bytes, Bytes);
+
+        hr = Encoder->ProcessInput(0, &Source, 0, 0, 0);
+    }
+    for (UINT Round = 0; SUCCEEDED(hr) && Round < 2; Round++)
+    {
+        if (Round == 1)
+            hr = Encoder->Discontinuity(0);
+        while (SUCCEEDED(hr) && Stream->PacketCount < Capacity)
+        {
+            XcMediaBuffer Packet(Stream->Packets + static_cast<SIZE_T>(Stream->PacketCount) * Stream->Format.nBlockAlign,
+                                 Stream->Format.nBlockAlign, 0);
+            DMO_OUTPUT_DATA_BUFFER Output = {};
+            DWORD Status = 0;
+
+            Output.pBuffer = &Packet;
+            hr = Encoder->ProcessOutput(0, 1, &Output, &Status);
+            if (XcVerbose)
+                fprintf(stderr, "packet %08lX length %lu status %08lX time %lld %lld\n", hr, Packet.Length, Output.dwStatus,
+                        Output.rtTimestamp, Output.rtTimelength);
+            if (hr == S_FALSE || Packet.Length == 0)
+            {
+                hr = S_OK;
+                break;
+            }
+            if (FAILED(hr) || Packet.Length != Stream->Format.nBlockAlign || (Output.dwStatus & DMO_OUTPUT_DATA_BUFFERF_TIMELENGTH) == 0)
+            {
+                hr = FAILED(hr) ? hr : E_UNEXPECTED;
+                break;
+            }
+
+            /* The packet lengths added up, in samples, give the decoded bytes so far */
+            Elapsed += Output.rtTimelength;
+            Stream->Cumulative[Stream->PacketCount] =
+                static_cast<UINT32>((Elapsed * PcmFormat->nSamplesPerSec + 5000000) / 10000000) * PcmFormat->nBlockAlign;
+            Stream->PacketCount += 1;
+        }
+    }
+    Encoder->Release();
+    return hr;
+}
+
+/* xWMA playback heard by a recorder on the mastering voice */
+static
+VOID
+XcCheckWma(VOID)
+{
+    static const struct
+    {
+        WORD Tag;
+        DWORD Average;
+        WORD Align;
+    } Rates[] =
+    {
+        { 0x0161, 6000, 2230 }, { 0x0161, 12000, 4459 }, { 0x0161, 24000, 8917 }, { 0x0162, 6000, 2230 }, { 0x0162, 12000, 4459 },
+    };
+    static BYTE Pcm[44100 * 4 / 2];
+    WAVEFORMATEX PcmFormat;
+
+    XcPcm(&PcmFormat, WAVE_FORMAT_PCM, 2, 44100, 16);
+    XcFillNoise(Pcm, sizeof(Pcm), &PcmFormat);
+    for (UINT Index = 0; Index < ARRAYSIZE(Rates); Index++)
+    {
+        XcProbeApo& Recorder = *new XcProbeApo(XAPO_FLAG_INPLACE_SUPPORTED | XAPO_FLAG_INPLACE_REQUIRED | XAPO_FLAG_CHANNELS_MUST_MATCH |
+                                XAPO_FLAG_FRAMERATE_MUST_MATCH | XAPO_FLAG_BITSPERSAMPLE_MUST_MATCH |
+                                XAPO_FLAG_BUFFERCOUNT_MUST_MATCH, FALSE);
+        XAUDIO2_EFFECT_DESCRIPTOR Effect = { static_cast<IXAPO*>(&Recorder), TRUE, 2 };
+        XAUDIO2_EFFECT_CHAIN Chain = { 1, &Effect };
+        IXAudio2* Engine = nullptr;
+        IXAudio2MasteringVoice* Master = nullptr;
+        IXAudio2SourceVoice* Source = nullptr;
+        XcVoiceCallback Callback;
+        XAUDIO2_BUFFER Buffer = {};
+        XAUDIO2_BUFFER_WMA Table = {};
+        XcWmaStream Stream;
+        HRESULT hr;
+
+        hr = XcEncodeWma(Pcm, sizeof(Pcm), &PcmFormat, Rates[Index].Tag, Rates[Index].Average, Rates[Index].Align, &Stream);
+        printf("wma[%u] encode %04X %lu = %08lX packets %u align %u\n", Index, Rates[Index].Tag, Rates[Index].Average, hr,
+               Stream.PacketCount,
+               Stream.Format.nBlockAlign);
+        if (SUCCEEDED(hr))
+        {
+            printf("  stream hash %08X decoded %u\n",
+                   XcHash(reinterpret_cast<const float*>(Stream.Packets), Stream.PacketCount * Stream.Format.nBlockAlign / 4),
+                   Stream.PacketCount != 0 ? Stream.Cumulative[Stream.PacketCount - 1] : 0);
+            hr = XcCreate(&Engine, 0);
+        }
+        if (SUCCEEDED(hr))
+        {
+            Engine->StopEngine();
+            hr = Engine->CreateMasteringVoice(&Master, 2, 44100, 0, nullptr, &Chain);
+        }
+        if (SUCCEEDED(hr))
+        {
+            Recorder.RecordedCapacity = 44100 * 2;
+            Recorder.Recorded = new (std::nothrow) float[Recorder.RecordedCapacity];
+            Recorder.Recording = TRUE;
+            hr = Engine->CreateSourceVoice(&Source, &Stream.Format, 0, 2.0f, &Callback);
+            printf("  source = %08lX\n", hr);
+        }
+        if (SUCCEEDED(hr))
+        {
+            Buffer.AudioBytes = Stream.PacketCount * Stream.Format.nBlockAlign;
+            Buffer.pAudioData = Stream.Packets;
+            Buffer.Flags = XAUDIO2_END_OF_STREAM;
+            Table.pDecodedPacketCumulativeBytes = Stream.Cumulative;
+            Table.PacketCount = Stream.PacketCount;
+            hr = Source->SubmitSourceBuffer(&Buffer, &Table);
+            printf("  submit = %08lX\n", hr);
+        }
+        if (SUCCEEDED(hr))
+        {
+            XcStreamEnded = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            Source->Start();
+            Engine->StartEngine();
+            if (WaitForSingleObject(XcStreamEnded, 3000) != WAIT_OBJECT_0)
+                printf("  no stream end\n");
+            Engine->StopEngine();
+            CloseHandle(XcStreamEnded);
+            XcStreamEnded = nullptr;
+            {
+                XAUDIO2_VOICE_STATE State;
+
+                Source->GetState(&State);
+                printf("  played %llu\n", State.SamplesPlayed);
+            }
+            Recorder.Recording = FALSE;
+            {
+                SIZE_T Onset = 0;
+                SIZE_T Frames;
+
+                while (Onset < Recorder.RecordedCount && Recorder.Recorded[Onset] == 0.0f)
+                    Onset += 1;
+                Onset -= Onset % 2;
+                Frames = (Recorder.RecordedCount - Onset) / 2;
+                printf("  onset %zu hash %08X\n", Onset / 2, XcHash(Recorder.Recorded + Onset, Frames * 2));
+                for (SIZE_T Frame = 0; Frame < Frames && Frame < 2048; Frame++)
+                {
+                    if (Frame >= 8 && !(Frame >= 1024 && Frame < 1032) && Frame < 2040)
+                        continue;
+                    printf("  frame %4zu %08lX %08lX\n", Frame, XcBits(Recorder.Recorded[Onset + Frame * 2]),
+                           XcBits(Recorder.Recorded[Onset + Frame * 2 + 1]));
+                }
+            }
+        }
+        if (Source != nullptr)
+            Source->DestroyVoice();
+        if (Engine != nullptr)
+            Engine->Release();
+        delete[] Stream.Packets;
+        delete[] Stream.Cumulative;
+    }
+}
+
 /* Whether passes run over a window, which only needs the windows to sit well clear of the idle delay */
 static
 VOID
@@ -5462,6 +5780,10 @@ wmain(
         XcCheckMix();
     if (XcSection != nullptr && _wcsicmp(XcSection, L"device") == 0)
         XcCheckDevice();
+
+    /* Encodes with the system WMA encoder and plays the result */
+    if (XcSection != nullptr && _wcsicmp(XcSection, L"wma") == 0)
+        XcCheckWma();
 
     /* Waits out the idle delay several times, so also only on request */
     if (XcSection != nullptr && _wcsicmp(XcSection, L"idle") == 0)
