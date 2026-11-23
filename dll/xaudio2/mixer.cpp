@@ -625,6 +625,17 @@ XaProcessMaster(
             memset(const_cast<float*>(Mix), 0, sizeof(*Mix) * Frames * Channels);
     }
 
+    /* A silent mix goes out as silence and the device converter starts over with the next sound */
+    if (Silent)
+    {
+        if (Master->Resampler != nullptr && Master->DeviceRunning)
+            XaResamplerReset(Master->Resampler);
+        Master->DeviceRunning = FALSE;
+        memset(Device, 0, sizeof(*Device) * DeviceFrames * DeviceChannels);
+        return;
+    }
+    Master->DeviceRunning = TRUE;
+
     if (Master->Endpoint->Format.Format.nSamplesPerSec != Master->InputRate)
     {
         float* Converted;

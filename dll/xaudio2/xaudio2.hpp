@@ -924,7 +924,8 @@ class XaMasterVoice final : public IXAudio2MasteringVoice, public XaVoice
 {
 public:
     XaMasterVoice(
-        _In_ XaEngine* NewEngine) : XaVoice(NewEngine, XaKindMaster), Endpoint(nullptr), DeviceMatrix(nullptr)
+        _In_ XaEngine* NewEngine) : XaVoice(NewEngine, XaKindMaster), Endpoint(nullptr), DeviceMatrix(nullptr),
+        DeviceRunning(FALSE)
     {
     }
 
@@ -969,6 +970,9 @@ public:
 
     /* Maps the voice's channels onto the endpoint's when they differ */
     float* DeviceMatrix;
+
+    /* Whether the device converter holds state from a sounding pass */
+    BOOLEAN DeviceRunning;
 };
 
 /* The shared mode WASAPI stream behind a mastering voice */
