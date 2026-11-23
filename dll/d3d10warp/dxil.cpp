@@ -914,6 +914,8 @@ typedef struct _RX_SIMPLE
 const RX_SIMPLE RxSimpleOps[] =
 {
     { OpCode::FAbs, D3D10_SB_OPCODE_MOV, 1, 0, D3D10_SB_OPERAND_MODIFIER_ABS },
+    { OpCode::BitcastF32toI32, D3D10_SB_OPCODE_MOV, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::BitcastI32toF32, D3D10_SB_OPCODE_MOV, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
     { OpCode::Saturate, D3D10_SB_OPCODE_MOV, 1, D3D10_SB_INSTRUCTION_SATURATE_MASK, D3D10_SB_OPERAND_MODIFIER_NONE },
     { OpCode::Exp, D3D10_SB_OPCODE_EXP, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
     { OpCode::Log, D3D10_SB_OPCODE_LOG, 1, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
@@ -944,6 +946,9 @@ const RX_SIMPLE RxSimpleOps[] =
     { OpCode::FMad, D3D10_SB_OPCODE_MAD, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
     { OpCode::IMad, D3D10_SB_OPCODE_IMAD, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
     { OpCode::UMad, D3D10_SB_OPCODE_UMAD, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Ibfe, D3D11_SB_OPCODE_IBFE, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Ubfe, D3D11_SB_OPCODE_UBFE, 3, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
+    { OpCode::Bfi, D3D11_SB_OPCODE_BFI, 4, 0, D3D10_SB_OPERAND_MODIFIER_NONE },
 };
 
 BOOLEAN
@@ -973,8 +978,11 @@ RxLowering::LowerCall(
             Emit(Simple.Opcode, { Dest(Call), First }, Simple.Flags);
         else if (Simple.Operands == 2)
             Emit(Simple.Opcode, { Dest(Call), First, Source(Call->getArgOperand(2)) }, Simple.Flags);
-        else
+        else if (Simple.Operands == 3)
             Emit(Simple.Opcode, { Dest(Call), First, Source(Call->getArgOperand(2)), Source(Call->getArgOperand(3)) }, Simple.Flags);
+        else
+            Emit(Simple.Opcode, { Dest(Call), First, Source(Call->getArgOperand(2)), Source(Call->getArgOperand(3)),
+                                  Source(Call->getArgOperand(4)) }, Simple.Flags);
         return TRUE;
     }
 
