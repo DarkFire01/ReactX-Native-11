@@ -16,6 +16,19 @@ static const GUID RxD3D12KernelDeviceKey = { 0x1a20c5df, 0x8f65, 0x405a, { 0x99,
 /* D3D12 device interface asked for when the device finishes construction */
 static const GUID RxD3D12ConstructionIid = { 0xde18ef3a, 0x2089, 0x4936, { 0xa3, 0xf3, 0xec, 0x78, 0x7a, 0xc6, 0xa4, 0x0d } };
 
+/* D3D12 queue interface the layer hands its graphics queue out as */
+static const GUID RxD3D12QueueIid = { 0x7974c836, 0x9520, 0x4cda, { 0x8d, 0x43, 0xd9, 0x96, 0x62, 0x2e, 0x89, 0x26 } };
+
+/* The construction interface; the runtime only reads the revision in its fifth slot */
+struct IRxD3D12Construction : public IUnknown
+{
+    STDMETHOD_(UINT, FirstSlot)() = 0;
+    STDMETHOD_(UINT, GetRevision)() = 0;
+};
+
+/* The revision at which the layer is also asked how compatible its shared resources are */
+constexpr UINT RxConstructionSharingRevision = 10;
+
 /* The formats a new device caches support for, in the order it asks */
 static constexpr DXGI_FORMAT RxCachedFormats[] =
 {
@@ -69,9 +82,10 @@ HRESULT
 RxDevice::AttachLayer()
 {
     D3D12_FEATURE_DATA_D3D12_OPTIONS Options = {};
+    D3D12_FEATURE_DATA_D3D12_OPTIONS4 Options4 = {};
     D3D12_FEATURE_DATA_SHADER_MODEL Model = { D3D_SHADER_MODEL_6_2 };
     ID3D12Device* Base = nullptr;
-    IUnknown* Construction = nullptr;
+    IRxD3D12Construction* Construction = nullptr;
     D3DKMT_HANDLE KernelDevice = 0;
     UINT Size = sizeof(KernelDevice);
     HRESULT hr;
@@ -100,7 +114,7 @@ RxDevice::AttachLayer()
         return hr;
     }
 
-    hr = LayerDevice->GetGraphicsQueue(IID_PPV_ARGS(&LayerQueue));
+    hr = LayerDevice->GetGraphicsQueue(RxD3D12QueueIid, reinterpret_cast<void**>(&LayerQueue));
     if (FAILED(hr))
     {
         RX_TRACE(L"the layer has no graphics queue (0x%08lX)", hr);
@@ -113,14 +127,27 @@ RxDevice::AttachLayer()
 
     WarmFormatCaches();
 
-    if (SUCCEEDED(LayerDevice12->QueryInterface(RxD3D12ConstructionIid, reinterpret_cast<void**>(&Construction))))
-        Construction->Release();
+    LayerDevice->GetD3D12Device(RxD3D12ConstructionIid, reinterpret_cast<void**>(&Construction));
+    if (Construction == nullptr)
+    {
+        RX_TRACE(L"the layer has no construction interface on its D3D12 device");
+        return E_NOINTERFACE;
+    }
 
-    if (SUCCEEDED(LayerDevice12->QueryInterface(IID_PPV_ARGS(&Base))))
+    if (Construction->GetRevision() == RxConstructionSharingRevision &&
+        SUCCEEDED(LayerDevice->GetD3D12Device(IID_PPV_ARGS(&Base))))
+    {
+        Base->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &Options4, sizeof(Options4));
+        Base->Release();
+        Base = nullptr;
+    }
+
+    if (SUCCEEDED(LayerDevice->GetD3D12Device(IID_PPV_ARGS(&Base))))
     {
         Base->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &Model, sizeof(Model));
         Base->Release();
     }
 
+    Construction->Release();
     return S_OK;
 }

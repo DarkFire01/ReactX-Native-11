@@ -1057,7 +1057,7 @@ private:
     IOn12DdiDevice* LayerDevice = nullptr;
     ID3D12Device5* LayerDevice12 = nullptr;
     IUnknown* LayerPrivate = nullptr;
-    ID3D12CommandQueue* LayerQueue = nullptr;
+    IUnknown* LayerQueue = nullptr;
 
     SRWLOCK VideoLock = SRWLOCK_INIT;
     BOOLEAN IsVideoQueried = FALSE;
