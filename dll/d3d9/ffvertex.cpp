@@ -469,15 +469,10 @@ D9BuildFixedVertexShader(
     DWORD Writes = D9VsWritesPosition;
     UINT Stages;
 
-    UNREFERENCED_PARAMETER(FlowControl);
     *Count = 0;
 
     /* Parts not converted yet */
     if ((In & (D9VsTweening | D9VsLighting)) != 0 || (Needs & D9VertexNeedsBlend) != 0)
-        return FALSE;
-    if ((Modes & D9VsModePointList) != 0 && (In & D9VsOutSize) != 0)
-        return FALSE;
-    if ((In & (D9VsFog | D9VsOutFog)) == (D9VsFog | D9VsOutFog))
         return FALSE;
 
     Position = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Position), D9VsAll);
@@ -525,7 +520,7 @@ D9BuildFixedVertexShader(
         if ((In & D9VsInSize) != 0)
         {
             Out.Declare(D9VsUsageSize, 0, Inputs.Take(&Inputs.Size));
-            Size = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Size), D9VsAll);
+            Size = D9VsSrc(D9VsInput, Inputs.Take(&Inputs.Size), D9VsX);
         }
         else
         {
@@ -563,10 +558,95 @@ D9BuildFixedVertexShader(
     if (SpecularOut)
         Out.Op(D9VsMov, D9VsDst(D9VsColorOut, 1, 0xF), Specular);
 
+    /* Vertex fog from the eye distance or depth, or the specular alpha when no mode is set */
+    if ((In & (D9VsFog | D9VsOutFog)) == (D9VsFog | D9VsOutFog))
+    {
+        D9_VS_TARGET Fog = D9VsDst(D9VsRasterOut, 1, 0xF);
+        D9_VS_TARGET Distance = D9VsDst(D9VsTemp, D9VsTempScratch, 0x1);
+        D9_VS_SOURCE Measured = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsX);
+        D9_VS_SOURCE Eye = D9VsSrc(D9VsTemp, D9VsTempEye, D9VsAll);
+        DWORD Mode = Modes & D9VsModeFog;
+
+        Writes |= D9VsWritesFog;
+        if (Mode == 0)
+        {
+            Out.Op(D9VsMov, Fog, D9VsSwizzled(Specular, D9VsW));
+        }
+        else
+        {
+            if ((In & D9VsRangeFog) != 0)
+            {
+                Out.Op(D9VsDp3, Distance, Eye, Eye);
+                Out.Op(D9VsRsq, Distance, Measured);
+                Out.Op(D9VsRcp, Distance, Measured);
+            }
+            else
+            {
+                Out.Op(D9VsAbs, Distance, D9VsSwizzled(Eye, D9VsZ));
+            }
+            if (Mode == 0x00300000)
+            {
+                Out.Op(D9VsMul, Distance, Measured, D9VsConstant(D9VsConstFog, 0));
+                Out.Op(D9VsAdd, Fog, Measured, D9VsConstant(D9VsConstFog, 1));
+            }
+            else
+            {
+                Out.Op(D9VsMul, Distance, Measured, D9VsConstant(D9VsConstFog, 2));
+                if (Mode == 0x00200000)
+                    Out.Op(D9VsMul, Distance, Measured, Measured);
+                Out.Op(D9VsPow, D9VsDst(D9VsTemp, D9VsTempOut, 0xF), D9VsConstant(D9VsConstNumbers, 2),
+                       D9VsNegated(Measured));
+                Out.Op(D9VsMov, Fog, D9VsSrc(D9VsTemp, D9VsTempOut, D9VsX));
+            }
+        }
+    }
+
+    /* Point sizes, scaled by the eye distance when point scaling is on */
     if ((Modes & D9VsModePointList) != 0 && (In & D9VsOutSize) != 0)
     {
+        D9_VS_TARGET Points = D9VsDst(D9VsRasterOut, 2, 0xF);
+
         Writes |= D9VsWritesSize;
-        Out.Op(D9VsMov, D9VsDst(D9VsRasterOut, 2, 0xF), Size);
+        if ((Modes & D9VsModePointScale) != 0)
+        {
+            D9_VS_SOURCE Eye = D9VsSrc(D9VsTemp, D9VsTempEye, D9VsAll);
+            D9_VS_TARGET Distance = D9VsDst(D9VsTemp, D9VsTempScratch, 0x1);
+            D9_VS_SOURCE Measured = D9VsSrc(D9VsTemp, D9VsTempScratch, D9VsX);
+            D9_VS_TARGET Sum = D9VsDst(D9VsTemp, D9VsTempOut, 0x1);
+            D9_VS_SOURCE Summed = D9VsSrc(D9VsTemp, D9VsTempOut, D9VsX);
+
+            Out.Op(D9VsDp3, Distance, Eye, Eye);
+            Out.Op(D9VsRsq, Distance, Measured);
+            Out.Op(D9VsRcp, Distance, Measured);
+            Out.Op(D9VsMov, Sum, D9VsConstant(D9VsConstPointScale, 1));
+            Out.Op(D9VsMad, Sum, D9VsConstant(D9VsConstPointScale, 2), Measured, Summed);
+            Out.Op(D9VsMad, Sum, Summed, Measured, D9VsConstant(D9VsConstPointScale, 0));
+            if (FlowControl)
+            {
+                Out.Put(0x02000029 | (6u << 16));
+                Out.Source(Summed);
+                Out.Source(D9VsConstant(D9VsConstZero, 0));
+                Out.Op(D9VsMov, Points, D9VsConstant(D9VsConstPoint, 0));
+                Out.Put(0x0000002A);
+                Out.Op(D9VsRsq, Sum, Summed);
+                Out.Op(D9VsMul, Sum, Summed, D9VsConstant(D9VsConstPoint, 3));
+                Out.Op(D9VsMul, Points, Size, Summed);
+                Out.Put(0x0000002B);
+            }
+            else
+            {
+                Out.Op(0x0C, D9VsDst(D9VsTemp, D9VsTempOut, 0x2), Summed, D9VsConstant(D9VsConstZero, 0));
+                Out.Op(D9VsMul, D9VsDst(D9VsTemp, D9VsTempOut, 0x4), D9VsSrc(D9VsTemp, D9VsTempOut, D9VsY),
+                       D9VsConstant(D9VsConstPoint, 0));
+                Out.Op(D9VsRsq, Sum, Summed);
+                Out.Op(D9VsMul, Sum, Summed, D9VsConstant(D9VsConstPoint, 3));
+                Out.Op(D9VsMad, Points, Size, Summed, D9VsSrc(D9VsTemp, D9VsTempOut, D9VsZ));
+            }
+        }
+        else
+        {
+            Out.Op(D9VsMov, Points, Size);
+        }
     }
 
     /* Each active stage gets the coordinates it reads in the output of its own number, through its transform

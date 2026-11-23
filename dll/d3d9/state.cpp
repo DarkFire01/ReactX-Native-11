@@ -100,6 +100,18 @@ D9Device::SendStateValue(
 {
     D3DDDIARG_RENDERSTATE Args = {};
 
+    /* Vertex fog turning on or off makes a device that keeps state bind its declaration again */
+    if ((State == D3DRS_FOGENABLE || State == D3DRS_FOGVERTEXMODE) && (BehaviorFlags & D3DCREATE_PUREDEVICE) == 0)
+    {
+        BOOLEAN Fogged = RenderStates[D3DRS_FOGENABLE] != 0 && RenderStates[D3DRS_FOGVERTEXMODE] != 0;
+
+        if (Fogged != VertexFogged)
+        {
+            VertexFogged = Fogged;
+            DrawDirty |= D9DrawVertexInput;
+        }
+    }
+
     /* The vertex converter sees every state first; a wrap state also follows the stages that read its set */
     if (Switch.HasVertexConverter)
     {

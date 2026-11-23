@@ -3365,8 +3365,9 @@ private:
     /* The pixel shaders standing in for the texture stages */
     D9PixelConverter PixelShaders;
 
-    /* The vertex shaders standing in for the fixed function vertex pipeline */
+    /* The vertex shaders standing in for the fixed function vertex pipeline, and whether vertex fog is on */
     D9VertexConverter VertexShaders;
+    BOOLEAN VertexFogged = FALSE;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;
