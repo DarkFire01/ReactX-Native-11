@@ -2587,6 +2587,96 @@ XcCheckEffects(VOID)
         }
     }
 
+    /* A new output rate locks a source voice's chain again, since its effects run after the converter */
+    {
+        XcProbeApo& Moved = *new XcProbeApo(FlagSets[0], TRUE);
+        XcProbeApo& Fixed = *new XcProbeApo(FlagSets[0], TRUE);
+        XAUDIO2_EFFECT_DESCRIPTOR MovedEffect = { static_cast<IXAPO*>(&Moved), TRUE, 1 };
+        XAUDIO2_EFFECT_DESCRIPTOR FixedEffect = { static_cast<IXAPO*>(&Fixed), TRUE, 1 };
+        XAUDIO2_EFFECT_CHAIN MovedChain = { 1, &MovedEffect };
+        XAUDIO2_EFFECT_CHAIN FixedChain = { 1, &FixedEffect };
+        IXAudio2SubmixVoice* Fast = nullptr;
+        IXAudio2SubmixVoice* Slow = nullptr;
+        IXAudio2SubmixVoice* Wide = nullptr;
+        IXAudio2SubmixVoice* Holder = nullptr;
+        IXAudio2SourceVoice* Source = nullptr;
+        XAUDIO2_SEND_DESCRIPTOR Send = {};
+        XAUDIO2_SEND_DESCRIPTOR Both[2] = {};
+        XAUDIO2_VOICE_SENDS Sends = { 1, &Send };
+        XAUDIO2_VOICE_SENDS Pair = { 2, Both };
+        XAUDIO2_VOICE_DETAILS Details;
+
+        printf("rate submixes = %08lX %08lX %08lX\n", Engine->CreateSubmixVoice(&Fast, 1, 48000, 0, 1),
+               Engine->CreateSubmixVoice(&Slow, 1, 32000, 0, 1), Engine->CreateSubmixVoice(&Wide, 2, 48000, 0, 1));
+        if (Fast != nullptr && Slow != nullptr && Wide != nullptr)
+        {
+            Send.pOutputVoice = Fast;
+            printf("rate source = %08lX\n", Engine->CreateSourceVoice(&Source, &Format, 0, 2.0f, nullptr, &Sends, &MovedChain));
+            XcWaitPasses(2);
+            Moved.PrintLog("  rate fast");
+            if (Source != nullptr)
+            {
+                Send.pOutputVoice = Slow;
+                printf("  to slow = %08lX\n", Source->SetOutputVoices(&Sends));
+                XcWaitPasses(2);
+                Source->GetVoiceDetails(&Details);
+                printf("  details %u %u\n", Details.InputChannels, Details.InputSampleRate);
+                Moved.PrintLog("  rate slow");
+                Send.pOutputVoice = Wide;
+                printf("  to wide = %08lX\n", Source->SetOutputVoices(&Sends));
+                XcWaitPasses(2);
+                Moved.PrintLog("  rate wide");
+                Both[0].pOutputVoice = Fast;
+                Both[1].pOutputVoice = Slow;
+                printf("  to both = %08lX\n", Source->SetOutputVoices(&Pair));
+                XcWaitPasses(2);
+                Moved.PrintLog("  rate both");
+                printf("  to master = %08lX\n", Source->SetOutputVoices(nullptr));
+                XcWaitPasses(2);
+                Moved.PrintLog("  rate master");
+                Send.pOutputVoice = Slow;
+                printf("  disabled to slow = %08lX\n", Source->DisableEffect(0));
+                printf("  then = %08lX\n", Source->SetOutputVoices(&Sends));
+                XcWaitPasses(2);
+                Moved.PrintLog("  rate disabled");
+                printf("  chain cleared = %08lX\n", Source->SetEffectChain(nullptr));
+                Send.pOutputVoice = Fast;
+                printf("  bare to fast = %08lX\n", Source->SetOutputVoices(&Sends));
+                printf("  chain again = %08lX\n", Source->SetEffectChain(&MovedChain));
+                XcWaitPasses(2);
+                Moved.PrintLog("  rate rechained");
+                Source->DestroyVoice();
+                Moved.PrintLog("  rate gone");
+            }
+
+            /* A submix voice runs its chain at its input rate, before the converter; pass counts are left out */
+            Fixed.Calls = 4;
+            Send.pOutputVoice = Slow;
+            printf("rate holder = %08lX\n", Engine->CreateSubmixVoice(&Holder, 1, 48000, 0, 0, &Sends, &FixedChain));
+            XcWaitPasses(2);
+            Fixed.PrintLog("  holder slow");
+            if (Holder != nullptr)
+            {
+                Send.pOutputVoice = Wide;
+                printf("  holder to wide = %08lX\n", Holder->SetOutputVoices(&Sends));
+                XcWaitPasses(2);
+                Fixed.PrintLog("  holder wide");
+                printf("  holder to master = %08lX\n", Holder->SetOutputVoices(nullptr));
+                XcWaitPasses(2);
+                Fixed.PrintLog("  holder master");
+                Holder->DestroyVoice();
+                Fixed.PrintLog("  holder gone");
+            }
+        }
+        if (Wide != nullptr)
+            Wide->DestroyVoice();
+        if (Slow != nullptr)
+            Slow->DestroyVoice();
+        if (Fast != nullptr)
+            Fast->DestroyVoice();
+        printf("rate refs %ld %ld\n", Moved.References, Fixed.References);
+    }
+
     /* Chains on submix and mastering voices */
     {
         XcProbeApo& First = *new XcProbeApo(XAPO_FLAG_INPLACE_SUPPORTED, TRUE);
