@@ -137,6 +137,12 @@ D9Device::SendStateValue(
             }
             Switch.DriverWrap[Set] = Value;
         }
+        if (State == D3DRS_CLIPPLANEENABLE)
+        {
+            Switch.ClipPlaneEnable = Value;
+            if (Value != 0)
+                UpdateSwitch(D9SwitchClipPlanes, 0);
+        }
         VertexShaders.SetRenderState(State, Value);
     }
 
@@ -479,7 +485,11 @@ D9Device::SetTransform(
     if (Slot >= 0)
         Transforms[Slot] = *Matrix;
     if (Switch.HasVertexConverter)
+    {
         VertexShaders.SetTransform(Type, Matrix);
+        if ((Type == D3DTS_VIEW || Type == D3DTS_PROJECTION) && Switch.ClipPlaneEnable != 0)
+            UpdateSwitch(D9SwitchClipPlanes, 0);
+    }
     if (Type == D3DTS_PROJECTION)
         SendWInfo(Matrix);
     return S_OK;
@@ -790,6 +800,15 @@ D9Device::SetClipPlane(
         return Recording->Add(D9BlockOp::ClipPlane, Slot, 0, Plane, sizeof(ClipPlanes[Slot]));
     /* A mixed device's driver sees the plane from both of the runtime's vertex pipelines */
     CopyMemory(ClipPlanes[Slot], Plane, sizeof(ClipPlanes[Slot]));
+
+    /* While the vertex converter runs, an enabled plane waits to reach the driver in clip space */
+    if (Switch.HasVertexConverter && Switch.VertexConverting)
+    {
+        SendClipPlane(Slot, (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0 ? 2 : 0);
+        if ((Switch.ClipPlaneEnable & (1u << Slot)) != 0)
+            UpdateSwitch(D9SwitchClipPlanes, 0);
+        return S_OK;
+    }
     SendClipPlane(Slot, (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0 ? 4 : 2);
     return S_OK;
 }

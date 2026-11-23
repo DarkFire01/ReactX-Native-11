@@ -140,6 +140,20 @@ public:
         _In_ DWORD Height);
 
     /**
+     * @brief Takes the stage count a pixel shader reads, or lets the stages count themselves.
+     */
+    VOID
+    UsePixelStages(
+        _In_ BOOLEAN Given,
+        _In_ UINT Count);
+
+    /**
+     * @brief The view and projection's inverse, which takes clip planes into clip space.
+     */
+    const D3DMATRIX*
+    ClipInverse(VOID);
+
+    /**
      * @brief Takes a light the application set.
      * @return FALSE when there is no room for another light.
      */
@@ -267,6 +281,9 @@ private:
     UINT LightLimit = 0;
     UINT MatrixLimit = 0;
     UINT DisabledStages = 0xFF;
+    BOOLEAN StagesGiven = FALSE;
+    UINT GivenStages = 0;
+    D3DMATRIX ViewProjectionInverse = {};
     BOOLEAN Lighting = FALSE;
     BOOLEAN ColorVertex = FALSE;
     DWORD Sources[4] = {};

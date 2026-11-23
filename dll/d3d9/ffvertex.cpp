@@ -1325,6 +1325,8 @@ D9VertexConverter::Start(
     Stale = 0xFFFFFFFF;
     Updated = 0;
     DisabledStages = 0xFF;
+    StagesGiven = FALSE;
+    GivenStages = 0;
     Lighting = FALSE;
     ColorVertex = FALSE;
     ZeroMemory(Sources, sizeof(Sources));
@@ -1765,6 +1767,18 @@ D9VertexConverter::SetMaterial(
     Touch(1, D9VsConstMaterial, D9VsConstMaterial + 5);
 }
 
+VOID
+D9VertexConverter::UsePixelStages(
+    _In_ BOOLEAN Given,
+    _In_ UINT Count)
+{
+    if (StagesGiven == Given && GivenStages == Count)
+        return;
+    StagesGiven = Given;
+    GivenStages = Count > D9VertexStages ? D9VertexStages : Count;
+    Dirty = TRUE;
+}
+
 /* Point scaling reads the shorter side of the viewport */
 VOID
 D9VertexConverter::SetViewportSize(
@@ -1795,8 +1809,15 @@ D9VertexConverter::RefreshKey(VOID)
         ((Modes & D9VsModeFog) != 0 || ((Modes & D9VsModeTableFog) == 0 && (In & D9VsInSpecular) != 0)))
         In |= D9VsOutFog;
 
-    while (Stages < D9VertexStages && (DisabledStages & (1u << Stages)) == 0)
-        Stages += 1;
+    if (StagesGiven)
+    {
+        Stages = GivenStages;
+    }
+    else
+    {
+        while (Stages < D9VertexStages && (DisabledStages & (1u << Stages)) == 0)
+            Stages += 1;
+    }
     Modes = (Modes & ~0x3C0u) | (Stages << 6);
 
     if ((Modes & (D9VsModePointScale | D9VsModePointList)) == (D9VsModePointScale | D9VsModePointList) ||
@@ -2326,6 +2347,22 @@ D9VertexConverter::UpdateBlendRegisters(
             *Flags &= ~(0x100u << Index);
         }
     }
+}
+
+/* Made again only after the view or projection changed */
+const D3DMATRIX*
+D9VertexConverter::ClipInverse(VOID)
+{
+    if ((Stale & 0x1000000) != 0)
+    {
+        D3DMATRIX Product;
+
+        for (UINT Row = 0; Row < 4; Row++)
+            D9VsProductRow(View.m[Row], &Projection, Product.m[Row]);
+        D9VsInverse(&Product, &ViewProjectionInverse);
+        Stale &= ~0x1000000u;
+    }
+    return &ViewProjectionInverse;
 }
 
 VOID

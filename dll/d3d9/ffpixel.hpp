@@ -128,6 +128,13 @@ public:
         _In_ DWORD Kind,
         _In_ DWORD Format);
 
+    /* The stages before the first disabled one */
+    UINT
+    ActiveStages(VOID) const
+    {
+        return StageCount;
+    }
+
     /**
      * @brief Looks the current key up among the shaders made so far.
      * @return TRUE when Shader holds one; FALSE when one has to be built.

@@ -175,6 +175,7 @@ D9Device::ApplySwitch(VOID)
             Switch.ShaderInput = FALSE;
             Switch.Allowed = (Switch.Allowed | D9SwitchShaderInput) & D9AllowTransformedInput;
             Switch.Pending &= ~D9SwitchTransformedInput;
+            RenumberStages(FALSE);
             Acting = Switch.Pending & Switch.Allowed;
         }
         else if ((Acting & D9SwitchShaderInput) != 0)
@@ -182,6 +183,8 @@ D9Device::ApplySwitch(VOID)
             Switch.ShaderInput = TRUE;
             Switch.Allowed = (Switch.Allowed | D9AllowShaderInput) & ~D9SwitchShaderInput;
             Switch.Pending &= ~D9SwitchShaderInput;
+            if (Switch.VertexConverting)
+                RenumberStages(TRUE);
             Acting = Switch.Pending & Switch.Allowed;
         }
 
@@ -215,6 +218,12 @@ D9Device::ApplySwitch(VOID)
             Switch.VertexConverting = FALSE;
             Switch.Pending &= ~(D9SwitchWantVertexConverter | D9SwitchWantApiVertexShader);
             RenumberStages(FALSE);
+            for (UINT Plane = 0; Plane < 8; Plane++)
+            {
+                if ((Switch.ClipPlanesMoved & (1u << Plane)) != 0)
+                    SendClipPlane(Plane, 1);
+            }
+            Switch.ClipPlanesMoved = 0;
             Switch.Allowed = (Switch.Allowed & D9AllowAfterVertexInit) | D9SwitchWantVertexConverter;
             D9RestoreVertexConstants(Switch.VertexFloatsUsed, Switch.VertexIntsUsed, Limits.VertexFloats,
                                      Limits.VertexInts, &Floats, &Ints);
@@ -264,6 +273,13 @@ D9Device::ApplySwitch(VOID)
         VertexShaders.SetPointList(Switch.DrewPoints);
     if ((Acting & D9SwitchPointSize) != 0)
         PixelShaders.SetPointSprite(Switch.DrewPoints && RenderStates[D3DRS_POINTSPRITEENABLE] != 0);
+    if ((Acting & D9SwitchPixelShaderUse) != 0 && Switch.HasVertexConverter)
+    {
+        if (Switch.ApiPixelInputs == -1)
+            VertexShaders.UsePixelStages(Switch.PixelMode != 0, Switch.PixelMode != 0 ? PixelShaders.ActiveStages() : 0);
+        else
+            VertexShaders.UsePixelStages(TRUE, static_cast<UINT>(Switch.ApiPixelInputs));
+    }
     if ((Acting & D9SwitchVertexInput) != 0 && Switch.HasVertexConverter && Declaration != nullptr)
     {
         if (Declaration->ForFormat)
@@ -271,6 +287,8 @@ D9Device::ApplySwitch(VOID)
         else
             VertexShaders.SetElements(Declaration->Elements);
     }
+    if ((Acting & D9SwitchClipPlanes) != 0 && Switch.HasVertexConverter)
+        SendConverterClipPlanes();
     if ((Acting & D9SwitchPixelInput) != 0)
     {
         if (!Switch.ShaderInput)
@@ -408,6 +426,33 @@ D9Device::PrepareVertexShader(VOID)
         PixelShaders.SetFvf(VertexShaders.UsedKey.Outputs);
     else
         UpdateSwitch(D9SwitchPixelInput, 0);
+}
+
+/* The enabled clip planes reach the driver in clip space, which the converter's shaders write positions in */
+VOID
+D9Device::SendConverterClipPlanes(VOID)
+{
+    const D3DMATRIX* Inverse;
+
+    if (Switch.ClipPlaneEnable == 0)
+        return;
+    Inverse = VertexShaders.ClipInverse();
+    for (UINT Plane = 0; Plane < 8; Plane++)
+    {
+        D3DDDIARG_SETCLIPPLANE Args = {};
+        const FLOAT* Given = ClipPlanes[Plane];
+
+        if ((Switch.ClipPlaneEnable & (1u << Plane)) == 0)
+            continue;
+        Args.Index = Plane;
+        for (UINT Part = 0; Part < 4; Part++)
+        {
+            Args.Plane[Part] = ((Inverse->m[Part][0] * Given[0] + Inverse->m[Part][1] * Given[1]) +
+                                Inverse->m[Part][2] * Given[2]) + Inverse->m[Part][3] * Given[3];
+        }
+        DdiClipPlane(&Args);
+        Switch.ClipPlanesMoved |= 1u << Plane;
+    }
 }
 
 /* The shaders the vertex converter made go with the device, oldest first */
@@ -594,7 +639,7 @@ D9Device::SettleSwitch(
     }
     if ((Switch.Pending & Switch.Allowed) != 0)
         ApplySwitch();
-    if (Switch.VertexConverting)
+    if (Switch.VertexConverting && (Switch.Allowed & 1) != 0)
         PrepareVertexShader();
     if (Switch.PixelMode != 0 && PixelShaders.Dirty)
         PreparePixelShader();

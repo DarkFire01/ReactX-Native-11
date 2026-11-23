@@ -1718,6 +1718,10 @@ struct D9ShaderSwitch
     DWORD DriverWrap[8];
     UINT RenumberedStages;
     UINT TransformedStages;
+
+    /* The enabled clip planes, and those the driver has in clip space for the vertex converter */
+    DWORD ClipPlaneEnable;
+    UINT ClipPlanesMoved;
 };
 
 /* Draw state that changed since the last draw and reaches the driver before the next one */
@@ -3115,6 +3119,9 @@ private:
 
     VOID
     SendConverterRanges(VOID);
+
+    VOID
+    SendConverterClipPlanes(VOID);
 
     VOID
     RenumberStages(
