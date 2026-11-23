@@ -134,6 +134,7 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTDestroyDCFromMemory", Kmt.DestroyDCFromMemory);
     RxResolve(Gdi32, "D3DKMTQueryClockCalibration", Kmt.QueryClockCalibration);
     RxResolve(Gdi32, "D3DKMTSetContextInProcessSchedulingPriority", Kmt.SetContextInProcessSchedulingPriority);
+    RxResolve(Gdi32, "D3DKMTIsFeatureEnabled", Kmt.IsFeatureEnabled);
 
     /* Nothing works without these */
     KmtUsable = (Kmt.CloseAdapter != NULL &&

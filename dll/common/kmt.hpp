@@ -108,6 +108,9 @@ struct KmtThunks
     /* Direct3D 12 queues */
     PFND3DKMT_QUERYCLOCKCALIBRATION QueryClockCalibration;
     PFND3DKMT_SETCONTEXTINPROCESSSCHEDULINGPRIORITY SetContextInProcessSchedulingPriority;
+
+    /* Kernel feature switches, absent before WDDM 3.2 */
+    PFND3DKMT_ISFEATUREENABLED IsFeatureEnabled;
 };
 
 _Ret_maybenull_
