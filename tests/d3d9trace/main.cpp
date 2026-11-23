@@ -7970,6 +7970,8 @@ TrProcessWork(
 {
     static const FLOAT Constants[] = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
                                        0.0f, 0.0f, 0.0f, 1.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    static const D3DMATRIX World = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                     0.25f, -0.5f, 0.0f, 1.0f };
     IDirect3DVertexShader9* Shader = nullptr;
     IDirect3DVertexDeclaration9* Declaration = nullptr;
     IDirect3DVertexBuffer9* Source = nullptr;
@@ -8015,9 +8017,20 @@ TrProcessWork(
     TrApi("ProcessVertices overflow", Device->ProcessVertices(0, 1, 3, Dest, nullptr, 0));
     TrSettle(Device);
 
+    TrPhase("process fixed");
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1));
+    TrApi("SetTransform world", Device->SetTransform(D3DTS_WORLD, &World));
+    TrApi("SetRenderState lighting", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+    TrApi("ProcessVertices fixed", Device->ProcessVertices(0, 0, 3, Dest, nullptr, 0));
+    TrApi("ProcessVertices fixed nocopy", Device->ProcessVertices(1, 1, 2, Dest, nullptr, D3DPV_DONOTCOPYDATA));
+    TrApi("SetRenderState lighting on", Device->SetRenderState(D3DRS_LIGHTING, TRUE));
+    TrApi("ProcessVertices fixed lit", Device->ProcessVertices(0, 0, 3, Dest, nullptr, 0));
+    TrApi("SetRenderState lighting off", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+    TrSettle(Device);
+
     TrPhase("process release");
     TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
-    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
     TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
     TrRelease(Shader);
     TrRelease(Declaration);

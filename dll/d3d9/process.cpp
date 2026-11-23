@@ -17,6 +17,10 @@ static constexpr DWORD D9PvZeroWReciprocal = 0x4A000000;
 /* D3DPV_DONOTCOPYDATA */
 static constexpr DWORD D9PvKeepData = 0x1;
 
+/* The converter's stale light list, and the vertex fog part of the format its shaders write */
+static constexpr DWORD D9PvLightsStale = 0x400000;
+static constexpr DWORD D9PvWritesFog = 0x2000;
+
 /* The lock flags of the caller's the destination lock passes on */
 static constexpr DWORD D9PvLockFlags = D3DLOCK_READONLY | D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD |
                                        D3DLOCK_NO_DIRTY_UPDATE;
@@ -240,6 +244,96 @@ D9PvReciprocal(
     return Large;
 }
 
+HRESULT
+D9Device::PrepareFixedProcessing(
+    _Outptr_ D9VmProgram** Program,
+    _Out_ DWORD* Outputs)
+{
+    BOOLEAN Dirty = VertexShaders.Dirty;
+    DWORD Waiting = VertexShaders.Stale & D9PvLightsStale;
+    D9_FIXED_VERTEX_KEY Key;
+    D9VmProgram* Made;
+    DWORD* Tokens;
+    UINT Count = 0;
+    HRESULT hr;
+
+    *Program = nullptr;
+    *Outputs = 0;
+
+    /* The converter takes the current input and states; the draws still see them as waiting */
+    if (Declaration != nullptr && !Declaration->Transformed)
+    {
+        if (Declaration->ForFormat)
+            VertexShaders.SetFvf(Declaration->Fvf);
+        else
+            VertexShaders.SetElements(Declaration->Elements);
+    }
+    if (Waiting != 0)
+        VertexShaders.GatherLights();
+    VertexShaders.RefreshKey();
+    VertexShaders.UpdateRegisters();
+    VertexShaders.Dirty = Dirty;
+    VertexShaders.Stale |= Waiting;
+
+    Key = VertexShaders.Key;
+    Tokens = new (std::nothrow) DWORD[D9FixedVertexTokenLimit];
+    if (Tokens == nullptr)
+        return E_OUTOFMEMORY;
+    if (!D9BuildFixedVertexShader(&Key, VertexShaders.FlowControl, VertexShaders.Projected, Tokens, &Count))
+    {
+        D9Trace(L"ProcessVertices: the fixed function vertex shader could not be made");
+        delete[] Tokens;
+        return D3DERR_INVALIDCALL;
+    }
+    Made = new (std::nothrow) D9VmProgram();
+    if (Made == nullptr)
+    {
+        delete[] Tokens;
+        return E_OUTOFMEMORY;
+    }
+    hr = Made->Compile(Tokens, Count);
+    delete[] Tokens;
+    if (FAILED(hr))
+    {
+        D9Trace(L"ProcessVertices: the interpreter cannot run the fixed function shader, %08lX", hr);
+        delete Made;
+        return hr;
+    }
+
+    /* Only the converter's registers and light loops reach the bank */
+    ZeroMemory(FixedMachine->FloatConstants, D9PvFloatRegisters * sizeof(*FixedMachine->FloatConstants));
+    ZeroMemory(FixedMachine->IntConstants, D9PvIntRegisters * sizeof(*FixedMachine->IntConstants));
+    ZeroMemory(FixedMachine->BoolConstants, D9PvIntRegisters * sizeof(*FixedMachine->BoolConstants));
+    CopyMemory(FixedMachine->FloatConstants, VertexShaders.Registers, sizeof(VertexShaders.Registers));
+    CopyMemory(FixedMachine->IntConstants, VertexShaders.Loops, sizeof(VertexShaders.Loops));
+    *Program = Made;
+    *Outputs = Key.Outputs;
+    return S_OK;
+}
+
+/* Whether DONOTCOPYDATA still lets a hardware device's fixed function pipeline write its colors and coordinates */
+VOID
+D9Device::FixedKeptParts(
+    _In_ DWORD Outputs,
+    _Inout_ DWORD* Parts,
+    _Inout_ UINT* CoordinateCount)
+{
+    BOOLEAN Lighting = RenderStates[D3DRS_LIGHTING] != FALSE;
+    BOOLEAN Generated = FALSE;
+
+    if (!Lighting)
+        *Parts &= ~D3DFVF_DIFFUSE;
+    if (!(Lighting && RenderStates[D3DRS_SPECULARENABLE] != FALSE) && (Outputs & D9PvWritesFog) == 0)
+        *Parts &= ~D3DFVF_SPECULAR;
+    for (UINT Stage = 0; Stage < D9VertexStages; Stage++)
+    {
+        if ((Switch.ApiCoordIndex[Stage] & 0xFFFF0000) != 0 || Switch.ApiTransformFlags[Stage] != 0)
+            Generated = TRUE;
+    }
+    if (!Generated)
+        *CoordinateCount = 0;
+}
+
 STDMETHODIMP
 D9Device::ProcessVertices(
     _In_ UINT SrcStartIndex,
@@ -259,6 +353,12 @@ D9Device::ProcessVertices(
     UINT TargetCount = 0;
     UINT Stride;
     D9VmProgram* Program;
+    D9VmProgram* Fixed = nullptr;
+    D9VertexMachine** Slot;
+    D9VertexMachine* Vm;
+    DWORD FixedOutputs = 0;
+    DWORD Parts;
+    BOOLEAN Keep = (Flags & D9PvKeepData) != 0;
     BYTE* Base;
     BYTE* Vertex;
     FLOAT Scale[3];
@@ -271,6 +371,7 @@ D9Device::ProcessVertices(
         return D3DERR_INVALIDCALL;
     Dest->GetDesc(&Desc);
     D9PvMakeLayout(Desc.FVF, &Layout);
+    Parts = Desc.FVF;
     if (Output != nullptr)
     {
         Stride = D9PvDeclarationStride(Output);
@@ -290,38 +391,90 @@ D9Device::ProcessVertices(
         }
     }
 
-    /* The fixed function pipeline has no interpreted form yet */
-    if (VertexShader == nullptr)
+    /* The fixed function pipeline has no shader to write a declaration's outputs */
+    if (VertexShader == nullptr && Output != nullptr)
     {
-        D9Trace(L"ProcessVertices: no vertex shader");
+        D9Trace(L"ProcessVertices: a declaration destination needs a vertex shader");
         return D3DERR_INVALIDCALL;
     }
-    Program = VertexShader->Program;
-    if (Program == nullptr)
+    /* The fixed function shaders run on an interpreter of their own, whose registers the application's
+       shaders never touch */
+    Slot = VertexShader == nullptr ? &FixedMachine : &Machine;
+    if (*Slot == nullptr)
     {
-        Program = new (std::nothrow) D9VmProgram();
-        if (Program == nullptr)
+        *Slot = new (std::nothrow) D9VertexMachine();
+        if (*Slot == nullptr)
             return E_OUTOFMEMORY;
-        hr = Program->Compile(VertexShader->Tokens(), VertexShader->Shape()->Size / sizeof(DWORD));
+        hr = (*Slot)->Initialize(D9PvFloatRegisters, D9PvIntRegisters, D9PvIntRegisters);
         if (FAILED(hr))
         {
-            D9Trace(L"ProcessVertices: the interpreter cannot run the shader, %08lX", hr);
-            delete Program;
+            delete *Slot;
+            *Slot = nullptr;
             return hr;
         }
-        VertexShader->Program = Program;
     }
-    if (Machine == nullptr)
+    Vm = *Slot;
+    if (VertexShader == nullptr)
     {
-        Machine = new (std::nothrow) D9VertexMachine();
-        if (Machine == nullptr)
-            return E_OUTOFMEMORY;
-        hr = Machine->Initialize(D9PvFloatRegisters, D9PvIntRegisters, D9PvIntRegisters);
+        hr = PrepareFixedProcessing(&Fixed, &FixedOutputs);
         if (FAILED(hr))
-        {
-            delete Machine;
-            Machine = nullptr;
             return hr;
+        Program = Fixed;
+
+        /* A hardware device's pipeline writes the coordinates it computes, which the destination must hold */
+        if (!SoftwareVertices)
+        {
+            static const BYTE CoordinateBytes[] = { 8, 12, 16, 4 };
+            UINT Sets = (FixedOutputs & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
+
+            if (Sets > Layout.CoordinateCount ||
+                (FixedOutputs & Desc.FVF & 0xFFFF0000) != (FixedOutputs & 0xFFFF0000))
+            {
+                D9Trace(L"ProcessVertices: the destination format %08lX lacks the coordinates of %08lX", Desc.FVF,
+                        FixedOutputs);
+                delete Fixed;
+                return D3DERR_INVALIDCALL;
+            }
+            Layout.CoordinateCount = Sets;
+            for (UINT Set = 0; Set < Sets; Set++)
+            {
+                Layout.CoordinateSizes[Set] = CoordinateBytes[(FixedOutputs >> (16 + Set * 2)) & 3];
+                if (Set != 0)
+                    Layout.Coordinates[Set] = Layout.Coordinates[Set - 1] + Layout.CoordinateSizes[Set - 1];
+            }
+        }
+
+        /* Without copying, a software device writes only positions */
+        if ((Flags & D9PvKeepData) != 0)
+        {
+            if (SoftwareVertices)
+            {
+                Parts &= ~(D3DFVF_DIFFUSE | D3DFVF_SPECULAR);
+                Layout.CoordinateCount = 0;
+            }
+            else
+            {
+                FixedKeptParts(FixedOutputs, &Parts, &Layout.CoordinateCount);
+            }
+            Keep = FALSE;
+        }
+    }
+    else
+    {
+        Program = VertexShader->Program;
+        if (Program == nullptr)
+        {
+            Program = new (std::nothrow) D9VmProgram();
+            if (Program == nullptr)
+                return E_OUTOFMEMORY;
+            hr = Program->Compile(VertexShader->Tokens(), VertexShader->Shape()->Size / sizeof(DWORD));
+            if (FAILED(hr))
+            {
+                D9Trace(L"ProcessVertices: the interpreter cannot run the shader, %08lX", hr);
+                delete Program;
+                return hr;
+            }
+            VertexShader->Program = Program;
         }
     }
 
@@ -394,15 +547,19 @@ D9Device::ProcessVertices(
     }
 
     /* The software bank: a hardware device never fills it, so its shaders read zeros */
-    ZeroMemory(Machine->FloatConstants, D9PvFloatRegisters * sizeof(*Machine->FloatConstants));
-    ZeroMemory(Machine->IntConstants, D9PvIntRegisters * sizeof(*Machine->IntConstants));
-    ZeroMemory(Machine->BoolConstants, D9PvIntRegisters * sizeof(*Machine->BoolConstants));
-    if ((BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)) != 0)
+    if (Fixed == nullptr)
+    {
+        ZeroMemory(Vm->FloatConstants, D9PvFloatRegisters * sizeof(*Vm->FloatConstants));
+        ZeroMemory(Vm->IntConstants, D9PvIntRegisters * sizeof(*Vm->IntConstants));
+        ZeroMemory(Vm->BoolConstants, D9PvIntRegisters * sizeof(*Vm->BoolConstants));
+    }
+    if (Fixed == nullptr &&
+        (BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)) != 0)
     {
         /* A mixed or software device's bank is never wider than the interpreter's */
-        CopyMemory(Machine->FloatConstants, VertexFloats, Limits.VertexFloats * sizeof(*VertexFloats));
-        CopyMemory(Machine->IntConstants, VertexInts, Limits.VertexInts * sizeof(*VertexInts));
-        CopyMemory(Machine->BoolConstants, VertexBools, Limits.VertexBools * sizeof(*VertexBools));
+        CopyMemory(Vm->FloatConstants, VertexFloats, Limits.VertexFloats * sizeof(*VertexFloats));
+        CopyMemory(Vm->IntConstants, VertexInts, Limits.VertexInts * sizeof(*VertexInts));
+        CopyMemory(Vm->BoolConstants, VertexBools, Limits.VertexBools * sizeof(*VertexBools));
     }
     for (UINT Index = 0; Index < Program->DefinitionCount; Index++)
     {
@@ -410,11 +567,11 @@ D9Device::ProcessVertices(
         UINT Register = Tokens[1] & 0x7FF;
 
         if (LOWORD(Tokens[0]) == D3DSIO_DEF && Register < D9PvFloatRegisters)
-            CopyMemory(Machine->FloatConstants[Register], &Tokens[2], 4 * sizeof(DWORD));
+            CopyMemory(Vm->FloatConstants[Register], &Tokens[2], 4 * sizeof(DWORD));
         else if (LOWORD(Tokens[0]) == D3DSIO_DEFI && Register < D9PvIntRegisters)
-            CopyMemory(Machine->IntConstants[Register], &Tokens[2], 4 * sizeof(DWORD));
+            CopyMemory(Vm->IntConstants[Register], &Tokens[2], 4 * sizeof(DWORD));
         else if (LOWORD(Tokens[0]) == D3DSIO_DEFB && Register < D9PvIntRegisters)
-            Machine->BoolConstants[Register].Bits = Tokens[2];
+            Vm->BoolConstants[Register].Bits = Tokens[2];
     }
 
     /* The screen transform of the half space position, offset a little like the system's viewport cache */
@@ -430,6 +587,7 @@ D9Device::ProcessVertices(
     if (FAILED(hr))
     {
         D9Trace(L"ProcessVertices: cannot lock the destination, %08lX", hr);
+        delete Fixed;
         return D3DERR_INVALIDCALL;
     }
 
@@ -441,7 +599,7 @@ D9Device::ProcessVertices(
 
     for (UINT Number = 0; Number < VertexCount; Number++, Vertex += Stride)
     {
-        D9VmRegisters* Registers = &Machine->Registers;
+        D9VmRegisters* Registers = &Vm->Registers;
 
         for (UINT Index = 0; Index < Program->InputCount; Index++)
         {
@@ -472,7 +630,7 @@ D9Device::ProcessVertices(
         }
         if (FAILED(hr))
             break;
-        Machine->Run(Program);
+        Vm->Run(Program);
 
         if (Program->Version >= D3DVS_VERSION(3, 0))
         {
@@ -589,19 +747,19 @@ D9Device::ProcessVertices(
                 Screen[3] = Reciprocal;
                 CopyMemory(Vertex, Screen, sizeof(Screen));
             }
-            if ((Written & D9VmWritesPointSize) != 0 && (Desc.FVF & D3DFVF_PSIZE) != 0)
+            if ((Written & D9VmWritesPointSize) != 0 && (Parts & D3DFVF_PSIZE) != 0)
                 CopyMemory(Vertex + Layout.PointSize, &Registers->PointSize[0], sizeof(Registers->PointSize[0]));
-            if ((Desc.FVF & D3DFVF_DIFFUSE) != 0)
+            if ((Parts & D3DFVF_DIFFUSE) != 0)
             {
                 DWORD Packed = 0xFFFFFFFF;
 
                 if ((Written & D9VmWritesDiffuse) != 0)
                     Packed = D9PvPackColor(Registers->Colors[0]);
-                if ((Written & D9VmWritesDiffuse) != 0 || (Flags & D9PvKeepData) == 0)
+                if ((Written & D9VmWritesDiffuse) != 0 || !Keep)
                     CopyMemory(Vertex + Layout.Diffuse, &Packed, sizeof(Packed));
             }
             Specular = (Written & (D9VmWritesSpecular | D9VmWritesFog)) != 0;
-            if ((Desc.FVF & D3DFVF_SPECULAR) != 0 && (Specular || (Flags & D9PvKeepData) == 0))
+            if ((Parts & D3DFVF_SPECULAR) != 0 && (Specular || !Keep))
             {
                 DWORD Packed = 0;
 
@@ -617,5 +775,6 @@ D9Device::ProcessVertices(
     }
 
     Dest->Unlock();
+    delete Fixed;
     return hr;
 }

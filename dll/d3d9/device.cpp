@@ -219,6 +219,7 @@ D9Device::~D9Device()
     UnpinTargets();
     delete[] Lights;
     delete Machine;
+    delete FixedMachine;
     delete[] VertexFloats;
     delete[] VertexInts;
     delete[] VertexBools;

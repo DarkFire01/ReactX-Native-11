@@ -3435,6 +3435,23 @@ private:
     VOID
     PrepareVertexShader(VOID);
 
+    /**
+     * @brief Builds the fixed function vertex shader for ProcessVertices and loads its registers into the
+     *        interpreter, leaving what the next draw hands the driver as it was.
+     * @param Program Receives the compiled shader, which the caller deletes.
+     * @param Outputs Receives the format the shader writes.
+     */
+    HRESULT
+    PrepareFixedProcessing(
+        _Outptr_ D9VmProgram** Program,
+        _Out_ DWORD* Outputs);
+
+    VOID
+    FixedKeptParts(
+        _In_ DWORD Outputs,
+        _Inout_ DWORD* Parts,
+        _Inout_ UINT* CoordinateCount);
+
     VOID
     StartVertexConverter(VOID);
 
@@ -3726,6 +3743,9 @@ private:
        ProcessVertices into a format used, which a later one into a declaration starts from */
     D9VertexMachine* Machine = nullptr;
     UINT ProcessedStride = 0;
+
+    /* The interpreter the fixed function shaders of ProcessVertices run on */
+    D9VertexMachine* FixedMachine = nullptr;
 
     /* The vertex shaders standing in for the fixed function vertex pipeline, and whether vertex fog is on */
     D9VertexConverter VertexShaders;

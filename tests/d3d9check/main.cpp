@@ -6776,6 +6776,135 @@ NcCheckProcessVerticesOn(
         OutDest->Release();
 }
 
+/* ProcessVertices through the fixed function pipeline: transforms only, then lit with a directional light */
+static
+VOID
+NcCheckProcessFixedOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device,
+    _In_ DWORD Usage)
+{
+    static const D3DMATRIX World = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                     0.25f, -0.5f, 0.0f, 1.0f };
+    static const D3DMATRIX Projection = { 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f,
+                                          0.0f, 0.0f, 0.0f, 1.0f };
+    D3DVIEWPORT9 Viewport = { 4, 2, 32, 16, 0.25f, 0.75f };
+    D3DMATERIAL9 Material = {};
+    D3DLIGHT9 Light = {};
+    IDirect3DVertexBuffer9* Source = nullptr;
+    IDirect3DVertexBuffer9* Dest = nullptr;
+    IDirect3DVertexBuffer9* Bare = nullptr;
+    IDirect3DVertexBuffer9* Wide = nullptr;
+    IDirect3DVertexBuffer9* Two = nullptr;
+    IDirect3DVertexShader9* Shader = nullptr;
+    VOID* Data;
+
+    printf("%s_src = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * 24, Usage, 0, D3DPOOL_SYSTEMMEM,
+                                                                  &Source, nullptr));
+    printf("%s_dst = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * NcPvStride, Usage, NcPvFvf,
+                                                                  D3DPOOL_SYSTEMMEM, &Dest, nullptr));
+    if (Source != nullptr && Dest != nullptr)
+    {
+        if (SUCCEEDED(Source->Lock(0, 0, &Data, 0)))
+        {
+            for (UINT Index = 0; Index < NcPvCount; Index++)
+            {
+                BYTE* Vertex = static_cast<BYTE*>(Data) + Index * 24;
+
+                CopyMemory(Vertex, &NcPvSource[Index * 6], 12);
+                CopyMemory(Vertex + 12, &NcPvColors[Index], 4);
+                CopyMemory(Vertex + 16, &NcPvSource[Index * 6 + 4], 8);
+            }
+            Source->Unlock();
+        }
+        printf("%s_viewport = %08lX\n", Prefix, Device->SetViewport(&Viewport));
+        Device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+        Device->SetStreamSource(0, Source, 0, 24);
+        Device->SetTransform(D3DTS_WORLD, &World);
+        Device->SetTransform(D3DTS_PROJECTION, &Projection);
+        Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+        NcPvRun(Prefix, "unlit", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        NcPvRun(Prefix, "nocopy", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, D3DPV_DONOTCOPYDATA);
+        NcPvRun(Prefix, "offset", Device, Dest, NcPvStride, 1, 2, 3, nullptr, 0);
+
+        Material.Diffuse.r = 0.5f;
+        Material.Diffuse.g = 0.25f;
+        Material.Diffuse.b = 1.0f;
+        Material.Diffuse.a = 1.0f;
+        Material.Ambient.r = 0.125f;
+        Light.Type = D3DLIGHT_DIRECTIONAL;
+        Light.Diffuse.r = 1.0f;
+        Light.Diffuse.g = 1.0f;
+        Light.Diffuse.b = 1.0f;
+        Light.Direction.z = 1.0f;
+        Device->SetMaterial(&Material);
+        Device->SetLight(0, &Light);
+        Device->LightEnable(0, TRUE);
+        Device->SetRenderState(D3DRS_LIGHTING, TRUE);
+        Device->SetRenderState(D3DRS_AMBIENT, 0xFF404040);
+        NcPvRun(Prefix, "lit", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        NcPvRun(Prefix, "litnocopy", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, D3DPV_DONOTCOPYDATA);
+        Device->SetRenderState(D3DRS_SPECULARENABLE, TRUE);
+        NcPvRun(Prefix, "specnocopy", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, D3DPV_DONOTCOPYDATA);
+        Device->SetRenderState(D3DRS_SPECULARENABLE, FALSE);
+        Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+
+        Device->SetRenderState(D3DRS_FOGENABLE, TRUE);
+        Device->SetRenderState(D3DRS_FOGVERTEXMODE, D3DFOG_LINEAR);
+        Device->SetRenderState(D3DRS_FOGSTART, 0);
+        Device->SetRenderState(D3DRS_FOGEND, 0x3F800000);
+        NcPvRun(Prefix, "fog", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        NcPvRun(Prefix, "fognocopy", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, D3DPV_DONOTCOPYDATA);
+        Device->SetRenderState(D3DRS_FOGVERTEXMODE, D3DFOG_NONE);
+        Device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+
+        Device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        NcPvRun(Prefix, "texgen", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, 0);
+        NcPvRun(Prefix, "texgennocopy", Device, Dest, NcPvStride, 0, 0, NcPvCount, nullptr, D3DPV_DONOTCOPYDATA);
+        Device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+
+        printf("%s_bare = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * 24, Usage,
+                                                                      D3DFVF_XYZRHW | D3DFVF_DIFFUSE |
+                                                                          D3DFVF_SPECULAR,
+                                                                      D3DPOOL_SYSTEMMEM, &Bare, nullptr));
+        if (Bare != nullptr)
+        {
+            NcPvRun(Prefix, "notex", Device, Bare, 24, 0, 0, NcPvCount, nullptr, 0);
+            if (SUCCEEDED(Device->CreateVertexShader(NcPvVertexCode, &Shader)))
+            {
+                Device->SetVertexShader(Shader);
+                NcPvRun(Prefix, "shadernotex", Device, Bare, 24, 0, 0, NcPvCount, nullptr, 0);
+                Device->SetVertexShader(nullptr);
+                Shader->Release();
+            }
+        }
+        printf("%s_two = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * 40, Usage,
+                                                                     D3DFVF_XYZRHW | D3DFVF_DIFFUSE |
+                                                                         D3DFVF_SPECULAR | D3DFVF_TEX2,
+                                                                     D3DPOOL_SYSTEMMEM, &Two, nullptr));
+        if (Two != nullptr)
+            NcPvRun(Prefix, "tex2", Device, Two, 40, 0, 0, NcPvCount, nullptr, 0);
+        printf("%s_wide = %08lX\n", Prefix, Device->CreateVertexBuffer(NcPvCount * 36, Usage,
+                                                                      D3DFVF_XYZRHW | D3DFVF_DIFFUSE |
+                                                                          D3DFVF_SPECULAR | D3DFVF_TEX1 |
+                                                                          D3DFVF_TEXCOORDSIZE3(0),
+                                                                      D3DPOOL_SYSTEMMEM, &Wide, nullptr));
+        if (Wide != nullptr)
+            NcPvRun(Prefix, "texsize", Device, Wide, 36, 0, 0, NcPvCount, nullptr, 0);
+        Device->SetStreamSource(0, nullptr, 0, 0);
+    }
+    if (Source != nullptr)
+        Source->Release();
+    if (Dest != nullptr)
+        Dest->Release();
+    if (Bare != nullptr)
+        Bare->Release();
+    if (Wide != nullptr)
+        Wide->Release();
+    if (Two != nullptr)
+        Two->Release();
+}
+
 static
 VOID
 NcCheckProcessVertices(
@@ -6801,6 +6930,7 @@ NcCheckProcessVertices(
         D3DPRESENT_PARAMETERS Parameters = {};
         IDirect3DDevice9* Device = nullptr;
         HRESULT hr;
+        char Prefix[32];
 
         Parameters.Windowed = TRUE;
         Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
@@ -6814,6 +6944,8 @@ NcCheckProcessVertices(
         if ((Case.Behavior & D3DCREATE_MIXED_VERTEXPROCESSING) != 0)
             printf("%s_software = %08lX\n", Case.Name, Device->SetSoftwareVertexProcessing(TRUE));
         NcCheckProcessVerticesOn(Case.Name, Device, Case.Usage);
+        sprintf_s(Prefix, "%s_ff", Case.Name);
+        NcCheckProcessFixedOn(Prefix, Device, Case.Usage);
         printf("%s_release = %lu\n", Case.Name, Device->Release());
     }
     DestroyWindow(Window);
