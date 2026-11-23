@@ -1020,8 +1020,18 @@ TrDeviceOutputs(
         TrForget(TrKindDriver, A[1]);
         break;
     case TR_DEVICE_SLOT(pfnDestroyDevice):
+    {
+        auto Found = Tr.RuntimeOfDriver.find(A[0]);
+
+        /* The runtime may make its next device where this one was */
+        if (Found != Tr.RuntimeOfDriver.end())
+        {
+            TrForget(TrKindRuntime, Found->second);
+            Tr.RuntimeOfDriver.erase(Found);
+        }
         TrForget(TrKindDriver, A[0]);
         break;
+    }
     case TR_DEVICE_SLOT(pfnCreateVertexShaderFunc):
         TrAppend(Text, " %s", TrDriver(static_cast<D3DDDIARG_CREATEVERTEXSHADERFUNC*>(Args)->ShaderHandle).c_str());
         break;
@@ -1547,6 +1557,7 @@ TrCreateDevice(
     D3DDDIARG_CREATEDEVICE* Args = reinterpret_cast<D3DDDIARG_CREATEDEVICE*>(A[1]);
     const D3DDDI_DEVICECALLBACKS* RuntimeCallbacks = Args->pCallbacks;
     D3DDDI_DEVICECALLBACKS* Callbacks = new D3DDDI_DEVICECALLBACKS(*RuntimeCallbacks);
+    ULONG_PTR RuntimeDevice = reinterpret_cast<ULONG_PTR>(Args->hDevice);
     BOOLEAN Log = TrShouldLog();
     std::string Text;
     HRESULT hr;
@@ -1576,6 +1587,7 @@ TrCreateDevice(
     if (SUCCEEDED(hr))
     {
         TrAppend(&Text, " %s", TrDriver(Args->hDevice).c_str());
+        Tr.RuntimeOfDriver[reinterpret_cast<ULONG_PTR>(Args->hDevice)] = RuntimeDevice;
         if (Log)
         {
             TrCloseLine();
