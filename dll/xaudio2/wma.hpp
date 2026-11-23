@@ -54,11 +54,6 @@ UINT32
 XaWmaPacketBytes(
     _In_ const XaWmaDecoder* Decoder);
 
-/* Whether each buffer is a stream of its own, drained and restarted at its end */
-BOOLEAN
-XaWmaDrainsPerBuffer(
-    _In_ const XaWmaDecoder* Decoder);
-
 /* Most frames a single decode step can produce */
 UINT32
 XaWmaMaxFrames(

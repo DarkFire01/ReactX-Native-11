@@ -87,13 +87,10 @@ XaWmaEscapeBits(
     return 9;
 }
 
-/* Brings the stream state back to how a new stream starts */
-static
 VOID
-XaWmaRestart(
+XaWmaRestartDecoding(
     _Inout_ XaWmaDecoder* Decoder)
 {
-    XaWmaReaderReset(Decoder);
     Decoder->FramesLeft = 0;
     Decoder->SkipOffset = TRUE;
     Decoder->ReadTileHeader = TRUE;
@@ -116,6 +113,16 @@ XaWmaRestart(
         if (Channel->Pcm != nullptr)
             memset(Channel->Pcm, 0, sizeof(*Channel->Pcm) * (3 * Decoder->FrameSize / 2));
     }
+}
+
+/* Brings the stream state back to how a new stream starts */
+static
+VOID
+XaWmaRestart(
+    _Inout_ XaWmaDecoder* Decoder)
+{
+    XaWmaReaderReset(Decoder);
+    XaWmaRestartDecoding(Decoder);
 }
 
 /* Reads a tile size code; sizes halve from the whole frame */
@@ -769,13 +776,6 @@ XaWmaPacketBytes(
     _In_ const XaWmaDecoder* Decoder)
 {
     return Decoder->Layout.PacketBytes;
-}
-
-BOOLEAN
-XaWmaDrainsPerBuffer(
-    _In_ const XaWmaDecoder* Decoder)
-{
-    return Decoder->Layout.Version != XA_WMA_PRO;
 }
 
 UINT32

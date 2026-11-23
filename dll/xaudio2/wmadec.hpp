@@ -100,6 +100,9 @@ struct XaWmaPacketHead
 
     /* WMA Pro: a frame starts in the packet */
     BOOLEAN Starts;
+
+    /* WMA Standard: the packet number does not follow the packet before it */
+    BOOLEAN Break;
 };
 
 /* Packets the bit reader holds: the one it reads from and at most one after it */
@@ -112,6 +115,10 @@ struct XaWmaReader
     XaWmaPacketHead Heads[2];
     UINT32 HeadCount;
     BOOLEAN Dry;
+
+    /* Number of the last packet loaded, once one has been since the reset */
+    UINT32 Sequence;
+    BOOLEAN Sequenced;
 
     /* Header layout of the stream's packets */
     UINT32 HeaderBits;
@@ -357,6 +364,11 @@ XaWmaReaderFree(
 
 VOID
 XaWmaReaderReset(
+    _Inout_ XaWmaDecoder* Decoder);
+
+/* Starts decoding over as at the head of a stream, leaving the packets held alone */
+VOID
+XaWmaRestartDecoding(
     _Inout_ XaWmaDecoder* Decoder);
 
 BOOLEAN

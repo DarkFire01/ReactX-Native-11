@@ -104,11 +104,17 @@ XaWmaLoadPacket(
     {
         Head->Frames = 0;
         Head->Starts = XaWmaStoreBit(Reader, Slot, 4) != 0;
+        Head->Break = FALSE;
     }
     else
     {
+        UINT32 Sequence = XaWmaStoreField(Reader, Slot, 0, 4);
+
         Head->Frames = XaWmaStoreField(Reader, Slot, 4, 4);
         Head->Starts = Head->Frames != 0;
+        Head->Break = Reader->Sequenced && Sequence != ((Reader->Sequence + 1) & 0xF);
+        Reader->Sequence = Sequence;
+        Reader->Sequenced = TRUE;
     }
     Reader->HeadCount += 1;
     if (Slot == 0)
@@ -249,6 +255,7 @@ XaWmaReaderReset(
     Reader->Position = 0;
     Reader->HeadCount = 0;
     Reader->Dry = FALSE;
+    Reader->Sequenced = FALSE;
 }
 
 /**
@@ -273,6 +280,15 @@ XaWmaNextPacket(
     Head = Reader->Heads[0];
     Reader->Heads[0] = Reader->Heads[1];
     Reader->HeadCount -= 1;
+
+    /* A packet out of sequence starts a new stream; nothing before it carries over */
+    if (Head.Break)
+    {
+        while (Reader->Held > 1)
+            XaWmaDropPacket(Decoder);
+        Reader->Position = XaWmaHeaderBits(Decoder);
+        XaWmaRestartDecoding(Decoder);
+    }
     Decoder->FramesLeft = Head.Frames;
 
     /* The first frame of every packet restates the tile sizes around it */
