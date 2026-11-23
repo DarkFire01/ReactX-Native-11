@@ -1774,9 +1774,16 @@ RxLowering::LowerResource(
                 Emit(D3D10_SB_OPCODE_MOV, { Temp(Result, RxMaskMode, 0xE), RxImmediate(0) });
                 return TRUE;
             }
-            Emit(D3D10_SB_OPCODE_RESINFO, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)), ResourceOperand(Handle) },
+            BOOLEAN Multisampled = Kind == hlsl::DXIL::ResourceKind::Texture2DMS || Kind == hlsl::DXIL::ResourceKind::Texture2DMSArray;
+            RxTokens Level = Multisampled ? RxImmediate(0) : Source(Call->getArgOperand(2));
+            UINT Valid = Fresh4();
+
+            /* A level past the last one reads as all zero, its level count too */
+            Emit(D3D10_SB_OPCODE_RESINFO, { Temp(Result, RxMaskMode, 0xF), Level, ResourceOperand(Handle) },
                  ENCODE_D3D10_SB_RESINFO_INSTRUCTION_RETURN_TYPE(D3D10_SB_RESINFO_INSTRUCTION_RETURN_UINT));
-            if (Kind == hlsl::DXIL::ResourceKind::Texture2DMS || Kind == hlsl::DXIL::ResourceKind::Texture2DMSArray)
+            Emit(D3D10_SB_OPCODE_ULT, { Temp(Valid, RxMaskMode, 1), Level, Temp(Result, RxSelectMode, 3) });
+            Emit(D3D10_SB_OPCODE_AND, { Temp(Result, RxMaskMode, 0xF), Temp(Result, RxSwizzleMode, RxXyzw), Temp(Valid, RxSwizzleMode, 0) });
+            if (Multisampled)
                 Emit(D3D10_1_SB_OPCODE_SAMPLE_INFO, { Temp(Result, RxMaskMode, 8), ResourceOperand(Handle, RxSelectMode, 0) },
                      ENCODE_D3D10_SB_INSTRUCTION_RETURN_TYPE(D3D10_SB_INSTRUCTION_RETURN_UINT));
             return TRUE;
@@ -1795,6 +1802,11 @@ RxLowering::LowerResource(
                                             (Component < Count) ? Source(Call->getArgOperand(3 + Component)) : RxImmediate(0) });
             Emit(D3D10_SB_OPCODE_MOV, { Temp(Address, RxMaskMode, 8), Multisampled ? RxImmediate(0) : Source(Call->getArgOperand(2)) });
             Result = ResultRegister(Call);
+            if (Handle.Class == (UINT)hlsl::DXIL::ResourceClass::UAV)
+            {
+                Emit(D3D11_SB_OPCODE_LD_UAV_TYPED, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle) });
+                return TRUE;
+            }
             if (Multisampled)
                 Emit(D3D10_SB_OPCODE_LD_MS, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), ResourceOperand(Handle),
                                               Source(Call->getArgOperand(2)) }, 0, Extended.empty() ? nullptr : &Extended);

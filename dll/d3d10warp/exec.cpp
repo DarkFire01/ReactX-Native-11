@@ -1776,8 +1776,13 @@ RxWarpMachine::Texture(
         for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         {
             UINT Raw[4];
+            RxWarpView *View = nullptr;
 
-            RxWarpResourceInfo((Slot < 128) ? Bindings->Views[Slot] : nullptr, Mip[Lane][0], Instruction.ReturnType, Raw);
+            if (Resource->Type == D3D11_SB_OPERAND_TYPE_UNORDERED_ACCESS_VIEW)
+                View = (Slot < 64) ? Bindings->Uavs[Slot] : nullptr;
+            else
+                View = (Slot < 128) ? Bindings->Views[Slot] : nullptr;
+            RxWarpResourceInfo(View, Mip[Lane][0], Instruction.ReturnType, Raw);
             for (UINT Component = 0; Component < 4; Component++)
                 Result[Lane][Component] = Raw[Resource->Swizzle[Component]];
         }
