@@ -480,7 +480,6 @@ D9BuildModeTable(
 }
 
 /* Desktop formats a mode filter may name */
-static
 BOOLEAN
 D9IsDesktopFormat(
     _In_ D3DFORMAT Format,

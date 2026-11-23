@@ -166,67 +166,6 @@ D9Enum::GetAdapterCount()
     return AdapterCount;
 }
 
-STDMETHODIMP
-D9Enum::CheckDeviceType(
-    _In_ UINT Adapter,
-    _In_ D3DDEVTYPE DeviceType,
-    _In_ D3DFORMAT DisplayFormat,
-    _In_ D3DFORMAT BackBufferFormat,
-    _In_ BOOL Windowed)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::CheckDeviceFormat(
-    _In_ UINT Adapter,
-    _In_ D3DDEVTYPE DeviceType,
-    _In_ D3DFORMAT AdapterFormat,
-    _In_ DWORD Usage,
-    _In_ D3DRESOURCETYPE ResourceType,
-    _In_ D3DFORMAT CheckFormat)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::CheckDeviceMultiSampleType(
-    _In_ UINT Adapter,
-    _In_ D3DDEVTYPE DeviceType,
-    _In_ D3DFORMAT SurfaceFormat,
-    _In_ BOOL Windowed,
-    _In_ D3DMULTISAMPLE_TYPE MultiSampleType,
-    _Out_opt_ DWORD* QualityLevels)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::CheckDepthStencilMatch(
-    _In_ UINT Adapter,
-    _In_ D3DDEVTYPE DeviceType,
-    _In_ D3DFORMAT AdapterFormat,
-    _In_ D3DFORMAT RenderTargetFormat,
-    _In_ D3DFORMAT DepthStencilFormat)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::CheckDeviceFormatConversion(
-    _In_ UINT Adapter,
-    _In_ D3DDEVTYPE DeviceType,
-    _In_ D3DFORMAT SourceFormat,
-    _In_ D3DFORMAT TargetFormat)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
 /* Finds the monitor whose device name matches the display */
 static
 BOOL

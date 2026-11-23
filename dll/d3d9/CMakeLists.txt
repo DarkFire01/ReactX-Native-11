@@ -4,6 +4,7 @@ nt_add_usermode_dll(d3d9
         adapter.cpp
         caps.cpp
         enum.cpp
+        formats.cpp
         identity.cpp
         main.cpp
         modes.cpp

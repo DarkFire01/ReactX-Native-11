@@ -261,6 +261,12 @@ private:
     ReadSwitches(VOID);
 
     HRESULT
+    DeviceTable(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _Outptr_ const D9Adapter** Table);
+
+    HRESULT
     FindMode(
         _In_ UINT Adapter,
         _In_ const D3DDISPLAYMODEFILTER* Filter,
@@ -363,3 +369,19 @@ D9ReadKernelModes(
 VOID
 D9FreeModeTable(
     _Inout_ D9Adapter* Adapter);
+
+BOOLEAN
+D9IsDesktopFormat(
+    _In_ D3DFORMAT Format,
+    _In_ BOOLEAN IsEx);
+
+/* formats.cpp */
+LONG
+D9BytesPerPixel(
+    _In_ D3DFORMAT Format);
+
+BOOLEAN
+D9DriverHasOps(
+    _In_ const D9Adapter* Adapter,
+    _In_ D3DFORMAT Format,
+    _In_ UINT Ops);
