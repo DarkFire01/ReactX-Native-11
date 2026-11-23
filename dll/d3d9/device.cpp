@@ -1164,9 +1164,22 @@ D9Device::ResetCommon(
     if (AutoDepthStencil != nullptr)
         AutoDepthStencil->Abandon();
     AutoDepthStencil = nullptr;
+
+    /* The plain object's device lets its format declarations go first and the converter's shaders after the
+       back buffers */
+    if (!IsEx)
+    {
+        ReleaseFvfDeclarations();
+        ApiFvf = 0;
+        LastFvf = 0;
+        DrawDirty |= D9DrawVertexInput;
+    }
     ImplicitChain->ReleaseBuffers();
     if (!IsEx)
+    {
+        ReleasePixelShaders();
         DestroyStagingBuffers();
+    }
     ReleaseVidPnOwnership();
 
     hr = ImplicitChain->Reset(Parameters);
@@ -1193,7 +1206,6 @@ D9Device::ResetCommon(
     ClearConstants();
     SetDefaultState(Parameters);
     SendInitialState();
-    ReleasePixelShaders();
     StartPixelConverter();
     return S_OK;
 }
