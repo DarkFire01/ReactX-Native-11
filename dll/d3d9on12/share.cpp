@@ -21,6 +21,74 @@ NineSharedIndexFormat(
     return Format == DXGI_FORMAT_R16_UINT || Format == DXGI_FORMAT_R8_UINT;
 }
 
+/* A handle of 1 is how the runtime names no resource */
+static
+NineResource*
+NineSharedResource(
+    _In_opt_ HANDLE Handle)
+{
+    if (Handle == reinterpret_cast<HANDLE>(1))
+        return nullptr;
+    return static_cast<NineResource*>(Handle);
+}
+
+HRESULT
+APIENTRY
+NineGetSharedGdiHandle(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource,
+    _Out_ HANDLE* Shared)
+{
+    NineDevice* Device = static_cast<NineDevice*>(hDevice);
+    NineResource* Resource = NineSharedResource(hResource);
+    HANDLE Handle = NULL;
+
+    if (Device == nullptr || Resource == nullptr)
+        return E_INVALIDARG;
+
+    *Shared = NULL;
+    try
+    {
+        /* Only resources shared the legacy way have a handle to report; NT handle sharing has none */
+        if (Resource->Underlying->Parent()->IsGDIStyleHandleShared())
+            Device->Context->GetSharedGDIHandle(Resource->Underlying.get(), &Handle);
+    }
+    catch (_com_error& Error)
+    {
+        return NineDxgiResult(Error.Error());
+    }
+    *Shared = Handle;
+    return NineDxgiResult(S_OK);
+}
+
+HRESULT
+APIENTRY
+NineCreateSharedNtHandle(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource,
+    _In_opt_ SECURITY_ATTRIBUTES* Attributes,
+    _Out_ HANDLE* Shared)
+{
+    NineDevice* Device = static_cast<NineDevice*>(hDevice);
+    NineResource* Resource = NineSharedResource(hResource);
+    HANDLE Handle = NULL;
+
+    if (Device == nullptr || Resource == nullptr)
+        return E_INVALIDARG;
+
+    *Shared = NULL;
+    try
+    {
+        Device->Context->CreateSharedNTHandle(Resource->Underlying.get(), &Handle, Attributes);
+    }
+    catch (_com_error& Error)
+    {
+        return NineDxgiResult(Error.Error());
+    }
+    *Shared = Handle;
+    return NineDxgiResult(S_OK);
+}
+
 UINT
 APIENTRY
 NineQueryResourceDriverDataSize(

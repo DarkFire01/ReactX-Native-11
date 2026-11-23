@@ -456,6 +456,21 @@ NineKernelPresent(
     _Inout_ D3DKMT_PRESENT* KmtPresent);
 
 /* share.cpp */
+HRESULT
+APIENTRY
+NineGetSharedGdiHandle(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource,
+    _Out_ HANDLE* Shared);
+
+HRESULT
+APIENTRY
+NineCreateSharedNtHandle(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource,
+    _In_opt_ SECURITY_ATTRIBUTES* Attributes,
+    _Out_ HANDLE* Shared);
+
 UINT
 APIENTRY
 NineQueryResourceDriverDataSize(

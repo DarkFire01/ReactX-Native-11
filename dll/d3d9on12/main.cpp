@@ -35,8 +35,8 @@ NineMissingCall(VOID)
 static const NinePrivateTable NinePrivate =
 {
     NineOpenAdapter,
-    reinterpret_cast<PVOID>(NineMissingEntry<1>),
-    reinterpret_cast<PVOID>(NineMissingEntry<2>),
+    reinterpret_cast<PVOID>(NineGetSharedGdiHandle),
+    reinterpret_cast<PVOID>(NineCreateSharedNtHandle),
     reinterpret_cast<PVOID>(NineMissingEntry<3>),
     reinterpret_cast<PVOID>(NineKernelPresent),
     reinterpret_cast<PVOID>(NineMissingEntry<5>),
