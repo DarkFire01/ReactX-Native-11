@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <winternl.h>
 #include <d3d12.h>
+#include <d3dcompiler.h>
 #include <d3d10umddi.h>
 #include <d3d12umddi.h>
 #include <dxgi1_6.h>
@@ -1671,6 +1672,593 @@ ScenePresent(
     return hr;
 }
 
+static const char TcShaderSource[] =
+    "cbuffer Root : register(b0) { float4 Tint; };\n"
+    "cbuffer Frame : register(b1) { float4 Place; };\n"
+    "Texture2D Image : register(t0);\n"
+    "Texture2DMS<float4> Multi : register(t0);\n"
+    "SamplerState Point : register(s0);\n"
+    "SamplerState Smooth : register(s1);\n"
+    "struct VsIn { float2 Pos : POSITION; float4 Color : COLOR; };\n"
+    "struct VsOut { float4 Pos : SV_Position; float4 Color : COLOR; float2 Uv : TEXCOORD; };\n"
+    "VsOut vs(VsIn i) { VsOut o; o.Pos = float4(i.Pos * Place.w + Place.xy, Place.z, 1); o.Color = i.Color; o.Uv = i.Pos * 0.5 + 0.5; return o; }\n"
+    "float4 ps(VsOut i) : SV_Target { return i.Color * Tint; }\n"
+    "float4 pstex(VsOut i) : SV_Target { return Image.Sample(Smooth, i.Uv * 1.7) * Tint + Image.Sample(Point, i.Uv.yx) * i.Color; }\n"
+    "float4 vsquad(uint Id : SV_VertexID) : SV_Position { return float4(Id == 1 ? 3 : -1, Id == 2 ? -3 : 1, 0, 1); }\n"
+    "float4 psms(float4 Pos : SV_Position) : SV_Target { uint x = (uint)Pos.x; return Multi.Load(int2(x / 4, (int)Pos.y), x % 4); }\n"
+    "RWStructuredBuffer<uint> Output : register(u0);\n"
+    "RWTexture2D<float4> Picture : register(u1);\n"
+    "ByteAddressBuffer Input : register(t0);\n"
+    "cbuffer Group : register(b0) { uint Base; };\n"
+    "groupshared uint Shared[64];\n"
+    "[numthreads(8, 8, 1)] void cs(uint3 t : SV_DispatchThreadID, uint g : SV_GroupIndex)\n"
+    "{\n"
+    "    Shared[g] = Input.Load(((t.x + t.y * 16) * 4) % 256) + Base;\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    Output[t.y * 16 + t.x] = Shared[63 - g] * 3 + g;\n"
+    "    Picture[t.xy] = float4(t.x / 16.0, t.y / 16.0, g / 64.0, 1);\n"
+    "}\n";
+
+static
+HRESULT
+TcCompile(
+    _In_z_ PCSTR Entry,
+    _In_z_ PCSTR Profile,
+    _Out_ ID3DBlob **Blob)
+{
+    ID3DBlob *Errors = NULL;
+    HRESULT hr;
+
+    hr = D3DCompile(TcShaderSource, sizeof(TcShaderSource) - 1, "warp12check", NULL, NULL, Entry, Profile, 0, 0, Blob, &Errors);
+    if (Errors)
+    {
+        if (FAILED(hr))
+            printf("%s", (const char *)Errors->GetBufferPointer());
+        Errors->Release();
+    }
+    return hr;
+}
+
+static
+D3D12_SHADER_BYTECODE
+TcCode(
+    _In_opt_ ID3DBlob *Blob)
+{
+    D3D12_SHADER_BYTECODE Code = {};
+
+    if (Blob != NULL)
+    {
+        Code.pShaderBytecode = Blob->GetBufferPointer();
+        Code.BytecodeLength = Blob->GetBufferSize();
+    }
+    return Code;
+}
+
+static
+HRESULT
+TcRootSignature(
+    _In_ ID3D12Device *Device,
+    _In_ const D3D12_ROOT_SIGNATURE_DESC *Desc,
+    _Out_ ID3D12RootSignature **Signature)
+{
+    ID3DBlob *Blob = NULL;
+    ID3DBlob *Errors = NULL;
+    HRESULT hr = D3D12SerializeRootSignature(Desc, D3D_ROOT_SIGNATURE_VERSION_1, &Blob, &Errors);
+
+    *Signature = NULL;
+    if (Errors)
+        Errors->Release();
+    if (SUCCEEDED(hr))
+        hr = Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_PPV_ARGS(Signature));
+    if (Blob)
+        Blob->Release();
+    return hr;
+}
+
+/* The draw scenes' root signature: tint constants, a root constant buffer, a texture table, a sampler table and a static sampler */
+static
+HRESULT
+TcDrawSignature(
+    _In_ ID3D12Device *Device,
+    _Out_ ID3D12RootSignature **Signature)
+{
+    D3D12_DESCRIPTOR_RANGE Texture = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND };
+    D3D12_DESCRIPTOR_RANGE Sampler = { D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 1, 0, 0 };
+    D3D12_ROOT_PARAMETER Parameters[4] = {};
+    D3D12_STATIC_SAMPLER_DESC Static = {};
+    D3D12_ROOT_SIGNATURE_DESC Desc = {};
+
+    Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    Parameters[0].Constants.Num32BitValues = 4;
+    Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters[1].Descriptor.ShaderRegister = 1;
+    Parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters[2].DescriptorTable.NumDescriptorRanges = 1;
+    Parameters[2].DescriptorTable.pDescriptorRanges = &Texture;
+    Parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    Parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters[3].DescriptorTable.NumDescriptorRanges = 1;
+    Parameters[3].DescriptorTable.pDescriptorRanges = &Sampler;
+    Parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    Static.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    Static.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    Static.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    Static.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    Static.MaxLOD = D3D12_FLOAT32_MAX;
+    Static.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    Desc.NumParameters = ARRAYSIZE(Parameters);
+    Desc.pParameters = Parameters;
+    Desc.NumStaticSamplers = 1;
+    Desc.pStaticSamplers = &Static;
+    Desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    return TcRootSignature(Device, &Desc, Signature);
+}
+
+static const D3D12_INPUT_ELEMENT_DESC TcVertexLayout[] =
+{
+    { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+};
+
+struct TcVertex
+{
+    FLOAT Pos[2];
+    FLOAT Color[4];
+};
+
+/* Graphics pipeline defaults: no blending, no depth, solid fill without culling, one eight bit target */
+static
+D3D12_GRAPHICS_PIPELINE_STATE_DESC
+TcPipelineDesc(
+    _In_ ID3D12RootSignature *Signature,
+    _In_ ID3DBlob *Vertex,
+    _In_ ID3DBlob *Pixel)
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = {};
+
+    Desc.pRootSignature = Signature;
+    Desc.VS = TcCode(Vertex);
+    Desc.PS = TcCode(Pixel);
+    for (UINT Index = 0; Index < 8; Index++)
+    {
+        Desc.BlendState.RenderTarget[Index].SrcBlend = D3D12_BLEND_ONE;
+        Desc.BlendState.RenderTarget[Index].DestBlend = D3D12_BLEND_ZERO;
+        Desc.BlendState.RenderTarget[Index].BlendOp = D3D12_BLEND_OP_ADD;
+        Desc.BlendState.RenderTarget[Index].SrcBlendAlpha = D3D12_BLEND_ONE;
+        Desc.BlendState.RenderTarget[Index].DestBlendAlpha = D3D12_BLEND_ZERO;
+        Desc.BlendState.RenderTarget[Index].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        Desc.BlendState.RenderTarget[Index].LogicOp = D3D12_LOGIC_OP_NOOP;
+        Desc.BlendState.RenderTarget[Index].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    Desc.SampleMask = UINT_MAX;
+    Desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    Desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    Desc.RasterizerState.DepthClipEnable = TRUE;
+    Desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    Desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    Desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+    Desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+    Desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+    Desc.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    Desc.DepthStencilState.BackFace = Desc.DepthStencilState.FrontFace;
+    Desc.DepthStencilState.StencilReadMask = 0xFF;
+    Desc.DepthStencilState.StencilWriteMask = 0xFF;
+    Desc.InputLayout.pInputElementDescs = TcVertexLayout;
+    Desc.InputLayout.NumElements = Vertex ? ARRAYSIZE(TcVertexLayout) : 0;
+    Desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    Desc.NumRenderTargets = 1;
+    Desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Desc.SampleDesc.Count = 1;
+    return Desc;
+}
+
+static
+VOID
+TcBarrier(
+    _In_ ID3D12GraphicsCommandList *List,
+    _In_ ID3D12Resource *Resource,
+    _In_ D3D12_RESOURCE_STATES Before,
+    _In_ D3D12_RESOURCE_STATES After)
+{
+    D3D12_RESOURCE_BARRIER Barrier = {};
+
+    Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    Barrier.Transition.pResource = Resource;
+    Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    Barrier.Transition.StateBefore = Before;
+    Barrier.Transition.StateAfter = After;
+    List->ResourceBarrier(1, &Barrier);
+}
+
+/* An upload buffer holding Size bytes of Data */
+static
+ID3D12Resource *
+TcUpload(
+    _In_ ID3D12Device *Device,
+    _In_reads_bytes_(Size) const VOID *Data,
+    _In_ SIZE_T Size)
+{
+    ID3D12Resource *Buffer = TcBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, Size, D3D12_RESOURCE_FLAG_NONE);
+    VOID *Mapped = NULL;
+
+    if (Buffer != NULL && SUCCEEDED(Buffer->Map(0, NULL, &Mapped)))
+    {
+        memcpy(Mapped, Data, Size);
+        Buffer->Unmap(0, NULL);
+    }
+    return Buffer;
+}
+
+/* A render or depth target texture with its own sample count */
+static
+ID3D12Resource *
+TcTarget(
+    _In_ ID3D12Device *Device,
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ UINT Samples,
+    _In_ D3D12_RESOURCE_FLAGS Flags,
+    _In_ D3D12_RESOURCE_STATES State)
+{
+    D3D12_HEAP_PROPERTIES Heap = { D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC Desc = {};
+    ID3D12Resource *Resource = NULL;
+
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Desc.Width = Width;
+    Desc.Height = Height;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.Format = Format;
+    Desc.SampleDesc.Count = Samples;
+    Desc.Flags = Flags;
+    if (FAILED(Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc, State, NULL, IID_PPV_ARGS(&Resource))))
+        return NULL;
+    return Resource;
+}
+
+/* Everything a draw scene keeps; released in one place */
+struct TcDrawKit
+{
+    ~TcDrawKit()
+    {
+        for (IUnknown *Item : Objects)
+        {
+            if (Item)
+                Item->Release();
+        }
+    }
+
+    template <typename Type>
+    Type *
+    Keep(
+        _In_opt_ Type *Item)
+    {
+        Objects.push_back(Item);
+        return Item;
+    }
+
+    std::vector<IUnknown *> Objects;
+};
+
+static
+ID3D12PipelineState *
+TcPipeline(
+    _In_ ID3D12Device *Device,
+    _In_ const D3D12_GRAPHICS_PIPELINE_STATE_DESC &Desc,
+    _Inout_ TcDrawKit *Kit)
+{
+    ID3D12PipelineState *State = NULL;
+
+    Device->CreateGraphicsPipelineState(&Desc, IID_PPV_ARGS(&State));
+    return Kit->Keep(State);
+}
+
+static
+D3D12_CPU_DESCRIPTOR_HANDLE
+TcHandle(
+    _In_ ID3D12Device *Device,
+    _In_ ID3D12DescriptorHeap *Heap,
+    _In_ UINT Index)
+{
+    D3D12_DESCRIPTOR_HEAP_DESC Desc = Heap->GetDesc();
+    D3D12_CPU_DESCRIPTOR_HANDLE Handle = Heap->GetCPUDescriptorHandleForHeapStart();
+
+    Handle.ptr += (SIZE_T)Index * Device->GetDescriptorHandleIncrementSize(Desc.Type);
+    return Handle;
+}
+
+static
+D3D12_GPU_DESCRIPTOR_HANDLE
+TcGpuHandle(
+    _In_ ID3D12Device *Device,
+    _In_ ID3D12DescriptorHeap *Heap,
+    _In_ UINT Index)
+{
+    D3D12_DESCRIPTOR_HEAP_DESC Desc = Heap->GetDesc();
+    D3D12_GPU_DESCRIPTOR_HANDLE Handle = Heap->GetGPUDescriptorHandleForHeapStart();
+
+    Handle.ptr += (UINT64)Index * Device->GetDescriptorHandleIncrementSize(Desc.Type);
+    return Handle;
+}
+
+static
+ID3D12DescriptorHeap *
+TcDescriptorHeap(
+    _In_ ID3D12Device *Device,
+    _In_ D3D12_DESCRIPTOR_HEAP_TYPE Type,
+    _In_ UINT Count,
+    _In_ BOOLEAN Visible,
+    _Inout_ TcDrawKit *Kit)
+{
+    D3D12_DESCRIPTOR_HEAP_DESC Desc = { Type, Count, Visible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE : D3D12_DESCRIPTOR_HEAP_FLAG_NONE };
+    ID3D12DescriptorHeap *Heap = NULL;
+
+    Device->CreateDescriptorHeap(&Desc, IID_PPV_ARGS(&Heap));
+    return Kit->Keep(Heap);
+}
+
+/* Per draw placement constants, one 256 byte slot each: offset, depth and scale */
+static const FLOAT TcPlaces[4][64] =
+{
+    { 0.0f, 0.0f, 0.5f, 1.0f },
+    { -0.3f, 0.2f, 0.25f, 0.6f },
+    { 0.35f, -0.25f, 0.75f, 0.8f },
+    { 0.1f, 0.1f, 0.4f, 0.45f },
+};
+
+static const TcVertex TcVertices[] =
+{
+    { { -0.9f, -0.8f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+    { { 0.0f, 0.95f }, { 0.0f, 1.0f, 0.0f, 0.5f } },
+    { { 0.85f, -0.7f }, { 0.0f, 0.0f, 1.0f, 0.25f } },
+    { { -0.6f, 0.3f }, { 1.0f, 1.0f, 0.0f, 0.75f } },
+    { { 0.7f, 0.45f }, { 0.0f, 1.0f, 1.0f, 1.0f } },
+    { { -0.2f, -0.95f }, { 1.0f, 0.0f, 1.0f, 0.6f } },
+    { { 0.33f, 0.12f }, { 0.5f, 0.25f, 0.75f, 0.9f } },
+    { { -0.45f, -0.33f }, { 0.2f, 0.4f, 0.6f, 0.3f } },
+};
+
+/* Common objects of the draw scenes: shaders, the root signature, geometry and the placement buffer */
+struct TcDrawSetup
+{
+    HRESULT
+    Create(
+        _In_ ID3D12Device *Device,
+        _Inout_ TcDrawKit *Kit)
+    {
+        static const UINT16 Indices[] = { 0, 1, 2, 3, 4, 5, 6, 7, 2, 4 };
+        HRESULT hr;
+
+        hr = TcCompile("vs", "vs_5_0", &Vertex);
+        if (SUCCEEDED(hr))
+            hr = TcCompile("ps", "ps_5_0", &Pixel);
+        if (SUCCEEDED(hr))
+            hr = TcCompile("pstex", "ps_5_0", &Textured);
+        if (SUCCEEDED(hr))
+            hr = TcDrawSignature(Device, &Signature);
+        Kit->Keep(Vertex);
+        Kit->Keep(Pixel);
+        Kit->Keep(Textured);
+        Kit->Keep(Signature);
+        if (FAILED(hr))
+            return hr;
+        Vertices = Kit->Keep(TcUpload(Device, TcVertices, sizeof(TcVertices)));
+        IndexBuffer = Kit->Keep(TcUpload(Device, Indices, sizeof(Indices)));
+        Places = Kit->Keep(TcUpload(Device, TcPlaces, sizeof(TcPlaces)));
+        if (Vertices == NULL || IndexBuffer == NULL || Places == NULL)
+            return E_OUTOFMEMORY;
+        VertexView.BufferLocation = Vertices->GetGPUVirtualAddress();
+        VertexView.SizeInBytes = sizeof(TcVertices);
+        VertexView.StrideInBytes = sizeof(TcVertex);
+        IndexView.BufferLocation = IndexBuffer->GetGPUVirtualAddress();
+        IndexView.SizeInBytes = sizeof(Indices);
+        IndexView.Format = DXGI_FORMAT_R16_UINT;
+        return S_OK;
+    }
+
+    /* Root signature, geometry, a full viewport and scissor, and tint constants */
+    VOID
+    Bind(
+        _In_ ID3D12GraphicsCommandList *List,
+        _In_ UINT Width,
+        _In_ UINT Height,
+        _In_ UINT Place)
+    {
+        static const FLOAT Tint[4] = { 1.0f, 0.75f, 0.5f, 1.0f };
+        D3D12_VIEWPORT Viewport = { 0.0f, 0.0f, (FLOAT)Width, (FLOAT)Height, 0.0f, 1.0f };
+        D3D12_RECT Scissor = { 0, 0, (LONG)Width, (LONG)Height };
+
+        List->SetGraphicsRootSignature(Signature);
+        List->SetGraphicsRoot32BitConstants(0, 4, Tint, 0);
+        List->SetGraphicsRootConstantBufferView(1, Places->GetGPUVirtualAddress() + Place * 256);
+        List->IASetVertexBuffers(0, 1, &VertexView);
+        List->IASetIndexBuffer(&IndexView);
+        List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        List->RSSetViewports(1, &Viewport);
+        List->RSSetScissorRects(1, &Scissor);
+    }
+
+    ID3DBlob *Vertex = NULL;
+    ID3DBlob *Pixel = NULL;
+    ID3DBlob *Textured = NULL;
+    ID3D12RootSignature *Signature = NULL;
+    ID3D12Resource *Vertices = NULL;
+    ID3D12Resource *IndexBuffer = NULL;
+    ID3D12Resource *Places = NULL;
+    D3D12_VERTEX_BUFFER_VIEW VertexView = {};
+    D3D12_INDEX_BUFFER_VIEW IndexView = {};
+};
+
+/* Triangles, strips, lines and points through root constants and root constant buffers, scissors and indirect draws */
+static
+HRESULT
+SceneDraw(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcQueue Queue;
+    ID3D12Resource *Target;
+    ID3D12DescriptorHeap *Rtvs;
+    ID3D12PipelineState *Triangles;
+    ID3D12PipelineState *Lines;
+    ID3D12PipelineState *Points;
+    ID3D12PipelineState *Culled;
+    ID3D12CommandSignature *Indirect = NULL;
+    ID3D12Resource *Arguments;
+    D3D12_CPU_DESCRIPTOR_HANDLE Rtv;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    Target = Kit.Keep(TcTarget(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET));
+    Rtvs = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, FALSE, &Kit);
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+
+        Triangles = TcPipeline(Device, Desc, &Kit);
+        Desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+        Culled = TcPipeline(Device, Desc, &Kit);
+        Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+        Desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+        Lines = TcPipeline(Device, Desc, &Kit);
+        Desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+        Points = TcPipeline(Device, Desc, &Kit);
+    }
+    {
+        static const UINT Draws[2][4] = { { 3, 1, 3, 0 }, { 3, 1, 5, 0 } };
+        D3D12_INDIRECT_ARGUMENT_DESC Argument = {};
+        D3D12_COMMAND_SIGNATURE_DESC Desc = {};
+
+        Argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+        Desc.ByteStride = sizeof(Draws[0]);
+        Desc.NumArgumentDescs = 1;
+        Desc.pArgumentDescs = &Argument;
+        Device->CreateCommandSignature(&Desc, NULL, IID_PPV_ARGS(&Indirect));
+        Kit.Keep(Indirect);
+        Arguments = Kit.Keep(TcUpload(Device, Draws, sizeof(Draws)));
+    }
+    if (Target == NULL || Rtvs == NULL || Triangles == NULL || Culled == NULL || Lines == NULL || Points == NULL || Indirect == NULL || Arguments == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+
+    Rtv = Rtvs->GetCPUDescriptorHandleForHeapStart();
+    Device->CreateRenderTargetView(Target, NULL, Rtv);
+    Queue.List->ClearRenderTargetView(Rtv, Clear, 0, NULL);
+    Queue.List->OMSetRenderTargets(1, &Rtv, FALSE, NULL);
+    Setup.Bind(Queue.List, 64, 64, 0);
+
+    Queue.List->SetPipelineState(Triangles);
+    Queue.List->DrawInstanced(6, 1, 0, 0);
+    Setup.Bind(Queue.List, 64, 64, 1);
+    Queue.List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    Queue.List->DrawIndexedInstanced(6, 1, 2, 1, 0);
+    {
+        D3D12_RECT Scissor = { 8, 12, 40, 50 };
+
+        Queue.List->RSSetScissorRects(1, &Scissor);
+        Queue.List->SetGraphicsRootConstantBufferView(1, Setup.Places->GetGPUVirtualAddress() + 2 * 256);
+        Queue.List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        Queue.List->DrawInstanced(3, 2, 2, 0);
+    }
+    Setup.Bind(Queue.List, 64, 64, 3);
+    Queue.List->SetPipelineState(Culled);
+    Queue.List->DrawIndexedInstanced(9, 1, 0, 0, 0);
+    Setup.Bind(Queue.List, 64, 64, 0);
+    Queue.List->SetPipelineState(Lines);
+    Queue.List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    Queue.List->DrawInstanced(8, 1, 0, 0);
+    Queue.List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
+    Queue.List->SetGraphicsRoot32BitConstant(0, 0x3F000000, 1);
+    Queue.List->DrawIndexedInstanced(5, 1, 3, 0, 0);
+    Queue.List->SetPipelineState(Points);
+    Queue.List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+    Queue.List->DrawInstanced(8, 1, 0, 0);
+    Setup.Bind(Queue.List, 64, 64, 2);
+    Queue.List->SetPipelineState(Triangles);
+    Queue.List->ExecuteIndirect(Indirect, 2, Arguments, 0, NULL, 0);
+    TcBarrier(Queue.List, Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    hr = Queue.Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        hr = TcReadTexture(Device, &Queue, Target, 1, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* Wireframe triangles, culled and not */
+static
+HRESULT
+SceneWireframe(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcQueue Queue;
+    ID3D12Resource *Target;
+    ID3D12DescriptorHeap *Rtvs;
+    ID3D12PipelineState *Wire;
+    ID3D12PipelineState *Culled;
+    D3D12_CPU_DESCRIPTOR_HANDLE Rtv;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    Target = Kit.Keep(TcTarget(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET));
+    Rtvs = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, FALSE, &Kit);
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+
+        Desc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+        Wire = TcPipeline(Device, Desc, &Kit);
+        Desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+        Culled = TcPipeline(Device, Desc, &Kit);
+    }
+    if (Target == NULL || Rtvs == NULL || Wire == NULL || Culled == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    Rtv = Rtvs->GetCPUDescriptorHandleForHeapStart();
+    Device->CreateRenderTargetView(Target, NULL, Rtv);
+    Queue.List->ClearRenderTargetView(Rtv, Clear, 0, NULL);
+    Queue.List->OMSetRenderTargets(1, &Rtv, FALSE, NULL);
+    Setup.Bind(Queue.List, 64, 64, 0);
+    Queue.List->SetPipelineState(Wire);
+    Queue.List->DrawInstanced(6, 1, 0, 0);
+    Setup.Bind(Queue.List, 64, 64, 3);
+    Queue.List->SetPipelineState(Culled);
+    Queue.List->DrawIndexedInstanced(9, 1, 0, 0, 0);
+    TcBarrier(Queue.List, Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    hr = Queue.Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        hr = TcReadTexture(Device, &Queue, Target, 1, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "ddi", SceneDdi },
@@ -1680,6 +2268,8 @@ static const TcScene Scenes[] =
     { "clear", SceneClear },
     { "fence", SceneFence },
     { "present", ScenePresent },
+    { "draw", SceneDraw },
+    { "wireframe", SceneWireframe },
 };
 
 static
