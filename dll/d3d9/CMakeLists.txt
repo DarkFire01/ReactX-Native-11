@@ -33,7 +33,8 @@ nt_add_usermode_dll(d3d9
         swapchain.cpp
         texture.cpp
         umd.cpp
-        validate.cpp)
+        validate.cpp
+        vertexvm.cpp)
 
 target_link_libraries(d3d9 PRIVATE rxcommon user32 gdi32 advapi32 version)
 
