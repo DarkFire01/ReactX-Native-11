@@ -3,11 +3,12 @@ nt_add_usermode_dll(d3d9
     SOURCES
         adapter.cpp
         enum.cpp
+        identity.cpp
         main.cpp
         perf.cpp
         psgp.cpp)
 
-target_link_libraries(d3d9 PRIVATE rxcommon user32 gdi32 advapi32)
+target_link_libraries(d3d9 PRIVATE rxcommon user32 gdi32 advapi32 version)
 
 # A plug-in error unwinds through the caller as a C++ exception
 set_source_files_properties(psgp.cpp PROPERTIES COMPILE_OPTIONS "/EHs")

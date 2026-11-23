@@ -162,16 +162,6 @@ D9Enum::RegisterSoftwareDevice(
     return D3DERR_NOTAVAILABLE;
 }
 
-STDMETHODIMP
-D9Enum::GetAdapterIdentifier(
-    _In_ UINT Adapter,
-    _In_ DWORD Flags,
-    _Out_ D3DADAPTER_IDENTIFIER9* Identifier)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
 STDMETHODIMP_(UINT)
 D9Enum::GetAdapterModeCount(
     _In_ UINT Adapter,

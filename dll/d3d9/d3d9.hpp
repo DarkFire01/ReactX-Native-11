@@ -16,6 +16,7 @@
 
 #include <utility>
 
+#include "adapteridentity.hpp"
 #include "trace.hpp"
 
 /* The most displays one IDirect3D9 object enumerates */
@@ -245,3 +246,9 @@ D9OpenAdapter(
 VOID
 D9CloseAdapter(
     _Inout_ D9Adapter* Adapter);
+
+BOOLEAN
+D9QueryUmdName(
+    _In_ D3DKMT_HANDLE Adapter,
+    _In_ KMTUMDVERSION Version,
+    _Out_ D3DKMT_UMDFILENAMEINFO* Name);
