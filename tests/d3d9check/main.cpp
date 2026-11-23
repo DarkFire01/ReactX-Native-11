@@ -1206,6 +1206,108 @@ NcCheckDevice(
     DestroyWindow(Window);
 }
 
+/* A windowed device of the plain object: what it refuses that the extended device offers */
+static
+VOID
+NcCheckDevicePlain(
+    _Inout_ NineCheck* Check)
+{
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DSwapChain9* Chain = nullptr;
+    IDirect3DSwapChain9Ex* ChainEx = nullptr;
+    IDirect3DSurface9* Back = nullptr;
+    D3DCAPS9 Caps = {};
+    D3DCAPS9 EnumCaps = {};
+    DWORD Value = 0;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    Parameters.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window,
+                             D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED, &Parameters, &Device);
+    printf("plain_create = %08lX %s\n", hr, Device != nullptr ? "device" : "null");
+    NcPrintParameters("plain_parameters", &Parameters, Window);
+    if (Device == nullptr)
+    {
+        DestroyWindow(Window);
+        Plain->Release();
+        return;
+    }
+
+    hr = Device->QueryInterface(__uuidof(IDirect3DDevice9Ex), reinterpret_cast<VOID**>(&DeviceEx));
+    printf("plain_qi_ex = %08lX %s\n", hr, DeviceEx != nullptr ? "object" : "null");
+    if (DeviceEx != nullptr)
+        DeviceEx->Release();
+
+    hr = Device->GetDeviceCaps(&Caps);
+    Plain->GetDeviceCaps(0, D3DDEVTYPE_HAL, &EnumCaps);
+    printf("plain_caps = %08lX %s\n", hr, memcmp(&Caps, &EnumCaps, sizeof(Caps)) == 0 ? "same" : "differs");
+    for (UINT Index = 0; Index < sizeof(Caps) / sizeof(DWORD); Index++)
+    {
+        if (reinterpret_cast<const DWORD*>(&Caps)[Index] != reinterpret_cast<const DWORD*>(&EnumCaps)[Index])
+            printf("plain_caps_field[%u] = %08lX %08lX\n", Index, reinterpret_cast<const DWORD*>(&Caps)[Index],
+                   reinterpret_cast<const DWORD*>(&EnumCaps)[Index]);
+    }
+
+    hr = Device->GetSwapChain(0, &Chain);
+    printf("plain_swapchain = %08lX\n", hr);
+    if (Chain != nullptr)
+    {
+        hr = Chain->QueryInterface(__uuidof(IDirect3DSwapChain9Ex), reinterpret_cast<VOID**>(&ChainEx));
+        printf("plain_chain_qi_ex = %08lX %s\n", hr, ChainEx != nullptr ? "object" : "null");
+        if (ChainEx != nullptr)
+            ChainEx->Release();
+        printf("plain_chain_release = %lu\n", Chain->Release());
+    }
+
+    printf("plain_coop = %08lX\n", Device->TestCooperativeLevel());
+    hr = Device->GetRenderState(D3DRS_ZENABLE, &Value);
+    printf("plain_zenable = %08lX %lu\n", hr, Value);
+    hr = Device->GetRenderState(D3DRS_POINTSIZE_MAX, &Value);
+    printf("plain_pointsize_max = %08lX %08lX\n", hr, Value);
+    printf("plain_set_retired = %08lX\n", Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(10), 1));
+    printf("plain_set_cull = %08lX\n", Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE));
+    hr = Device->GetRenderState(D3DRS_CULLMODE, &Value);
+    printf("plain_get_cull = %08lX %lu\n", hr, Value);
+    printf("plain_clear = %08lX\n", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF00FF00, 1.0f, 0));
+    printf("plain_clear_depth = %08lX\n", Device->Clear(0, nullptr, D3DCLEAR_ZBUFFER, 0, 1.0f, 0));
+    hr = Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back);
+    NcPrintSurface("plain_backbuffer", Back);
+    if (Back != nullptr)
+    {
+        D3DLOCKED_RECT Locked = {};
+        RECT Bad = { 0, 0, 41, 30 };
+
+        printf("plain_lock_bad = %08lX\n", Back->LockRect(&Locked, &Bad, 0));
+        NcPrintPixels("plain_pixels", Back);
+        printf("plain_backbuffer_release = %lu\n", Back->Release());
+    }
+    printf("plain_present = %08lX\n", Device->Present(nullptr, nullptr, nullptr, nullptr));
+    Parameters.BackBufferWidth = 0;
+    Parameters.BackBufferHeight = 0;
+    Parameters.EnableAutoDepthStencil = TRUE;
+    Parameters.AutoDepthStencilFormat = D3DFMT_D16;
+    hr = Device->Reset(&Parameters);
+    printf("plain_reset = %08lX\n", hr);
+    NcPrintParameters("plain_reset_parameters", &Parameters, Window);
+    hr = Device->GetRenderState(D3DRS_ZENABLE, &Value);
+    printf("plain_reset_zenable = %08lX %lu\n", hr, Value);
+    hr = Device->GetRenderState(D3DRS_CULLMODE, &Value);
+    printf("plain_reset_cull = %08lX %lu\n", hr, Value);
+    printf("plain_reset_clear_depth = %08lX\n", Device->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0));
+    printf("plain_release_last = %lu\n", Device->Release());
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -1222,6 +1324,7 @@ static const NineCheckInfo NcChecks[] =
     { "depthmatch", NcCheckDepthMatch },
     { "create", NcCheckCreate },
     { "device", NcCheckDevice },
+    { "device_plain", NcCheckDevicePlain },
 };
 
 static
