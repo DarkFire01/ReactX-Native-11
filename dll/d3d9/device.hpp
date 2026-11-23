@@ -3638,6 +3638,9 @@ private:
 
     /* Vertices go through the runtime's software pipeline; a mixed device switches this */
     BOOLEAN SoftwareVertices;
+
+    /* Streams a scene binds again at its first draw; the software pipeline hands the driver one */
+    UINT SceneStreams;
     INT GpuPriority = 0;
     UINT FrameLatency = 3;
 

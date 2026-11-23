@@ -655,7 +655,7 @@ D9Device::MarkSceneState(VOID)
     if (Displacement)
         TextureDirty |= 1u << 16;
     TextureDirty |= ((1u << 4) - 1) << 17;
-    StreamDirty = ((1u << D9StreamCount) - 1) | D9IndexStreamBit;
+    StreamDirty = ((1u << SceneStreams) - 1) | D9IndexStreamBit;
     DrawDirty |= D9DrawTextures | D9DrawStreams;
 }
 

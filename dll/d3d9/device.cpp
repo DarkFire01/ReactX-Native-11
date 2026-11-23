@@ -198,7 +198,8 @@ D9Device::D9Device(
       BehaviorFlags(BehaviorFlags),
       IsEx(IsEx),
       SwapEffectUpgrade(SwapEffectUpgrade),
-      SoftwareVertices((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0)
+      SoftwareVertices((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0),
+      SceneStreams(SoftwareVertices ? 1 : D9StreamCount)
 {
     InitializeCriticalSection(&Lock);
     for (DWORD& Value : RenderStates)

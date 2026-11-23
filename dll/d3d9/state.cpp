@@ -882,6 +882,7 @@ D9Device::SwitchVertexProcessing(
     _In_ BOOLEAN Software)
 {
     SoftwareVertices = Software;
+    SceneStreams = Software ? 1 : D9StreamCount;
     if (Software)
         return;
 

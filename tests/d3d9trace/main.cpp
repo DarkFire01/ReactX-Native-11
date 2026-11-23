@@ -8029,6 +8029,14 @@ TrProcessWork(
     TrApi("SetRenderState lighting off", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
     TrSettle(Device);
 
+    TrPhase("process draw");
+    TrApi("SetFVF processed", Device->SetFVF(TrProcessFvf));
+    TrApi("SetStreamSource processed", Device->SetStreamSource(0, Dest, 0, 32));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive processed", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+
     TrPhase("process release");
     TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
     TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
