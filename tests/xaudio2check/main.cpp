@@ -5085,6 +5085,7 @@ enum XcWmaQueue
 {
     XcWmaOne,
     XcWmaTwo,
+    XcWmaThree,
     XcWmaFlushFirst,
     XcWmaDiscontinuity,
 };
@@ -5098,6 +5099,10 @@ struct XcWmaCase
     UINT32 LoopLength;
     UINT32 LoopCount;
     XcWmaQueue Queue;
+
+    /* Play range of the second buffer */
+    UINT32 NextBegin;
+    UINT32 NextLength;
 };
 
 /* Plays one xWMA stream through a control case and prints what the recorder heard and the voice reported */
@@ -5158,7 +5163,7 @@ XcPlayWmaCase(
     hr = Source->SubmitSourceBuffer(&Buffer, &Table);
     printf("  %s submit = %08lX", Case->Name, hr);
     Queued = SUCCEEDED(hr);
-    if (Case->Queue == XcWmaTwo || Case->Queue == XcWmaFlushFirst)
+    if (Case->Queue == XcWmaTwo || Case->Queue == XcWmaThree || Case->Queue == XcWmaFlushFirst)
     {
         if (Case->Queue == XcWmaFlushFirst)
         {
@@ -5166,16 +5171,25 @@ XcPlayWmaCase(
             Source->GetState(&State, 0);
             printf(" queued %u", State.BuffersQueued);
         }
-        Buffer.PlayBegin = 0;
-        Buffer.PlayLength = 0;
+        Buffer.PlayBegin = Case->NextBegin;
+        Buffer.PlayLength = Case->NextLength;
         Buffer.LoopBegin = 0;
         Buffer.LoopLength = 0;
         Buffer.LoopCount = 0;
         Buffer.pContext = reinterpret_cast<void*>(2);
-        Buffer.Flags = XAUDIO2_END_OF_STREAM;
+        Buffer.Flags = Case->Queue == XcWmaThree ? 0 : XAUDIO2_END_OF_STREAM;
         hr = Source->SubmitSourceBuffer(&Buffer, &Table);
         printf(" second = %08lX", hr);
         Queued = Queued || SUCCEEDED(hr);
+        if (Case->Queue == XcWmaThree)
+        {
+            Buffer.PlayBegin = 0;
+            Buffer.PlayLength = 0;
+            Buffer.pContext = reinterpret_cast<void*>(3);
+            Buffer.Flags = XAUDIO2_END_OF_STREAM;
+            hr = Source->SubmitSourceBuffer(&Buffer, &Table);
+            printf(" third = %08lX", hr);
+        }
     }
     else if (Case->Queue == XcWmaDiscontinuity)
     {
@@ -5243,6 +5257,40 @@ XcCheckWmaControls(VOID)
         { "rangetwo", 3000, 2000, 0, 0, 0, XcWmaTwo },
         { "flush", 0, 0, 0, 0, 0, XcWmaFlushFirst },
         { "discontinuity", 0, 0, 0, 0, 0, XcWmaDiscontinuity },
+        /* Starts on and off frame and packet boundaries */
+        { "begin1", 1, 0, 0, 0, 0, XcWmaOne },
+        { "begin2047", 2047, 0, 0, 0, 0, XcWmaOne },
+        { "begin2049", 2049, 0, 0, 0, 0, XcWmaOne },
+        { "begin4096", 4096, 0, 0, 0, 0, XcWmaOne },
+        { "begin6000", 6000, 0, 0, 0, 0, XcWmaOne },
+        { "begin10240", 10240, 0, 0, 0, 0, XcWmaOne },
+        { "begin10241", 10241, 0, 0, 0, 0, XcWmaOne },
+        { "begin12288", 12288, 0, 0, 0, 0, XcWmaOne },
+        { "begin12300", 12300, 0, 0, 0, 0, XcWmaOne },
+        { "begin20000", 20000, 0, 0, 0, 0, XcWmaOne },
+        /* Ranges that end inside a frame or a packet */
+        { "range1", 2048, 1, 0, 0, 0, XcWmaOne },
+        { "range1000", 0, 1000, 0, 0, 0, XcWmaOne },
+        { "range2047", 1, 2047, 0, 0, 0, XcWmaOne },
+        { "rangepacket", 10000, 4000, 0, 0, 0, XcWmaOne },
+        { "rangeend", 20000, 2000, 0, 0, 0, XcWmaOne },
+        /* Loops after a start inside the stream */
+        { "loopbegin2048", 2048, 0, 0, 0, 2, XcWmaOne },
+        { "loopbegin3000", 3000, 0, 0, 0, 1, XcWmaOne },
+        { "loopbegin12300", 12300, 0, 0, 0, 1, XcWmaOne },
+        /* Ranges across queued buffers */
+        { "begintwo", 2048, 0, 0, 0, 0, XcWmaTwo },
+        { "begin12300two", 12300, 0, 0, 0, 0, XcWmaTwo },
+        { "range1two", 100, 1, 0, 0, 0, XcWmaTwo },
+        { "rangepackettwo", 10000, 4000, 0, 0, 0, XcWmaTwo },
+        { "secondrange", 0, 0, 0, 0, 0, XcWmaTwo, 3000, 2000 },
+        { "secondbegin", 0, 0, 0, 0, 0, XcWmaTwo, 12300, 0 },
+        { "bothranges", 1000, 1500, 0, 0, 0, XcWmaTwo, 5000, 1500 },
+        { "looptwo", 1000, 0, 0, 0, 1, XcWmaTwo, 3000, 2000 },
+        { "three", 0, 0, 0, 0, 0, XcWmaThree },
+        { "rangethree", 3000, 2000, 0, 0, 0, XcWmaThree, 3000, 2000 },
+        { "beginthree", 2048, 0, 0, 0, 0, XcWmaThree, 12300, 0 },
+        { "middlerange", 0, 0, 0, 0, 0, XcWmaThree, 10000, 4000 },
     };
     static BYTE Pcm[44100 * 4 / 2];
     WAVEFORMATEX PcmFormat;
