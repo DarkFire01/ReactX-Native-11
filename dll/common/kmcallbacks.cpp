@@ -209,7 +209,7 @@ RxCreateContextVirtualCb(
     Create.Flags = Args->Flags;
     Create.pPrivateDriverData = Args->pPrivateDriverData;
     Create.PrivateDriverDataSize = Args->PrivateDriverDataSize;
-    Create.ClientHint = D3DKMT_CLIENTHINT_DX11;
+    Create.ClientHint = RxKernelDeviceFromHandle(hDevice).KernelClientHint();
 
     Status = RxGetKmtThunks()->CreateContextVirtual(&Create);
     if (!NT_SUCCESS(Status))
