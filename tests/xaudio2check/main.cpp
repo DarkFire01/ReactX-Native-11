@@ -3728,6 +3728,484 @@ XcCheckMix(VOID)
     }
 }
 
+typedef HRESULT (__cdecl* PXC_X3D_INITIALIZE)(UINT32, FLOAT32, X3DAUDIO_HANDLE);
+typedef void (__cdecl* PXC_X3D_CALCULATE)(const X3DAUDIO_HANDLE, const X3DAUDIO_LISTENER*, const X3DAUDIO_EMITTER*,
+                                          UINT32, X3DAUDIO_DSP_SETTINGS*);
+
+static PXC_X3D_INITIALIZE XcX3DInitialize;
+static PXC_X3D_CALCULATE XcX3DCalculate;
+
+#define XC_X3D_CELLS            80
+#define XC_X3D_ALL              (X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_DELAY | X3DAUDIO_CALCULATE_LPF_DIRECT | \
+                                 X3DAUDIO_CALCULATE_LPF_REVERB | X3DAUDIO_CALCULATE_REVERB | X3DAUDIO_CALCULATE_DOPPLER | \
+                                 X3DAUDIO_CALCULATE_EMITTER_ANGLE)
+
+static const UINT32 XcX3DMasks[] =
+{
+    SPEAKER_MONO, SPEAKER_STEREO, SPEAKER_2POINT1, SPEAKER_QUAD, SPEAKER_4POINT1, SPEAKER_5POINT1,
+    SPEAKER_5POINT1_SURROUND, SPEAKER_7POINT1, SPEAKER_7POINT1_SURROUND, SPEAKER_SURROUND, 0, 0x7, 0xF,
+};
+
+static
+X3DAUDIO_VECTOR
+XcVector(
+    _In_ float X,
+    _In_ float Y,
+    _In_ float Z)
+{
+    X3DAUDIO_VECTOR Vector = { X, Y, Z };
+
+    return Vector;
+}
+
+/* Front and top vectors turned by a yaw and then a pitch */
+static
+VOID
+XcX3DOrient(
+    _In_ float Yaw,
+    _In_ float Pitch,
+    _Out_ X3DAUDIO_VECTOR* Front,
+    _Out_ X3DAUDIO_VECTOR* Top)
+{
+    *Front = XcVector(sinf(Yaw) * cosf(Pitch), sinf(Pitch), cosf(Yaw) * cosf(Pitch));
+    *Top = XcVector(-sinf(Yaw) * sinf(Pitch), cosf(Pitch), -cosf(Yaw) * sinf(Pitch));
+}
+
+static
+VOID
+XcX3DListener(
+    _Out_ X3DAUDIO_LISTENER* Listener,
+    _In_ BOOLEAN Turned)
+{
+    memset(Listener, 0, sizeof(*Listener));
+    if (Turned)
+    {
+        XcX3DOrient(0.6f, 0.25f, &Listener->OrientFront, &Listener->OrientTop);
+        Listener->Position = XcVector(1.5f, -0.5f, 2.0f);
+        Listener->Velocity = XcVector(3.0f, 0.5f, -2.0f);
+    }
+    else
+    {
+        Listener->OrientFront = XcVector(0.0f, 0.0f, 1.0f);
+        Listener->OrientTop = XcVector(0.0f, 1.0f, 0.0f);
+    }
+}
+
+static
+VOID
+XcX3DEmitter(
+    _Out_ X3DAUDIO_EMITTER* Emitter,
+    _In_ const X3DAUDIO_LISTENER* Listener,
+    _In_ float Azimuth,
+    _In_ float Radius,
+    _In_ float Height)
+{
+    X3DAUDIO_VECTOR Right;
+
+    memset(Emitter, 0, sizeof(*Emitter));
+    XcX3DOrient(-0.4f, 0.1f, &Emitter->OrientFront, &Emitter->OrientTop);
+    Emitter->ChannelCount = 1;
+    Emitter->CurveDistanceScaler = 1.0f;
+    Emitter->DopplerScaler = 1.0f;
+    Emitter->Velocity = XcVector(-1.0f, 0.0f, 4.0f);
+
+    /* Placed around the listener in its own frame */
+    Right.x = Listener->OrientTop.y * Listener->OrientFront.z - Listener->OrientTop.z * Listener->OrientFront.y;
+    Right.y = Listener->OrientTop.z * Listener->OrientFront.x - Listener->OrientTop.x * Listener->OrientFront.z;
+    Right.z = Listener->OrientTop.x * Listener->OrientFront.y - Listener->OrientTop.y * Listener->OrientFront.x;
+    Emitter->Position.x = Listener->Position.x + Radius * (cosf(Azimuth) * Listener->OrientFront.x + sinf(Azimuth) * Right.x) +
+                          Height * Listener->OrientTop.x;
+    Emitter->Position.y = Listener->Position.y + Radius * (cosf(Azimuth) * Listener->OrientFront.y + sinf(Azimuth) * Right.y) +
+                          Height * Listener->OrientTop.y;
+    Emitter->Position.z = Listener->Position.z + Radius * (cosf(Azimuth) * Listener->OrientFront.z + sinf(Azimuth) * Right.z) +
+                          Height * Listener->OrientTop.z;
+}
+
+static
+VOID
+XcX3DRun(
+    _In_z_ PCSTR Label,
+    _In_ UINT32 Mask,
+    _In_ float Speed,
+    _In_ const X3DAUDIO_LISTENER* Listener,
+    _In_ const X3DAUDIO_EMITTER* Emitter,
+    _In_ UINT32 Flags)
+{
+    X3DAUDIO_HANDLE Handle;
+    X3DAUDIO_DSP_SETTINGS Settings;
+    float Matrix[XC_X3D_CELLS];
+    float Delays[4];
+    float Scalars[8];
+    UINT32 Destinations = 0;
+    UINT32 Sources = Emitter->ChannelCount;
+    UINT32 Used;
+    char Name[16];
+
+    for (UINT32 Rest = Mask; Rest != 0; Rest &= Rest - 1)
+        Destinations += 1;
+    if (Destinations == 0)
+        Destinations = 1;
+    for (UINT32 Index = 0; Index < XC_X3D_CELLS; Index++)
+        Matrix[Index] = -1000.0f - static_cast<float>(Index);
+    for (UINT32 Index = 0; Index < ARRAYSIZE(Delays); Index++)
+        Delays[Index] = -100.0f - static_cast<float>(Index);
+    memset(Handle, 0xCC, sizeof(Handle));
+    XcX3DInitialize(Mask, Speed, Handle);
+
+    memset(&Settings, 0, sizeof(Settings));
+    Settings.pMatrixCoefficients = Matrix;
+    Settings.pDelayTimes = Delays;
+    Settings.SrcChannelCount = Sources;
+    Settings.DstChannelCount = Destinations;
+    Settings.LPFDirectCoefficient = -2.0f;
+    Settings.LPFReverbCoefficient = -3.0f;
+    Settings.ReverbLevel = -4.0f;
+    Settings.DopplerFactor = -5.0f;
+    Settings.EmitterToListenerAngle = -6.0f;
+    Settings.EmitterToListenerDistance = -7.0f;
+    Settings.EmitterVelocityComponent = -8.0f;
+    Settings.ListenerVelocityComponent = -9.0f;
+    XcX3DCalculate(Handle, Listener, Emitter, Flags, &Settings);
+
+    printf("x3d %s mask %X flags %05X\n", Label, Mask, Flags);
+    Scalars[0] = Settings.LPFDirectCoefficient;
+    Scalars[1] = Settings.LPFReverbCoefficient;
+    Scalars[2] = Settings.ReverbLevel;
+    Scalars[3] = Settings.DopplerFactor;
+    Scalars[4] = Settings.EmitterToListenerAngle;
+    Scalars[5] = Settings.EmitterToListenerDistance;
+    Scalars[6] = Settings.EmitterVelocityComponent;
+    Scalars[7] = Settings.ListenerVelocityComponent;
+    XcFloats("  dsp", Scalars, ARRAYSIZE(Scalars));
+    for (UINT32 Row = 0; Row < Destinations; Row++)
+    {
+        sprintf_s(Name, sizeof(Name), "  m%u", Row);
+        XcFloats(Name, Matrix + Row * Sources, Sources);
+    }
+    Used = Sources * Destinations;
+    XcFloats("  spare", Matrix + Used, 2);
+    XcFloats("  delay", Delays, ARRAYSIZE(Delays));
+}
+
+static
+BOOLEAN
+XcX3DHasLfe(
+    _In_ UINT32 Mask)
+{
+    return (Mask & SPEAKER_LOW_FREQUENCY) != 0;
+}
+
+static
+VOID
+XcCheckX3DInitialize(VOID)
+{
+    static const float Speeds[] = { X3DAUDIO_SPEED_OF_SOUND, 1.0f, 0.0f, 1000000.0f };
+    X3DAUDIO_HANDLE Handle;
+    char Name[48];
+
+    for (UINT32 Index = 0; Index < ARRAYSIZE(XcX3DMasks); Index++)
+    {
+        for (UINT32 Speed = 0; Speed < ARRAYSIZE(Speeds); Speed++)
+        {
+            memset(Handle, 0xCC, sizeof(Handle));
+            sprintf_s(Name, sizeof(Name), "x3d init %X speed %u = %08lX", XcX3DMasks[Index], Speed,
+                      XcX3DInitialize(XcX3DMasks[Index], Speeds[Speed], Handle));
+            XcBytes(Name, Handle, sizeof(Handle));
+        }
+    }
+    memset(Handle, 0xCC, sizeof(Handle));
+    sprintf_s(Name, sizeof(Name), "x3d init all = %08lX", XcX3DInitialize(0xFFFFFFFF, 2.5f, Handle));
+    XcBytes(Name, Handle, sizeof(Handle));
+}
+
+/* Mono emitters all around the listener, in and out of the horizontal plane */
+static
+VOID
+XcCheckX3DRing(VOID)
+{
+    static const float Radii[] = { 0.25f, 3.0f };
+    X3DAUDIO_LISTENER Listener;
+    X3DAUDIO_EMITTER Emitter;
+    char Label[48];
+
+    for (UINT32 Mask = 0; Mask < ARRAYSIZE(XcX3DMasks); Mask++)
+    {
+        for (UINT32 Turned = 0; Turned < 2; Turned++)
+        {
+            XcX3DListener(&Listener, Turned != 0);
+            for (UINT32 Step = 0; Step < 16; Step++)
+            {
+                for (UINT32 Radius = 0; Radius < ARRAYSIZE(Radii); Radius++)
+                {
+                    XcX3DEmitter(&Emitter, &Listener, static_cast<float>(Step) * (X3DAUDIO_PI / 8.0f), Radii[Radius], 0.0f);
+                    sprintf_s(Label, sizeof(Label), "ring %u %u %u", Turned, Step, Radius);
+                    XcX3DRun(Label, XcX3DMasks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter, XC_X3D_ALL);
+                }
+            }
+            XcX3DEmitter(&Emitter, &Listener, 0.0f, 0.0f, 0.0f);
+            XcX3DRun("ring same", XcX3DMasks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter, XC_X3D_ALL);
+            XcX3DEmitter(&Emitter, &Listener, 0.0f, 0.0f, 2.0f);
+            XcX3DRun("ring above", XcX3DMasks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter, XC_X3D_ALL);
+            XcX3DEmitter(&Emitter, &Listener, 1.0f, 0.5f, -1.5f);
+            XcX3DRun("ring below", XcX3DMasks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter,
+                     XC_X3D_ALL | X3DAUDIO_CALCULATE_ZEROCENTER);
+            if (XcX3DHasLfe(XcX3DMasks[Mask]))
+            {
+                XcX3DEmitter(&Emitter, &Listener, 2.0f, 4.0f, 0.5f);
+                XcX3DRun("ring lfe", XcX3DMasks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter,
+                         XC_X3D_ALL | X3DAUDIO_CALCULATE_REDIRECT_TO_LFE);
+            }
+        }
+    }
+}
+
+/* Inner radius blending, with and without a tilted inner radius angle */
+static
+VOID
+XcCheckX3DInner(VOID)
+{
+    static const float Radii[] = { 0.0f, 0.5f, 0.999f, 1.0f, 1.5f, 3.0f };
+    static const float Heights[] = { 0.0f, 0.75f, -1.25f };
+    static const UINT32 Masks[] = { SPEAKER_STEREO, SPEAKER_QUAD, SPEAKER_5POINT1, SPEAKER_7POINT1, SPEAKER_SURROUND, 0 };
+    X3DAUDIO_LISTENER Listener;
+    X3DAUDIO_EMITTER Emitter;
+    char Label[48];
+
+    XcX3DListener(&Listener, TRUE);
+    for (UINT32 Mask = 0; Mask < ARRAYSIZE(Masks); Mask++)
+    {
+        for (UINT32 Angle = 0; Angle < 2; Angle++)
+        {
+            for (UINT32 Radius = 0; Radius < ARRAYSIZE(Radii); Radius++)
+            {
+                for (UINT32 Height = 0; Height < ARRAYSIZE(Heights); Height++)
+                {
+                    XcX3DEmitter(&Emitter, &Listener, 0.4f + static_cast<float>(Radius) * 1.1f, Radii[Radius], Heights[Height]);
+                    Emitter.InnerRadius = 2.0f;
+                    Emitter.InnerRadiusAngle = Angle != 0 ? X3DAUDIO_PI / 8.0f : 0.0f;
+                    sprintf_s(Label, sizeof(Label), "inner %u %u %u", Angle, Radius, Height);
+                    XcX3DRun(Label, Masks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter,
+                             Height == 2 ? X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_ZEROCENTER : X3DAUDIO_CALCULATE_MATRIX);
+                }
+            }
+        }
+    }
+}
+
+/* Multichannel emitters with azimuths, X3DAUDIO_2PI entries marking LFE channels */
+static
+VOID
+XcCheckX3DChannels(VOID)
+{
+    static const float Pair[] = { 5.8f, 0.48f };
+    static const float Four[] = { 0.0f, X3DAUDIO_PI / 2.0f, X3DAUDIO_PI, X3DAUDIO_PI * 1.5f };
+    static const float Six[] = { 5.5f, 0.785f, 0.0f, X3DAUDIO_2PI, 3.9f, 2.35f };
+    static const float Eight[] = { X3DAUDIO_2PI, 5.5f, 0.785f, 0.0f, X3DAUDIO_2PI, 3.9f, 2.35f, 4.71f };
+    static const float* Sets[] = { Pair, Four, Six, Eight };
+    static const UINT32 Counts[] = { 2, 4, 6, 8 };
+    static const float Spokes[] = { 0.0f, 1.5f };
+    X3DAUDIO_CONE Cone = { X3DAUDIO_PI / 2.0f, X3DAUDIO_PI * 1.5f, 1.0f, 0.3f, 0.1f, 0.7f, 0.9f, 0.2f };
+    X3DAUDIO_LISTENER Listener;
+    X3DAUDIO_EMITTER Emitter;
+    char Label[48];
+
+    for (UINT32 Mask = 0; Mask < ARRAYSIZE(XcX3DMasks); Mask++)
+    {
+        for (UINT32 Set = 0; Set < ARRAYSIZE(Sets); Set++)
+        {
+            for (UINT32 Spoke = 0; Spoke < ARRAYSIZE(Spokes); Spoke++)
+            {
+                for (UINT32 Place = 0; Place < 4; Place++)
+                {
+                    UINT32 Flags = X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_LPF_DIRECT | X3DAUDIO_CALCULATE_REVERB;
+
+                    XcX3DListener(&Listener, Place & 1);
+                    if (Place == 3)
+                        Listener.pCone = &Cone;
+                    XcX3DEmitter(&Emitter, &Listener, 0.9f + static_cast<float>(Place) * 1.7f, Place == 2 ? 0.8f : 4.0f, 0.3f);
+                    Emitter.ChannelCount = Counts[Set];
+                    Emitter.pChannelAzimuths = const_cast<float*>(Sets[Set]);
+                    Emitter.ChannelRadius = Spokes[Spoke];
+                    Emitter.InnerRadius = Place == 2 ? 1.0f : 0.0f;
+                    if (Place == 1)
+                        Flags |= X3DAUDIO_CALCULATE_ZEROCENTER;
+                    if (Place == 2 && XcX3DHasLfe(XcX3DMasks[Mask]))
+                        Flags |= X3DAUDIO_CALCULATE_REDIRECT_TO_LFE;
+                    sprintf_s(Label, sizeof(Label), "channels %u %u %u", Set, Spoke, Place);
+                    XcX3DRun(Label, XcX3DMasks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter, Flags);
+                }
+            }
+        }
+    }
+}
+
+/* Emitter and listener cones against several facings */
+static
+VOID
+XcCheckX3DCones(VOID)
+{
+    static const X3DAUDIO_CONE Cones[] =
+    {
+        { X3DAUDIO_PI / 2.0f, X3DAUDIO_PI, 1.0f, 0.708f, 0.0f, 0.25f, 0.708f, 1.0f },
+        { X3DAUDIO_2PI, X3DAUDIO_2PI, 0.8f, 0.1f, 0.3f, 0.9f, 0.6f, 0.2f },
+        { 0.0f, 0.0f, 0.8f, 0.1f, 0.3f, 0.9f, 0.6f, 0.2f },
+        { 0.3f, 2.5f, 1.2f, 0.05f, 0.15f, 0.6f, 1.0f, 0.4f },
+        { 1.0f, 1.0f, 0.5f, 0.25f, 0.5f, 0.75f, 0.2f, 0.8f },
+    };
+    static const UINT32 Masks[] = { SPEAKER_STEREO, SPEAKER_5POINT1, SPEAKER_4POINT1 };
+    X3DAUDIO_LISTENER Listener;
+    X3DAUDIO_EMITTER Emitter;
+    char Label[48];
+
+    for (UINT32 Mask = 0; Mask < ARRAYSIZE(Masks); Mask++)
+    {
+        for (UINT32 Own = 0; Own <= ARRAYSIZE(Cones); Own++)
+        {
+            for (UINT32 Heard = 0; Heard <= ARRAYSIZE(Cones); Heard++)
+            {
+                for (UINT32 Place = 0; Place < 3; Place++)
+                {
+                    XcX3DListener(&Listener, Place != 0);
+                    if (Heard < ARRAYSIZE(Cones))
+                        Listener.pCone = const_cast<X3DAUDIO_CONE*>(&Cones[Heard]);
+                    XcX3DEmitter(&Emitter, &Listener, 0.5f + static_cast<float>(Place) * 2.1f, Place == 2 ? 0.0f : 2.5f, 0.0f);
+                    if (Own < ARRAYSIZE(Cones))
+                        Emitter.pCone = const_cast<X3DAUDIO_CONE*>(&Cones[Own]);
+                    sprintf_s(Label, sizeof(Label), "cones %u %u %u", Own, Heard, Place);
+                    XcX3DRun(Label, Masks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter, XC_X3D_ALL);
+                }
+            }
+        }
+    }
+}
+
+/* Custom curves at points on, between and past their ends */
+static
+VOID
+XcCheckX3DCurves(VOID)
+{
+    static X3DAUDIO_DISTANCE_CURVE_POINT VolumePoints[] = { { 0.0f, 1.0f }, { 0.3f, 0.9f }, { 2.0f, 0.2f }, { 6.0f, 0.0f } };
+    static X3DAUDIO_DISTANCE_CURVE_POINT LfePoints[] = { { 0.0f, 0.5f }, { 1.0f, 0.25f } };
+    static X3DAUDIO_DISTANCE_CURVE_POINT DirectPoints[] = { { 0.0f, 0.9f }, { 0.5f, 0.6f }, { 4.0f, 0.1f } };
+    static X3DAUDIO_DISTANCE_CURVE_POINT ReverbLpfPoints[] = { { 0.0f, 0.2f }, { 3.0f, 0.8f } };
+    static X3DAUDIO_DISTANCE_CURVE_POINT ReverbPoints[] = { { 0.0f, 0.0f }, { 0.25f, 1.0f }, { 0.5f, 0.5f }, { 1.0f, 0.25f }, { 10.0f, 0.0f } };
+    static X3DAUDIO_DISTANCE_CURVE_POINT SinglePoint[] = { { 0.5f, 0.375f } };
+    static X3DAUDIO_DISTANCE_CURVE Volume = { VolumePoints, ARRAYSIZE(VolumePoints) };
+    static X3DAUDIO_DISTANCE_CURVE Lfe = { LfePoints, ARRAYSIZE(LfePoints) };
+    static X3DAUDIO_DISTANCE_CURVE Direct = { DirectPoints, ARRAYSIZE(DirectPoints) };
+    static X3DAUDIO_DISTANCE_CURVE ReverbLpf = { ReverbLpfPoints, ARRAYSIZE(ReverbLpfPoints) };
+    static X3DAUDIO_DISTANCE_CURVE Reverb = { ReverbPoints, ARRAYSIZE(ReverbPoints) };
+    static X3DAUDIO_DISTANCE_CURVE Single = { SinglePoint, 1 };
+    static const float Distances[] = { 0.0f, 0.3f, 0.5f, 1.0f, 2.5f, 7.0f, 100.0f };
+    static const float Scalers[] = { 1.0f, 2.5f, 0.1f };
+    static const float Six[] = { 5.5f, 0.785f, 0.0f, X3DAUDIO_2PI, 3.9f, 2.35f };
+    static const UINT32 Masks[] = { SPEAKER_STEREO, SPEAKER_5POINT1 };
+    X3DAUDIO_LISTENER Listener;
+    X3DAUDIO_EMITTER Emitter;
+    char Label[48];
+
+    XcX3DListener(&Listener, FALSE);
+    for (UINT32 Mask = 0; Mask < ARRAYSIZE(Masks); Mask++)
+    {
+        for (UINT32 Style = 0; Style < 4; Style++)
+        {
+            for (UINT32 Scaler = 0; Scaler < ARRAYSIZE(Scalers); Scaler++)
+            {
+                for (UINT32 Distance = 0; Distance < ARRAYSIZE(Distances); Distance++)
+                {
+                    UINT32 Flags = X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_LPF_DIRECT | X3DAUDIO_CALCULATE_LPF_REVERB |
+                                   X3DAUDIO_CALCULATE_REVERB;
+
+                    XcX3DEmitter(&Emitter, &Listener, 0.7f, Distances[Distance], 0.0f);
+                    Emitter.CurveDistanceScaler = Scalers[Scaler];
+                    if (Style == 1 || Style == 3)
+                    {
+                        Emitter.pVolumeCurve = &Volume;
+                        Emitter.pLFECurve = &Lfe;
+                        Emitter.pLPFDirectCurve = &Direct;
+                        Emitter.pLPFReverbCurve = &ReverbLpf;
+                        Emitter.pReverbCurve = &Reverb;
+                    }
+                    if (Style == 2)
+                    {
+                        Emitter.pVolumeCurve = &Single;
+                        Emitter.pLPFDirectCurve = &Single;
+                        Emitter.pReverbCurve = &Single;
+                    }
+                    if (Style == 3)
+                    {
+                        Emitter.ChannelCount = ARRAYSIZE(Six);
+                        Emitter.pChannelAzimuths = const_cast<float*>(Six);
+                        Emitter.ChannelRadius = 0.5f;
+                    }
+                    if (XcX3DHasLfe(Masks[Mask]))
+                        Flags |= X3DAUDIO_CALCULATE_REDIRECT_TO_LFE;
+                    sprintf_s(Label, sizeof(Label), "curves %u %u %u", Style, Scaler, Distance);
+                    XcX3DRun(Label, Masks[Mask], X3DAUDIO_SPEED_OF_SOUND, &Listener, &Emitter, Flags);
+                }
+            }
+        }
+    }
+}
+
+/* Doppler from both velocities, scaled, and clamped near the speed of sound */
+static
+VOID
+XcCheckX3DDoppler(VOID)
+{
+    static const X3DAUDIO_VECTOR Velocities[] =
+    {
+        { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 20.0f }, { 0.0f, 0.0f, -20.0f }, { 3.0f, -4.0f, 12.0f },
+        { 0.0f, 0.0f, 400.0f }, { 0.0f, 0.0f, -400.0f }, { 0.0f, 0.0f, 343.5f }, { 250.0f, 10.0f, -300.0f },
+    };
+    static const float Scalers[] = { 0.0f, 1.0f, 2.5f };
+    static const float Speeds[] = { X3DAUDIO_SPEED_OF_SOUND, 10.0f };
+    X3DAUDIO_LISTENER Listener;
+    X3DAUDIO_EMITTER Emitter;
+    char Label[48];
+
+    for (UINT32 Speed = 0; Speed < ARRAYSIZE(Speeds); Speed++)
+    {
+        for (UINT32 Heard = 0; Heard < ARRAYSIZE(Velocities); Heard++)
+        {
+            for (UINT32 Own = 0; Own < ARRAYSIZE(Velocities); Own += 1 + (Heard & 1))
+            {
+                for (UINT32 Scaler = 0; Scaler < ARRAYSIZE(Scalers); Scaler++)
+                {
+                    XcX3DListener(&Listener, Heard & 1);
+                    Listener.Velocity = Velocities[Heard];
+                    XcX3DEmitter(&Emitter, &Listener, 0.3f + static_cast<float>(Own), Own == 3 ? 0.0f : 5.0f, 0.0f);
+                    Emitter.Velocity = Velocities[Own];
+                    Emitter.DopplerScaler = Scalers[Scaler];
+                    sprintf_s(Label, sizeof(Label), "doppler %u %u %u %u", Speed, Heard, Own, Scaler);
+                    XcX3DRun(Label, SPEAKER_STEREO, Speeds[Speed], &Listener, &Emitter,
+                             X3DAUDIO_CALCULATE_DOPPLER | X3DAUDIO_CALCULATE_DELAY);
+                }
+            }
+        }
+    }
+}
+
+static
+VOID
+XcCheckX3D(VOID)
+{
+    XcX3DInitialize = reinterpret_cast<PXC_X3D_INITIALIZE>(GetProcAddress(XcModule, "X3DAudioInitialize"));
+    XcX3DCalculate = reinterpret_cast<PXC_X3D_CALCULATE>(GetProcAddress(XcModule, "X3DAudioCalculate"));
+    if (XcX3DInitialize == nullptr || XcX3DCalculate == nullptr)
+    {
+        printf("x3d exports missing\n");
+        return;
+    }
+    XcCheckX3DInitialize();
+    XcCheckX3DRing();
+    XcCheckX3DInner();
+    XcCheckX3DChannels();
+    XcCheckX3DCones();
+    XcCheckX3DCurves();
+    XcCheckX3DDoppler();
+}
+
 /* XAudio2 2.8 forwards everything to 2.9 */
 static
 VOID
@@ -3846,6 +4324,8 @@ wmain(
         XcCheckEffects();
     if (XcWant(L"apo"))
         XcCheckApos();
+    if (XcWant(L"x3d"))
+        XcCheckX3D();
 
     /* Audible, so only on request */
     if (XcSection != nullptr && _wcsicmp(XcSection, L"mix") == 0)
