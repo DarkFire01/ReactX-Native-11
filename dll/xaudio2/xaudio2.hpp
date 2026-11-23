@@ -363,7 +363,23 @@ struct XaSend
     float* MixState;
     BOOLEAN Primed;
     BOOLEAN Changed;
+    float* FilterState;
+    float* Filtered;
 };
+
+/* filter.cpp */
+BOOLEAN
+XaFilterSilences(
+    _In_ const XAUDIO2_FILTER_PARAMETERS* Parameters);
+
+VOID
+XaFilterRun(
+    _In_ const XAUDIO2_FILTER_PARAMETERS* Parameters,
+    _Inout_updates_(2 * Channels) float* State,
+    _In_reads_(Frames * Channels) const float* Input,
+    _Out_writes_(Frames * Channels) float* Output,
+    _In_ UINT32 Frames,
+    _In_ UINT32 Channels);
 
 /* mixmatrix.cpp: one block through a matrix, optionally ramping from Matrix by Delta a frame */
 struct XaMixBlock
@@ -471,6 +487,7 @@ public:
     BOOLEAN InputFed;
     XaResampler* Resampler;
     float* FilterState;
+    BOOLEAN FilterActive;
     XaScratchBuffer InputScratch;
     XaScratchBuffer OutputScratch;
 

@@ -178,6 +178,16 @@ XaMixThroughSend(
     XaMixBlock Block;
     UINT32 RampFrames = 0;
 
+    if (Send->FilterState != nullptr && Send->Filtered != nullptr)
+    {
+        const XAUDIO2_FILTER_PARAMETERS* Parameters = reinterpret_cast<const XAUDIO2_FILTER_PARAMETERS*>(Send->Mix.Current);
+
+        if (!XaFilterSilences(Parameters))
+        {
+            XaFilterRun(Parameters, Send->FilterState, Input, Send->Filtered, Frames, InputChannels);
+            Input = Send->Filtered;
+        }
+    }
     if (!Send->Primed)
     {
         memcpy(Send->MixState, Matrix, sizeof(float) * Cells);

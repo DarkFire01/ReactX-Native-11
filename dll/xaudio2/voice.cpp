@@ -124,6 +124,7 @@ XaVoice::XaVoice(
     InputFed = FALSE;
     Resampler = nullptr;
     FilterState = nullptr;
+    FilterActive = FALSE;
     memset(&InputScratch, 0, sizeof(InputScratch));
     memset(&OutputScratch, 0, sizeof(OutputScratch));
 }
@@ -268,6 +269,8 @@ XaVoice::ReleaseSends(VOID)
         delete[] Send->Levels;
         XaParameterFree(&Send->Mix);
         delete[] Send->MixState;
+        delete[] Send->FilterState;
+        delete[] Send->Filtered;
         delete Send;
     }
     SendCount = 0;
@@ -314,6 +317,13 @@ XaVoice::BuildSends(
         memcpy(Initial, &XaDefaultFilter, sizeof(XaDefaultFilter));
         memset(Initial + sizeof(XaDefaultFilter), 0, BlockSize - sizeof(XaDefaultFilter));
         Send->MixState = new (std::nothrow) float[2 * Inputs * Outputs];
+        if ((Send->Flags & XAUDIO2_SEND_USEFILTER) != 0)
+        {
+            Send->FilterState = new (std::nothrow) float[2 * Inputs];
+            Send->Filtered = new (std::nothrow) float[static_cast<SIZE_T>(XaQuantumFrames(XA_MAX_RATE, Engine)) * Inputs];
+            if (Send->FilterState != nullptr)
+                memset(Send->FilterState, 0, sizeof(float) * 2 * Inputs);
+        }
         if (Send->MixState == nullptr || !XaParameterInit(&Send->Mix, BlockSize, Initial))
         {
             delete[] Send->MixState;
@@ -388,8 +398,15 @@ XaVoice::InitializeCommon(
     }
     CreationFlags = Flags;
     ActiveFlags = Flags;
-    if ((Flags & XAUDIO2_VOICE_USEFILTER) != 0 && !XaParameterInit(&Filter, sizeof(XaDefaultFilter), &XaDefaultFilter))
-        return E_OUTOFMEMORY;
+    if ((Flags & XAUDIO2_VOICE_USEFILTER) != 0)
+    {
+        if (!XaParameterInit(&Filter, sizeof(XaDefaultFilter), &XaDefaultFilter))
+            return E_OUTOFMEMORY;
+        FilterState = new (std::nothrow) float[2 * InputChannels];
+        if (FilterState == nullptr)
+            return E_OUTOFMEMORY;
+        memset(FilterState, 0, sizeof(float) * 2 * InputChannels);
+    }
     if (Chain != nullptr)
     {
         hr = XaEffectsCreate(this, Chain, &Effects);

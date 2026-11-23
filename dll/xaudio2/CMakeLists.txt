@@ -5,6 +5,7 @@ nt_add_usermode_dll(xaudio2_9
         device.cpp
         effects.cpp
         engine.cpp
+        filter.cpp
         format.cpp
         main.cpp
         matrix.cpp

@@ -402,6 +402,39 @@ XaApplyFlush(
         Voice->QueueTail = Buffer;
 }
 
+/* The voice filter runs in place on what the voice is about to process */
+static
+VOID
+XaApplyVoiceFilter(
+    _Inout_ XaVoice* Voice,
+    _Inout_ float* Buffer,
+    _In_ UINT32 Frames,
+    _Inout_ BOOLEAN* Silent)
+{
+    const XAUDIO2_FILTER_PARAMETERS* Parameters;
+    UINT32 Channels = Voice->InputChannels;
+
+    if (Voice->FilterState == nullptr)
+        return;
+    Parameters = reinterpret_cast<const XAUDIO2_FILTER_PARAMETERS*>(Voice->Filter.Current);
+    if (*Silent || XaFilterSilences(Parameters))
+    {
+        if (Voice->FilterActive)
+        {
+            memset(Voice->FilterState, 0, sizeof(float) * 2 * Channels);
+            Voice->FilterActive = FALSE;
+        }
+        if (!*Silent)
+        {
+            memset(Buffer, 0, sizeof(float) * Frames * Channels);
+            *Silent = TRUE;
+        }
+        return;
+    }
+    XaFilterRun(Parameters, Voice->FilterState, Buffer, Buffer, Frames, Channels);
+    Voice->FilterActive = TRUE;
+}
+
 /* 16 bit PCM through a converter keeps its integer frames for the interpolation */
 static
 VOID
@@ -491,6 +524,7 @@ XaProcessSource(
             BOOLEAN Silent = Gathered == 0;
             float* Result = Output;
 
+            XaApplyVoiceFilter(Voice, Output, Frames, &Silent);
             if (Voice->Effects != nullptr)
                 Result = XaEffectsProcess(Voice->Effects, Output, Frames, &Silent);
             XaMixSends(Voice, Result, Frames, Silent);
@@ -514,6 +548,7 @@ XaProcessSubmix(
     XaTakeParameters(Voice);
     if (Output == nullptr)
         return;
+    XaApplyVoiceFilter(Voice, Voice->InputMix, Frames, &Silent);
     if (Voice->Effects != nullptr)
         Output = XaEffectsProcess(Voice->Effects, Voice->InputMix, Frames, &Silent);
     if (Voice->OutputRate != Voice->InputRate)
