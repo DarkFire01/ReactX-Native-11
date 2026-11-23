@@ -224,10 +224,12 @@ VOID
 D9Device::ComputeCaps(VOID)
 {
     Enum->GetDeviceCaps(Adapter->Ordinal, DeviceType, &Caps);
+    /* Hardware vertex processing runs the fixed function vertex pipeline as the runtime's own shaders */
     if ((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) == 0)
     {
         Caps.VertexProcessingCaps = D9PipelineVertexCaps;
         Caps.MaxActiveLights = D9ShaderPipelineLights;
+        Caps.MaxVertexBlendMatrices = 4;
         Caps.MaxVertexBlendMatrixIndex = D9ShaderPipelineBlendIndex;
         return;
     }
