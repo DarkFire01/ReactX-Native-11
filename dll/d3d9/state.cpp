@@ -100,6 +100,34 @@ D9Device::SendStateValue(
 {
     D3DDDIARG_RENDERSTATE Args = {};
 
+    /* The vertex converter sees every state first; a wrap state also follows the stages that read its set */
+    if (Switch.HasVertexConverter)
+    {
+        if (State >= D3DRS_WRAP0 && State <= D3DRS_WRAP7)
+        {
+            UINT Set = State - D3DRS_WRAP0;
+
+            Switch.ApiWrap[Set] = Value;
+            if (Switch.VertexConverting && (Switch.Allowed & 1) != 0)
+            {
+                for (UINT Stage = 0; Stage < D9VertexStages; Stage++)
+                {
+                    if ((Switch.RenumberedStages & (1u << Stage)) == 0 || (Switch.ApiCoordIndex[Stage] & 7) != Set ||
+                        Switch.DriverWrap[Stage] == Value)
+                    {
+                        continue;
+                    }
+                    Args.State = static_cast<D3DDDIRENDERSTATETYPE>(D3DRS_WRAP0 + Stage);
+                    Args.Value = Value;
+                    DdiRenderState(&Args);
+                    Switch.DriverWrap[Stage] = Value;
+                }
+            }
+            Switch.DriverWrap[Set] = Value;
+        }
+        VertexShaders.SetRenderState(State, Value);
+    }
+
     if (SoftwareVertices && D9ListHolds(D9SoftwareOnlyStates, _countof(D9SoftwareOnlyStates), State))
         return;
     if (!SoftwareVertices && D9ListHolds(D9ShaderPipelineStates, _countof(D9ShaderPipelineStates), State))
@@ -182,6 +210,10 @@ D9Device::SendStageValue(
     D3DDDIARG_SETPIXELSHADERCONST Constant = {};
     DWORD Bits[4] = {};
     BOOLEAN Pass = TRUE;
+
+    /* The vertex converter may take the state for itself or hand the driver its own value */
+    if (Switch.HasVertexConverter && Stage < D9VertexStages && FeedVertexStage(Stage, Type, &Value))
+        return;
 
     /* A new count of active stages changes the coordinates the vertex converter writes */
     if (Switch.HasPixelConverter && Stage < D9FixedStages && PixelShaders.SetStage(Stage, Type, Value))
@@ -434,6 +466,8 @@ D9Device::SetTransform(
     /* Types the runtime does not keep are accepted and dropped */
     if (Slot >= 0)
         Transforms[Slot] = *Matrix;
+    if (Switch.HasVertexConverter)
+        VertexShaders.SetTransform(Type, Matrix);
     if (Type == D3DTS_PROJECTION)
         SendWInfo(Matrix);
     return S_OK;
@@ -489,6 +523,8 @@ D9Device::SetViewport(
 
     /* A depth range thinner than a thousandth is widened away from the nearer end of the unit range */
     *Kept = *Viewport;
+    if (Switch.HasVertexConverter)
+        VertexShaders.SetViewportSize(Kept->Width, Kept->Height);
     if (!KeepsNoState() && Kept->MaxZ - Kept->MinZ < 0.001f)
     {
         if (Kept->MaxZ < 0.5f)
@@ -563,6 +599,8 @@ D9Device::SetMaterial(
     if (Recording != nullptr)
         return Recording->Add(D9BlockOp::Material, 0, 0, Material, sizeof(*Material));
     CurrentMaterial = *Material;
+    if (Switch.HasVertexConverter)
+        VertexShaders.SetMaterial(Material);
     return S_OK;
 }
 

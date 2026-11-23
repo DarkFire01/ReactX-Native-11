@@ -7,9 +7,6 @@
 
 #include "device.hpp"
 
-/* What a render state slot holds before anything sets it */
-static constexpr DWORD D9UnsetState = 0xBAADCAFE;
-
 /* Render states the runtime no longer defines; asking for them fails */
 static const BYTE D9RetiredStates[] =
 {
@@ -232,6 +229,7 @@ D9Device::~D9Device()
     delete ImplicitChain;
     if (DriverDevice != NULL)
     {
+        ReleaseVertexShaders();
         ReleasePixelShaders();
         DestroyStagingBuffers();
     }
@@ -433,6 +431,8 @@ D9Device::SendViewportRange(VOID)
     CurrentViewport.Y = 0;
     CurrentViewport.Width = Viewport.Width;
     CurrentViewport.Height = Viewport.Height;
+    if (Switch.HasVertexConverter)
+        VertexShaders.SetViewportSize(CurrentViewport.Width, CurrentViewport.Height);
     CurrentViewport.MinZ = Range.MinZ;
     CurrentViewport.MaxZ = Range.MaxZ;
 }
@@ -448,6 +448,8 @@ D9Device::SendResetViewport(VOID)
     CurrentViewport.Y = 0;
     CurrentViewport.Width = Parameters.BackBufferWidth;
     CurrentViewport.Height = Parameters.BackBufferHeight;
+    if (Switch.HasVertexConverter)
+        VertexShaders.SetViewportSize(CurrentViewport.Width, CurrentViewport.Height);
     Viewport.Width = CurrentViewport.Width;
     Viewport.Height = CurrentViewport.Height;
     Range.MinZ = CurrentViewport.MinZ;
@@ -800,6 +802,7 @@ D9Device::Initialize(
     SetDefaultState(Parameters);
     SendInitialState();
     StartPixelConverter();
+    StartVertexConverter();
     return S_OK;
 }
 
@@ -1193,6 +1196,7 @@ D9Device::ResetCommon(
     ImplicitChain->ReleaseBuffers();
     if (!IsEx)
     {
+        ReleaseVertexShaders();
         ReleasePixelShaders();
         DestroyStagingBuffers();
     }
@@ -1231,6 +1235,7 @@ D9Device::ResetCommon(
     SetDefaultState(Parameters);
     SendInitialState();
     StartPixelConverter();
+    StartVertexConverter();
     return S_OK;
 }
 
@@ -2383,6 +2388,8 @@ D9Device::SetRenderTarget(
         CurrentViewport.Y = 0;
         CurrentViewport.Width = Desc.Width;
         CurrentViewport.Height = Desc.Height;
+        if (Switch.HasVertexConverter)
+            VertexShaders.SetViewportSize(CurrentViewport.Width, CurrentViewport.Height);
         CurrentViewport.MinZ = 0.0f;
         CurrentViewport.MaxZ = 1.0f;
         SetRect(&ScissorRect, 0, 0, Desc.Width, Desc.Height);

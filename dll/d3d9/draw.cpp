@@ -190,7 +190,21 @@ D9Device::ApplySwitch(VOID)
             Switch.VertexConverting = TRUE;
             Switch.Allowed = (Switch.Allowed | D9AllowConvertingVertices) & ~D9SwitchWantVertexConverter;
             Switch.Pending &= ~D9SwitchWantVertexConverter;
-            D9_TRACE_ONCE(L"a draw needs the fixed function vertex pipeline, which is not converted yet");
+
+            /* The converter's registers reach the driver again, then the stages read the outputs of their own
+               numbers */
+            if (VertexShaders.Mark != 0)
+            {
+                UINT Count = VertexShaders.Mark < Limits.DriverVertexFloats ? VertexShaders.Mark
+                                                                             : Limits.DriverVertexFloats;
+
+                DdiShaderConstants(D9BatchCall::VertexShaderConst, 0, Count, VertexShaders.Registers,
+                                   Count * sizeof(VertexShaders.Registers[0]));
+            }
+            DdiShaderConstants(D9BatchCall::VertexShaderConstI, 0, 3, VertexShaders.Loops,
+                               sizeof(VertexShaders.Loops));
+            RenumberStages(TRUE);
+            VertexShaders.Dirty = TRUE;
             Acting = Switch.Pending & Switch.Allowed;
         }
         else if ((Acting & D9SwitchWantApiVertexShader) != 0)
@@ -200,6 +214,7 @@ D9Device::ApplySwitch(VOID)
 
             Switch.VertexConverting = FALSE;
             Switch.Pending &= ~(D9SwitchWantVertexConverter | D9SwitchWantApiVertexShader);
+            RenumberStages(FALSE);
             Switch.Allowed = (Switch.Allowed & D9AllowAfterVertexInit) | D9SwitchWantVertexConverter;
             D9RestoreVertexConstants(Switch.VertexFloatsUsed, Switch.VertexIntsUsed, Limits.VertexFloats,
                                      Limits.VertexInts, &Floats, &Ints);
@@ -245,8 +260,17 @@ D9Device::ApplySwitch(VOID)
     Acting = Switch.Pending & Switch.Allowed;
     if ((Acting & D9SwitchInputChanges) == 0)
         return;
+    if ((Acting & D9SwitchPointList) != 0 && Switch.HasVertexConverter)
+        VertexShaders.SetPointList(Switch.DrewPoints);
     if ((Acting & D9SwitchPointSize) != 0)
         PixelShaders.SetPointSprite(Switch.DrewPoints && RenderStates[D3DRS_POINTSPRITEENABLE] != 0);
+    if ((Acting & D9SwitchVertexInput) != 0 && Switch.HasVertexConverter && Declaration != nullptr)
+    {
+        if (Declaration->Fvf != 0)
+            VertexShaders.SetFvf(Declaration->Fvf);
+        else
+            VertexShaders.SetElements(Declaration->Elements);
+    }
     if ((Acting & D9SwitchPixelInput) != 0)
     {
         if (!Switch.ShaderInput)
@@ -259,6 +283,10 @@ D9Device::ApplySwitch(VOID)
         else if (!Switch.VertexConverting)
         {
             PixelShaders.SetFvf(Switch.ApiVertexInputs);
+        }
+        else
+        {
+            PixelShaders.SetFvf(VertexShaders.UsedKey.Outputs);
         }
     }
     Switch.Pending &= ~(Acting & D9SwitchInputChanges);
@@ -300,6 +328,231 @@ D9Device::PreparePixelShader(VOID)
         DdiPixelShader(Shader);
         Switch.ConverterBound = Shader;
     }
+}
+
+/* The registers waiting for the driver go in the order the converter keeps its ranges */
+VOID
+D9Device::SendConverterRanges(VOID)
+{
+    UINT First;
+    UINT Count;
+
+    while (VertexShaders.TakeRange(&First, &Count))
+    {
+        if (First >= Limits.DriverVertexFloats)
+            continue;
+        if (Count > Limits.DriverVertexFloats - First)
+            Count = Limits.DriverVertexFloats - First;
+        DdiShaderConstants(D9BatchCall::VertexShaderConst, First, Count, VertexShaders.Registers[First],
+                           Count * sizeof(VertexShaders.Registers[0]));
+    }
+}
+
+/* The fixed function vertex shader for the inputs and states as they stand, made the first time they come up,
+   then the registers it reads */
+VOID
+D9Device::PrepareVertexShader(VOID)
+{
+    HANDLE Shader;
+    HANDLE Evicted;
+
+    if (!VertexShaders.Dirty)
+    {
+        if (VertexShaders.Updated != VertexShaders.Stale)
+            VertexShaders.UpdateRegisters();
+        SendConverterRanges();
+        return;
+    }
+
+    /* The lights in use are counted again; one light needs no loop registers */
+    if ((VertexShaders.Stale & 0x400000) != 0)
+    {
+        VertexShaders.Stale = (VertexShaders.Stale | 0x2C00000) & ~0x400000u;
+        VertexShaders.Key.Modes &= ~0x8u;
+        for (UINT Kind = 0; Kind < 3; Kind++)
+        {
+            VertexShaders.Loops[Kind][0] = 0;
+            VertexShaders.Loops[Kind][1] = 0;
+            VertexShaders.Loops[Kind][2] = 7;
+            VertexShaders.Loops[Kind][3] = 0;
+        }
+        DdiShaderConstants(D9BatchCall::VertexShaderConstI, 0, 3, VertexShaders.Loops, sizeof(VertexShaders.Loops));
+    }
+
+    if (VertexShaders.RefreshKey())
+    {
+        if (!VertexShaders.Find(&Shader))
+        {
+            DWORD* Tokens = new (std::nothrow) DWORD[D9FixedVertexTokenLimit];
+            UINT Count = 0;
+
+            if (Tokens == nullptr)
+                return;
+            if (!D9BuildFixedVertexShader(&VertexShaders.Key, VertexShaders.FlowControl, VertexShaders.Projected,
+                                          Tokens, &Count) ||
+                FAILED(CreateDriverShader(FALSE, Tokens, Count * sizeof(*Tokens), &Shader)))
+            {
+                D9_TRACE_ONCE(L"a fixed function vertex shader could not be made");
+                delete[] Tokens;
+                VertexShaders.Dirty = TRUE;
+                return;
+            }
+            delete[] Tokens;
+            if (!VertexShaders.Keep(Shader, &Evicted))
+            {
+                DestroyDriverShader(FALSE, Shader);
+                return;
+            }
+            if (Evicted != NULL)
+                DestroyDriverShader(FALSE, Evicted);
+        }
+    }
+    if (VertexShaders.Stale != 0)
+        VertexShaders.UpdateRegisters();
+    SendConverterRanges();
+
+    /* The shader goes to the driver each time the converter looked again; the pixel converter reads what it
+       writes now, or at the next change of its inputs */
+    Shader = VertexShaders.UsedShader;
+    DdiShaderConstants(D9BatchCall::VertexShaderFunc, 0, 0, &Shader, sizeof(Shader));
+    if (Switch.PixelMode != 0)
+        PixelShaders.SetFvf(VertexShaders.UsedKey.Outputs);
+    else
+        UpdateSwitch(D9SwitchPixelInput, 0);
+}
+
+/* The shaders the vertex converter made go with the device, oldest first */
+VOID
+D9Device::ReleaseVertexShaders(VOID)
+{
+    HANDLE Shader;
+
+    while (VertexShaders.TakeOldest(&Shader))
+        DestroyDriverShader(FALSE, Shader);
+}
+
+/* While the converter runs each stage reads the coordinates of its own number, with the wrap of the set it
+   reads; switching back hands the driver what the application set */
+VOID
+D9Device::RenumberStages(
+    _In_ BOOLEAN Converting)
+{
+    D3DDDIARG_RENDERSTATE Wrap = {};
+
+    for (UINT Stage = 0; Stage < D9VertexStages; Stage++)
+    {
+        DWORD Index;
+        DWORD Value;
+
+        if ((Switch.RenumberedStages & (1u << Stage)) == 0)
+            continue;
+        Index = Converting ? Stage : Switch.ApiCoordIndex[Stage];
+        SendTextureStageState(Stage, D3DTSS_TEXCOORDINDEX, Index);
+        if (Switch.HasPixelConverter)
+            PixelShaders.SetStage(Stage, D3DTSS_TEXCOORDINDEX, Index);
+        Value = Switch.ApiWrap[Converting ? (Switch.ApiCoordIndex[Stage] & 7) : Stage];
+        if (Value != Switch.DriverWrap[Stage])
+        {
+            Wrap.State = static_cast<D3DDDIRENDERSTATETYPE>(D3DRS_WRAP0 + Stage);
+            Wrap.Value = Value;
+            DdiRenderState(&Wrap);
+            Switch.DriverWrap[Stage] = Value;
+        }
+    }
+    for (UINT Stage = 0; Stage < D9VertexStages; Stage++)
+    {
+        if ((Switch.TransformedStages & (1u << Stage)) != 0)
+        {
+            SendTextureStageState(Stage, D3DTSS_TEXTURETRANSFORMFLAGS,
+                                  Converting ? (Switch.ApiTransformFlags[Stage] & D3DTTFF_PROJECTED)
+                                             : Switch.ApiTransformFlags[Stage]);
+        }
+    }
+}
+
+/* The vertex converter's part of a stage state; while it runs the driver gets the stage's own coordinates and
+   only the projection of a transform */
+BOOLEAN
+D9Device::FeedVertexStage(
+    _In_ UINT Stage,
+    _In_ UINT Type,
+    _Inout_ DWORD* Value)
+{
+    if (Type != D3DTSS_COLOROP && Type != D3DTSS_TEXCOORDINDEX && Type != D3DTSS_TEXTURETRANSFORMFLAGS)
+        return FALSE;
+    VertexShaders.SetStage(Stage, Type, *Value);
+    if (Type == D3DTSS_TEXCOORDINDEX)
+    {
+        Switch.ApiCoordIndex[Stage] = *Value;
+        Switch.RenumberedStages &= ~(1u << Stage);
+        if (*Value != Stage)
+            Switch.RenumberedStages |= 1u << Stage;
+    }
+    else if (Type == D3DTSS_TEXTURETRANSFORMFLAGS)
+    {
+        Switch.ApiTransformFlags[Stage] = *Value;
+        Switch.TransformedStages &= ~(1u << Stage);
+        if ((*Value & ~D3DTTFF_PROJECTED) != 0)
+            Switch.TransformedStages |= 1u << Stage;
+    }
+    if (!Switch.VertexConverting || (Switch.Allowed & 1) == 0)
+        return FALSE;
+    if (Type == D3DTSS_TEXTURETRANSFORMFLAGS)
+    {
+        *Value &= D3DTTFF_PROJECTED;
+        return FALSE;
+    }
+    if (Type == D3DTSS_TEXCOORDINDEX)
+    {
+        DWORD Wrap = Switch.ApiWrap[*Value & 7];
+
+        if (Switch.DriverWrap[Stage] != Wrap)
+        {
+            D3DDDIARG_RENDERSTATE Args = {};
+
+            Args.State = static_cast<D3DDDIRENDERSTATETYPE>(D3DRS_WRAP0 + Stage);
+            Args.Value = Wrap;
+            DdiRenderState(&Args);
+            Switch.DriverWrap[Stage] = Wrap;
+        }
+        *Value = Stage;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The vertex converter starts from the device's default states, matrices and material */
+VOID
+D9Device::StartVertexConverter(VOID)
+{
+    D3DMATRIX Identity = {};
+
+    if (!Switch.HasVertexConverter)
+        return;
+    VertexShaders.Start(Limits.DriverVertexFloats, Caps.VS20Caps.DynamicFlowControlDepth > 1,
+                        (Caps.TextureCaps & D3DPTEXTURECAPS_PROJECTED) != 0);
+    for (UINT State = 0; State < D9RenderStateCount; State++)
+    {
+        if (RenderStates[State] != D9UnsetState)
+            VertexShaders.SetRenderState(State, RenderStates[State]);
+    }
+    for (UINT Stage = 0; Stage < D9VertexStages; Stage++)
+    {
+        VertexShaders.SetStage(Stage, D3DTSS_COLOROP, StageStates[Stage][D3DTSS_COLOROP]);
+        VertexShaders.SetStage(Stage, D3DTSS_TEXCOORDINDEX, StageStates[Stage][D3DTSS_TEXCOORDINDEX]);
+        VertexShaders.SetStage(Stage, D3DTSS_TEXTURETRANSFORMFLAGS, StageStates[Stage][D3DTSS_TEXTURETRANSFORMFLAGS]);
+        Switch.ApiCoordIndex[Stage] = StageStates[Stage][D3DTSS_TEXCOORDINDEX];
+        Switch.ApiTransformFlags[Stage] = StageStates[Stage][D3DTSS_TEXTURETRANSFORMFLAGS];
+        Switch.ApiWrap[Stage] = RenderStates[D3DRS_WRAP0 + Stage];
+        Switch.DriverWrap[Stage] = RenderStates[D3DRS_WRAP0 + Stage];
+    }
+    Switch.RenumberedStages = 0;
+    Switch.TransformedStages = 0;
+    Identity._11 = Identity._22 = Identity._33 = Identity._44 = 1.0f;
+    for (UINT Stage = 0; Stage < D9VertexStages; Stage++)
+        VertexShaders.SetTransform(D3DTS_TEXTURE0 + Stage, &Identity);
+    VertexShaders.SetMaterial(&CurrentMaterial);
+    VertexShaders.SetViewportSize(CurrentViewport.Width, CurrentViewport.Height);
 }
 
 /* The shaders the converter made go with the device, oldest first */
@@ -352,6 +605,8 @@ D9Device::SettleSwitch(
     }
     if ((Switch.Pending & Switch.Allowed) != 0)
         ApplySwitch();
+    if (Switch.VertexConverting)
+        PrepareVertexShader();
     if (Switch.PixelMode != 0 && PixelShaders.Dirty)
         PreparePixelShader();
 }

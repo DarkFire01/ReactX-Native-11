@@ -13,6 +13,7 @@ nt_add_usermode_dll(d3d9
         draw.cpp
         enum.cpp
         ffpixel.cpp
+        ffvertex.cpp
         formats.cpp
         hardware.cpp
         identity.cpp

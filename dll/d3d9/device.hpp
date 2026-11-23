@@ -10,6 +10,7 @@
 #include "d3d9.hpp"
 #include "kmcallbacks.hpp"
 #include "ffpixel.hpp"
+#include "ffvertex.hpp"
 
 class D9Device;
 class D9SwapChain;
@@ -19,6 +20,9 @@ static constexpr UINT D9MaxRenderTargets = 4;
 
 /* Render states a device keeps a value for */
 static constexpr UINT D9RenderStateCount = 256;
+
+/* What a render state holds before the device first sets it */
+static constexpr DWORD D9UnsetState = 0xBAADCAFE;
 
 /* Kernel contexts a device tracks for its driver */
 static constexpr UINT D9MaxKernelContexts = 16;
@@ -1702,6 +1706,15 @@ struct D9ShaderSwitch
     /* The layout transformed vertices hand the pixel converter, and the converter's shader the driver has */
     const D9Declaration* PixelLayout;
     HANDLE ConverterBound;
+
+    /* What the application set for each stage's coordinates and transform and for each wrap state, the wraps
+       the driver has by stage, and the stages the vertex converter renumbers or projects only */
+    DWORD ApiCoordIndex[8];
+    DWORD ApiTransformFlags[8];
+    DWORD ApiWrap[8];
+    DWORD DriverWrap[8];
+    UINT RenumberedStages;
+    UINT TransformedStages;
 };
 
 /* Draw state that changed since the last draw and reaches the driver before the next one */
@@ -3089,6 +3102,28 @@ private:
     PreparePixelShader(VOID);
 
     VOID
+    PrepareVertexShader(VOID);
+
+    VOID
+    StartVertexConverter(VOID);
+
+    VOID
+    ReleaseVertexShaders(VOID);
+
+    VOID
+    SendConverterRanges(VOID);
+
+    VOID
+    RenumberStages(
+        _In_ BOOLEAN Converting);
+
+    BOOLEAN
+    FeedVertexStage(
+        _In_ UINT Stage,
+        _In_ UINT Type,
+        _Inout_ DWORD* Value);
+
+    VOID
     StartPixelConverter(VOID);
 
     VOID
@@ -3329,6 +3364,9 @@ private:
 
     /* The pixel shaders standing in for the texture stages */
     D9PixelConverter PixelShaders;
+
+    /* The vertex shaders standing in for the fixed function vertex pipeline */
+    D9VertexConverter VertexShaders;
 
     /* Sync token packets, with the slots tokens the driver ran left free */
     SRWLOCK SyncLock = SRWLOCK_INIT;
