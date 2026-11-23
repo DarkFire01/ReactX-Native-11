@@ -646,6 +646,78 @@ private:
     HANDLE LimitSemaphore = NULL;
 };
 
+/* ID3D11On12Device2 of a device on the D3D11 on 12 layer, reached through QueryInterface */
+class RxOn12Face final : public ID3D11On12Device2
+{
+public:
+    explicit RxOn12Face(
+        _In_ RxDevice& Owner)
+        : Device(Owner)
+    {
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    ULONG
+    STDMETHODCALLTYPE
+    AddRef(VOID) override;
+
+    ULONG
+    STDMETHODCALLTYPE
+    Release(VOID) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    CreateWrappedResource(
+        _In_ IUnknown* pResource12,
+        _In_ const D3D11_RESOURCE_FLAGS* pFlags11,
+        _In_ D3D12_RESOURCE_STATES InState,
+        _In_ D3D12_RESOURCE_STATES OutState,
+        _In_ REFIID riid,
+        _COM_Outptr_opt_ void** ppResource11) override;
+
+    VOID
+    STDMETHODCALLTYPE
+    ReleaseWrappedResources(
+        _In_reads_(NumResources) ID3D11Resource* const* ppResources,
+        _In_ UINT NumResources) override;
+
+    VOID
+    STDMETHODCALLTYPE
+    AcquireWrappedResources(
+        _In_reads_(NumResources) ID3D11Resource* const* ppResources,
+        _In_ UINT NumResources) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetD3D12Device(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvDevice) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    UnwrapUnderlyingResource(
+        _In_ ID3D11Resource* pResource11,
+        _In_ ID3D12CommandQueue* pCommandQueue,
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvResource12) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    ReturnUnderlyingResource(
+        _In_ ID3D11Resource* pResource11,
+        _In_ UINT NumSync,
+        _In_reads_(NumSync) UINT64* pSignalValues,
+        _In_reads_(NumSync) ID3D12Fence** ppFences) override;
+
+private:
+    RxDevice& Device;
+};
+
 class RxDevice final : public ID3D11Device2, public RxKernelDevice
 {
 public:
@@ -678,6 +750,19 @@ public:
     GetContext()
     {
         return Context;
+    }
+
+    /* The layer's interface on its device; null when the driver is not the D3D11 on 12 layer */
+    IOn12DdiDevice*
+    GetLayerDevice() const
+    {
+        return LayerDevice;
+    }
+
+    ID3D12Device5*
+    GetLayerDevice12() const
+    {
+        return LayerDevice12;
     }
 
     /* Used by the DDI callbacks in ddicallbacks.cpp */
@@ -928,6 +1013,7 @@ private:
     RxMultithread<ID3D10Multithread, RxDevice> Multithread;
     RxCompositionPartner CompositionPartner;
     RxD3D10Device D3D10Device;
+    RxOn12Face On12Face;
 
     SRWLOCK DxgiLock = SRWLOCK_INIT;
     IDXGIAdapter1* DxgiAdapter = nullptr;

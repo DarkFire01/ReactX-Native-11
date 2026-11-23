@@ -6,6 +6,7 @@
  */
 
 #include "device.hpp"
+#include "resource.hpp"
 
 #include <dxgi1_4.h>
 
@@ -57,10 +58,8 @@ RxOn12GetResourceFlags(
     _In_ D3D10DDI_HRESOURCE Resource,
     _Out_ bool* AcquireOnWrite)
 {
-    const RxRuntimeResource* Runtime = static_cast<const RxRuntimeResource*>(Resource.pDrvPrivate);
-
     *AcquireOnWrite = false;
-    return Runtime->ApiFlags;
+    return DdiResource::FromLayerHandle(Resource).GetApiFlags();
 }
 
 /* Only resources opened through the runtime's shared path are noted, and none are yet */

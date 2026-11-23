@@ -74,6 +74,72 @@ RxApiResult(
     }
 }
 
+VOID
+RxCheckLayerTextureFormat(
+    _In_ RxDevice& Device,
+    _In_ DXGI_FORMAT Format)
+{
+    UINT Caps;
+    UINT Pass;
+
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        Caps = 0;
+        Device.GetDeviceFuncs().pfnCheckFormatSupport(Device.GetDriverDevice(), Format, &Caps);
+    }
+}
+
+/* The layer hands its resource handle back to the runtime, so a layer device puts its owner in front of it */
+static constexpr SIZE_T RxLayerOwnerSize = 16;
+
+BOOLEAN
+DdiResource::AllocateDriverMemory(
+    _In_ SIZE_T Size)
+{
+    SIZE_T Header = Device.GetAdapter().IsLayer() ? RxLayerOwnerSize : 0;
+
+    Memory = _aligned_malloc(Header + Size, 16);
+    if (Memory == nullptr)
+        return FALSE;
+
+    ZeroMemory(Memory, Header + Size);
+    if (Header != 0)
+        *static_cast<DdiResource**>(Memory) = this;
+
+    Handle.pDrvPrivate = static_cast<BYTE*>(Memory) + Header;
+    return TRUE;
+}
+
+DdiResource&
+DdiResource::FromLayerHandle(
+    _In_ D3D10DDI_HRESOURCE Resource)
+{
+    return **reinterpret_cast<DdiResource**>(static_cast<BYTE*>(Resource.pDrvPrivate) - RxLayerOwnerSize);
+}
+
+HRESULT
+DdiResource::OpenWrapped(
+    _In_ D3DKMT_HANDLE KernelHandle,
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ UINT Size,
+    _In_ const D3D11_RESOURCE_FLAGS& Flags)
+{
+    D3DDDI_OPENALLOCATIONINFO2 Allocation = {};
+    D3D10DDIARG_OPENRESOURCE Args = {};
+
+    if (Runtime == nullptr)
+        return E_OUTOFMEMORY;
+
+    Runtime->ApiFlags = Flags;
+
+    Args.NumAllocations = 1;
+    Args.pOpenAllocationInfo2 = &Allocation;
+    Args.hKMResource.handle = KernelHandle;
+    Args.pPrivateDriverData = const_cast<VOID*>(Data);
+    Args.PrivateDriverDataSize = Size;
+    return OpenDriverResource(Args);
+}
+
 DdiResource::~DdiResource()
 {
     D3DKMT_DESTROYALLOCATION Destroy = {};
@@ -113,12 +179,8 @@ DdiResource::Create(
         return E_OUTOFMEMORY;
 
     Size = Funcs.pfnCalcPrivateResourceSize(Device.GetDriverDevice(), &Args);
-    Memory = _aligned_malloc(Size, 16);
-    if (Memory == nullptr)
+    if (!AllocateDriverMemory(Size))
         return E_OUTOFMEMORY;
-    ZeroMemory(Memory, Size);
-
-    Handle.pDrvPrivate = Memory;
     RuntimeHandle.handle = Runtime;
     Funcs.pfnCreateResource(Device.GetDriverDevice(), &Args, Handle, RuntimeHandle);
 
@@ -181,6 +243,9 @@ DdiResource::CreateTexture(
 
     if (Runtime != nullptr)
         Runtime->ApiFlags = { Shape.BindFlags, Shape.MiscFlags, Shape.CPUAccessFlags, 0 };
+
+    if (Device.GetLayerDevice() != nullptr)
+        RxCheckLayerTextureFormat(Device, Shape.Format);
 
     return Create(Args);
 }
@@ -466,12 +531,9 @@ DdiResource::OpenDriverResource(
 
     /* The runtime data belongs to whoever created the surface; the UMD only needs its own */
     Size = Funcs.pfnCalcPrivateOpenedResourceSize(Device.GetDriverDevice(), &Args);
-    Memory = _aligned_malloc(Size ? Size : 1, 16);
-    if (Memory == nullptr)
+    if (!AllocateDriverMemory(Size ? Size : 1))
         return E_OUTOFMEMORY;
-    ZeroMemory(Memory, Size);
 
-    Handle.pDrvPrivate = Memory;
     RuntimeHandle.handle = Runtime;
     Funcs.pfnOpenResource(Device.GetDriverDevice(), &Args, Handle, RuntimeHandle);
 
@@ -750,6 +812,37 @@ RxBuffer::Create(
 
     NewBuffer->Desc = Desc;
     hr = NewBuffer->Resource.CreateBuffer(Desc, InitialData);
+    if (FAILED(hr))
+    {
+        NewBuffer->Release();
+        return hr;
+    }
+
+    *Buffer = NewBuffer;
+    return S_OK;
+}
+
+HRESULT
+RxBuffer::Wrap(
+    _In_ RxDevice& Device,
+    _In_ const D3D11_BUFFER_DESC& Desc,
+    _In_ D3DKMT_HANDLE KernelHandle,
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ UINT Size,
+    _In_ const D3D11_RESOURCE_FLAGS& Flags,
+    _Outptr_ RxBuffer** Buffer)
+{
+    RxBuffer* NewBuffer;
+    HRESULT hr;
+
+    *Buffer = nullptr;
+
+    NewBuffer = new (std::nothrow) RxBuffer(Device);
+    if (NewBuffer == nullptr)
+        return E_OUTOFMEMORY;
+
+    NewBuffer->Desc = Desc;
+    hr = NewBuffer->Resource.OpenWrapped(KernelHandle, Data, Size, Flags);
     if (FAILED(hr))
     {
         NewBuffer->Release();

@@ -237,6 +237,38 @@ RxTexture<Traits>::Create(
 
 template <typename Traits>
 HRESULT
+RxTexture<Traits>::Wrap(
+    _In_ RxDevice& Device,
+    _In_ const Desc& Description,
+    _In_ D3DKMT_HANDLE KernelHandle,
+    _In_reads_bytes_(Size) const VOID* Data,
+    _In_ UINT Size,
+    _In_ const D3D11_RESOURCE_FLAGS& Flags,
+    _Outptr_ RxTexture** Texture)
+{
+    RxTexture* NewTexture;
+    HRESULT hr;
+
+    *Texture = nullptr;
+
+    NewTexture = new (std::nothrow) RxTexture(Device);
+    if (NewTexture == nullptr)
+        return E_OUTOFMEMORY;
+
+    NewTexture->Description = Description;
+    hr = NewTexture->Resource.OpenWrapped(KernelHandle, Data, Size, Flags);
+    if (FAILED(hr))
+    {
+        NewTexture->Release();
+        return hr;
+    }
+
+    *Texture = NewTexture;
+    return S_OK;
+}
+
+template <typename Traits>
+HRESULT
 RxTexture<Traits>::Open(
     _In_ RxDevice& Device,
     _In_ HANDLE SharedHandle,

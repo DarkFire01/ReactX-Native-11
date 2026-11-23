@@ -38,7 +38,8 @@ RxDevice::RxDevice(
       PresentBridge(*this),
       Multithread(*this, *this),
       CompositionPartner(*this),
-      D3D10Device(*this)
+      D3D10Device(*this),
+      On12Face(*this)
 {
     InitializeCriticalSection(&ThreadLock);
 }
@@ -367,6 +368,14 @@ RxDevice::QueryInterface(
     if (riid == __uuidof(ID3D10Multithread) && !(CreationFlags & D3D11_CREATE_DEVICE_SINGLETHREADED))
     {
         *ppvObject = static_cast<ID3D10Multithread*>(&Multithread);
+        AddRef();
+        return S_OK;
+    }
+
+    if ((riid == __uuidof(ID3D11On12Device) || riid == __uuidof(ID3D11On12Device1) ||
+         riid == __uuidof(ID3D11On12Device2)) && LayerDevice != nullptr)
+    {
+        *ppvObject = static_cast<ID3D11On12Device2*>(&On12Face);
         AddRef();
         return S_OK;
     }

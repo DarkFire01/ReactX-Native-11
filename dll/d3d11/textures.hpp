@@ -149,6 +149,18 @@ public:
         _In_opt_ const RxSharedTextureRecord* SharedRecord = nullptr,
         _In_opt_ const DXGI_DDI_PRIMARY_DESC* PrimaryDesc = nullptr);
 
+    /* Wraps a D3D12 resource the D3D11 on 12 layer opened under a kernel handle */
+    static
+    HRESULT
+    Wrap(
+        _In_ RxDevice& Device,
+        _In_ const Desc& Description,
+        _In_ D3DKMT_HANDLE KernelHandle,
+        _In_reads_bytes_(Size) const VOID* Data,
+        _In_ UINT Size,
+        _In_ const D3D11_RESOURCE_FLAGS& Flags,
+        _Outptr_ RxTexture** Texture);
+
     /* Opens a texture another device shared; only 2D textures can be opened */
     static
     HRESULT

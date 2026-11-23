@@ -15,6 +15,7 @@ nt_add_usermode_dll(d3d11
         devicecreate.cpp
         on12create.cpp
         on12device.cpp
+        on12face.cpp
         buffer_stubs.cpp
         dxbc.cpp
         features.cpp

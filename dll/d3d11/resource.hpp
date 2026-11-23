@@ -57,6 +57,47 @@ public:
     DdiResource(const DdiResource&) = delete;
     DdiResource& operator=(const DdiResource&) = delete;
 
+    /* The DdiResource a layer device's driver handle belongs to */
+    static
+    DdiResource&
+    FromLayerHandle(
+        _In_ D3D10DDI_HRESOURCE Resource);
+
+    /* Opens a D3D12 resource the layer wrapped under a kernel handle */
+    HRESULT
+    OpenWrapped(
+        _In_ D3DKMT_HANDLE KernelHandle,
+        _In_reads_bytes_(Size) const VOID* Data,
+        _In_ UINT Size,
+        _In_ const D3D11_RESOURCE_FLAGS& Flags);
+
+    /* The flags the layer is told the resource was created with */
+    const D3D11_RESOURCE_FLAGS&
+    GetApiFlags() const
+    {
+        return Runtime->ApiFlags;
+    }
+
+    /* The layer's own interface on its resource */
+    IOn12DdiResource*
+    GetLayerResource() const
+    {
+        return static_cast<IOn12DdiResource*>(Handle.pDrvPrivate);
+    }
+
+    /* Who may use a resource of a layer device right now */
+    enum class On12Owner : UCHAR
+    {
+        Direct3D11,
+        Released,
+        Unwrapped,
+    };
+
+    On12Owner LayerOwner = On12Owner::Direct3D11;
+    BOOLEAN IsLayerWrapped = FALSE;
+    D3D12_RESOURCE_STATES LayerInState = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES LayerOutState = D3D12_RESOURCE_STATE_COMMON;
+
     /* Extra DDI bits cover what only the runtime asks for, such as present targets */
     HRESULT
     CreateTexture(
@@ -199,6 +240,10 @@ public:
     RECT GuardRect = {};
 
 private:
+    BOOLEAN
+    AllocateDriverMemory(
+        _In_ SIZE_T Size);
+
     HRESULT
     Create(
         _In_ const D3D11DDIARG_CREATERESOURCE& Args);
@@ -232,6 +277,12 @@ RxCreateKeyedMutex(
 VOID
 RxCloseKeyedMutex(
     _Inout_ RxRuntimeResource& Resource);
+
+/* A layer device checks a texture's format with the driver twice, uncached, before the driver makes it */
+VOID
+RxCheckLayerTextureFormat(
+    _In_ RxDevice& Device,
+    _In_ DXGI_FORMAT Format);
 
 /* Finds the lifetime of an API resource created by this runtime */
 _Ret_maybenull_
@@ -269,6 +320,18 @@ public:
         _In_ RxDevice& Device,
         _In_ const D3D11_BUFFER_DESC& Desc,
         _In_opt_ const D3D11_SUBRESOURCE_DATA* InitialData,
+        _Outptr_ RxBuffer** Buffer);
+
+    /* Wraps a D3D12 buffer the D3D11 on 12 layer opened under a kernel handle */
+    static
+    HRESULT
+    Wrap(
+        _In_ RxDevice& Device,
+        _In_ const D3D11_BUFFER_DESC& Desc,
+        _In_ D3DKMT_HANDLE KernelHandle,
+        _In_reads_bytes_(Size) const VOID* Data,
+        _In_ UINT Size,
+        _In_ const D3D11_RESOURCE_FLAGS& Flags,
         _Outptr_ RxBuffer** Buffer);
 
     HRESULT
