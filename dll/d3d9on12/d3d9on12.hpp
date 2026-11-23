@@ -27,8 +27,12 @@
 #include <featurestagingapi.h>
 #include <stddef.h>
 
+#include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
+#include <unordered_map>
+#include <vector>
 
 #include "trace.hpp"
 
@@ -158,6 +162,17 @@ NineGetCaps(
 DXGI_FORMAT
 NineDxgiFormat(
     _In_ D3DDDIFORMAT Format);
+
+/* Formats the hardware vendors defined that map onto a Direct3D 12 format of their own */
+BOOLEAN
+NineIsIhvFormat(
+    _In_ D3DDDIFORMAT Format);
+
+/* The shader view component mapping a format is sampled with; ~0 for formats without one */
+UINT
+NineViewSwizzle(
+    _In_ D3DDDIFORMAT Format,
+    _In_ BOOLEAN AlphaIsOne);
 
 UINT
 NineCollectFormatOps(

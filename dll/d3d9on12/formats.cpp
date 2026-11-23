@@ -393,3 +393,115 @@ NineCollectFormatOps(
     }
     return Count;
 }
+
+BOOLEAN
+NineIsIhvFormat(
+    _In_ D3DDDIFORMAT Format)
+{
+    return Format == NineFormatAti1 || Format == NineFormatAti2 || Format == NineFormatDf24 ||
+           Format == NineFormatDf16 || Format == NineFormatNull || Format == NineFormatIntz ||
+           Format == NineFormatRawz;
+}
+
+/* Shader view swizzles, with 5 standing for a forced one and 4 for a forced zero */
+static constexpr UINT NineSwizzleRgba = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, 3);
+static constexpr UINT NineSwizzleRgb1 = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, 5);
+static constexpr UINT NineSwizzleAlpha = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(4, 4, 4, 3);
+static constexpr UINT NineSwizzleLuma = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 5);
+static constexpr UINT NineSwizzleLumaAlpha = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 1);
+static constexpr UINT NineSwizzleRed = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 5, 5, 5);
+static constexpr UINT NineSwizzleRedGreen = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 5, 5);
+static constexpr UINT NineSwizzleGreenRed = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(1, 0, 5, 5);
+static constexpr UINT NineSwizzleChroma = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 4, 5);
+static constexpr UINT NineSwizzleSplat = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 0);
+
+UINT
+NineViewSwizzle(
+    _In_ D3DDDIFORMAT Format,
+    _In_ BOOLEAN AlphaIsOne)
+{
+    const UINT WithAlpha = AlphaIsOne ? NineSwizzleRgb1 : NineSwizzleRgba;
+
+    switch (static_cast<UINT>(Format))
+    {
+        case D3DDDIFMT_R8G8B8:
+        case D3DDDIFMT_X8R8G8B8:
+        case D3DDDIFMT_R5G6B5:
+        case D3DDDIFMT_X1R5G5B5:
+        case D3DDDIFMT_R3G3B2:
+        case D3DDDIFMT_X4R4G4B4:
+        case D3DDDIFMT_X8B8G8R8:
+        case D3DDDIFMT_L6V5U5:
+        case D3DDDIFMT_X8L8V8U8:
+            return NineSwizzleRgb1;
+        case D3DDDIFMT_A8R8G8B8:
+        case D3DDDIFMT_A1R5G5B5:
+        case D3DDDIFMT_A4R4G4B4:
+        case D3DDDIFMT_A8R3G3B2:
+        case D3DDDIFMT_A2B10G10R10:
+        case D3DDDIFMT_A8B8G8R8:
+        case D3DDDIFMT_A16B16G16R16:
+        case D3DDDIFMT_Q8W8V8U8:
+        case D3DDDIFMT_A2W10V10U10:
+        case D3DDDIFMT_Q16W16V16U16:
+        case D3DDDIFMT_A16B16G16R16F:
+        case D3DDDIFMT_A32B32G32R32F:
+        case D3DDDIFMT_A2B10G10R10_XR_BIAS:
+            return WithAlpha;
+        case D3DDDIFMT_A8:
+            return NineSwizzleAlpha;
+        case D3DDDIFMT_G16R16:
+        case D3DDDIFMT_V8U8:
+        case D3DDDIFMT_V16U16:
+        case D3DDDIFMT_G16R16F:
+        case D3DDDIFMT_G32R32F:
+        case D3DDDIFMT_CxV8U8:
+            return NineSwizzleRedGreen;
+        case D3DDDIFMT_A2R10G10B10:
+            return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, AlphaIsOne ? 5 : 3);
+        case D3DDDIFMT_L8:
+        case D3DDDIFMT_L16:
+            return NineSwizzleLuma;
+        case D3DDDIFMT_A8L8:
+        case D3DDDIFMT_A4L4:
+            return NineSwizzleLumaAlpha;
+        case D3DDDIFMT_D32:
+        case D3DDDIFMT_D24S8:
+        case 76:
+        case D3DDDIFMT_D24X8:
+        case D3DDDIFMT_D16:
+        case D3DDDIFMT_R16F:
+        case D3DDDIFMT_R32F:
+            return NineSwizzleRed;
+        case D3DDDIFMT_A1:
+            return NineSwizzleSplat;
+        default:
+            break;
+    }
+
+    if (Format == D3DDDIFMT_DXT1 || Format == D3DDDIFMT_DXT2 || Format == D3DDDIFMT_DXT3 ||
+        Format == D3DDDIFMT_DXT4 || Format == D3DDDIFMT_DXT5 || Format == NineFourCc('M', 'E', 'T', '1'))
+    {
+        return WithAlpha;
+    }
+    if (Format == NineFormatDf24 || Format == NineFormatDf16 || Format == NineFormatIntz ||
+        Format == NineFormatRawz || Format == NineFormatAti1)
+    {
+        return NineSwizzleRed;
+    }
+    if (Format == NineFormatAti2)
+        return NineSwizzleGreenRed;
+    if (Format == NineFourCc('G', 'R', 'G', 'B') || Format == NineFourCc('R', 'G', 'B', 'G') ||
+        Format == NineFourCc('U', 'Y', 'V', 'Y'))
+    {
+        return NineSwizzleRgb1;
+    }
+    if (Format == NineFormatNv12 || Format == NineFormatNv11 || Format == NineFormatYuy2 ||
+        Format == NineFormatP010 || Format == NineFormatP016 || Format == NineFormatY210 ||
+        Format == NineFormatY216 || Format == NineFormatY410 || Format == NineFormatY416 ||
+        Format == NineFormatIa44 || Format == NineFormatAi44)
+    {
+        return NineSwizzleChroma;
+    }
+    return ~0U;
+}

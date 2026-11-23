@@ -72,6 +72,15 @@ struct NineDeviceState
     D3DDDIARG_WINFO WInfo;
 };
 
+struct NineResource;
+
+/* A byte range of a buffer locked with discard, kept to turn adjacent discards into no overwrite locks */
+struct NineLockRange
+{
+    UINT Offset;
+    UINT Size;
+};
+
 struct NineDevice
 {
     NineAdapter* Adapter;
@@ -96,7 +105,115 @@ struct NineDevice
     NineUploadSlice PixelConstants[NineConstantKindCount];
 
     NineDeviceState State;
+
+    /* Discarded ranges of each buffer locked since it was created */
+    std::mutex LockRangesLock;
+    std::unordered_map<NineResource*, std::vector<NineLockRange>> LockRanges;
 };
+
+/* Clears what the translation layer still has bound before letting a resource go */
+struct NineUnderlyingDeleter
+{
+    VOID
+    operator()(
+        _In_opt_ TL::Resource* Resource) const;
+};
+
+typedef std::unique_ptr<TL::Resource, NineUnderlyingDeleter> NineUnderlying;
+
+/* What one lock of a subresource asked for, kept until its unlock */
+struct NineLockState
+{
+    UINT Flags;
+    D3D12_BOX Box;
+    UINT Count;
+};
+
+/* Where the runtime keeps the initial contents of one surface */
+struct NineSysMemSource
+{
+    const BYTE* Data;
+    UINT64 RowPitch;
+    UINT64 SlicePitch;
+};
+
+/* A Direct3D 9 surface, texture or buffer and the translation layer resource behind it */
+struct NineResource
+{
+    NineDevice* Device;
+    HANDLE RuntimeResource;
+    UINT64 UniqueId;
+
+    D3DDDIFORMAT Format;
+    DXGI_FORMAT DxgiFormat;
+    DXGI_FORMAT DepthViewFormat;
+    UINT VidPnSourceId;
+
+    /* An X8R8G8B8 primary is created as A8R8G8B8 and keeps reading alpha as one */
+    BOOLEAN PromotedPrimary;
+    BOOLEAN Lockable;
+    BOOLEAN AutogenMips;
+    BOOLEAN CubeMap;
+    BOOLEAN SystemMemory;
+    BOOLEAN DecodeBuffer;
+    BOOLEAN SampledDepth;
+
+    /* Reset by every lock that writes */
+    UINT GpuWrites;
+    BOOLEAN CpuDirty;
+
+    UINT8 ArraySize;
+    UINT8 PlaneCount;
+    UINT Subresources;
+    UINT CpuAccess;
+    UINT64 TotalSize;
+
+    /* The description as the application asked for it, and as Direct3D 12 creates it */
+    D3D12_RESOURCE_DESC Typed;
+    D3D12_RESOURCE_DESC Desc;
+
+    std::vector<NineLockState> Locks;
+    std::vector<NineSysMemSource> SysMem;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> Footprints;
+    std::vector<UINT64> RowSizes;
+    std::vector<UINT> RowCounts;
+
+    NineUnderlying Underlying;
+    std::vector<std::unique_ptr<TL::TRTV>> Rtvs;
+    std::vector<std::unique_ptr<TL::TRTV>> SrgbRtvs;
+    std::unique_ptr<TL::TDSV> Dsvs[4];
+    std::unique_ptr<TL::TSRV> Srv;
+    std::unique_ptr<TL::TSRV> SrgbSrv;
+    UINT TextureType;
+
+    /* The renamed allocation an asynchronous discard lock handed out */
+    TL::D3D12ResourceSuballocation Renamed;
+};
+
+/* resource.cpp */
+HRESULT
+APIENTRY
+NineCreateResource2(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_CREATERESOURCE2* Args);
+
+HRESULT
+APIENTRY
+NineDestroyResource(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hResource);
+
+HRESULT
+APIENTRY
+NineLock(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_LOCK* Args);
+
+HRESULT
+APIENTRY
+NineUnlock(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_UNLOCK* Args);
 
 /* device.cpp */
 HRESULT

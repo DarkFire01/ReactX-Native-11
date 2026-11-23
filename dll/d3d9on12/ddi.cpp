@@ -129,10 +129,10 @@ NineFillDeviceFuncs(
     Functions->pfnDestroyLight = NineFixedAnswer<S_OK>;
     Functions->pfnSetClipPlane = NineSetClipPlane;
     Functions->pfnGetInfo = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnLock, 35);
-    NINE_MISSING(pfnUnlock, 36);
+    Functions->pfnLock = NineLock;
+    Functions->pfnUnlock = NineUnlock;
     Functions->pfnCreateResource = nullptr;
-    NINE_MISSING(pfnDestroyResource, 38);
+    Functions->pfnDestroyResource = NineDestroyResource;
     Functions->pfnSetDisplayMode = NineFixedAnswer<S_OK>;
     Functions->pfnPresent = nullptr;
     Functions->pfnFlush = nullptr;
@@ -222,7 +222,7 @@ NineFillDeviceFuncs(
     Functions->pfnOfferResources = NineFixedAnswer<NotDone>;
     Functions->pfnReclaimResources = NineFixedAnswer<NotDone>;
     Functions->pfnCheckDirectFlipSupport = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnCreateResource2, 128);
+    Functions->pfnCreateResource2 = NineCreateResource2;
     Functions->pfnCheckMultiPlaneOverlaySupport = NineFixedAnswer<NotDone>;
     Functions->pfnPresentMultiPlaneOverlay = NineFixedAnswer<NotDone>;
     Functions->pfnReserved1 = nullptr;
