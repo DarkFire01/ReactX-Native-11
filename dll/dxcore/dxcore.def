@@ -1,0 +1,19 @@
+LIBRARY dxcore.dll
+EXPORTS
+    DXCoreCreateAdapterFactory @211
+    D3DKMTCreateAllocation @1 NONAME PRIVATE
+    D3DKMTOpenResource @9 NONAME PRIVATE
+    D3DKMTCreateSynchronizationObject @18 NONAME PRIVATE
+    D3DKMTWaitForSynchronizationObject @22 NONAME PRIVATE
+    D3DKMTSignalSynchronizationObject @24 NONAME PRIVATE
+    D3DKMTSetVidPnSourceOwner @40 NONAME PRIVATE
+    D3DKMTSetDisplayPrivateDriverFormat @65 NONAME PRIVATE
+    D3DKMTNetDispStartMiracastDisplayDevice @95 NONAME PRIVATE
+    D3DKMTNetDispStartMiracastDisplayDevice2 @96 NONAME PRIVATE
+    D3DKMTRegisterTrimNotification @133 NONAME PRIVATE
+    D3DKMTUnregisterTrimNotification @134 NONAME PRIVATE
+    D3DKMTPinDirectFlipResources @135 NONAME PRIVATE
+    D3DKMTUnpinDirectFlipResources @136 NONAME PRIVATE
+    D3DKMTSetVidPnSourceOwner1 @165 NONAME PRIVATE
+    DXCoreCreateInternalFactory @218 NONAME PRIVATE
+    D3DKMTQueryFeatureInterface @243 NONAME PRIVATE

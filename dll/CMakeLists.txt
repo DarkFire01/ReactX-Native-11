@@ -18,6 +18,7 @@ add_subdirectory(xaudio2_8)
 
 # Direct3D 12 needs WDDM 2, so only the Windows 10 and later targets get it
 if(NT_TARGET MATCHES "^win1[01]")
+    add_subdirectory(dxcore)
     add_subdirectory(d3d12core)
     add_subdirectory(d3d12)
     add_subdirectory(d3d9on12)
