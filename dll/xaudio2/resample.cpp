@@ -155,6 +155,10 @@ XaResamplerProcess(
 
             for (UINT32 Channel = 0; Channel < Channels; Channel++)
                 Output[Frame * Channels + Channel] = fmaf(After[Channel] - Before[Channel], Fraction, Before[Channel]);
+
+            /* Four channel float input reaching back into the history aims its last channel at the second one's target */
+            if (Channels == 4 && Raw == nullptr && Index <= 0)
+                Output[Frame * Channels + 3] = fmaf(After[1] - Before[3], Fraction, Before[3]);
         }
         Fraction = Part + Fraction;
         if (Fraction < 1.0f)
