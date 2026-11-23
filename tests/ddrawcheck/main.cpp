@@ -1632,10 +1632,10 @@ DcBlitCase(
     {
         Key.dwColorSpaceLowValue = TargetBits == 32 ? 0x00787F86 : TargetBits == 16 ? 0x7F78 : 0x6B;
         Key.dwColorSpaceHighValue = Key.dwColorSpaceLowValue;
-        Target->SetColorKey(DDCKEY_DESTBLT, &Key);
+        printf("%s_key_dest = %08lX\n", Name, Target->SetColorKey(DDCKEY_DESTBLT, &Key));
         Key.dwColorSpaceLowValue = SourceBits == 32 ? 0x001D150E : SourceBits == 16 ? 0x0F08 : 0x08;
         Key.dwColorSpaceHighValue = Key.dwColorSpaceLowValue;
-        Source->SetColorKey(DDCKEY_SRCBLT, &Key);
+        printf("%s_key_src = %08lX\n", Name, Source->SetColorKey(DDCKEY_SRCBLT, &Key));
         printf("%s = %08lX\n", Name, Target->Blt(const_cast<LPRECT>(To), Source, nullptr, BltFlags,
                                                    const_cast<LPDDBLTFX>(Fx)));
         sprintf_s(Label, "  %s_after", Name);
@@ -3527,6 +3527,208 @@ DcCheckDepthFill(
     Draw7->Release();
 }
 
+/* Sets one key on a surface, then reads back the key it names */
+static
+VOID
+DcKeyCase(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ DWORD Flags)
+{
+    DDCOLORKEY Key;
+    DWORD Which = Flags & ~DDCKEY_COLORSPACE;
+    HRESULT hr;
+
+    Key.dwColorSpaceLowValue = 0x10;
+    Key.dwColorSpaceHighValue = (Flags & DDCKEY_COLORSPACE) != 0 ? 0x20 : 0x99;
+    hr = Surface->SetColorKey(Flags, &Key);
+    printf("%s %02lX = %08lX", Name, Flags, hr);
+    if (Which == DDCKEY_SRCBLT || Which == DDCKEY_DESTBLT || Which == DDCKEY_SRCOVERLAY || Which == DDCKEY_DESTOVERLAY)
+    {
+        memset(&Key, 0xCC, sizeof(Key));
+        hr = Surface->GetColorKey(Which, &Key);
+        printf(" get=%08lX %08lX %08lX", hr, Key.dwColorSpaceLowValue, Key.dwColorSpaceHighValue);
+    }
+    printf(" clear=%08lX\n", Surface->SetColorKey(Flags, nullptr));
+}
+
+/* SetColorKey and keys in the creation description, over every key kind, memory kind and format */
+static
+VOID
+DcCheckColorKeys(
+    _Inout_ DrawCheck* Check)
+{
+    static const DWORD Memories[] =
+    {
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY,
+        DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY,
+        DDSCAPS_OFFSCREENPLAIN,
+    };
+    static const DWORD KeyFlags[] =
+    {
+        0,
+        DDCKEY_COLORSPACE,
+        DDCKEY_SRCBLT,
+        DDCKEY_SRCBLT | DDCKEY_COLORSPACE,
+        DDCKEY_DESTBLT,
+        DDCKEY_DESTBLT | DDCKEY_COLORSPACE,
+        DDCKEY_SRCOVERLAY,
+        DDCKEY_SRCOVERLAY | DDCKEY_COLORSPACE,
+        DDCKEY_DESTOVERLAY,
+        DDCKEY_DESTOVERLAY | DDCKEY_COLORSPACE,
+        DDCKEY_SRCBLT | DDCKEY_DESTBLT,
+        DDCKEY_SRCBLT | DDCKEY_SRCOVERLAY,
+        DDCKEY_DESTBLT | DDCKEY_DESTOVERLAY,
+        DDCKEY_DESTOVERLAY | DDCKEY_SRCOVERLAY,
+        0x20,
+    };
+    static const struct
+    {
+        DWORD DescFlag;
+        DWORD Which;
+        DWORD High;
+    } DescKeys[] =
+    {
+        { DDSD_CKSRCBLT, DDCKEY_SRCBLT, 0x11 },
+        { DDSD_CKSRCBLT, DDCKEY_SRCBLT, 0x12 },
+        { DDSD_CKDESTBLT, DDCKEY_DESTBLT, 0x11 },
+        { DDSD_CKSRCOVERLAY, DDCKEY_SRCOVERLAY, 0x11 },
+        { DDSD_CKDESTOVERLAY, DDCKEY_DESTOVERLAY, 0x11 },
+        { DDSD_CKSRCBLT | DDSD_CKDESTBLT, DDCKEY_SRCBLT, 0x11 },
+    };
+    static const DWORD Formats[][2] =
+    {
+        { 8, DDPF_RGB | DDPF_PALETTEINDEXED8 },
+        { 16, DDPF_RGB },
+        { 32, DDPF_RGB },
+    };
+    LPDIRECTDRAWSURFACE7 Surface;
+    LPDIRECTDRAWSURFACE7 Level;
+    LPDIRECTDRAWSURFACE Old;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDCOLORKEY Key;
+    DDSCAPS2 Caps;
+    char Name[64];
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+
+    for (DWORD Memory : Memories)
+    {
+        for (const DWORD* Format : Formats)
+        {
+            sprintf_s(Name, "%08lX_%lu", Memory, Format[0]);
+            Surface = DcMakeShaped(Draw7, Memory, Format[0], Format[1], 1);
+            if (Surface == nullptr)
+            {
+                printf("%s = make failed\n", Name);
+                continue;
+            }
+            for (DWORD Flags : KeyFlags)
+                DcKeyCase(Name, Surface, Flags);
+            Surface->Release();
+
+            for (const auto& Item : DescKeys)
+            {
+                DcSurfaceShape Shape = { "", DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT, Memory, 8, 2, Format[0], Format[1] };
+
+                if (Format[0] == 16)
+                {
+                    Shape.Red = 0xF800;
+                    Shape.Green = 0x07E0;
+                    Shape.Blue = 0x001F;
+                }
+                else if (Format[0] == 32)
+                {
+                    Shape.Red = 0xFF0000;
+                    Shape.Green = 0xFF00;
+                    Shape.Blue = 0xFF;
+                }
+                DcFillDesc(Shape, &Desc);
+                Desc.dwFlags |= Item.DescFlag;
+                Desc.ddckCKSrcBlt.dwColorSpaceLowValue = 0x11;
+                Desc.ddckCKSrcBlt.dwColorSpaceHighValue = Item.High;
+                Desc.ddckCKDestBlt.dwColorSpaceLowValue = 0x11;
+                Desc.ddckCKDestBlt.dwColorSpaceHighValue = Item.High;
+                Desc.ddckCKSrcOverlay.dwColorSpaceLowValue = 0x11;
+                Desc.ddckCKSrcOverlay.dwColorSpaceHighValue = Item.High;
+                Desc.ddckCKDestOverlay.dwColorSpaceLowValue = 0x11;
+                Desc.ddckCKDestOverlay.dwColorSpaceHighValue = Item.High;
+                Surface = nullptr;
+                hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+                printf("%s desc %05lX %02lX = %08lX", Name, Item.DescFlag, Item.High, hr);
+                if (SUCCEEDED(hr))
+                {
+                    memset(&Key, 0xCC, sizeof(Key));
+                    hr = Surface->GetColorKey(Item.Which, &Key);
+                    printf(" get=%08lX %08lX %08lX", hr, Key.dwColorSpaceLowValue, Key.dwColorSpaceHighValue);
+                    memset(&Caps, 0, sizeof(Caps));
+                    Surface->GetCaps(&Caps);
+                    printf(" caps=%08lX", Caps.dwCaps);
+                    Surface->Release();
+                }
+                printf("\n");
+            }
+        }
+    }
+
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    Surface = nullptr;
+    hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+    printf("primary_create = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        for (DWORD Flags : KeyFlags)
+            DcKeyCase("primary", Surface, Flags);
+        Surface->Release();
+    }
+
+    /* Mip sub levels refuse keys through the newest interface only */
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_MIPMAPCOUNT;
+    Desc.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | DDSCAPS_SYSTEMMEMORY;
+    Desc.dwWidth = 8;
+    Desc.dwHeight = 8;
+    Desc.dwMipMapCount = 2;
+    Surface = nullptr;
+    hr = Draw7->CreateSurface(&Desc, &Surface, nullptr);
+    printf("mip_create = %08lX\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        memset(&Caps, 0, sizeof(Caps));
+        Caps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
+        Level = nullptr;
+        hr = Surface->GetAttachedSurface(&Caps, &Level);
+        printf("mip_level = %08lX\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            DcKeyCase("mip_level7", Level, DDCKEY_SRCBLT);
+            Old = nullptr;
+            Level->QueryInterface(IID_IDirectDrawSurface, reinterpret_cast<VOID**>(&Old));
+            if (Old != nullptr)
+            {
+                Key.dwColorSpaceLowValue = 3;
+                Key.dwColorSpaceHighValue = 3;
+                printf("mip_level1 = %08lX\n", Old->SetColorKey(DDCKEY_SRCBLT, &Key));
+                Old->Release();
+            }
+            Level->Release();
+        }
+        DcKeyCase("mip_top", Surface, DDCKEY_SRCBLT);
+        Surface->Release();
+    }
+
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -3559,6 +3761,7 @@ static const DrawCheckInfo DcChecks[] =
     { "blt_batch", DcCheckBltBatch },
     { "depth_fill", DcCheckDepthFill },
     { "enum_surfaces", DcCheckEnumSurfaces },
+    { "color_keys", DcCheckColorKeys },
 };
 
 static
