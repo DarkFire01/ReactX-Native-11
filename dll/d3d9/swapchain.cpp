@@ -325,7 +325,7 @@ D9SwapChain::PresentWindowed(
     if (BackBufferCount == 0 || (Parameters.SwapEffect & 0x40000000) != 0)
         return S_OK;
     if (Composed)
-        return PresentComposed(DirtyRegion, Flags);
+        return Device->NoteDisplayChange(PresentComposed(DirtyRegion, Flags));
 
     SetRect(&From, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
     if (SourceRect != nullptr && !IntersectRect(&From, &From, SourceRect))
@@ -336,7 +336,7 @@ D9SwapChain::PresentWindowed(
     if (IsRectEmpty(&To))
         return D9CheckOcclusion(Target) == S_PRESENT_OCCLUDED ? S_PRESENT_OCCLUDED : S_OK;
 
-    hr = Device->PresentToWindow(BackBuffers[0]->DriverResource(), Target, &From, &To);
+    hr = Device->NoteDisplayChange(Device->PresentToWindow(BackBuffers[0]->DriverResource(), Target, &From, &To));
     if (SUCCEEDED(hr) && Parameters.SwapEffect == D3DSWAPEFFECT_FLIP)
         RotateBuffers();
 

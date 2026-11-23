@@ -2256,6 +2256,10 @@ public:
         _In_ const RECT* From,
         _In_ const RECT* To);
 
+    HRESULT
+    NoteDisplayChange(
+        _In_ HRESULT Presented);
+
     /* A flip model present: the back buffer goes to the compositor with the token the chain describes */
     HRESULT
     PresentToCompositor(
@@ -3538,6 +3542,10 @@ private:
 
     /* A flip handed to the driver that has not reached the kernel yet; the next flip flushes it out first */
     volatile LONG FlipQueued = 0;
+
+    /* The display settings uniqueness value when the device was made; a windowed present after it changes
+       reports the new mode */
+    UINT DisplayUniqueness = 0;
 
     /* The last execution state the kernel reported, and whether a display mode change was seen */
     D3DKMT_DEVICEEXECUTION_STATE ExecutionState = static_cast<D3DKMT_DEVICEEXECUTION_STATE>(0);

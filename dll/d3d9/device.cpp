@@ -774,6 +774,7 @@ D9Device::Initialize(
     hr = CreateKernelDevice();
     if (FAILED(hr))
         return hr;
+    DisplayUniqueness = D9QueryDisplayUniqueness();
     hr = OpenDriverAdapter();
     if (FAILED(hr))
         return hr;

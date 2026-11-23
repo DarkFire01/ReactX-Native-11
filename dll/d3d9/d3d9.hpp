@@ -58,6 +58,9 @@ struct D9Globals
 extern D9Globals D9State;
 
 /* One display as an IDirect3D9 object sees it */
+UINT
+D9QueryDisplayUniqueness(VOID);
+
 struct D9Adapter
 {
     CHAR DeviceName[32];

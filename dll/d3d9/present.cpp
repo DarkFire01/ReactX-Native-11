@@ -246,6 +246,37 @@ D9Device::FlushDriver(VOID)
         DeviceFunctions.pfnFlush(DriverDevice);
 }
 
+typedef UINT (APIENTRY *PD9_QUERY_UNIQUENESS)(VOID);
+
+/* What gdi32 counts display settings changes with */
+UINT
+D9QueryDisplayUniqueness(VOID)
+{
+    static PD9_QUERY_UNIQUENESS Query = nullptr;
+    static BOOLEAN Looked = FALSE;
+    HMODULE Gdi;
+
+    if (!Looked)
+    {
+        Gdi = GetModuleHandleW(L"gdi32.dll");
+        if (Gdi != NULL)
+            Query = reinterpret_cast<PD9_QUERY_UNIQUENESS>(GetProcAddress(Gdi, "GdiEntry13"));
+        Looked = TRUE;
+    }
+    return Query != nullptr ? Query() : 0;
+}
+
+/* A windowed present that went through tells the application when the display settings changed since the
+   device was made */
+HRESULT
+D9Device::NoteDisplayChange(
+    _In_ HRESULT Presented)
+{
+    if (Presented != S_OK || Lost || D9QueryDisplayUniqueness() == DisplayUniqueness)
+        return Presented;
+    return S_PRESENT_MODE_CHANGED;
+}
+
 /* Keeps a copy of the present being handed to the driver; the oldest is dropped when the queue is full */
 VOID
 D9Device::QueuePendingPresent(VOID)
