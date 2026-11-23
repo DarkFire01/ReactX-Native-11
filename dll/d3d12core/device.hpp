@@ -479,6 +479,13 @@ public:
         return ValidationCaps;
     }
 
+    /* Buffer footprints of copies may then start and step at any multiple of a texel */
+    BOOLEAN
+    UnrestrictedCopyPitch() const
+    {
+        return CopyAndViewport.UnrestrictedBufferTextureCopyPitchSupported != FALSE;
+    }
+
     D3D_FEATURE_LEVEL
     GetFeatureLevel() const
     {

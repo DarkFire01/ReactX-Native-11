@@ -6,6 +6,8 @@
  */
 
 #include "pipeline.hpp"
+#include "formatlayout12.hpp"
+#include "formatsupport12.hpp"
 
 /* Values the API defines denormals away from before they reach the driver */
 static
@@ -437,6 +439,134 @@ RxToCopyLocation(
     Out.Placed.pLayout = &Out.Pitched;
 }
 
+static
+BOOLEAN
+RxIsBlockCompressed(
+    _In_ DXGI_FORMAT Format)
+{
+    return (Format >= DXGI_FORMAT_BC1_TYPELESS && Format <= DXGI_FORMAT_BC5_SNORM) ||
+           (Format >= DXGI_FORMAT_BC6H_TYPELESS && Format <= DXGI_FORMAT_BC7_UNORM_SRGB);
+}
+
+/* A buffer footprint must fit a format the device copies, the dimension it implies, and the buffer */
+static
+BOOLEAN
+RxFootprintIsValid(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& Placed,
+    _In_ const D3D12_RESOURCE_DESC1& BufferDesc)
+{
+    const D3D12_SUBRESOURCE_FOOTPRINT& Footprint = Placed.Footprint;
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT Support = {};
+    BOOLEAN Unrestricted = Device.UnrestrictedCopyPitch();
+    DXGI_FORMAT Family;
+    UINT64 Needed;
+    UINT64 LastRow;
+    UINT Largest = Device.GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0 ? D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION
+                                                                       : D3D10_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+    UINT MaxWidth;
+    UINT MaxHeight;
+    UINT MaxDepth;
+    UINT Dimension;
+    UINT BlockWidth;
+    UINT BlockHeight;
+    UINT BlockBytes;
+    UINT Rows;
+
+    if (!Unrestricted && (Placed.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) != 0)
+        return FALSE;
+    if ((UINT)Footprint.Format >= RxFormatRuleCount12 || !RxFormatInHeader(Footprint.Format))
+        return FALSE;
+
+    /* The device's support decides which dimensions a footprint of the format may stand for */
+    Support.Format = Footprint.Format;
+    if (FAILED(Device.CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &Support, sizeof(Support))))
+        return FALSE;
+
+    if (Footprint.Depth > 1)
+    {
+        Dimension = D3D12_FORMAT_SUPPORT1_TEXTURE3D;
+        MaxWidth = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+        MaxHeight = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+        MaxDepth = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+    }
+    else if (Footprint.Height == 1 && (Support.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE1D) != 0)
+    {
+        Dimension = D3D12_FORMAT_SUPPORT1_TEXTURE1D;
+        MaxWidth = Largest;
+        MaxHeight = 1;
+        MaxDepth = 1;
+    }
+    else
+    {
+        Dimension = D3D12_FORMAT_SUPPORT1_TEXTURE2D;
+        MaxWidth = Largest;
+        MaxHeight = Largest;
+        MaxDepth = 1;
+    }
+    if ((Support.Support1 & Dimension) == 0)
+        return FALSE;
+
+    if (!RxFormatBlock(Footprint.Format, &BlockWidth, &BlockHeight, &BlockBytes))
+        return FALSE;
+    if ((!RxIsBlockCompressed(Footprint.Format) || !Device.GetValidationCaps().UnalignedBlocks) &&
+        ((Footprint.Width % BlockWidth) != 0 || (Footprint.Height % BlockHeight) != 0))
+    {
+        return FALSE;
+    }
+
+    if (Footprint.Width == 0 || Footprint.Height == 0 || Footprint.Depth == 0)
+        return FALSE;
+    if (Footprint.Width > MaxWidth || Footprint.Height > MaxHeight || Footprint.Depth > MaxDepth)
+        return FALSE;
+
+    if (Footprint.RowPitch < (UINT64)(Footprint.Width / BlockWidth) * BlockBytes)
+        return FALSE;
+    if (!Unrestricted && (Footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) != 0)
+        return FALSE;
+
+    /* The last row only needs its own bytes, not the whole pitch */
+    LastRow = (UINT64)((Footprint.Width + BlockWidth - 1) / BlockWidth) * BlockBytes;
+    Rows = (Footprint.Height + BlockHeight - 1) / BlockHeight;
+    Needed = (UINT64)Footprint.RowPitch * ((UINT64)Footprint.Depth * Rows - 1) + LastRow;
+    if (Placed.Offset + Needed < Needed || Placed.Offset + Needed > BufferDesc.Width)
+        return FALSE;
+
+    /* Depth stencil formats are planar and copy one plane at a time through their plane formats */
+    Family = RxFormatFamily(Footprint.Format);
+    return Family != DXGI_FORMAT_R32G8X24_TYPELESS && Family != DXGI_FORMAT_R24G8_TYPELESS;
+}
+
+/* What one end of a texture copy names must exist on its resource */
+static
+BOOLEAN
+RxCopyLocationIsValid(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_TEXTURE_COPY_LOCATION& Location)
+{
+    RxResource* Resource = RxUnwrap12<RxResource>(Location.pResource);
+    const D3D12_RESOURCE_DESC1* Desc;
+    UINT Subresources;
+
+    if (Resource == nullptr)
+        return FALSE;
+    Desc = &Resource->GetApiDesc();
+
+    if (Location.Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT)
+    {
+        if (Desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+            return FALSE;
+        return RxFootprintIsValid(Device, Location.PlacedFootprint, *Desc);
+    }
+    if (Location.Type != D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX || Desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+        return FALSE;
+
+    Subresources = Desc->MipLevels * RxFormatPlaneCount(Desc->Format);
+    if (Desc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+        Subresources *= Desc->DepthOrArraySize;
+    return Location.SubresourceIndex < Subresources;
+}
+
 VOID
 STDMETHODCALLTYPE
 RxCommandList::CopyTextureRegion(
@@ -453,6 +583,15 @@ RxCommandList::CopyTextureRegion(
 
     if (pDst == nullptr || pSrc == nullptr)
         return;
+
+    /* A bad location fails the whole list, as the system core removes it */
+    if (!RxCopyLocationIsValid(Device, *pDst) || !RxCopyLocationIsValid(Device, *pSrc))
+    {
+        RX_TRACE(L"invalid texture copy location");
+        if (SUCCEEDED(Error))
+            Error = E_INVALIDARG;
+        return;
+    }
 
     RxToCopyLocation(*pDst, Destination);
     RxToCopyLocation(*pSrc, Source);
