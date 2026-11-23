@@ -4968,17 +4968,23 @@ XcCheckWma(VOID)
         WORD Tag;
         DWORD Average;
         WORD Align;
+        DWORD Rate;
+        WORD Channels;
     } Rates[] =
     {
-        { 0x0161, 6000, 2230 }, { 0x0161, 12000, 4459 }, { 0x0161, 24000, 8917 }, { 0x0162, 6000, 2230 }, { 0x0162, 12000, 4459 },
+        { 0x0161, 6000, 2230, 44100, 2 }, { 0x0161, 12000, 4459, 44100, 2 }, { 0x0161, 24000, 8917, 44100, 2 },
+        { 0x0162, 6000, 2230, 44100, 2 }, { 0x0162, 12000, 4459, 44100, 2 },
+        /* Noise substitution at the low and mid rate classes */
+        { 0x0161, 3998, 1485, 44100, 2 }, { 0x0161, 5000, 1920, 32000, 2 },
+        /* LPC weighting with and without noise substitution; the system hangs on the 16 byte rate without superframes */
+        { 0x0161, 2000, 640, 16000, 1 }, { 0x0161, 1000, 640, 8000, 1 },
     };
     static BYTE Pcm[44100 * 4 / 2];
-    WAVEFORMATEX PcmFormat;
 
-    XcPcm(&PcmFormat, WAVE_FORMAT_PCM, 2, 44100, 16);
-    XcFillNoise(Pcm, sizeof(Pcm), &PcmFormat);
     for (UINT Index = 0; Index < ARRAYSIZE(Rates); Index++)
     {
+        WAVEFORMATEX PcmFormat;
+        DWORD Bytes = Rates[Index].Rate * Rates[Index].Channels;
         XcProbeApo& Recorder = *new XcProbeApo(XAPO_FLAG_INPLACE_SUPPORTED | XAPO_FLAG_INPLACE_REQUIRED | XAPO_FLAG_CHANNELS_MUST_MATCH |
                                 XAPO_FLAG_FRAMERATE_MUST_MATCH | XAPO_FLAG_BITSPERSAMPLE_MUST_MATCH |
                                 XAPO_FLAG_BUFFERCOUNT_MUST_MATCH, FALSE);
@@ -4993,7 +4999,10 @@ XcCheckWma(VOID)
         XcWmaStream Stream;
         HRESULT hr;
 
-        hr = XcEncodeWma(Pcm, sizeof(Pcm), &PcmFormat, Rates[Index].Tag, Rates[Index].Average, Rates[Index].Align, &Stream);
+        /* Half a second of quiet noise at the stream's rate */
+        XcPcm(&PcmFormat, WAVE_FORMAT_PCM, Rates[Index].Channels, Rates[Index].Rate, 16);
+        XcFillNoise(Pcm, Bytes, &PcmFormat);
+        hr = XcEncodeWma(Pcm, Bytes, &PcmFormat, Rates[Index].Tag, Rates[Index].Average, Rates[Index].Align, &Stream);
         printf("wma[%u] encode %04X %lu = %08lX packets %u align %u\n", Index, Rates[Index].Tag, Rates[Index].Average, hr,
                Stream.PacketCount,
                Stream.Format.nBlockAlign);
