@@ -1233,7 +1233,12 @@ DdLearnPitch(
     if (Surface->Shared->PitchPending)
     {
         if (!Hardware->Lost && Surface->SharedPrimary == nullptr)
+        {
+            /* The display's rows are whole pixels with no padding to a DWORD */
+            Surface->Shared->Pitch =
+                static_cast<LONG>(Surface->Shared->Width * (Surface->Shared->Format.dwRGBBitCount / 8));
             Surface->Shared->PitchPending = FALSE;
+        }
         return;
     }
     if (Surface->Shared->Pitch != 0 || Surface->Resource == nullptr || Hardware->Lost)
