@@ -12,7 +12,8 @@ trim notifications, which query ID3D12Device15 where the system layer does not.
 
 The upstream CMakeLists.txt files are kept but unused; ../CMakeLists.txt builds the
 d3d12translationlayer and dxbcparser static libraries against ../DirectX-Headers.
-.github and README.md are not imported.
+.github and README.md are not imported. USE_PIX is on, with ../include/pix3.h standing in for
+WinPixEventRuntime: command list events and markers reach D3D12 as the system layer sends them.
 
 ## Patches
 
