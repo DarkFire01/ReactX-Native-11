@@ -443,6 +443,10 @@ XaVoice::SetOutputRate(
         return XAUDIO2_E_INVALID_CALL;
     }
     OutputRate = Rate;
+
+    /* A source voice runs its effects after the converter, so they follow the new rate */
+    if (Kind == XaKindSource && Effects != nullptr)
+        return XaEffectsRelock(Effects, Rate, XaQuantumFrames(Rate, Engine));
     return S_OK;
 }
 

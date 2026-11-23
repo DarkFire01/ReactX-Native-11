@@ -317,6 +317,12 @@ VOID
 XaEffectsFree(
     _In_opt_ XaEffectChain* Chain);
 
+HRESULT
+XaEffectsRelock(
+    _Inout_ XaEffectChain* Chain,
+    _In_ UINT32 Rate,
+    _In_ UINT32 MaxFrames);
+
 VOID
 XaEffectsCommit(
     _Inout_ XaEffectChain* Chain,

@@ -218,6 +218,31 @@ XaEffectsCreate(
     return S_OK;
 }
 
+/* Each effect asks for its properties again and locks for the new rate, enabled or not */
+HRESULT
+XaEffectsRelock(
+    _Inout_ XaEffectChain* Chain,
+    _In_ UINT32 Rate,
+    _In_ UINT32 MaxFrames)
+{
+    for (UINT32 Index = 0; Index < Chain->Count; Index++)
+    {
+        XaEffect* Entry = &Chain->Entries[Index];
+        XAPO_REGISTRATION_PROPERTIES* Properties = nullptr;
+
+        if (SUCCEEDED(Entry->Apo->GetRegistrationProperties(&Properties)))
+            CoTaskMemFree(Properties);
+        if (Entry->Locked)
+        {
+            Entry->Apo->UnlockForProcess();
+            Entry->Locked = FALSE;
+        }
+        delete[] Entry->Output;
+        Entry->Output = nullptr;
+    }
+    return XaEffectsLock(Chain, Rate, MaxFrames);
+}
+
 VOID
 XaEffectsFree(
     _In_opt_ XaEffectChain* Chain)
