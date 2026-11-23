@@ -166,14 +166,14 @@ XaRvFillPrimes(
 }
 
 /* The prime equal to the value, or else the next one up */
-static
 UINT32
-XaRvPrimeAtLeast(
+XaReverbPrime(
     _In_ UINT32 Value)
 {
     INT Low = 0;
     INT High = XA_RV_PRIMES - 1;
 
+    InitOnceExecuteOnce(&XaRvPrimeOnce, XaRvFillPrimes, nullptr, nullptr);
     if (Value <= 1)
         return 1;
     if (Value >= XA_RV_LINE)
@@ -517,7 +517,7 @@ XaRv::ApplyRoom(
         {
             float Length = fmaf(static_cast<float>(XaRvCombLengths[Group][Index]), Scale, 0.5f);
 
-            XaRvCombLength(&Set[Index], XaRvPrimeAtLeast(XaRvToIndex(Length)), Fade);
+            XaRvCombLength(&Set[Index], XaReverbPrime(XaRvToIndex(Length)), Fade);
         }
         Group += 1;
     }

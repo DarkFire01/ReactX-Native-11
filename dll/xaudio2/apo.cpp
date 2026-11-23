@@ -12,11 +12,9 @@ XaCreateReverb(
     _Outptr_ IUnknown** Apo,
     _In_ BOOLEAN Legacy)
 {
-    UNREFERENCED_PARAMETER(Legacy);
-    if (Apo != nullptr)
-        *Apo = nullptr;
-    XA_TRACE_ONCE(L"CreateAudioReverb: not available yet");
-    return E_NOTIMPL;
+    if (Apo == nullptr)
+        return E_POINTER;
+    return XaCreateReverbObject(Apo, Legacy);
 }
 
 HRESULT

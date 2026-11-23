@@ -207,6 +207,16 @@ XaCreateFxReverbObject(
     _Outptr_ IUnknown** Apo);
 
 HRESULT
+XaCreateReverbObject(
+    _Outptr_ IUnknown** Apo,
+    _In_ BOOLEAN Legacy);
+
+/* fxreverb.cpp: the prime equal to the value or the next one up, at most 9973 */
+UINT32
+XaReverbPrime(
+    _In_ UINT32 Value);
+
+HRESULT
 XaCreateEchoObject(
     _Outptr_ IUnknown** Apo,
     _In_opt_ const VOID* InitData,

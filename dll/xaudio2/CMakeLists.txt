@@ -18,6 +18,7 @@ nt_add_usermode_dll(xaudio2_9
         mixmatrix.cpp
         output.cpp
         resample.cpp
+        reverb.cpp
         source.cpp
         voice.cpp
         x3daudio.cpp
