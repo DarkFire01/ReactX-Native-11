@@ -61,6 +61,7 @@ RxFence::Initialize(
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3DKMT_CREATESYNCHRONIZATIONOBJECT2 Create = {};
     D3D12DDIARG_CREATE_FENCE_0116 Args = {};
+    D3D12DDIARG_CREATE_FENCE_0116 Sizing = {};
     D3D12DDI_HRTFENCE Runtime;
     NTSTATUS Status;
     HRESULT hr;
@@ -85,7 +86,9 @@ RxFence::Initialize(
     Args.MonitoredFenceArgs.FenceValue.BaseAddress = Create.Info.MonitoredFence.FenceValueGPUVirtualAddress;
     Args.MonitoredFenceArgs.Flags = D3D12DDI_FENCE_FLAG_BOTTOM_OF_PIPE;
 
-    DriverFence.pDrvPrivate = Memory.Allocate(Ddi.pfnCalcPrivateFenceSize(Device.Handle(), &Args));
+    /* Sizing only names the fence type */
+    Sizing.FenceType = Args.FenceType;
+    DriverFence.pDrvPrivate = Memory.Allocate(Ddi.pfnCalcPrivateFenceSize(Device.Handle(), &Sizing));
     if (DriverFence.pDrvPrivate == nullptr)
         return E_OUTOFMEMORY;
 
