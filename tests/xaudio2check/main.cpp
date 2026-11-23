@@ -2898,11 +2898,13 @@ XcApoBlock(
             printf(" %08lX", XcBits(Result[Index]));
         if (Count != 0)
             printf(" %08lX", XcBits(Result[Count - 1]));
+        if (!Run->InPlace)
+            printf(" input %08X", XcHash(Run->Input, Run->Frames * Run->InChannels));
         printf("\n");
         if (XcVerbose)
         {
             for (UINT32 Index = 0; Index < Count; Index++)
-                printf("  %u %08lX\n", Index, XcBits(Result[Index]));
+                printf("  %u %08lX %08lX\n", Index, XcBits(Result[Index]), XcBits(Run->Input[Index]));
         }
     }
     Run->Block += 1;
@@ -3057,14 +3059,133 @@ XcCheckMeter(
     delete &Run;
 }
 
+/* Creates one FX library XAPO and runs the shared identity, format and lock checks on it */
+static
+IXAPO*
+XcCreateFx(
+    _In_z_ PCSTR Name,
+    _In_ REFCLSID Clsid,
+    _In_reads_bytes_opt_(InitSize) const VOID* InitData,
+    _In_ UINT32 InitSize,
+    _In_ BOOLEAN Report)
+{
+    PXC_CREATE_FX CreateFx = reinterpret_cast<PXC_CREATE_FX>(GetProcAddress(XcModule, "CreateFX"));
+    IUnknown* Object = nullptr;
+    IXAPO* Apo = nullptr;
+    HRESULT hr;
+
+    if (CreateFx == nullptr)
+        return nullptr;
+    hr = CreateFx(Clsid, &Object, InitData, InitSize);
+    printf("%s create = %08lX\n", Name, hr);
+    if (FAILED(hr) || Object == nullptr)
+        return nullptr;
+    if (Report)
+    {
+        XcApoIdentity(Name, Object);
+        if (SUCCEEDED(Object->QueryInterface(IID_PPV_ARGS(&Apo))))
+        {
+            XcApoFormats(Name, Apo);
+            XcApoLocks(Name, Apo);
+            Apo->Release();
+            Apo = nullptr;
+        }
+    }
+    Object->QueryInterface(IID_PPV_ARGS(&Apo));
+    Object->Release();
+    return Apo;
+}
+
+static
+VOID
+XcCheckEq(VOID)
+{
+    static const FXEQ_PARAMETERS Shaped =
+    {
+        200.0f, 2.0f, 0.5f, 1000.0f, 0.5f, 1.0f, 4000.0f, 1.5f, 2.0f, 12000.0f, 0.3f, 0.8f,
+    };
+    static const FXEQ_PARAMETERS Edges =
+    {
+        20.0f, 7.94f, 0.1f, 20000.0f, 0.126f, 2.0f, 5000.0f, 1.0f, 1.0f, 30000.0f, 9.0f, 0.05f,
+    };
+    XcApoRun& Run = *new XcApoRun();
+    IXAPO* Apo = XcCreateFx("eq", __uuidof(FXEQ), &Shaped, sizeof(Shaped), TRUE);
+
+    if (Apo == nullptr)
+        return;
+    XcApoParameters("eq parameters", Apo, sizeof(FXEQ_PARAMETERS));
+    printf("eq initialize = %08lX\n", Apo->Initialize(&Shaped, sizeof(Shaped)));
+    printf("eq initialize short = %08lX\n", Apo->Initialize(&Shaped, 4));
+    XcApoParameters("eq parameters after initialize", Apo, sizeof(FXEQ_PARAMETERS));
+
+    Run.Apo = Apo;
+    Run.InChannels = 2;
+    Run.OutChannels = 2;
+    Run.Frames = 480;
+    Run.InPlace = FALSE;
+    Run.Amplitude = 0.5f;
+    Run.Seed = 7;
+    printf("eq lock = %08lX\n", XcApoLock(&Run, 48000));
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Shaped, sizeof(Shaped));
+    XcApoParameters("eq parameters set", Apo, sizeof(FXEQ_PARAMETERS));
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoParameters("eq parameters processed", Apo, sizeof(FXEQ_PARAMETERS));
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_SILENT, TRUE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Edges, sizeof(Edges));
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    Run.InPlace = TRUE;
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("eq", &Run, XAPO_BUFFER_SILENT, TRUE);
+    Apo->Reset();
+    XcApoBlock("eq", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+
+    /* A new lock starts from the default bands again */
+    Run.InChannels = 1;
+    Run.OutChannels = 1;
+    Run.Frames = 441;
+    Run.InPlace = FALSE;
+    printf("eq lock mono = %08lX\n", XcApoLock(&Run, 44100));
+    XcApoParameters("eq parameters relocked", Apo, sizeof(FXEQ_PARAMETERS));
+    XcApoBlock("eq mono", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoSet(Apo, &Shaped, sizeof(Shaped));
+    XcApoBlock("eq mono", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+    Run.InChannels = 6;
+    Run.OutChannels = 6;
+    Run.Frames = 220;
+    printf("eq lock six = %08lX\n", XcApoLock(&Run, 22050));
+    XcApoSet(Apo, &Edges, sizeof(Edges));
+    XcApoBlock("eq six", &Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock("eq six", &Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+    printf("eq release %lu\n", Apo->Release());
+    delete &Run;
+}
+
 static
 VOID
 XcCheckApos(VOID)
 {
     PXC_CREATE_APO CreateMeter = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, "CreateAudioVolumeMeter"));
 
+    IXAudio2* Engine = nullptr;
+
     if (CreateMeter != nullptr)
         XcCheckMeter(CreateMeter);
+
+    /* The FX library draws on the engine's heap, so an engine stays alive while they run */
+    if (FAILED(XcCreate(&Engine, 0)))
+        return;
+    XcCheckEq();
+    Engine->Release();
 }
 
 /* Records what the default endpoint plays, which carries the engine output */
