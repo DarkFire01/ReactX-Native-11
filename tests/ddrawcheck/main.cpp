@@ -4425,6 +4425,96 @@ DcCheckDuplicate(
     Draw7->Release();
 }
 
+/* Blits to and from a windowed primary with no clipper, a clip list clipper, an empty clipper and a window clipper */
+static
+VOID
+DcCheckPrimaryTargets(
+    _Inout_ DrawCheck* Check)
+{
+    struct
+    {
+        RGNDATAHEADER Header;
+        RECT Rects[1];
+    } List = {};
+    LPDIRECTDRAWSURFACE7 Primary = nullptr;
+    LPDIRECTDRAWSURFACE7 Video;
+    LPDIRECTDRAWSURFACE7 System;
+    LPDIRECTDRAWCLIPPER Listed = nullptr;
+    LPDIRECTDRAWCLIPPER Empty = nullptr;
+    LPDIRECTDRAWCLIPPER Windowed = nullptr;
+    LPDIRECTDRAW7 Draw7;
+    DDSURFACEDESC2 Desc;
+    DDBLTFX Fx;
+    RECT Rect = { 0, 0, 4, 4 };
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    hr = Draw7->CreateSurface(&Desc, &Primary, nullptr);
+    printf("primary = %08lX\n", hr);
+    Video = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY, 4, 4, 32);
+    System = DcMakeSurface(Draw7, DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY, 4, 4, 32);
+    if (FAILED(hr) || Video == nullptr || System == nullptr)
+    {
+        printf("create failed\n");
+        Draw7->Release();
+        return;
+    }
+    memset(&Fx, 0, sizeof(Fx));
+    Fx.dwSize = sizeof(Fx);
+
+    printf("none fill = %08lX\n", Primary->Blt(&Rect, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+    printf("none fill_whole = %08lX\n", Primary->Blt(nullptr, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+    printf("none video = %08lX\n", Primary->Blt(&Rect, Video, nullptr, DDBLT_WAIT, nullptr));
+    printf("none system = %08lX\n", Primary->Blt(&Rect, System, nullptr, DDBLT_WAIT, nullptr));
+    printf("none fast = %08lX\n", Primary->BltFast(0, 0, Video, nullptr, DDBLTFAST_WAIT));
+    printf("none read = %08lX\n", Video->Blt(nullptr, Primary, &Rect, DDBLT_WAIT, nullptr));
+    Fx.dwROP = BLACKNESS;
+    printf("none rop = %08lX\n", Primary->Blt(&Rect, nullptr, nullptr, DDBLT_ROP | DDBLT_WAIT, &Fx));
+
+    List.Header.dwSize = sizeof(List.Header);
+    List.Header.iType = RDH_RECTANGLES;
+    List.Header.nCount = 1;
+    List.Header.nRgnSize = sizeof(RECT);
+    List.Header.rcBound = Rect;
+    List.Rects[0] = Rect;
+    Draw7->CreateClipper(0, &Listed, nullptr);
+    Draw7->CreateClipper(0, &Empty, nullptr);
+    Draw7->CreateClipper(0, &Windowed, nullptr);
+    if (Listed != nullptr && Empty != nullptr && Windowed != nullptr)
+    {
+        printf("set_list = %08lX\n", Listed->SetClipList(reinterpret_cast<LPRGNDATA>(&List), 0));
+        printf("set_listed = %08lX\n", Primary->SetClipper(Listed));
+        printf("listed fill = %08lX\n", Primary->Blt(&Rect, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+        printf("listed video = %08lX\n", Primary->Blt(&Rect, Video, nullptr, DDBLT_WAIT, nullptr));
+        printf("listed system = %08lX\n", Primary->Blt(&Rect, System, nullptr, DDBLT_WAIT, nullptr));
+        printf("listed read = %08lX\n", Video->Blt(nullptr, Primary, &Rect, DDBLT_WAIT, nullptr));
+        printf("set_empty = %08lX\n", Primary->SetClipper(Empty));
+        printf("empty fill = %08lX\n", Primary->Blt(&Rect, nullptr, nullptr, DDBLT_COLORFILL | DDBLT_WAIT, &Fx));
+        printf("empty video = %08lX\n", Primary->Blt(&Rect, Video, nullptr, DDBLT_WAIT, nullptr));
+        printf("set_hwnd = %08lX\n", Windowed->SetHWnd(0, Check->Window));
+        printf("set_windowed = %08lX\n", Primary->SetClipper(Windowed));
+        printf("windowed self = %08lX\n", Primary->Blt(&Rect, Primary, &Rect, DDBLT_WAIT, nullptr));
+        printf("windowed read = %08lX\n", Video->Blt(nullptr, Primary, &Rect, DDBLT_WAIT, nullptr));
+    }
+    if (Listed != nullptr)
+        Listed->Release();
+    if (Empty != nullptr)
+        Empty->Release();
+    if (Windowed != nullptr)
+        Windowed->Release();
+    printf("release_primary = %lu\n", Primary->Release());
+    Video->Release();
+    System->Release();
+    Draw7->Release();
+}
+
 static const DrawCheckInfo DcChecks[] =
 {
     { "exports", DcCheckExports },
@@ -4461,6 +4551,7 @@ static const DrawCheckInfo DcChecks[] =
     { "enum_creatable", DcCheckEnumCreatable },
     { "color_keys", DcCheckColorKeys },
     { "duplicate", DcCheckDuplicate },
+    { "primary_targets", DcCheckPrimaryTargets },
 };
 
 static
