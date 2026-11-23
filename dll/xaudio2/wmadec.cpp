@@ -834,7 +834,9 @@ XaWmaDecode(
                 Decoder->Seeking = FALSE;
             }
             hr = XaWmaDecodeProFrame(Decoder);
-            if (hr == XA_WMA_E_STARVED)
+
+            /* Past the last packet the stream just ends, whatever the bits after it looked like */
+            if (hr == XA_WMA_E_STARVED || (FAILED(hr) && Decoder->Reader.Dry))
             {
                 *State = XaWmaIdle;
                 return S_OK;
