@@ -634,6 +634,229 @@ ScRunTlCases(
     }
 }
 
+typedef HRESULT (*PFN_SC_CREATE_GS)(PVOID*, NineScGsArgs*);
+
+static constexpr ULONG ScCreateGsOffset = 0x78C08;
+
+/* One geometry shader run */
+struct ScGsRun
+{
+    HRESULT Result;
+    NineScGsArgs Args;
+    NineScOutputs Outputs;
+};
+
+static
+BOOL
+ScCompareGs(
+    _In_ const ScGsRun* System,
+    _In_ const ScGsRun* ReactX)
+{
+    BOOL Same = TRUE;
+
+    if (System->Result != ReactX->Result)
+    {
+        printf("  result %08lX, reactx %08lX\n", System->Result, ReactX->Result);
+        Same = FALSE;
+    }
+    if (System->Args.TokenSize != ReactX->Args.TokenSize ||
+        (System->Args.TokenSize && memcmp(System->Args.Tokens, ReactX->Args.Tokens, System->Args.TokenSize) != 0))
+    {
+        printf("  tokens differ: size %Iu, reactx %Iu\n", System->Args.TokenSize, ReactX->Args.TokenSize);
+        Same = FALSE;
+    }
+    /* The bits above the 45 bit indexed mask are left as the system's stack held them */
+    if (System->Outputs.Flags != ReactX->Outputs.Flags || System->Outputs.Count != ReactX->Outputs.Count ||
+        ((System->Outputs.Indexed ^ ReactX->Outputs.Indexed) & ((1ull << 45) - 1)) != 0 ||
+        memcmp(System->Outputs.Outputs, ReactX->Outputs.Outputs, sizeof(System->Outputs.Outputs)) != 0)
+    {
+        printf("  outputs differ: flags %08X count %u, reactx %08X %u\n", System->Outputs.Flags, System->Outputs.Count,
+               ReactX->Outputs.Flags, ReactX->Outputs.Count);
+        Same = FALSE;
+    }
+    return Same;
+}
+
+/*
+ * A triangle that is not expanded reads its third vertex's registers 13 to 15 from bytes the system
+ * converter never wrote, so those cases are left out.
+ */
+static
+BOOL
+ScGsReadsUninitialized(
+    _In_ const NineScOutputs* Vertex,
+    _In_ const NineScRasterStates* Raster)
+{
+    UINT Words1 = Raster->Words[1];
+    UINT Primitive = Words1 & 0x1C0000;
+    BOOL Triangle = Primitive != 0x40000 && Primitive != 0x80000 && Primitive != 0xC0000;
+    BOOL PointFill = (Words1 & 0xC000) == 0x4000 && (Words1 & 0x100000);
+
+    if (!Triangle || PointFill)
+        return FALSE;
+    for (UINT Slot = 0; Slot < Vertex->Count; Slot += 1)
+    {
+        if ((Vertex->Outputs[Slot] & 0x1F) != 4 && ((Vertex->Outputs[Slot] >> 9) & 0xF) >= 13)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static
+VOID
+ScRunGs(
+    _Inout_ ScContext* Context,
+    _In_ PFN_SC_CREATE_GS SystemCreate,
+    _In_ const NineScOutputs* Vertex,
+    _In_ const NineScRasterStates* Raster,
+    _In_ BOOL Old,
+    _In_ UINT Flags,
+    _In_z_ PCSTR Label)
+{
+    static ScGsRun System;
+    static ScGsRun ReactX;
+    ScGsRun* Runs[2] = { &System, &ReactX };
+
+    for (ScGsRun* Run : Runs)
+    {
+        Run->Result = E_FAIL;
+        ZeroMemory(&Run->Args, sizeof(Run->Args));
+        memset(&Run->Outputs, 0x5A, sizeof(Run->Outputs));
+        Run->Args.Flags = Flags;
+        Run->Args.Version = Old ? ScOldRuntimeVersion : ScRuntimeVersion;
+        Run->Args.VertexOutputs = Vertex;
+        Run->Args.Outputs = &Run->Outputs;
+        Run->Args.Raster = Raster;
+    }
+
+    System.Result = SystemCreate(Old ? Context->SystemOldState : Context->SystemState, &System.Args);
+    try
+    {
+        ReactX.Result = NineScCreateGeometryShader(Old ? Context->OldTranslator : Context->Translator, &ReactX.Args);
+    }
+    catch (...)
+    {
+        ReactX.Result = E_UNEXPECTED;
+    }
+
+    Context->Cases += 1;
+    if (ScCompareGs(&System, &ReactX))
+    {
+        if (Context->Dump)
+        {
+            printf("%s: same\n", Label);
+            ScPrintTokens("tokens", System.Args.Tokens, System.Args.TokenSize);
+        }
+    }
+    else
+    {
+        printf("%s: differs\n", Label);
+        ScPrintTokens("system", System.Args.Tokens, System.Args.TokenSize);
+        ScPrintTokens("reactx", ReactX.Args.Tokens, ReactX.Args.TokenSize);
+        Context->Failures += 1;
+    }
+    free(System.Args.Tokens);
+    free(ReactX.Args.Tokens);
+}
+
+/* The vertex shader outputs a geometry shader reads: position, colors, coordinates, fog, size, clip */
+static
+VOID
+ScGsVertexOutputs(
+    _Inout_ ScContext* Context,
+    _Out_ NineScOutputs* Outputs,
+    _In_ UINT Set)
+{
+    ZeroMemory(Outputs, sizeof(*Outputs));
+    if (Set < ScPixelInputSets)
+    {
+        ScPixelInputs(Outputs, Set);
+        return;
+    }
+
+    ScAddLinked(Outputs, 0, 0, 0, 0xF);
+    if (ScRandom(Context) & 1)
+        ScAddLinked(Outputs, 10, 0, 1, 0xF);
+    if (ScRandom(Context) & 1)
+        ScAddLinked(Outputs, 10, 1, 2, ScRandom(Context) & 1 ? 0xF : 0x7);
+    for (UINT Index = 0; Index < 8; Index += 1)
+    {
+        if (ScRandom(Context) % 3 == 0)
+            ScAddLinked(Outputs, 5, Index, 3 + Index, 1 + ScRandom(Context) % 15);
+    }
+    if (ScRandom(Context) & 1)
+        ScAddLinked(Outputs, 11, 0, 11, 0x1);
+    if (ScRandom(Context) & 1)
+    {
+        ScAddLinked(Outputs, 4, 0, 11, 0x2);
+        Outputs->Flags |= 0x100000;
+    }
+    if (ScRandom(Context) % 4 == 0)
+    {
+        ScAddLinked(Outputs, 16, 0, 13, 0xF);
+        ScAddLinked(Outputs, 16, 1, 14, 0x3);
+    }
+}
+
+/* Raster states that pick each geometry shader path, then random ones */
+static
+VOID
+ScRunGsCases(
+    _Inout_ ScContext* Context,
+    _In_ UINT Fuzz)
+{
+    static const UINT Words1[] =
+    {
+        0x00040000, 0x40040000, 0x80040000, 0x00080000, 0x000C0000, 0x00000000, 0x00104000, 0x00114000,
+        0x80104000, 0x00083F00, 0x00040300, 0x00100000,
+    };
+    PFN_SC_CREATE_GS SystemCreate =
+        reinterpret_cast<PFN_SC_CREATE_GS>(reinterpret_cast<PBYTE>(Context->SystemConvert) - ScConvertOffset +
+                                           ScCreateGsOffset);
+    NineScOutputs Vertex;
+    NineScRasterStates Raster;
+    UINT Skipped = 0;
+    char Label[48];
+
+    for (UINT Set = 0; Set < ScPixelInputSets; Set += 1)
+    {
+        ScGsVertexOutputs(Context, &Vertex, Set);
+        for (UINT Word = 0; Word < _countof(Words1); Word += 1)
+        {
+            for (UINT Variant = 0; Variant < 4; Variant += 1)
+            {
+                ZeroMemory(&Raster, sizeof(Raster));
+                for (UINT Sampler = 0; Sampler < 16; Sampler += 1)
+                    Raster.Samplers[Sampler] = Variant & 2 ? static_cast<BYTE>(1 | (Sampler << 2)) : 1;
+                Raster.Words[1] = Words1[Word];
+                Raster.Words[2] = Variant & 1 ? 0x400 : 0;
+                if (ScGsReadsUninitialized(&Vertex, &Raster))
+                {
+                    Skipped += 1;
+                    continue;
+                }
+                sprintf_s(Label, "gs set %u words %08X variant %u", Set, Words1[Word], Variant);
+                ScRunGs(Context, SystemCreate, &Vertex, &Raster, Variant & 1, 0, Label);
+            }
+        }
+    }
+
+    for (UINT Round = 0; Round < Fuzz * 32; Round += 1)
+    {
+        ScGsVertexOutputs(Context, &Vertex, ScPixelInputSets + Round);
+        for (UINT Byte = 0; Byte < sizeof(Raster); Byte += 1)
+            reinterpret_cast<PBYTE>(&Raster)[Byte] = static_cast<BYTE>(ScRandom(Context));
+        if (ScGsReadsUninitialized(&Vertex, &Raster))
+        {
+            Skipped += 1;
+            continue;
+        }
+        sprintf_s(Label, "gs random %u", Round);
+        ScRunGs(Context, SystemCreate, &Vertex, &Raster, Round & 1, (Round >> 1) & 1, Label);
+    }
+    printf("gs cases left out because the system reads uninitialized memory: %u\n", Skipped);
+}
+
 int
 __cdecl
 main(
@@ -705,8 +928,11 @@ main(
         }
     }
 
-    if (!Only || strcmp(Only, "tl") == 0)
+    /* The pretransformed cases also make both translators, which the geometry shader needs */
+    if (!Only || strcmp(Only, "tl") == 0 || strcmp(Only, "gs") == 0)
         ScRunTlCases(&Context, Fuzz);
+    if (!Only || strcmp(Only, "gs") == 0)
+        ScRunGsCases(&Context, Fuzz);
 
     printf("%u cases, %u differ\n", Context.Cases, Context.Failures);
     NineScDestroyTranslator(Context.Translator);
