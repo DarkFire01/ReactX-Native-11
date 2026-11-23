@@ -119,6 +119,25 @@ RxNormalizeResourceDesc(
     if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D && Desc.Height != 1)
         return FALSE;
 
+    /* The largest textures the API allows */
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D &&
+        (Desc.Width > D3D12_REQ_TEXTURE1D_U_DIMENSION || Desc.DepthOrArraySize > D3D12_REQ_TEXTURE1D_ARRAY_AXIS_DIMENSION))
+    {
+        return FALSE;
+    }
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        (Desc.Width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || Desc.Height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+         Desc.DepthOrArraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION))
+    {
+        return FALSE;
+    }
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D &&
+        (Desc.Width > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION || Desc.Height > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION ||
+         Desc.DepthOrArraySize > D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION))
+    {
+        return FALSE;
+    }
+
     Largest = Desc.Width;
     if (Desc.Height > Largest)
         Largest = Desc.Height;
