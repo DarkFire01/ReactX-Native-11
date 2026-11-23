@@ -169,7 +169,7 @@ protected:
     LONG RefCount = 0;
 };
 
-/* A surface the device made: back buffers, the automatic depth buffer and later render targets */
+/* A surface the device made: back buffers, the automatic depth buffer and the surfaces applications ask for */
 class D9Surface final : public IDirect3DSurface9, public D9Child
 {
 public:
@@ -178,7 +178,8 @@ public:
         _In_opt_ IUnknown* Container,
         _In_ const D3DSURFACE_DESC* Desc,
         _In_ BOOLEAN Lockable,
-        _In_ BOOLEAN Discard = FALSE);
+        _In_ BOOLEAN Discard = FALSE,
+        _In_ BOOLEAN Standalone = FALSE);
 
     ~D9Surface();
 
@@ -262,6 +263,12 @@ public:
         _In_ HDC Dc) override;
 
 private:
+    HRESULT
+    LockMemory(
+        _Out_ D3DLOCKED_RECT* Locked,
+        _In_opt_ const RECT* Rect,
+        _In_ DWORD Flags);
+
     IUnknown* Container;
     D3DSURFACE_DESC Desc;
     D9Resource* Resource = nullptr;
@@ -269,6 +276,13 @@ private:
     BOOLEAN Discard;
     BOOLEAN IsLocked = FALSE;
     DWORD ResourcePriority = 0;
+
+    /* Surfaces the application made on their own go away with their last reference */
+    BOOLEAN Standalone;
+
+    /* System memory and scratch surfaces keep their pixels in memory of the runtime's own */
+    BYTE* Memory = nullptr;
+    UINT MemoryPitch = 0;
 };
 
 /* A swap chain: the back buffers of one window and how they reach it */
@@ -378,6 +392,17 @@ private:
     UINT BackBufferCount = 0;
 };
 
+/* surface.cpp */
+UINT64
+D9MemoryPitch(
+    _In_ D3DFORMAT Format,
+    _In_ UINT Width);
+
+UINT
+D9MemoryRows(
+    _In_ D3DFORMAT Format,
+    _In_ UINT Height);
+
 /* present.cpp */
 HRESULT
 D9CheckOcclusion(
@@ -435,6 +460,9 @@ public:
         _In_ const D3DSURFACE_DESC* Desc,
         _In_ BOOLEAN Lockable,
         _In_ BOOLEAN Discard,
+        _In_ D3DDDI_POOL DriverPool,
+        _In_opt_ VOID* Memory,
+        _In_ UINT MemoryPitch,
         _Out_ D9Resource* Resource);
 
     HRESULT
@@ -1311,6 +1339,44 @@ private:
         _In_ UINT MultisampleQuality);
 
     HRESULT
+    CheckSurfaceFormat(
+        _In_ DWORD Usage,
+        _In_ D3DFORMAT Format);
+
+    HRESULT
+    CheckProtectedContent(VOID);
+
+    HRESULT
+    CreateTargetSurface(
+        _In_ UINT Width,
+        _In_ UINT Height,
+        _In_ D3DFORMAT Format,
+        _In_ DWORD Usage,
+        _In_ D3DMULTISAMPLE_TYPE MultiSample,
+        _In_ DWORD MultisampleQuality,
+        _In_ BOOLEAN Lockable,
+        _In_ BOOLEAN Discard,
+        _Out_ IDirect3DSurface9** Surface,
+        _Inout_opt_ HANDLE* SharedHandle);
+
+    HRESULT
+    CreatePlainSurface(
+        _In_ UINT Width,
+        _In_ UINT Height,
+        _In_ D3DFORMAT Format,
+        _In_ D3DPOOL Pool,
+        _In_ DWORD Usage,
+        _Out_ IDirect3DSurface9** Surface,
+        _Inout_opt_ HANDLE* SharedHandle);
+
+    HRESULT
+    AddSurface(
+        _In_ const D3DSURFACE_DESC* Desc,
+        _In_ BOOLEAN Lockable,
+        _In_ BOOLEAN Discard,
+        _Out_ IDirect3DSurface9** Surface);
+
+    HRESULT
     CreateStagingBuffers(VOID);
 
     VOID
@@ -1385,6 +1451,10 @@ private:
     /* The bound targets reach the driver before the first operation that writes them */
     BOOLEAN TargetsDirty = FALSE;
     D9Resource StagingBuffers[D9StagingBufferCount] = {};
+
+    /* Content protection caps the driver reported, asked for once when a surface first wants them */
+    BOOLEAN ProtectionQueried = FALSE;
+    BOOLEAN ProtectionSupported = FALSE;
 
     /* Records driver calls for a worker thread when the driver leaves threading to the runtime */
     D9Batch* Batch = nullptr;

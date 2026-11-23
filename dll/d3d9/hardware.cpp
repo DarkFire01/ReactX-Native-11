@@ -728,25 +728,30 @@ D9Device::CreateDriverBuffer(
     return CreateDriverResource(Resource, &Surface, D3DDDIMULTISAMPLE_NONE, 0);
 }
 
+/* System memory surfaces hand the driver the memory the runtime keeps their pixels in */
 HRESULT
 D9Device::CreateDriverSurface(
     _In_ const D3DSURFACE_DESC* Desc,
     _In_ BOOLEAN Lockable,
     _In_ BOOLEAN Discard,
+    _In_ D3DDDI_POOL DriverPool,
+    _In_opt_ VOID* Memory,
+    _In_ UINT MemoryPitch,
     _Out_ D9Resource* Resource)
 {
     D3DDDI_SURFACEINFO Surface = {};
 
-    /* Depth buffers may live in any video memory; render targets stay local */
     ZeroMemory(Resource, sizeof(*Resource));
-    Resource->Format = static_cast<D3DDDIFORMAT>(Desc->Format);
-    Resource->Pool = (Desc->Usage & D3DUSAGE_DEPTHSTENCIL) != 0 ? D3DDDIPOOL_VIDEOMEMORY : D3DDDIPOOL_LOCALVIDMEM;
+    Resource->Format = static_cast<D3DDDIFORMAT>(D9DriverDepthFormat(Adapter, Desc->Format));
+    Resource->Pool = DriverPool;
     Resource->Width = Desc->Width;
     Resource->Height = Desc->Height;
     D9SurfaceFlags(Desc, Lockable, Discard, &Resource->Flags);
 
     Surface.Width = Desc->Width;
     Surface.Height = Desc->Height;
+    Surface.pSysMem = Memory;
+    Surface.SysMemPitch = MemoryPitch;
     return CreateDriverResource(Resource, &Surface, static_cast<D3DDDIMULTISAMPLE_TYPE>(Desc->MultiSampleType),
                                 Desc->MultiSampleQuality);
 }
@@ -773,11 +778,13 @@ D9Device::LockDriverSurface(
     D3DDDIARG_LOCK Args = {};
     HRESULT hr;
 
+    /* A read only lock never discards; system memory locks only tell the driver */
     Args.hResource = Resource->DriverResource;
     Args.Flags.ReadOnly = (Flags & D3DLOCK_READONLY) != 0;
-    Args.Flags.Discard = (Flags & D3DLOCK_DISCARD) != 0;
+    Args.Flags.Discard = !Args.Flags.ReadOnly && (Flags & D3DLOCK_DISCARD) != 0;
     Args.Flags.DoNotWait = (Flags & D3DLOCK_DONOTWAIT) != 0;
     Args.Flags.NoOverwrite = (Flags & D3DLOCK_NOOVERWRITE) != 0;
+    Args.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
     if (Rect != nullptr)
     {
         Args.Flags.AreaValid = TRUE;
@@ -805,6 +812,7 @@ D9Device::UnlockDriverSurface(
     D3DDDIARG_UNLOCK Unlock = {};
 
     Unlock.hResource = Resource->DriverResource;
+    Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
     DrainBatch();
     return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
 }

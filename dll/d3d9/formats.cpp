@@ -261,7 +261,6 @@ D9DriverLists(
 }
 
 /* Asks about a depth format in the component order the driver listed it */
-static
 D3DFORMAT
 D9DriverDepthFormat(
     _In_ const D9Adapter* Adapter,

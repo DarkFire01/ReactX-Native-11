@@ -532,6 +532,11 @@ LONG
 D9BytesPerPixel(
     _In_ D3DFORMAT Format);
 
+D3DFORMAT
+D9DriverDepthFormat(
+    _In_ const D9Adapter* Adapter,
+    _In_ D3DFORMAT Format);
+
 VOID
 D9RegisterFormatBits(
     _In_ D3DFORMAT Format,

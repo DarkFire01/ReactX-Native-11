@@ -1461,6 +1461,257 @@ D9Device::CreateIndexBuffer(
     return D3DERR_INVALIDCALL;
 }
 
+/* Usage bits the extended surface creation calls accept */
+static constexpr DWORD D9SurfaceUsageAllowed = D3DUSAGE_RESTRICTED_CONTENT | D3DUSAGE_RESTRICT_SHARED_RESOURCE |
+                                               D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER | D3DUSAGE_NONSECURE;
+
+/* Usage bits only a surface made to be shared may carry */
+static constexpr DWORD D9SurfaceUsageShared = D3DUSAGE_RESTRICT_SHARED_RESOURCE |
+                                              D3DUSAGE_RESTRICT_SHARED_RESOURCE_DRIVER | D3DUSAGE_NONSECURE;
+
+/* The size of the system memory a surface needs stays within two gigabytes */
+static constexpr UINT64 D9SurfaceMemoryLimit = 0x80000000ULL;
+
+/* Depth formats the application can never lock */
+static
+BOOLEAN
+D9IsHiddenDepth(
+    _In_ D3DFORMAT Format)
+{
+    switch (Format)
+    {
+    case D3DFMT_D32:
+    case D3DFMT_D15S1:
+    case D3DFMT_D24S8:
+    case D3DFMT_D24X8:
+    case D3DFMT_D24X4S4:
+    case D3DFMT_D16:
+    case D3DFMT_D24FS8:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+static
+BOOLEAN
+D9IsDxtFormat(
+    _In_ D3DFORMAT Format)
+{
+    return Format == D3DFMT_DXT1 || Format == D3DFMT_DXT2 || Format == D3DFMT_DXT3 || Format == D3DFMT_DXT4 ||
+           Format == D3DFMT_DXT5;
+}
+
+/* Asks the object whether surfaces of a format and usage work under the display format */
+HRESULT
+D9Device::CheckSurfaceFormat(
+    _In_ DWORD Usage,
+    _In_ D3DFORMAT Format)
+{
+    D3DDISPLAYMODE Mode = {};
+
+    Enum->GetAdapterDisplayMode(Adapter->Ordinal, &Mode);
+    return Enum->CheckDeviceFormat(Adapter->Ordinal, DeviceType, Mode.Format, Usage, D3DRTYPE_SURFACE, Format);
+}
+
+/* Restricted content needs a driver that protects content; its caps are asked for once */
+HRESULT
+D9Device::CheckProtectedContent(VOID)
+{
+    DDICONTENTPROTECTIONCAPS Info = {};
+    D3DCONTENTPROTECTIONCAPS Protection = {};
+    D3DDDIARG_GETCAPS Args = {};
+
+    if (!ProtectionQueried)
+    {
+        ProtectionQueried = TRUE;
+        Args.Type = D3DDDICAPS_GETCONTENTPROTECTIONCAPS;
+        Args.pInfo = &Info;
+        Args.pData = &Protection;
+        Args.DataSize = sizeof(Protection);
+        if (SUCCEEDED(AdapterFunctions.pfnGetCaps(DriverAdapter, &Args)))
+            ProtectionSupported = (Protection.Caps & (D3DCPCAPS_SOFTWARE | D3DCPCAPS_HARDWARE)) != 0;
+    }
+    if (!ProtectionSupported)
+    {
+        D9_TRACE_ONCE(L"the driver cannot protect restricted content");
+        return D3DERR_INVALIDCALL;
+    }
+    return S_OK;
+}
+
+/* Wraps a description in a surface object the application owns */
+HRESULT
+D9Device::AddSurface(
+    _In_ const D3DSURFACE_DESC* Desc,
+    _In_ BOOLEAN Lockable,
+    _In_ BOOLEAN Discard,
+    _Out_ IDirect3DSurface9** Surface)
+{
+    D9Surface* Made = new (std::nothrow) D9Surface(this, nullptr, Desc, Lockable, Discard, TRUE);
+    HRESULT hr;
+
+    if (Made == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Made->Create();
+    if (FAILED(hr))
+    {
+        D9Trace(L"a surface of format %u could not be made (0x%08lX)", Desc->Format, hr);
+        delete Made;
+        return hr;
+    }
+    Made->AddRef();
+    *Surface = Made;
+    return S_OK;
+}
+
+/* Render targets and depth stencil surfaces share their checks; Usage says which one */
+HRESULT
+D9Device::CreateTargetSurface(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ D3DFORMAT Format,
+    _In_ DWORD Usage,
+    _In_ D3DMULTISAMPLE_TYPE MultiSample,
+    _In_ DWORD MultisampleQuality,
+    _In_ BOOLEAN Lockable,
+    _In_ BOOLEAN Discard,
+    _Out_ IDirect3DSurface9** Surface,
+    _Inout_opt_ HANDLE* SharedHandle)
+{
+    D3DSURFACE_DESC Desc = {};
+    DWORD Levels = 0;
+    HRESULT hr;
+
+    if (SharedHandle != nullptr)
+    {
+        if (!IsEx)
+        {
+            D9_TRACE_ONCE(L"only extended devices share surfaces");
+            return D3DERR_INVALIDCALL;
+        }
+        RX_UNIMPLEMENTED();
+        return D3DERR_INVALIDCALL;
+    }
+    if (D9IsDxtFormat(Format) && ((Width % 4) != 0 || (Height % 4) != 0))
+        return D3DERR_INVALIDCALL;
+    if (Width == 0 || Height == 0)
+        return D3DERR_INVALIDCALL;
+    if (FAILED(CheckSurfaceFormat(Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL), Format)))
+    {
+        D9_TRACE_ONCE(L"format %u cannot make this kind of surface", Format);
+        return D3DERR_INVALIDCALL;
+    }
+    if ((Usage & D9SurfaceUsageShared) != 0)
+        return D3DERR_INVALIDCALL;
+
+    if ((Usage & D3DUSAGE_DEPTHSTENCIL) != 0)
+        Lockable = !D9IsHiddenDepth(Format);
+    if (MultiSample != D3DMULTISAMPLE_NONE && Lockable)
+    {
+        D9_TRACE_ONCE(L"multisampled surfaces cannot be lockable");
+        return D3DERR_INVALIDCALL;
+    }
+
+    if (MultiSample != D3DMULTISAMPLE_NONE)
+    {
+        hr = Enum->CheckDeviceMultiSampleType(Adapter->Ordinal, DeviceType, Format,
+                                              ImplicitChain->PresentParameters().Windowed, MultiSample, &Levels);
+        if (FAILED(hr) || MultisampleQuality >= Levels)
+        {
+            D9_TRACE_ONCE(L"multisample type %u quality %lu is not supported", MultiSample, MultisampleQuality);
+            return D3DERR_INVALIDCALL;
+        }
+    }
+    if ((Usage & D3DUSAGE_RESTRICTED_CONTENT) != 0)
+    {
+        hr = CheckProtectedContent();
+        if (FAILED(hr))
+            return hr;
+    }
+
+    Desc.Format = Format;
+    Desc.Type = D3DRTYPE_SURFACE;
+    Desc.Usage = Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL);
+    Desc.Pool = D3DPOOL_DEFAULT;
+    Desc.MultiSampleType = MultiSample;
+    Desc.MultiSampleQuality = MultisampleQuality;
+    Desc.Width = Width;
+    Desc.Height = Height;
+    return AddSurface(&Desc, Lockable, Discard, Surface);
+}
+
+/* Offscreen plain surfaces; scratch ones only need a format the runtime knows the size of */
+HRESULT
+D9Device::CreatePlainSurface(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ D3DFORMAT Format,
+    _In_ D3DPOOL Pool,
+    _In_ DWORD Usage,
+    _Out_ IDirect3DSurface9** Surface,
+    _Inout_opt_ HANDLE* SharedHandle)
+{
+    D3DSURFACE_DESC Desc = {};
+    UINT64 Pitch;
+
+    if (Format == D3DFMT_UNKNOWN)
+        return D3DERR_INVALIDCALL;
+    if (Pool != D3DPOOL_DEFAULT && Pool != D3DPOOL_SYSTEMMEM && Pool != D3DPOOL_SCRATCH)
+    {
+        D9_TRACE_ONCE(L"CreateOffscreenPlainSurface: pool %u is not allowed", Pool);
+        return D3DERR_INVALIDCALL;
+    }
+    if (Pool == D3DPOOL_SCRATCH ? D9PixelStride(Format) == 0 : FAILED(CheckSurfaceFormat(0, Format)))
+    {
+        D9_TRACE_ONCE(L"CreateOffscreenPlainSurface: format %u is not supported", Format);
+        return D3DERR_INVALIDCALL;
+    }
+    if (Format == D3DFMT_BINARYBUFFER && Height > 1)
+        return D3DERR_INVALIDCALL;
+
+    if (SharedHandle != nullptr)
+    {
+        if (!IsEx)
+        {
+            D9_TRACE_ONCE(L"only extended devices share surfaces");
+            return D3DERR_INVALIDCALL;
+        }
+        RX_UNIMPLEMENTED();
+        return D3DERR_INVALIDCALL;
+    }
+    if (D9IsHiddenDepth(Format))
+        return D3DERR_INVALIDCALL;
+    if (D9IsDxtFormat(Format) && ((Width % 4) != 0 || (Height % 4) != 0))
+        return D3DERR_INVALIDCALL;
+    if (Width == 0 || Height == 0)
+        return D3DERR_INVALIDCALL;
+    if ((Usage & ~D9SurfaceUsageAllowed) != 0 || (Usage & D9SurfaceUsageShared) != 0)
+        return D3DERR_INVALIDCALL;
+
+    if (Pool == D3DPOOL_SYSTEMMEM)
+    {
+        Pitch = D9MemoryPitch(Format, Width);
+        if (Pitch > D9SurfaceMemoryLimit || Pitch * D9MemoryRows(Format, Height) > D9SurfaceMemoryLimit)
+            return D3DERR_INVALIDCALL;
+    }
+    if (Pool != D3DPOOL_SCRATCH && (Usage & D3DUSAGE_RESTRICTED_CONTENT) != 0)
+    {
+        HRESULT hr = CheckProtectedContent();
+
+        if (FAILED(hr))
+            return hr;
+    }
+
+    Desc.Format = Format;
+    Desc.Type = D3DRTYPE_SURFACE;
+    Desc.Pool = Pool;
+    Desc.Width = Width;
+    Desc.Height = Height;
+    return AddSurface(&Desc, TRUE, FALSE, Surface);
+}
+
 STDMETHODIMP
 D9Device::CreateRenderTarget(
     _In_ UINT Width,
@@ -1472,8 +1723,39 @@ D9Device::CreateRenderTarget(
     _Out_ IDirect3DSurface9** Surface,
     _Inout_opt_ HANDLE* SharedHandle)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    D9_DEVICE_LOCK();
+
+    *Surface = nullptr;
+    if (Format == D3DFMT_UNKNOWN)
+        return D3DERR_INVALIDCALL;
+    return CreateTargetSurface(Width, Height, Format, D3DUSAGE_RENDERTARGET, MultiSample, MultisampleQuality,
+                               Lockable != FALSE, FALSE, Surface, SharedHandle);
+}
+
+STDMETHODIMP
+D9Device::CreateRenderTargetEx(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ D3DFORMAT Format,
+    _In_ D3DMULTISAMPLE_TYPE MultiSample,
+    _In_ DWORD MultisampleQuality,
+    _In_ BOOL Lockable,
+    _Out_ IDirect3DSurface9** Surface,
+    _Inout_opt_ HANDLE* SharedHandle,
+    _In_ DWORD Usage)
+{
+    D9_DEVICE_LOCK();
+
+    if ((Usage & ~D9SurfaceUsageAllowed) != 0)
+    {
+        D9_TRACE_ONCE(L"CreateRenderTargetEx: invalid usage 0x%08lX", Usage);
+        return D3DERR_INVALIDCALL;
+    }
+    *Surface = nullptr;
+    if (Format == D3DFMT_UNKNOWN)
+        return D3DERR_INVALIDCALL;
+    return CreateTargetSurface(Width, Height, Format, Usage | D3DUSAGE_RENDERTARGET, MultiSample,
+                               MultisampleQuality, Lockable != FALSE, FALSE, Surface, SharedHandle);
 }
 
 STDMETHODIMP
@@ -1487,8 +1769,73 @@ D9Device::CreateDepthStencilSurface(
     _Out_ IDirect3DSurface9** Surface,
     _Inout_opt_ HANDLE* SharedHandle)
 {
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
+    return CreateDepthStencilSurfaceEx(Width, Height, Format, MultiSample, MultisampleQuality, Discard, Surface,
+                                       SharedHandle, 0);
+}
+
+STDMETHODIMP
+D9Device::CreateDepthStencilSurfaceEx(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ D3DFORMAT Format,
+    _In_ D3DMULTISAMPLE_TYPE MultiSample,
+    _In_ DWORD MultisampleQuality,
+    _In_ BOOL Discard,
+    _Out_ IDirect3DSurface9** Surface,
+    _Inout_opt_ HANDLE* SharedHandle,
+    _In_ DWORD Usage)
+{
+    D9_DEVICE_LOCK();
+
+    if ((Usage & ~D9SurfaceUsageAllowed) != 0)
+    {
+        D9_TRACE_ONCE(L"CreateDepthStencilSurfaceEx: invalid usage 0x%08lX", Usage);
+        return D3DERR_INVALIDCALL;
+    }
+    *Surface = nullptr;
+    if (Format == D3DFMT_UNKNOWN)
+        return D3DERR_INVALIDCALL;
+
+    /* Discarded depth contents can never be read back */
+    if (Discard && !D9IsHiddenDepth(Format))
+    {
+        D9_TRACE_ONCE(L"a discardable depth stencil surface cannot be lockable");
+        return D3DERR_INVALIDCALL;
+    }
+    return CreateTargetSurface(Width, Height, Format, Usage | D3DUSAGE_DEPTHSTENCIL, MultiSample,
+                               MultisampleQuality, FALSE, Discard != FALSE, Surface, SharedHandle);
+}
+
+STDMETHODIMP
+D9Device::CreateOffscreenPlainSurface(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ D3DFORMAT Format,
+    _In_ D3DPOOL Pool,
+    _Out_ IDirect3DSurface9** Surface,
+    _Inout_opt_ HANDLE* SharedHandle)
+{
+    return CreateOffscreenPlainSurfaceEx(Width, Height, Format, Pool, Surface, SharedHandle, 0);
+}
+
+STDMETHODIMP
+D9Device::CreateOffscreenPlainSurfaceEx(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ D3DFORMAT Format,
+    _In_ D3DPOOL Pool,
+    _Out_ IDirect3DSurface9** Surface,
+    _Inout_opt_ HANDLE* SharedHandle,
+    _In_ DWORD Usage)
+{
+    HRESULT hr;
+
+    D9_DEVICE_LOCK();
+
+    hr = CreatePlainSurface(Width, Height, Format, Pool, Usage, Surface, SharedHandle);
+    if (FAILED(hr))
+        *Surface = nullptr;
+    return hr;
 }
 
 STDMETHODIMP
@@ -1546,19 +1893,6 @@ D9Device::ColorFill(
     _In_opt_ IDirect3DSurface9* Surface,
     _In_opt_ const RECT* Rect,
     _In_ D3DCOLOR Color)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateOffscreenPlainSurface(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_ D3DFORMAT Format,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DSurface9** Surface,
-    _Inout_opt_ HANDLE* SharedHandle)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;
@@ -2298,52 +2632,6 @@ STDMETHODIMP
 D9Device::CheckResourceResidency(
     _In_ IDirect3DResource9** ResourceArray,
     _In_ UINT32 NumResources)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateRenderTargetEx(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_ D3DFORMAT Format,
-    _In_ D3DMULTISAMPLE_TYPE MultiSample,
-    _In_ DWORD MultisampleQuality,
-    _In_ BOOL Lockable,
-    _Out_ IDirect3DSurface9** Surface,
-    _Inout_opt_ HANDLE* SharedHandle,
-    _In_ DWORD Usage)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateOffscreenPlainSurfaceEx(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_ D3DFORMAT Format,
-    _In_ D3DPOOL Pool,
-    _Out_ IDirect3DSurface9** Surface,
-    _Inout_opt_ HANDLE* SharedHandle,
-    _In_ DWORD Usage)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CreateDepthStencilSurfaceEx(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_ D3DFORMAT Format,
-    _In_ D3DMULTISAMPLE_TYPE MultiSample,
-    _In_ DWORD MultisampleQuality,
-    _In_ BOOL Discard,
-    _Out_ IDirect3DSurface9** Surface,
-    _Inout_opt_ HANDLE* SharedHandle,
-    _In_ DWORD Usage)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;
