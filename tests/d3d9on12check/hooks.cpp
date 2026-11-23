@@ -407,6 +407,144 @@ CkDescribeQueueCall(
     }
 }
 
+/* Slots of the device DDI table whose arguments are printed */
+enum CkDdiSlot
+{
+    CkDdiLock = 35,
+    CkDdiUnlock = 36,
+    CkDdiDestroyResource = 38,
+    CkDdiLockAsync = 96,
+    CkDdiUnlockAsync = 97,
+    CkDdiRename = 98,
+    CkDdiCreateResource2 = 128,
+};
+
+/* The arguments of a device DDI call the runtime made */
+static
+VOID
+CkDescribeDdiCall(
+    _Inout_ std::string* Text,
+    _In_ UINT Slot,
+    _In_reads_(CkArgumentCount) const UINT_PTR* A)
+{
+    switch (Slot)
+    {
+        case CkDdiCreateResource2:
+        {
+            const D3DDDIARG_CREATERESOURCE2* Args = reinterpret_cast<const D3DDDIARG_CREATERESOURCE2*>(A[1]);
+
+            CkAppend(Text, " format %X pool %u ms %u/%u surfaces %u mips %u fvf %X source %u flags %X rotation %u flags2 %X",
+                     Args->Format, Args->Pool, Args->MultisampleType, Args->MultisampleQuality, Args->SurfCount,
+                     Args->MipLevels, Args->Fvf, Args->VidPnSourceId, Args->Flags.Value, Args->Rotation,
+                     Args->Flags2.Value);
+            for (UINT Index = 0; Index < Args->SurfCount && Index < 4; Index++)
+            {
+                const D3DDDI_SURFACEINFO* Surface = &Args->pSurfList[Index];
+
+                CkAppend(Text, " [%ux%ux%u mem %s pitch %u/%u]", Surface->Width, Surface->Height, Surface->Depth,
+                         Surface->pSysMem != nullptr ? "set" : "none", Surface->SysMemPitch,
+                         Surface->SysMemSlicePitch);
+            }
+            break;
+        }
+        case CkDdiLock:
+        {
+            const D3DDDIARG_LOCK* Args = reinterpret_cast<const D3DDDIARG_LOCK*>(A[1]);
+
+            CkAppend(Text, " resource %s sub %u flags %X box %u %u %u %u %u %u", CkName(Args->hResource).c_str(),
+                     Args->SubResourceIndex, Args->Flags.Value, Args->Box.Left, Args->Box.Top, Args->Box.Right,
+                     Args->Box.Bottom, Args->Box.Front, Args->Box.Back);
+            break;
+        }
+        case CkDdiUnlock:
+        {
+            const D3DDDIARG_UNLOCK* Args = reinterpret_cast<const D3DDDIARG_UNLOCK*>(A[1]);
+
+            CkAppend(Text, " resource %s sub %u flags %X", CkName(Args->hResource).c_str(), Args->SubResourceIndex,
+                     Args->Flags.Value);
+            break;
+        }
+        case CkDdiDestroyResource:
+            CkAppend(Text, " resource %s", CkName(reinterpret_cast<VOID*>(A[1])).c_str());
+            break;
+        case CkDdiLockAsync:
+        {
+            const D3DDDIARG_LOCKASYNC* Args = reinterpret_cast<const D3DDDIARG_LOCKASYNC*>(A[1]);
+
+            CkAppend(Text, " resource %s sub %u flags %X box %u %u %u %u %u %u", CkName(Args->hResource).c_str(),
+                     Args->SubResourceIndex, Args->Flags.Value, Args->Box.Left, Args->Box.Top, Args->Box.Right,
+                     Args->Box.Bottom, Args->Box.Front, Args->Box.Back);
+            break;
+        }
+        case CkDdiUnlockAsync:
+        {
+            const D3DDDIARG_UNLOCKASYNC* Args = reinterpret_cast<const D3DDDIARG_UNLOCKASYNC*>(A[1]);
+
+            CkAppend(Text, " resource %s sub %u flags %X", CkName(Args->hResource).c_str(), Args->SubResourceIndex,
+                     Args->Flags.Value);
+            break;
+        }
+        case CkDdiRename:
+        {
+            const D3DDDIARG_RENAME* Args = reinterpret_cast<const D3DDDIARG_RENAME*>(A[1]);
+
+            CkAppend(Text, " resource %s sub %u cookie %s", CkName(Args->hResource).c_str(), Args->SubResourceIndex,
+                     CkName(Args->hCookie).c_str());
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+/* What a device DDI call handed back */
+static
+VOID
+CkDescribeDdiResult(
+    _Inout_ std::string* Text,
+    _In_ UINT Slot,
+    _In_reads_(CkArgumentCount) const UINT_PTR* A)
+{
+    switch (Slot)
+    {
+        case CkDdiCreateResource2:
+        {
+            const D3DDDIARG_CREATERESOURCE2* Args = reinterpret_cast<const D3DDDIARG_CREATERESOURCE2*>(A[1]);
+
+            if (Args->hResource == reinterpret_cast<HANDLE>(1))
+            {
+                CkAppend(Text, " -> null");
+            }
+            else
+            {
+                AcquireSRWLockExclusive(&CkHooks.Lock);
+                CkHooks.Ids.erase(Args->hResource);
+                ReleaseSRWLockExclusive(&CkHooks.Lock);
+                CkAppend(Text, " -> %s", CkName(Args->hResource).c_str());
+            }
+            break;
+        }
+        case CkDdiLock:
+        {
+            const D3DDDIARG_LOCK* Args = reinterpret_cast<const D3DDDIARG_LOCK*>(A[1]);
+
+            CkAppend(Text, " -> data %s pitch %u slice %u", Args->pSurfData != nullptr ? "set" : "none", Args->Pitch,
+                     Args->SlicePitch);
+            break;
+        }
+        case CkDdiLockAsync:
+        {
+            const D3DDDIARG_LOCKASYNC* Args = reinterpret_cast<const D3DDDIARG_LOCKASYNC*>(A[1]);
+
+            CkAppend(Text, " -> data %s pitch %u slice %u cookie %s", Args->pSurfData != nullptr ? "set" : "none",
+                     Args->Pitch, Args->SlicePitch, Args->hCookie != nullptr ? "set" : "none");
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static
 UINT_PTR
 CkDispatch(
@@ -423,6 +561,7 @@ CkDispatch(
     if (Family == CkFamilyDdi)
     {
         CkAppend(&Text, "ddi %s", CkDdiNames[Slot]);
+        CkDescribeDdiCall(&Text, Slot, A);
     }
     else if (Family == CkFamilyDevice)
     {
@@ -438,6 +577,9 @@ CkDispatch(
     Self->Depth += 1;
     Result = CkHooks.Originals[Family][Slot](A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[8], A[9], A[10], A[11]);
     Self->Depth -= 1;
+
+    if (Family == CkFamilyDdi && SUCCEEDED(static_cast<HRESULT>(Result)))
+        CkDescribeDdiResult(&Text, Slot, A);
 
     if (Family == CkFamilyDevice)
     {
