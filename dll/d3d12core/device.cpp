@@ -759,8 +759,15 @@ RxDevice12::CreateCommandList1(
 
     if (ppCommandList != nullptr)
         *ppCommandList = nullptr;
-    if (nodeMask > 1 || flags != D3D12_COMMAND_LIST_FLAG_NONE)
+    if (nodeMask > 1 || RxQueueFlagsOf(type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE)
         return E_INVALIDARG;
+    if (type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
+        type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
+    {
+        return E_NOINTERFACE;
+    }
+    if (ppCommandList == nullptr)
+        return E_UNEXPECTED;
 
     hr = RxCommandList::Create(*this, type, nullptr, nullptr, &List);
     if (FAILED(hr))

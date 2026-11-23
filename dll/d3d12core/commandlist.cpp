@@ -293,7 +293,10 @@ RxCommandList::Reset(
 {
     RxCommandAllocator* NewAllocator = RxUnwrap12<RxCommandAllocator>(pAllocator);
 
-    if (State == RxListState::Recording || NewAllocator == nullptr || NewAllocator->GetType() != Type)
+    /* A list still recording can not start over */
+    if (State == RxListState::Recording)
+        return E_FAIL;
+    if (NewAllocator == nullptr || NewAllocator->GetType() != Type)
         return E_INVALIDARG;
 
     return Begin(NewAllocator, pInitialState);
