@@ -1904,11 +1904,14 @@ VOID
 DcFillNoise(
     _Out_writes_bytes_(Bytes) BYTE* Data,
     _In_ DWORD Bytes,
-    _In_ const WAVEFORMATEX* Format)
+    _In_ const WAVEFORMATEX* Format,
+    _In_ ULONG Seed)
 {
     UINT Width = Format->wBitsPerSample / 8;
     DWORD Samples = Bytes / Width;
-    ULONG Seed = 12345;
+    BOOLEAN Float = Format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
+                    (Format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                     reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(Format)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
 
     for (DWORD Index = 0; Index < Samples; Index++)
     {
@@ -1918,7 +1921,7 @@ DcFillNoise(
         Value = (static_cast<float>((Seed >> 16) & 0x7FFF) / 32767.0f - 0.5f) * 0.008f;
         if (Index < Format->nChannels)
             Value = 0.004f;
-        if (Format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+        if (Float)
         {
             reinterpret_cast<float*>(Data)[Index] = Value;
         }
@@ -2032,11 +2035,12 @@ DcSetScene(
     Primary->Release();
 }
 
-/* A new device object with its stream already running on a silent warm up */
+/* A new device object with its stream already running on a silent warm up, stereo unless a format is given */
 static
 HRESULT
 DcOpenMixDevice(
-    _Out_ IDirectSound8** Sound)
+    _Out_ IDirectSound8** Sound,
+    _In_opt_ WAVEFORMATEX* WarmUp = nullptr)
 {
     WAVEFORMATEX Format;
     IDirectSoundBuffer* Buffer;
@@ -2048,7 +2052,9 @@ DcOpenMixDevice(
     (*Sound)->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
 
     DcFormat(&Format, WAVE_FORMAT_PCM, 2, 48000, 16);
-    if (SUCCEEDED(DcMakeBuffer(*Sound, DSBCAPS_GLOBALFOCUS, 9600, &Format, &Buffer)))
+    if (WarmUp == nullptr)
+        WarmUp = &Format;
+    if (SUCCEEDED(DcMakeBuffer(*Sound, DSBCAPS_GLOBALFOCUS, WarmUp->nBlockAlign * 2400, WarmUp, &Buffer)))
     {
         Buffer->Play(0, 0, 0);
         Sleep(300);
@@ -2214,7 +2220,7 @@ DcCheckMix(VOID)
             continue;
         }
         Buffer->Lock(0, 0, &Part1, &Size1, nullptr, nullptr, DSBLOCK_ENTIREBUFFER);
-        DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format);
+        DcFillNoise(static_cast<BYTE*>(Part1), Size1, &Format, 12345);
         Buffer->Unlock(Part1, Size1, nullptr, 0);
         Buffer->SetVolume(Cases[Case].Volume);
         if (Scene == 67 || Long)
@@ -2326,6 +2332,205 @@ DcCheckMix(VOID)
     printf("release %lu\n", Sound->Release());
 }
 
+/* Prints the sums, powers and first frames of what the loopback heard, from the first sound on */
+static
+VOID
+DcShowHeard(
+    _In_ UINT Case,
+    _In_ DcLoopback* Loopback,
+    _In_ size_t Shown)
+{
+    UINT Channels = Loopback->Format->nChannels;
+    size_t Onset;
+    size_t Frames;
+    size_t Count;
+    double Sum[8] = {};
+    double Power[8] = {};
+    const float* Start;
+
+    for (Onset = 0; Onset < Loopback->Samples.size(); Onset++)
+    {
+        if (fabsf(Loopback->Samples[Onset]) > 1e-4f)
+            break;
+    }
+    if (Onset >= Loopback->Samples.size())
+    {
+        fprintf(stderr, "mix[%u] heard nothing in %zu samples\n", Case, Loopback->Samples.size());
+        printf("  silent\n");
+        return;
+    }
+    Onset -= Onset % Channels;
+    Frames = (Loopback->Samples.size() - Onset) / Channels;
+    Start = &Loopback->Samples[Onset];
+    Count = Frames < 8000 ? Frames : 8000;
+
+    for (size_t Frame = 0; Frame < Count; Frame++)
+    {
+        for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
+        {
+            Sum[Channel] += Start[Frame * Channels + Channel];
+            Power[Channel] += static_cast<double>(Start[Frame * Channels + Channel]) * Start[Frame * Channels + Channel];
+        }
+    }
+    for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
+        printf("  channel %u sum %.9g power %.9g\n", Channel, Sum[Channel], Power[Channel]);
+    for (size_t Frame = 0; Frame < Shown && Frame < Frames; Frame++)
+    {
+        printf("  frame %2zu", Frame);
+        for (UINT Channel = 0; Channel < Channels && Channel < 8; Channel++)
+            printf(" %08lX", *reinterpret_cast<const DWORD*>(&Start[Frame * Channels + Channel]));
+        printf("\n");
+    }
+}
+
+/* Several buffers at once, and buffers wider than the endpoint that pick the final mix layout */
+static
+VOID
+DcCheckMixLayouts(VOID)
+{
+    struct DC_LAYOUT_BUFFER
+    {
+        WORD Tag;
+        WORD Channels;
+        DWORD Mask;
+        DWORD Rate;
+        WORD Bits;
+        LONG Volume;
+        LONG Pan;
+        BOOLEAN Quiet;
+    };
+    static const struct
+    {
+        /* The warm up plays stereo, the first buffer's format so the final mix starts in its layout, or nothing */
+        UCHAR WarmUp;
+        UINT Count;
+        DC_LAYOUT_BUFFER Buffers[3];
+    } Cases[] =
+    {
+        { 1, 1, { { WAVE_FORMAT_PCM, 6, KSAUDIO_SPEAKER_5POINT1, 0, 16, 0, 0 } } },
+        { 1, 1, { { WAVE_FORMAT_PCM, 6, KSAUDIO_SPEAKER_5POINT1, 0, 16, -600, 2000 } } },
+        { 1, 1, { { WAVE_FORMAT_PCM, 4, KSAUDIO_SPEAKER_QUAD, 0, 16, 0, -3000 } } },
+        { 1, 1, { { WAVE_FORMAT_IEEE_FLOAT, 8, KSAUDIO_SPEAKER_7POINT1_SURROUND, 44100, 32, -300, 700 } } },
+        { 1, 1, { { WAVE_FORMAT_IEEE_FLOAT, 8, KSAUDIO_SPEAKER_7POINT1_SURROUND, 0, 32, -300, 700 } } },
+        /* The second buffer locks the endpoint layout before the stream ever starts */
+        { 2, 2, { { WAVE_FORMAT_PCM, 6, KSAUDIO_SPEAKER_5POINT1, 0, 16, 0, 1500 },
+                  { WAVE_FORMAT_PCM, 2, 0, 0, 16, -1200, 0 } } },
+        { 1, 2, { { WAVE_FORMAT_PCM, 6, KSAUDIO_SPEAKER_5POINT1, 0, 16, -400, -1500 },
+                  { WAVE_FORMAT_PCM, 4, KSAUDIO_SPEAKER_QUAD, 0, 16, -800, 0 } } },
+        { 0, 2, { { WAVE_FORMAT_PCM, 1, 0, 0, 16, -600, -2500 },
+                  { WAVE_FORMAT_PCM, 2, 0, 0, 16, -900, 0 } } },
+        { 0, 2, { { WAVE_FORMAT_PCM, 1, 0, 22050, 16, -600, 0 },
+                  { WAVE_FORMAT_PCM, 2, 0, 44100, 16, -600, 1200 } } },
+        { 0, 2, { { WAVE_FORMAT_PCM, 2, 0, 0, 8, -600, 0 },
+                  { WAVE_FORMAT_IEEE_FLOAT, 1, 0, 32000, 32, -600, 0 } } },
+        { 0, 2, { { WAVE_FORMAT_PCM, 6, KSAUDIO_SPEAKER_5POINT1, 0, 16, -600, 800 },
+                  { WAVE_FORMAT_PCM, 1, 0, 0, 16, -600, 0 } } },
+        /* A third buffer moves the whole device to the cubic converter for good, so it comes last. Only one plays,
+           since starting a cubic voice can take the system longer than an engine pass */
+        { 0, 3, { { WAVE_FORMAT_PCM, 1, 0, 22050, 16, -900, 0 },
+                  { WAVE_FORMAT_PCM, 2, 0, 44100, 16, -900, 0, TRUE },
+                  { WAVE_FORMAT_PCM, 1, 0, 0, 16, -900, 3000, TRUE } } },
+        { 0, 3, { { WAVE_FORMAT_PCM, 2, 0, 44100, 16, -900, 600 },
+                  { WAVE_FORMAT_PCM, 1, 0, 0, 16, -900, 0, TRUE },
+                  { WAVE_FORMAT_PCM, 1, 0, 0, 16, -900, 0, TRUE } } },
+    };
+    const UINT First = 55;
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Cases); Index++)
+    {
+        UINT Case = First + Index;
+        IDirectSoundBuffer* Buffers[3] = {};
+        WAVEFORMATEXTENSIBLE Formats[3];
+        IDirectSound8* Sound = nullptr;
+        IDirectSound8* Keeper = nullptr;
+        DcLoopback Loopback;
+        HRESULT hr;
+
+        if (Case < DcFirstMixCase)
+            continue;
+        hr = Loopback.Start();
+        if (FAILED(hr))
+        {
+            printf("mix[%u] loopback = %08lX\n", Case, hr);
+            continue;
+        }
+
+        for (UINT Slot = 0; Slot < Cases[Index].Count; Slot++)
+        {
+            const DC_LAYOUT_BUFFER* Want = &Cases[Index].Buffers[Slot];
+            DWORD Rate = Want->Rate != 0 ? Want->Rate : Loopback.Format->nSamplesPerSec;
+
+            if (Want->Mask != 0)
+            {
+                DcExtensible(&Formats[Slot], Want->Tag == WAVE_FORMAT_IEEE_FLOAT ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM,
+                             Want->Channels, Rate, Want->Bits, Want->Bits, Want->Mask);
+            }
+            else
+            {
+                DcFormat(&Formats[Slot].Format, Want->Tag, Want->Channels, Rate, Want->Bits);
+            }
+        }
+        /* Another device object keeps the endpoint running, so this one starts its stream on a warm engine */
+        if (Cases[Index].WarmUp == 2)
+        {
+            if (FAILED(DcOpenMixDevice(&Keeper)))
+                return;
+            if (FAILED(DcCreate8(&Sound)))
+            {
+                Keeper->Release();
+                return;
+            }
+            Sound->SetCooperativeLevel(DcWindow, DSSCL_PRIORITY);
+        }
+        else if (FAILED(DcOpenMixDevice(&Sound, Cases[Index].WarmUp == 1 ? &Formats[0].Format : nullptr)))
+        {
+            return;
+        }
+
+        printf("mix[%u] buffers %u\n", Case, Cases[Index].Count);
+        for (UINT Slot = 0; Slot < Cases[Index].Count; Slot++)
+        {
+            const DC_LAYOUT_BUFFER* Want = &Cases[Index].Buffers[Slot];
+            WAVEFORMATEX* Format = &Formats[Slot].Format;
+            DWORD Bytes = Format->nAvgBytesPerSec / 4 / Format->nBlockAlign * Format->nBlockAlign;
+            VOID* Part1;
+            DWORD Size1;
+
+            hr = DcMakeBuffer(Sound, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_GLOBALFOCUS, Bytes, Format, &Buffers[Slot]);
+            printf("  buffer %u format %u/%u/%lX/%lu/%u volume %ld pan %ld%s = %08lX\n", Slot, Want->Tag, Want->Channels, Want->Mask,
+                   Format->nSamplesPerSec, Want->Bits, Want->Volume, Want->Pan, Want->Quiet ? " unplayed" : "", hr);
+            if (FAILED(hr))
+                continue;
+            Buffers[Slot]->Lock(0, 0, &Part1, &Size1, nullptr, nullptr, DSBLOCK_ENTIREBUFFER);
+            DcFillNoise(static_cast<BYTE*>(Part1), Size1, Format, 12345 + Slot * 777);
+            Buffers[Slot]->Unlock(Part1, Size1, nullptr, 0);
+            Buffers[Slot]->SetVolume(Want->Volume);
+            Buffers[Slot]->SetPan(Want->Pan);
+        }
+
+        Loopback.Collect(100);
+        for (UINT Slot = 0; Slot < Cases[Index].Count; Slot++)
+        {
+            if (Buffers[Slot] != nullptr && !Cases[Index].Buffers[Slot].Quiet)
+            {
+                hr = Buffers[Slot]->Play(0, 0, 0);
+                if (FAILED(hr))
+                    fprintf(stderr, "mix[%u] play %u = %08lX\n", Case, Slot, hr);
+            }
+        }
+        Loopback.Collect(500);
+        for (UINT Slot = 0; Slot < Cases[Index].Count; Slot++)
+        {
+            if (Buffers[Slot] != nullptr)
+                Buffers[Slot]->Release();
+        }
+        DcShowHeard(Case, &Loopback, 200);
+        Sound->Release();
+        if (Keeper != nullptr)
+            Keeper->Release();
+    }
+}
+
 int
 wmain(
     _In_ int argc,
@@ -2386,7 +2591,10 @@ wmain(
 
     /* Audible, so only on request */
     if (DcSection != nullptr && _wcsicmp(DcSection, L"mix") == 0)
+    {
         DcCheckMix();
+        DcCheckMixLayouts();
+    }
 
     DestroyWindow(DcWindow);
     FreeLibrary(DcModule);
