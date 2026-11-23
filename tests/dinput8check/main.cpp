@@ -571,6 +571,28 @@ DcCheckFactory(VOID)
                 printf("  uninit caps = %08lX\n", Device->GetCapabilities(&Caps));
                 printf("  uninit acquire = %08lX\n", Device->Acquire());
                 printf("  uninit format = %08lX\n", Device->SetDataFormat(&DcKeyboardFormat));
+                {
+                    LPDIRECTINPUTEFFECT Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(DC_SENTINEL);
+                    DIEFFECTINFOW Info = { sizeof(Info) };
+                    DIEFFESCAPE Escape = { sizeof(Escape) };
+                    DIDEVICEOBJECTDATA Data = {};
+                    DWORD State = 0xCCCCCCCC;
+                    DWORD Count = 1;
+
+                    printf("  uninit create effect = %08lX", Device->CreateEffect(GUID_Sine, nullptr, &Effect, nullptr));
+                    printf(" %s\n", DcPointer(Effect));
+                    printf("  uninit enum effects = %08lX\n", Device->EnumEffects(
+                        [](LPCDIEFFECTINFOW, VOID*) -> BOOL { return DIENUM_CONTINUE; }, nullptr, 0));
+                    printf("  uninit effect info = %08lX\n", Device->GetEffectInfo(&Info, GUID_Sine));
+                    printf("  uninit ff state = %08lX", Device->GetForceFeedbackState(&State));
+                    printf(" %08lX\n", State);
+                    printf("  uninit ff command = %08lX\n", Device->SendForceFeedbackCommand(DISFFC_RESET));
+                    printf("  uninit escape = %08lX\n", Device->Escape(&Escape));
+                    printf("  uninit enum created = %08lX\n", Device->EnumCreatedEffectObjects(
+                        [](LPDIRECTINPUTEFFECT, VOID*) -> BOOL { return DIENUM_CONTINUE; }, nullptr, 0));
+                    printf("  uninit send = %08lX", Device->SendDeviceData(sizeof(Data), &Data, &Count, 0));
+                    printf(" count %lu\n", Count);
+                }
                 printf("  init null guid hinst = %08lX\n", Device->Initialize(nullptr, DIRECTINPUT_VERSION, GUID_SysKeyboard));
                 printf("  init 0x700 = %08lX\n", Device->Initialize(Instance, 0x700, GUID_SysKeyboard));
                 printf("  init random = %08lX\n", Device->Initialize(Instance, DIRECTINPUT_VERSION, DcRandomGuid));
@@ -741,6 +763,7 @@ static const struct
     { "props", [] { DcRunDataChecks("props"); } },
     { "hidprops", [] { DcRunDataChecks("hidprops"); } },
     { "misc", [] { DcRunDataChecks("misc"); } },
+    { "ffargs", [] { DcRunDataChecks("ffargs"); } },
     { "effects", DcCheckEffectFiles },
     { "actions", DcCheckActions },
     { "joyconfig", DcCheckJoyConfig },

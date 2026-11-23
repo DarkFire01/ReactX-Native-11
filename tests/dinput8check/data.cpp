@@ -900,6 +900,204 @@ DcCheckMisc(VOID)
     Wide->Release();
 }
 
+static
+BOOL
+CALLBACK
+DcCountEffectW(
+    _In_ LPCDIEFFECTINFOW Info,
+    _In_ VOID* Context)
+{
+    UNREFERENCED_PARAMETER(Info);
+    *static_cast<ULONG*>(Context) += 1;
+    return DIENUM_CONTINUE;
+}
+
+static
+BOOL
+CALLBACK
+DcCountEffectA(
+    _In_ LPCDIEFFECTINFOA Info,
+    _In_ VOID* Context)
+{
+    UNREFERENCED_PARAMETER(Info);
+    *static_cast<ULONG*>(Context) += 1;
+    return DIENUM_CONTINUE;
+}
+
+static
+BOOL
+CALLBACK
+DcCountCreated(
+    _In_ LPDIRECTINPUTEFFECT Effect,
+    _In_ VOID* Context)
+{
+    UNREFERENCED_PARAMETER(Effect);
+    *static_cast<ULONG*>(Context) += 1;
+    return DIENUM_CONTINUE;
+}
+
+/* Every force feedback entry point a device without force feedback hardware can reach */
+static
+VOID
+DcCheckForceFeedback(VOID)
+{
+    static const DWORD Types[] = { 0, DIEFT_ALL, DIEFT_CONSTANTFORCE, DIEFT_CUSTOMFORCE, 0xFF, 0x100, 0x04000000, 0x04000001,
+                                   0x80000000 };
+    static const DWORD Commands[] = { 0, DISFFC_RESET, DISFFC_STOPALL, 3, DISFFC_SETACTUATORSOFF, 0x40, 0x80000000 };
+    static const DWORD InfoSizes[] = { 0, sizeof(DIEFFECTINFOW) - 4, sizeof(DIEFFECTINFOW), sizeof(DIEFFECTINFOA) };
+    IDirectInput8W* Wide = DcCreateWide();
+    IDirectInput8A* Ansi = DcCreateAnsi();
+
+    if (Wide == nullptr || Ansi == nullptr)
+        return;
+    for (const GUID* Guid : DcReadDevices())
+    {
+        IDirectInputDevice8W* Device = DcOpen(Wide, Guid);
+        IDirectInputDevice8A* Narrow = nullptr;
+        DIDEVCAPS Caps;
+        DWORD Count;
+        HRESULT Result;
+
+        printf("device %s\n", DcGuid(Guid).c_str());
+        if (Device == nullptr)
+            continue;
+        Ansi->CreateDevice(*Guid, &Narrow, nullptr);
+
+        memset(&Caps, 0xCC, sizeof(Caps));
+        Caps.dwSize = sizeof(Caps);
+        Result = Device->GetCapabilities(&Caps);
+        printf("  caps = %08lX flags %08lX hidden %u period %lu res %lu ffdrv %lu\n", Result, Caps.dwFlags,
+               (Caps.dwFlags & DIDC_HIDDEN) != 0, Caps.dwFFSamplePeriod, Caps.dwFFMinTimeResolution, Caps.dwFFDriverVersion);
+
+        for (DWORD Type : Types)
+        {
+            ULONG Seen = 0;
+
+            Result = Device->EnumEffects(DcCountEffectW, &Seen, Type);
+            printf("  enum type %08lX = %08lX seen %lu", Type, Result, Seen);
+            Seen = 0;
+            if (Narrow != nullptr)
+            {
+                Result = Narrow->EnumEffects(DcCountEffectA, &Seen, Type);
+                printf(" ansi %08lX seen %lu", Result, Seen);
+            }
+            printf("\n");
+        }
+        if (Narrow != nullptr)
+            printf("  enum ansi null = %08lX\n", Narrow->EnumEffects(nullptr, nullptr, 0));
+
+        for (DWORD Size : InfoSizes)
+        {
+            DIEFFECTINFOW Info;
+            DIEFFECTINFOA Short;
+
+            memset(&Info, 0xCC, sizeof(Info));
+            Info.dwSize = Size;
+            printf("  info %lu = %08lX", Size, Device->GetEffectInfo(&Info, GUID_Sine));
+            if (Narrow != nullptr)
+            {
+                memset(&Short, 0xCC, sizeof(Short));
+                Short.dwSize = Size;
+                printf(" ansi %08lX", Narrow->GetEffectInfo(&Short, GUID_Sine));
+            }
+            printf("\n");
+        }
+        printf("  info null = %08lX", Device->GetEffectInfo(nullptr, GUID_Sine));
+        if (Narrow != nullptr)
+            printf(" ansi %08lX", Narrow->GetEffectInfo(nullptr, GUID_Sine));
+        printf("\n");
+
+        printf("  state null = %08lX\n", Device->GetForceFeedbackState(nullptr));
+        for (DWORD Command : Commands)
+            printf("  command %08lX = %08lX\n", Command, Device->SendForceFeedbackCommand(Command));
+
+        {
+            BYTE Buffer[8] = {};
+            DIEFFESCAPE Escape;
+
+            printf("  escape null = %08lX\n", Device->Escape(nullptr));
+            ZeroMemory(&Escape, sizeof(Escape));
+            printf("  escape size 0 = %08lX\n", Device->Escape(&Escape));
+            Escape.dwSize = sizeof(Escape);
+            Escape.cbInBuffer = sizeof(Buffer);
+            printf("  escape no in = %08lX\n", Device->Escape(&Escape));
+            Escape.lpvInBuffer = Buffer;
+            Escape.cbOutBuffer = sizeof(Buffer);
+            printf("  escape no out = %08lX\n", Device->Escape(&Escape));
+            Escape.lpvOutBuffer = Buffer;
+            printf("  escape = %08lX\n", Device->Escape(&Escape));
+        }
+
+        {
+            LPDIRECTINPUTEFFECT Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(DC_SENTINEL);
+            DIEFFECT Params = {};
+
+            printf("  create null = %08lX\n", Device->CreateEffect(GUID_Sine, nullptr, nullptr, nullptr));
+            Params.dwSize = 4;
+            printf("  create bad params = %08lX", Device->CreateEffect(GUID_Sine, &Params, &Effect, nullptr));
+            printf(" %s\n", DcPointer(Effect));
+            Effect = reinterpret_cast<LPDIRECTINPUTEFFECT>(DC_SENTINEL);
+            printf("  create null guid = %08lX", Device->CreateEffect(GUID_NULL, nullptr, &Effect, nullptr));
+            printf(" %s\n", DcPointer(Effect));
+        }
+
+        Count = 0;
+        printf("  created flags = %08lX\n", Device->EnumCreatedEffectObjects(DcCountCreated, &Count, 1));
+        printf("  created null = %08lX\n", Device->EnumCreatedEffectObjects(nullptr, nullptr, 0));
+        Result = Device->EnumCreatedEffectObjects(DcCountCreated, &Count, 0);
+        printf("  created = %08lX seen %lu\n", Result, Count);
+
+        /* Every one of these returns before a device would be written to */
+        {
+            DIDEVICEOBJECTDATA Data = {};
+
+            Count = 1;
+            Result = Device->SendDeviceData(sizeof(Data), &Data, &Count, 2);
+            printf("  send flags = %08lX count %lu\n", Result, Count);
+            Count = 1;
+            Result = Device->SendDeviceData(16, &Data, &Count, 0);
+            printf("  send size 16 = %08lX count %lu\n", Result, Count);
+            Count = 1;
+            Result = Device->SendDeviceData(0, &Data, &Count, 0);
+            printf("  send size 0 = %08lX count %lu\n", Result, Count);
+            Count = 1;
+            Result = Device->SendDeviceData(sizeof(Data), &Data, &Count, 0);
+            printf("  send unacquired = %08lX count %lu\n", Result, Count);
+        }
+
+        {
+            DIPROPDWORD Value = { { sizeof(Value), sizeof(DIPROPHEADER), 0, DIPH_DEVICE }, 0xCCCCCCCC };
+
+            Result = Device->GetProperty(DIPROP_FFLOAD, &Value.diph);
+            printf("  get load = %08lX %08lX\n", Result, Value.dwData);
+            Value.dwData = 0xCCCCCCCC;
+            Result = Device->GetProperty(DIPROP_FFGAIN, &Value.diph);
+            printf("  get gain = %08lX %lu\n", Result, Value.dwData);
+            Value.dwData = 0x10000;
+            printf("  set gain big = %08lX\n", Device->SetProperty(DIPROP_FFGAIN, &Value.diph));
+            Value.dwData = 5000;
+            printf("  set gain = %08lX\n", Device->SetProperty(DIPROP_FFGAIN, &Value.diph));
+            Value.dwData = 0xCCCCCCCC;
+            Result = Device->GetProperty(DIPROP_FFGAIN, &Value.diph);
+            printf("  get gain after = %08lX %lu\n", Result, Value.dwData);
+            Value.dwData = 0xCCCCCCCC;
+            Result = Device->GetProperty(DIPROP_AUTOCENTER, &Value.diph);
+            printf("  get center = %08lX %08lX\n", Result, Value.dwData);
+            for (DWORD Center : { 0ul, 1ul, 2ul })
+            {
+                Value.dwData = Center;
+                printf("  set center %lu = %08lX\n", Center, Device->SetProperty(DIPROP_AUTOCENTER, &Value.diph));
+            }
+        }
+
+        if (Narrow != nullptr)
+            Narrow->Release();
+        Device->Release();
+    }
+    Ansi->Release();
+    Wide->Release();
+}
+
 /* Prints what the keyboard and mouse report for a while; only run by hand, its output depends on the user */
 static
 VOID
@@ -978,4 +1176,6 @@ DcRunDataChecks(
         DcCheckHidProperties();
     else if (strcmp(Name, "misc") == 0)
         DcCheckMisc();
+    else if (strcmp(Name, "ffargs") == 0)
+        DcCheckForceFeedback();
 }
