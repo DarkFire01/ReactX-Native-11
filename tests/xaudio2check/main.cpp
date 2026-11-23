@@ -4550,6 +4550,111 @@ XcCheckDevice(VOID)
     }
 }
 
+/* Whether passes run over a window, which only needs the windows to sit well clear of the idle delay */
+static
+VOID
+XcIdleWindow(
+    _In_z_ PCSTR Name,
+    _In_ IXAudio2* Engine)
+{
+    XAUDIO2_PERFORMANCE_DATA Data = {};
+
+    XcResetEvents();
+    Sleep(300);
+    Engine->GetPerformanceData(&Data);
+    printf("  %s %s active %u submix %u\n", Name, XcEventCount != 0 ? "running" : "idle", Data.ActiveSourceVoiceCount,
+           Data.ActiveSubmixVoiceCount);
+}
+
+/* XAUDIO2_STOP_ENGINE_WHEN_IDLE stops the engine two seconds after the last active voice and restarts it on the next */
+static
+VOID
+XcCheckIdle(VOID)
+{
+    static SHORT Data[4800];
+    IXAudio2* Engine = nullptr;
+    IXAudio2MasteringVoice* Master = nullptr;
+    IXAudio2SourceVoice* Source = nullptr;
+    IXAudio2SubmixVoice* Submix = nullptr;
+    XAUDIO2_BUFFER Buffer = {};
+    WAVEFORMATEX Format;
+    HRESULT hr;
+
+    hr = XcCreate(&Engine, XAUDIO2_STOP_ENGINE_WHEN_IDLE);
+    printf("idle create = %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+    Engine->RegisterForCallbacks(&XcPassCallback);
+    hr = Engine->CreateMasteringVoice(&Master, 2, 48000);
+    printf("idle master = %08lX\n", hr);
+    if (FAILED(hr))
+    {
+        Engine->Release();
+        return;
+    }
+    XcIdleWindow("fresh", Engine);
+    Sleep(2200);
+    XcIdleWindow("no voice ever", Engine);
+
+    XcPcm(&Format, WAVE_FORMAT_PCM, 1, 48000, 16);
+    hr = Engine->CreateSourceVoice(&Source, &Format);
+    printf("idle source = %08lX\n", hr);
+    if (FAILED(hr))
+    {
+        Engine->Release();
+        return;
+    }
+    XcIdleWindow("created", Engine);
+    Source->Start();
+    XcIdleWindow("started", Engine);
+    Source->Stop();
+    XcIdleWindow("just stopped", Engine);
+    Sleep(2000);
+    XcIdleWindow("stopped long", Engine);
+    Sleep(1000);
+    XcIdleWindow("still stopped", Engine);
+
+    /* Submitting data alone does not count as activity */
+    Buffer.AudioBytes = sizeof(Data);
+    Buffer.pAudioData = reinterpret_cast<const BYTE*>(Data);
+    Source->SubmitSourceBuffer(&Buffer);
+    XcIdleWindow("submitted", Engine);
+    Source->Start();
+    XcIdleWindow("restarted", Engine);
+    Sleep(2500);
+    XcIdleWindow("played out", Engine);
+    Source->Stop();
+    Sleep(2500);
+    XcIdleWindow("stopped again", Engine);
+
+    /* A submix voice counts as active while it exists */
+    hr = Engine->CreateSubmixVoice(&Submix, 2, 48000);
+    printf("idle submix = %08lX\n", hr);
+    XcIdleWindow("submix", Engine);
+    Sleep(2500);
+    XcIdleWindow("submix long", Engine);
+    if (Submix != nullptr)
+        Submix->DestroyVoice();
+    XcIdleWindow("submix gone", Engine);
+    Sleep(2500);
+    XcIdleWindow("submix gone long", Engine);
+
+    /* The application's own stop holds until a voice wakes it */
+    Source->Start();
+    XcIdleWindow("woken", Engine);
+    Engine->StopEngine();
+    XcIdleWindow("app stopped", Engine);
+    Source->Stop();
+    Source->Start();
+    XcIdleWindow("start while app stopped", Engine);
+    Source->DestroyVoice();
+    XcIdleWindow("source gone", Engine);
+    Sleep(2500);
+    XcIdleWindow("source gone long", Engine);
+    Engine->UnregisterForCallbacks(&XcPassCallback);
+    printf("idle release %lu\n", Engine->Release());
+}
+
 typedef HRESULT (__cdecl* PXC_X3D_INITIALIZE)(UINT32, FLOAT32, X3DAUDIO_HANDLE);
 typedef void (__cdecl* PXC_X3D_CALCULATE)(const X3DAUDIO_HANDLE, const X3DAUDIO_LISTENER*, const X3DAUDIO_EMITTER*,
                                           UINT32, X3DAUDIO_DSP_SETTINGS*);
@@ -5154,6 +5259,10 @@ wmain(
         XcCheckMix();
     if (XcSection != nullptr && _wcsicmp(XcSection, L"device") == 0)
         XcCheckDevice();
+
+    /* Waits out the idle delay several times, so also only on request */
+    if (XcSection != nullptr && _wcsicmp(XcSection, L"idle") == 0)
+        XcCheckIdle();
 
     FreeLibrary(XcModule);
     CoUninitialize();
