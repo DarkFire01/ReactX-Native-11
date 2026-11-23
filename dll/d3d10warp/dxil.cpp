@@ -1413,6 +1413,7 @@ RxCoordinates(
         case hlsl::DXIL::ResourceKind::Texture1DArray:
         case hlsl::DXIL::ResourceKind::Texture2D:
         case hlsl::DXIL::ResourceKind::Texture2DMS: return 2;
+        case hlsl::DXIL::ResourceKind::TextureCubeArray: return 4;
         default: return 3;
     }
 }
@@ -1441,18 +1442,47 @@ RxLowering::InputCoordinates(
     return TRUE;
 }
 
+/* A level of detail clamp the executor has no form for: anything but none or zero */
+BOOLEAN
+RxClamped(
+    _In_ llvm::Value *Clamp)
+{
+    llvm::ConstantFP *Fixed = llvm::dyn_cast<llvm::ConstantFP>(Clamp);
+
+    if (llvm::isa<llvm::UndefValue>(Clamp))
+        return FALSE;
+    return Fixed == nullptr || !Fixed->isZero();
+}
+
+/* Spatial axes of a texture kind: what gradients and gather offsets cover */
+UINT
+RxSpatialAxes(
+    _In_ UINT Kind)
+{
+    switch ((hlsl::DXIL::ResourceKind)Kind)
+    {
+        case hlsl::DXIL::ResourceKind::Texture1D:
+        case hlsl::DXIL::ResourceKind::Texture1DArray: return 1;
+        case hlsl::DXIL::ResourceKind::Texture3D:
+        case hlsl::DXIL::ResourceKind::TextureCube:
+        case hlsl::DXIL::ResourceKind::TextureCubeArray: return 3;
+        default: return 2;
+    }
+}
+
 /* Constant texel offsets go in the extended opcode; others are not lowered */
 BOOLEAN
 RxOffsets(
     _In_ llvm::CallInst *Call,
     _In_ UINT First,
-    _Out_ RxTokens *Extended)
+    _Out_ RxTokens *Extended,
+    _In_ UINT Axes = 3)
 {
     UINT Token = ENCODE_D3D10_SB_EXTENDED_OPCODE_TYPE(D3D10_SB_EXTENDED_OPCODE_SAMPLE_CONTROLS);
     BOOLEAN Any = FALSE;
 
     Extended->clear();
-    for (UINT Axis = 0; Axis < 3; Axis++)
+    for (UINT Axis = 0; Axis < Axes; Axis++)
     {
         llvm::Value *Value = Call->getArgOperand(First + Axis);
         llvm::ConstantInt *Fixed = llvm::dyn_cast<llvm::ConstantInt>(Value);
@@ -1487,15 +1517,19 @@ RxLowering::LowerResource(
         case OpCode::Sample:
         case OpCode::SampleBias:
         case OpCode::SampleLevel:
+        case OpCode::SampleGrad:
         case OpCode::SampleCmp:
         case OpCode::SampleCmpLevelZero:
         {
-            UINT Count = RxCoordinates(Handle.Kind) + ((Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
-                                                        Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::TextureCubeArray) ? 1 : 0);
+            UINT Count = RxCoordinates(Handle.Kind);
+            UINT Clamp = (Code == OpCode::Sample) ? 10 : (Code == OpCode::SampleBias || Code == OpCode::SampleCmp) ? 11 :
+                         (Code == OpCode::SampleGrad) ? 16 : 0;
             RxTokens SamplerOperand;
             RxTokens Coordinates;
 
             if (!HandleOf(Call->getArgOperand(2), &Sampler) || !RxOffsets(Call, 7, &Extended))
+                return FALSE;
+            if (Clamp != 0 && RxClamped(Call->getArgOperand(Clamp)))
                 return FALSE;
             if (!InputCoordinates(Call, 3, Count, &Coordinates))
             {
@@ -1516,6 +1550,16 @@ RxLowering::LowerResource(
                          { Temp(Result, RxMaskMode, 0xF), Coordinates, ResourceOperand(Handle), SamplerOperand,
                            Source(Call->getArgOperand(10)) }, 0, Extended.empty() ? nullptr : &Extended);
                     break;
+                case OpCode::SampleGrad:
+                {
+                    UINT Across = GatherRange(Call, 10, RxSpatialAxes(Handle.Kind));
+                    UINT Down = GatherRange(Call, 13, RxSpatialAxes(Handle.Kind));
+
+                    Emit(D3D10_SB_OPCODE_SAMPLE_D, { Temp(Result, RxMaskMode, 0xF), Coordinates, ResourceOperand(Handle), SamplerOperand,
+                                                     Temp(Across, RxSwizzleMode, RxXyzw), Temp(Down, RxSwizzleMode, RxXyzw) }, 0,
+                         Extended.empty() ? nullptr : &Extended);
+                    break;
+                }
                 default:
                     Emit((Code == OpCode::SampleCmp) ? D3D10_SB_OPCODE_SAMPLE_C : D3D10_SB_OPCODE_SAMPLE_C_LZ,
                          { Temp(Result, RxMaskMode, 1), Coordinates, ResourceOperand(Handle, RxSelectMode, 0),
@@ -1524,13 +1568,67 @@ RxLowering::LowerResource(
             }
             return TRUE;
         }
+        case OpCode::TextureGather:
+        case OpCode::TextureGatherCmp:
+        {
+            UINT Count = RxCoordinates(Handle.Kind);
+            llvm::ConstantInt *Channel = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(9));
+            BOOLEAN Compare = Code == OpCode::TextureGatherCmp;
+            RxTokens SamplerOperand;
+            RxTokens Resource;
+
+            /* The sampler operand's component picks the channel; offsets the program computes take the _po form */
+            if (!HandleOf(Call->getArgOperand(2), &Sampler) || Channel == nullptr)
+                return FALSE;
+            Address = GatherRange(Call, 3, Count);
+            Result = ResultRegister(Call);
+            SamplerOperand = RxRegister(D3D10_SB_OPERAND_TYPE_SAMPLER, RxSelectMode, Compare ? 0 : (UINT)Channel->getZExtValue() & 3, { Sampler.Slot });
+            Resource = ResourceOperand(Handle);
+            if (RxOffsets(Call, 7, &Extended, 2))
+            {
+                if (Compare)
+                    Emit(D3D11_SB_OPCODE_GATHER4_C, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), Resource, SamplerOperand,
+                                                      Source(Call->getArgOperand(10)) }, 0, Extended.empty() ? nullptr : &Extended);
+                else
+                    Emit(D3D10_1_SB_OPCODE_GATHER4, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw), Resource, SamplerOperand },
+                         0, Extended.empty() ? nullptr : &Extended);
+                return TRUE;
+            }
+            UINT Offsets = GatherRange(Call, 7, 2);
+
+            if (Compare)
+                Emit(D3D11_SB_OPCODE_GATHER4_PO_C, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw),
+                                                     Temp(Offsets, RxSwizzleMode, RxXyzw), Resource, SamplerOperand, Source(Call->getArgOperand(10)) });
+            else
+                Emit(D3D11_SB_OPCODE_GATHER4_PO, { Temp(Result, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw),
+                                                   Temp(Offsets, RxSwizzleMode, RxXyzw), Resource, SamplerOperand });
+            return TRUE;
+        }
+        case OpCode::GetDimensions:
+        {
+            hlsl::DXIL::ResourceKind Kind = (hlsl::DXIL::ResourceKind)Handle.Kind;
+
+            /* Buffers count elements, bytes when raw; textures give sizes and levels, multisampled ones samples */
+            Result = ResultRegister(Call);
+            if (Kind == hlsl::DXIL::ResourceKind::TypedBuffer || Kind == hlsl::DXIL::ResourceKind::RawBuffer ||
+                Kind == hlsl::DXIL::ResourceKind::StructuredBuffer)
+            {
+                Emit(D3D11_SB_OPCODE_BUFINFO, { Temp(Result, RxMaskMode, 1), ResourceOperand(Handle, RxSelectMode, 0) });
+                Emit(D3D10_SB_OPCODE_MOV, { Temp(Result, RxMaskMode, 0xE), RxImmediate(0) });
+                return TRUE;
+            }
+            Emit(D3D10_SB_OPCODE_RESINFO, { Temp(Result, RxMaskMode, 0xF), Source(Call->getArgOperand(2)), ResourceOperand(Handle) },
+                 ENCODE_D3D10_SB_RESINFO_INSTRUCTION_RETURN_TYPE(D3D10_SB_RESINFO_INSTRUCTION_RETURN_UINT));
+            if (Kind == hlsl::DXIL::ResourceKind::Texture2DMS || Kind == hlsl::DXIL::ResourceKind::Texture2DMSArray)
+                Emit(D3D10_1_SB_OPCODE_SAMPLE_INFO, { Temp(Result, RxMaskMode, 8), ResourceOperand(Handle, RxSelectMode, 0) },
+                     ENCODE_D3D10_SB_INSTRUCTION_RETURN_TYPE(D3D10_SB_INSTRUCTION_RETURN_UINT));
+            return TRUE;
+        }
         case OpCode::TextureLoad:
         {
             BOOLEAN Multisampled = Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DMS ||
                                    Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DMSArray;
-            UINT Count = RxCoordinates(Handle.Kind) + ((Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
-                                                        Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture1DArray ||
-                                                        Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DMSArray) ? 1 : 0);
+            UINT Count = RxCoordinates(Handle.Kind);
 
             if (Count > 3 || !RxOffsets(Call, 6, &Extended))
                 return FALSE;
@@ -1577,8 +1675,7 @@ RxLowering::LowerResource(
 
             if (Texture)
             {
-                Address = GatherRange(Call, 2, RxCoordinates(Kind) + ((Kind == (UINT)hlsl::DXIL::ResourceKind::Texture2DArray ||
-                                                                      Kind == (UINT)hlsl::DXIL::ResourceKind::Texture1DArray) ? 1 : 0));
+                Address = GatherRange(Call, 2, RxCoordinates(Kind));
                 Emit(D3D11_SB_OPCODE_STORE_UAV_TYPED, { ResourceOperand(Handle, RxMaskMode, 0xF), Temp(Address, RxSwizzleMode, RxXyzw),
                                                         Temp(Values, RxSwizzleMode, RxXyzw) });
             }
