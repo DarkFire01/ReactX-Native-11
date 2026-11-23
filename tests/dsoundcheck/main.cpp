@@ -2548,6 +2548,448 @@ DcCheckProperties(VOID)
     DcCheckPrivate();
 }
 
+static const GUID DcBufferConfigClass = { 0xB2F586D4, 0x5558, 0x49D1, { 0xA0, 0x7B, 0x32, 0x49, 0xDB, 0xBB, 0x33, 0xC2 } };
+static const GUID DcSendEffect = { 0xEF602176, 0xBCBB, 0x49E0, { 0x8C, 0xCA, 0xE0, 0x9A, 0x5A, 0x15, 0x2B, 0x33 } };
+static const GUID DcMusicObjectIid = { 0xD2AC28B5, 0xB39B, 0x11D1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xB1, 0xBD } };
+
+/* The DirectMusic object descriptor */
+struct DC_MUSIC_DESC
+{
+    DWORD Size;
+    DWORD Valid;
+    GUID Object;
+    GUID Class;
+    FILETIME Date;
+    DWORD VersionMs;
+    DWORD VersionLs;
+    WCHAR Name[64];
+    WCHAR Category[64];
+    WCHAR File[260];
+    LONGLONG MemLength;
+    BYTE* MemData;
+    IStream* Stream;
+};
+
+static_assert(sizeof(DC_MUSIC_DESC) == 856, "descriptor size");
+
+struct DcMusicObject : public IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE GetDescriptor(DC_MUSIC_DESC* Desc) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDescriptor(DC_MUSIC_DESC* Desc) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ParseDescriptor(IStream* Stream, DC_MUSIC_DESC* Desc) = 0;
+};
+
+/* Builds RIFF images: lists and forms are opened, filled and closed, which writes their sizes */
+class DcRiff
+{
+public:
+    size_t
+    Open(
+        _In_ DWORD Id,
+        _In_ DWORD Type)
+    {
+        size_t At = Bytes.size();
+
+        Put(Id);
+        Put(0);
+        Put(Type);
+        return At;
+    }
+
+    VOID
+    Close(
+        _In_ size_t At)
+    {
+        DWORD Size = static_cast<DWORD>(Bytes.size() - At - 8);
+
+        memcpy(&Bytes[At + 4], &Size, sizeof(Size));
+        if (Bytes.size() & 1)
+            Bytes.push_back(0);
+    }
+
+    VOID
+    Chunk(
+        _In_ DWORD Id,
+        _In_reads_bytes_(Size) const VOID* Data,
+        _In_ DWORD Size)
+    {
+        Put(Id);
+        Put(Size);
+        Bytes.insert(Bytes.end(), static_cast<const BYTE*>(Data), static_cast<const BYTE*>(Data) + Size);
+        if (Size & 1)
+            Bytes.push_back(0);
+    }
+
+    VOID
+    Put(
+        _In_ DWORD Value)
+    {
+        Bytes.insert(Bytes.end(), reinterpret_cast<const BYTE*>(&Value), reinterpret_cast<const BYTE*>(&Value) + sizeof(Value));
+    }
+
+    IStream*
+    Stream(VOID)
+    {
+        IStream* Result = nullptr;
+        HGLOBAL Memory = GlobalAlloc(GMEM_MOVEABLE, Bytes.size() + 1);
+
+        if (Memory == nullptr)
+            return nullptr;
+        if (!Bytes.empty())
+        {
+            memcpy(GlobalLock(Memory), Bytes.data(), Bytes.size());
+            GlobalUnlock(Memory);
+        }
+        if (FAILED(CreateStreamOnHGlobal(Memory, TRUE, &Result)))
+        {
+            GlobalFree(Memory);
+            return nullptr;
+        }
+        /* The stream ends where the image does, not at the rounded allocation */
+        {
+            ULARGE_INTEGER End;
+
+            End.QuadPart = Bytes.size();
+            Result->SetSize(End);
+        }
+        return Result;
+    }
+
+    std::vector<BYTE> Bytes;
+};
+
+#define DC_FOURCC(a, b, c, d) (static_cast<DWORD>(a) | (static_cast<DWORD>(b) << 8) | (static_cast<DWORD>(c) << 16) | (static_cast<DWORD>(d) << 24))
+
+static
+VOID
+DcShowMusicDesc(
+    _In_z_ PCSTR Name,
+    _In_ const DC_MUSIC_DESC* Desc)
+{
+    printf("%s size %lu valid %lX date %lX %lX version %lX %lX", Name, Desc->Size, Desc->Valid, Desc->Date.dwLowDateTime,
+           Desc->Date.dwHighDateTime, Desc->VersionMs, Desc->VersionLs);
+    DcGuid(" object", &Desc->Object);
+    DcGuid("  class", &Desc->Class);
+    printf("  name %.64ls category %.64ls file %.260ls\n", Desc->Name, Desc->Category, Desc->File);
+}
+
+/* One effect inside the effect list of a buffer configuration */
+static
+VOID
+DcRiffEffect(
+    _Inout_ DcRiff* Riff,
+    _In_ const GUID* Class,
+    _In_opt_ const GUID* Send,
+    _In_ DWORD Reserved,
+    _In_reads_bytes_opt_(DataSize) const VOID* Data,
+    _In_ DWORD DataSize)
+{
+    BYTE Header[56] = {};
+    size_t Form = Riff->Open(DC_FOURCC('R', 'I', 'F', 'F'), DC_FOURCC('D', 'S', 'F', 'X'));
+
+    memcpy(Header + 4, Class, sizeof(*Class));
+    if (Send != nullptr)
+        memcpy(Header + 36, Send, sizeof(*Send));
+    memcpy(Header + 52, &Reserved, sizeof(Reserved));
+    Riff->Chunk(DC_FOURCC('f', 'x', 'h', 'r'), Header, sizeof(Header));
+    if (Data != nullptr)
+        Riff->Chunk(DC_FOURCC('d', 'a', 't', 'a'), Data, DataSize);
+    Riff->Close(Form);
+}
+
+/* Buffer configuration images, good and broken, loaded and parsed by the CLSID_DirectSoundBufferConfig object */
+static
+VOID
+DcBuildConfig(
+    _In_ UINT Shape,
+    _Out_ DcRiff* Riff)
+{
+    static const GUID Object = { 0x12345678, 0x1111, 0x2222, { 1, 2, 3, 4, 5, 6, 7, 8 } };
+    static const GUID Send = { 0x87654321, 0x3333, 0x4444, { 8, 7, 6, 5, 4, 3, 2, 1 } };
+    static const GUID NoSuchEffect = { 0xDEADBEEF, 0x5555, 0x6666, { 1, 1, 2, 2, 3, 3, 4, 4 } };
+    static const WCHAR Name[] = L"Config One";
+    static const WCHAR Category[] = L"Tests";
+    static const DWORD Date[2] = { 0x11223344, 0x01D00000 };
+    static const DWORD Version[2] = { 0x00010002, 0x00030004 };
+    BYTE Desc[20] = { 0x08, 0, 0, 0, 2, 0, 0, 0 };
+    BYTE Spatial[80] = {};
+    DWORD Mix[3] = { 1, 2, 3 };
+    DWORD Gargle[2] = { 20, 0 };
+    LONG Level = Shape == 9 ? 100 : -600;
+    size_t Form;
+    size_t List;
+
+    if (Shape == 0)
+        return;
+    if (Shape == 1)
+    {
+        Form = Riff->Open(DC_FOURCC('R', 'I', 'F', 'F'), DC_FOURCC('W', 'A', 'V', 'E'));
+        Riff->Close(Form);
+        return;
+    }
+
+    Form = Riff->Open(DC_FOURCC('R', 'I', 'F', 'F'), DC_FOURCC('D', 'S', 'B', 'C'));
+    if (Shape == 2)
+    {
+        Riff->Close(Form);
+        return;
+    }
+    if (Shape == 10)
+    {
+        /* The guid chunk claims more than the image holds */
+        Riff->Put(DC_FOURCC('g', 'u', 'i', 'd'));
+        Riff->Put(16);
+        Riff->Put(0xAAAAAAAA);
+        Riff->Put(0xBBBBBBBB);
+        Riff->Close(Form);
+        return;
+    }
+    if (Shape == 12)
+    {
+        /* A list that says it is larger than the form around it */
+        List = Riff->Open(DC_FOURCC('L', 'I', 'S', 'T'), DC_FOURCC('U', 'N', 'F', 'O'));
+        Riff->Chunk(DC_FOURCC('U', 'N', 'A', 'M'), Name, sizeof(Name));
+        Riff->Close(List);
+        Riff->Close(Form);
+        {
+            DWORD Big = 400;
+
+            memcpy(&Riff->Bytes[List + 4], &Big, sizeof(Big));
+        }
+        Riff->Chunk(DC_FOURCC('g', 'u', 'i', 'd'), &Object, sizeof(Object));
+        return;
+    }
+
+    Riff->Chunk(DC_FOURCC('g', 'u', 'i', 'd'), &Object, sizeof(Object));
+    List = Riff->Open(DC_FOURCC('L', 'I', 'S', 'T'), DC_FOURCC('U', 'N', 'F', 'O'));
+    if (Shape == 11)
+        Riff->Chunk(DC_FOURCC('U', 'N', 'A', 'M'), Name, sizeof(Name) - 1);
+    else if (Shape == 13)
+    {
+        WCHAR Long[100];
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Long); Index++)
+            Long[Index] = static_cast<WCHAR>(L'a' + Index % 26);
+        Riff->Chunk(DC_FOURCC('U', 'N', 'A', 'M'), Long, sizeof(Long));
+    }
+    else
+        Riff->Chunk(DC_FOURCC('U', 'N', 'A', 'M'), Name, sizeof(Name));
+    Riff->Close(List);
+    Riff->Chunk(DC_FOURCC('c', 'a', 't', 'g'), Category, sizeof(Category));
+    Riff->Chunk(DC_FOURCC('d', 'a', 't', 'e'), Date, sizeof(Date));
+    Riff->Chunk(DC_FOURCC('v', 'e', 'r', 's'), Version, sizeof(Version));
+
+    if (Shape == 4)
+    {
+        List = Riff->Open(DC_FOURCC('L', 'I', 'S', 'T'), DC_FOURCC('f', 'x', 'l', 's'));
+        DcRiffEffect(Riff, &GUID_DSFX_STANDARD_GARGLE, nullptr, 0, Gargle, sizeof(Gargle));
+        Riff->Close(List);
+    }
+    Riff->Chunk(DC_FOURCC('d', 's', 'b', 'd'), Desc, sizeof(Desc));
+    Riff->Chunk(DC_FOURCC('d', 's', '3', 'd'), Spatial, sizeof(Spatial));
+    Riff->Chunk(DC_FOURCC('b', 's', 'i', 'd'), Mix, sizeof(Mix));
+
+    List = Riff->Open(DC_FOURCC('L', 'I', 'S', 'T'), DC_FOURCC('f', 'x', 'l', 's'));
+    switch (Shape)
+    {
+        case 3:
+            DcRiffEffect(Riff, &GUID_DSFX_STANDARD_GARGLE, nullptr, 0, Gargle, sizeof(Gargle));
+            DcRiffEffect(Riff, &GUID_DSFX_STANDARD_ECHO, nullptr, 0, nullptr, 0);
+            DcRiffEffect(Riff, &DcSendEffect, &Send, 0, &Level, sizeof(Level));
+            break;
+        case 5:
+            DcRiffEffect(Riff, &GUID_DSFX_STANDARD_GARGLE, nullptr, 1, nullptr, 0);
+            break;
+        case 6:
+            DcRiffEffect(Riff, &DcSendEffect, nullptr, 0, &Level, sizeof(Level));
+            break;
+        case 7:
+            DcRiffEffect(Riff, &GUID_DSFX_STANDARD_ECHO, &Send, 0, nullptr, 0);
+            break;
+        case 8:
+            DcRiffEffect(Riff, &NoSuchEffect, nullptr, 0, nullptr, 0);
+            break;
+        case 9:
+            DcRiffEffect(Riff, &DcSendEffect, &Send, 0, &Level, sizeof(Level));
+            break;
+    }
+    Riff->Close(List);
+    Riff->Close(Form);
+}
+
+static
+VOID
+DcCheckBufferConfig(VOID)
+{
+    PDC_GET_CLASS_OBJECT GetClassObject = reinterpret_cast<PDC_GET_CLASS_OBJECT>(GetProcAddress(DcModule, "DllGetClassObject"));
+    IClassFactory* Factory = nullptr;
+    IPersistStream* Persist = nullptr;
+    DcMusicObject* Music = nullptr;
+    IUnknown* Other = nullptr;
+    DC_MUSIC_DESC Desc;
+    HRESULT hr;
+
+    hr = GetClassObject(DcBufferConfigClass, IID_IClassFactory, reinterpret_cast<void**>(&Factory));
+    printf("config factory = %08lX\n", hr);
+    if (FAILED(hr))
+        return;
+    Other = reinterpret_cast<IUnknown*>(1);
+    hr = Factory->CreateInstance(reinterpret_cast<IUnknown*>(1), IID_IUnknown, reinterpret_cast<void**>(&Other));
+    printf("config create_outer = %08lX null %d\n", hr, Other == nullptr);
+    printf("config create_null = %08lX\n", Factory->CreateInstance(nullptr, IID_IUnknown, nullptr));
+    Other = reinterpret_cast<IUnknown*>(1);
+    hr = Factory->CreateInstance(nullptr, IID_IDirectSound, reinterpret_cast<void**>(&Other));
+    printf("config create_wrong = %08lX null %d\n", hr, Other == nullptr);
+    hr = Factory->CreateInstance(nullptr, IID_IPersistStream, reinterpret_cast<void**>(&Persist));
+    printf("config create = %08lX\n", hr);
+    if (FAILED(hr))
+    {
+        Factory->Release();
+        return;
+    }
+
+    {
+        static const struct
+        {
+            const IID* Iid;
+            PCSTR Name;
+        } Interfaces[] =
+        {
+            { &IID_IUnknown, "IUnknown" },
+            { &IID_IPersistStream, "IPersistStream" },
+            { &IID_IPersist, "IPersist" },
+            { &DcMusicObjectIid, "IDirectMusicObject" },
+            { &IID_IDirectSoundBuffer, "IDirectSoundBuffer" },
+            { &IID_IKsPropertySet, "IKsPropertySet" },
+        };
+
+        for (UINT Index = 0; Index < ARRAYSIZE(Interfaces); Index++)
+        {
+            Other = nullptr;
+            hr = Persist->QueryInterface(*Interfaces[Index].Iid, reinterpret_cast<void**>(&Other));
+            printf("config qi %s = %08lX\n", Interfaces[Index].Name, hr);
+            if (SUCCEEDED(hr))
+                Other->Release();
+        }
+    }
+    Persist->QueryInterface(DcMusicObjectIid, reinterpret_cast<void**>(&Music));
+    {
+        CLSID Class = GUID_NULL;
+        ULARGE_INTEGER Size = {};
+        DcRiff Empty;
+        IStream* Stream = Empty.Stream();
+
+        printf("config getclassid = %08lX", Persist->GetClassID(&Class));
+        DcGuid("", &Class);
+        printf("config getclassid_null = %08lX\n", Persist->GetClassID(nullptr));
+        printf("config isdirty = %08lX\n", Persist->IsDirty());
+        printf("config getsizemax = %08lX\n", Persist->GetSizeMax(&Size));
+        printf("config getsizemax_null = %08lX\n", Persist->GetSizeMax(nullptr));
+        printf("config save = %08lX\n", Persist->Save(Stream, TRUE));
+        printf("config save_null = %08lX\n", Persist->Save(nullptr, TRUE));
+        printf("config load_null = %08lX\n", Persist->Load(nullptr));
+        if (Stream != nullptr)
+            Stream->Release();
+    }
+    if (Music != nullptr)
+    {
+        memset(&Desc, 0xCC, sizeof(Desc));
+        printf("config getdescriptor = %08lX\n", Music->GetDescriptor(&Desc));
+        DcShowMusicDesc("config fresh", &Desc);
+        printf("config getdescriptor_null = %08lX\n", Music->GetDescriptor(nullptr));
+        printf("config setdescriptor_null = %08lX\n", Music->SetDescriptor(nullptr));
+        printf("config parsedescriptor_null = %08lX %08lX\n", Music->ParseDescriptor(nullptr, &Desc), Music->ParseDescriptor(nullptr, nullptr));
+
+        {
+            static const DWORD Valids[] = { 0x1, 0x4 | 0x8, 0x10, 0x20, 0x80 | 0x100, 0x2, 0x40, 0x200 | 0x1, 0x30 };
+
+            for (UINT Index = 0; Index < ARRAYSIZE(Valids); Index++)
+            {
+                DC_MUSIC_DESC Set;
+                DC_MUSIC_DESC Got;
+
+                ZeroMemory(&Set, sizeof(Set));
+                Set.Size = sizeof(Set);
+                Set.Valid = Valids[Index];
+                Set.Object.Data1 = 0x100 + Index;
+                Set.Class.Data1 = 0x200 + Index;
+                Set.Date.dwLowDateTime = 0x300 + Index;
+                Set.VersionMs = 0x400 + Index;
+                _snwprintf_s(Set.Name, _TRUNCATE, L"name %u with a long tail that runs past the end of the name field for sure", Index);
+                swprintf_s(Set.Category, L"category %u", Index);
+                swprintf_s(Set.File, L"file %u", Index);
+                hr = Music->SetDescriptor(&Set);
+                printf("config setdescriptor %lX = %08lX valid now %lX\n", Valids[Index], hr, Set.Valid);
+                memset(&Got, 0xCC, sizeof(Got));
+                Music->GetDescriptor(&Got);
+                DcShowMusicDesc("  after", &Got);
+            }
+        }
+        {
+            DC_MUSIC_DESC Set;
+
+            ZeroMemory(&Set, sizeof(Set));
+            Set.Size = sizeof(Set) - 1;
+            Set.Valid = 1;
+            printf("config setdescriptor_small = %08lX\n", Music->SetDescriptor(&Set));
+        }
+    }
+
+    for (UINT Shape = 0; Shape <= 13; Shape++)
+    {
+        IPersistStream* Loader = nullptr;
+        DcMusicObject* Described = nullptr;
+        DcRiff Riff;
+        IStream* Stream;
+
+        DcBuildConfig(Shape, &Riff);
+        hr = Factory->CreateInstance(nullptr, IID_IPersistStream, reinterpret_cast<void**>(&Loader));
+        if (FAILED(hr))
+            continue;
+        Stream = Riff.Stream();
+        if (Stream == nullptr)
+        {
+            Loader->Release();
+            continue;
+        }
+        hr = Loader->Load(Stream);
+        {
+            LARGE_INTEGER Zero = {};
+            ULARGE_INTEGER At = {};
+
+            Stream->Seek(Zero, STREAM_SEEK_CUR, &At);
+            printf("config shape %u size %zu load = %08lX at %llu\n", Shape, Riff.Bytes.size(), hr, At.QuadPart);
+        }
+        Loader->QueryInterface(DcMusicObjectIid, reinterpret_cast<void**>(&Described));
+        if (Described != nullptr)
+        {
+            LARGE_INTEGER Zero = {};
+            ULARGE_INTEGER At = {};
+
+            memset(&Desc, 0xCC, sizeof(Desc));
+            Described->GetDescriptor(&Desc);
+            DcShowMusicDesc("  loaded", &Desc);
+
+            Stream->Seek(Zero, STREAM_SEEK_SET, nullptr);
+            ZeroMemory(&Desc, sizeof(Desc));
+            Desc.Size = 0x1234;
+            Desc.Valid = 0xF00;
+            hr = Described->ParseDescriptor(Stream, &Desc);
+            Stream->Seek(Zero, STREAM_SEEK_CUR, &At);
+            printf("  parse = %08lX at %llu\n", hr, At.QuadPart);
+            DcShowMusicDesc("  parsed", &Desc);
+            Described->Release();
+        }
+        Stream->Release();
+        printf("  release %lu\n", Loader->Release());
+    }
+
+    if (Music != nullptr)
+        Music->Release();
+    printf("config release %lu\n", Persist->Release());
+    Factory->Release();
+}
+
 /* Records what the default endpoint plays, which carries the mixer output */
 class DcLoopback
 {
@@ -3471,6 +3913,8 @@ wmain(
         DcCheckEffects();
     if (DcWant(L"properties"))
         DcCheckProperties();
+    if (DcWant(L"config"))
+        DcCheckBufferConfig();
 
     /* Audible, so only on request */
     if (DcSection != nullptr && _wcsicmp(DcSection, L"mix") == 0)
