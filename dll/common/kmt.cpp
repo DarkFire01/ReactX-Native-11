@@ -67,6 +67,7 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTDestroyContext", Kmt.DestroyContext);
     RxResolve(Gdi32, "D3DKMTSetContextSchedulingPriority", Kmt.SetContextSchedulingPriority);
     RxResolve(Gdi32, "D3DKMTGetContextSchedulingPriority", Kmt.GetContextSchedulingPriority);
+    RxResolve(Gdi32, "D3DKMTSetQueuedLimit", Kmt.SetQueuedLimit);
     RxResolve(Gdi32, "D3DKMTRender", Kmt.Render);
 
     RxResolve(Gdi32, "D3DKMTCreateAllocation", Kmt.CreateAllocation);
