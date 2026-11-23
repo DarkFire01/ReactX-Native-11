@@ -708,11 +708,783 @@ SceneFormats(
     return S_OK;
 }
 
+/* A queue, an allocator, a list and a fence; Submit runs the list and waits for it */
+class TcQueue
+{
+public:
+    ~TcQueue()
+    {
+        if (Event != NULL)
+            CloseHandle(Event);
+        if (Fence)
+            Fence->Release();
+        if (List)
+            List->Release();
+        if (Allocator)
+            Allocator->Release();
+        if (Queue)
+            Queue->Release();
+    }
+
+    HRESULT
+    Create(
+        _In_ ID3D12Device *Device,
+        _In_ D3D12_COMMAND_LIST_TYPE Type)
+    {
+        D3D12_COMMAND_QUEUE_DESC Desc = {};
+        HRESULT hr;
+
+        Desc.Type = Type;
+        hr = Device->CreateCommandQueue(&Desc, IID_PPV_ARGS(&Queue));
+        if (SUCCEEDED(hr))
+            hr = Device->CreateCommandAllocator(Type, IID_PPV_ARGS(&Allocator));
+        if (SUCCEEDED(hr))
+            hr = Device->CreateCommandList(0, Type, Allocator, NULL, IID_PPV_ARGS(&List));
+        if (SUCCEEDED(hr))
+            hr = Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
+        Event = CreateEventW(NULL, FALSE, FALSE, NULL);
+        return hr;
+    }
+
+    /* Closes and runs the list, waits for it, and opens it again */
+    HRESULT
+    Submit(VOID)
+    {
+        ID3D12CommandList *Lists[] = { List };
+        HRESULT hr = List->Close();
+
+        if (FAILED(hr))
+            return hr;
+        Queue->ExecuteCommandLists(1, Lists);
+        hr = Wait();
+        if (SUCCEEDED(hr))
+            hr = Allocator->Reset();
+        if (SUCCEEDED(hr))
+            hr = List->Reset(Allocator, NULL);
+        return hr;
+    }
+
+    HRESULT
+    Wait(VOID)
+    {
+        HRESULT hr;
+
+        Value += 1;
+        hr = Queue->Signal(Fence, Value);
+        if (FAILED(hr))
+            return hr;
+        if (Fence->GetCompletedValue() < Value)
+        {
+            hr = Fence->SetEventOnCompletion(Value, Event);
+            if (SUCCEEDED(hr) && WaitForSingleObject(Event, 10000) != WAIT_OBJECT_0)
+                hr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+        }
+        return hr;
+    }
+
+    ID3D12CommandQueue *Queue = NULL;
+    ID3D12CommandAllocator *Allocator = NULL;
+    ID3D12GraphicsCommandList *List = NULL;
+    ID3D12Fence *Fence = NULL;
+    HANDLE Event = NULL;
+    UINT64 Value = 0;
+};
+
+static
+ID3D12Resource *
+TcBuffer(
+    _In_ ID3D12Device *Device,
+    _In_ D3D12_HEAP_TYPE Type,
+    _In_ UINT64 Size,
+    _In_ D3D12_RESOURCE_FLAGS Flags)
+{
+    D3D12_HEAP_PROPERTIES Heap = { Type };
+    D3D12_RESOURCE_DESC Desc = {};
+    ID3D12Resource *Resource = NULL;
+    D3D12_RESOURCE_STATES State = D3D12_RESOURCE_STATE_COMMON;
+
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Desc.Width = Size;
+    Desc.Height = 1;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Desc.Flags = Flags;
+    if (Type == D3D12_HEAP_TYPE_UPLOAD)
+        State = D3D12_RESOURCE_STATE_GENERIC_READ;
+    if (Type == D3D12_HEAP_TYPE_READBACK)
+        State = D3D12_RESOURCE_STATE_COPY_DEST;
+    if (FAILED(Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc, State, NULL, IID_PPV_ARGS(&Resource))))
+        return NULL;
+    return Resource;
+}
+
+static
+ID3D12Resource *
+TcTexture(
+    _In_ ID3D12Device *Device,
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ UINT16 Slices,
+    _In_ UINT16 Mips,
+    _In_ D3D12_RESOURCE_FLAGS Flags,
+    _In_ D3D12_RESOURCE_STATES State)
+{
+    D3D12_HEAP_PROPERTIES Heap = { D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC Desc = {};
+    ID3D12Resource *Resource = NULL;
+
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    Desc.Width = Width;
+    Desc.Height = Height;
+    Desc.DepthOrArraySize = Slices;
+    Desc.MipLevels = Mips;
+    Desc.Format = Format;
+    Desc.SampleDesc.Count = 1;
+    Desc.Flags = Flags;
+    if (FAILED(Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc, State, NULL, IID_PPV_ARGS(&Resource))))
+        return NULL;
+    return Resource;
+}
+
+/* Fills an upload buffer with a byte pattern that depends on Seed */
+static
+HRESULT
+TcFill(
+    _In_ ID3D12Resource *Buffer,
+    _In_ SIZE_T Size,
+    _In_ UINT Seed)
+{
+    BYTE *Data = NULL;
+    HRESULT hr = Buffer->Map(0, NULL, reinterpret_cast<VOID **>(&Data));
+
+    if (FAILED(hr))
+        return hr;
+    for (SIZE_T Index = 0; Index < Size; Index++)
+        Data[Index] = (BYTE)(Index * 7 + Seed + (Index >> 8) * 13);
+    Buffer->Unmap(0, NULL);
+    return S_OK;
+}
+
+static
+VOID
+TcReadback(
+    _In_ ID3D12Resource *Buffer,
+    _In_ SIZE_T Size,
+    _Inout_ TcResult *Result)
+{
+    D3D12_RANGE Range = { 0, Size };
+    BYTE *Data = NULL;
+    HRESULT hr = Buffer->Map(0, &Range, reinterpret_cast<VOID **>(&Data));
+
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return;
+    TcAppend(Result, Data, Size);
+    Buffer->Unmap(0, NULL);
+}
+
+/* Copies every subresource of a texture into a readback buffer through its footprints, then logs the bytes */
+static
+HRESULT
+TcReadTexture(
+    _In_ ID3D12Device *Device,
+    _In_ TcQueue *Queue,
+    _In_ ID3D12Resource *Texture,
+    _In_ UINT Subresources,
+    _Inout_ TcResult *Result)
+{
+    D3D12_RESOURCE_DESC Desc = Texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT Layouts[16];
+    UINT64 Total = 0;
+    ID3D12Resource *Readback;
+    HRESULT hr;
+
+    if (Subresources > ARRAYSIZE(Layouts))
+        return E_INVALIDARG;
+    Device->GetCopyableFootprints(&Desc, 0, Subresources, 0, Layouts, NULL, NULL, &Total);
+    Readback = TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, Total, D3D12_RESOURCE_FLAG_NONE);
+    if (Readback == NULL)
+        return E_OUTOFMEMORY;
+    for (UINT Index = 0; Index < Subresources; Index++)
+    {
+        D3D12_TEXTURE_COPY_LOCATION To = {};
+        D3D12_TEXTURE_COPY_LOCATION From = {};
+
+        To.pResource = Readback;
+        To.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        To.PlacedFootprint = Layouts[Index];
+        From.pResource = Texture;
+        From.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        From.SubresourceIndex = Index;
+        Queue->List->CopyTextureRegion(&To, 0, 0, 0, &From, NULL);
+    }
+    hr = Queue->Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        TcReadback(Readback, (SIZE_T)Total, Result);
+    Readback->Release();
+    return hr;
+}
+
+static
+VOID
+TcLogSince(
+    _In_ SIZE_T Start,
+    _Inout_ TcResult *Result)
+{
+    EnterCriticalSection(&TcDdiLock);
+    TcAppendTo(&Result->Data, TcDdiLog.data() + Start, TcDdiLog.size() - Start);
+    LeaveCriticalSection(&TcDdiLock);
+}
+
+static
+SIZE_T
+TcLogMark(VOID)
+{
+    SIZE_T Size;
+
+    EnterCriticalSection(&TcDdiLock);
+    Size = TcDdiLog.size();
+    LeaveCriticalSection(&TcDdiLock);
+    return Size;
+}
+
+/* Allocation info, GPU addresses, buffer and texture copies through committed and placed resources */
+static
+HRESULT
+SceneCopy(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const struct { D3D12_RESOURCE_DIMENSION Dimension; DXGI_FORMAT Format; UINT Width; UINT Height; UINT16 Depth; UINT16 Mips; D3D12_RESOURCE_FLAGS Flags; UINT Samples; } Descs[] =
+    {
+        { D3D12_RESOURCE_DIMENSION_BUFFER, DXGI_FORMAT_UNKNOWN, 1, 1, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_BUFFER, DXGI_FORMAT_UNKNOWN, 65537, 1, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE1D, DXGI_FORMAT_R8G8B8A8_UNORM, 100, 1, 3, 0, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 64, 64, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, 4 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R16G16B16A16_FLOAT, 333, 77, 6, 0, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_BC1_UNORM, 256, 256, 1, 0, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_D32_FLOAT, 128, 128, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_D24_UNORM_S8_UINT, 17, 9, 2, 1, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_NV12, 64, 64, 1, 1, D3D12_RESOURCE_FLAG_NONE, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE3D, DXGI_FORMAT_R32_FLOAT, 32, 16, 8, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, 1 },
+        { D3D12_RESOURCE_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8_UNORM, 4096, 4096, 1, 0, D3D12_RESOURCE_FLAG_NONE, 1 },
+    };
+    SIZE_T LogStart = TcLogMark();
+    TcQueue Queue;
+    ID3D12Resource *Upload = NULL;
+    ID3D12Resource *Middle = NULL;
+    ID3D12Resource *Readback = NULL;
+    ID3D12Resource *Texture = NULL;
+    ID3D12Resource *Copy = NULL;
+    ID3D12Heap *Heap = NULL;
+    ID3D12Resource *Placed[2] = {};
+    HRESULT hr;
+
+    for (const auto &Item : Descs)
+    {
+        D3D12_RESOURCE_DESC Desc = {};
+        D3D12_RESOURCE_ALLOCATION_INFO Info;
+
+        Desc.Dimension = Item.Dimension;
+        Desc.Width = Item.Width;
+        Desc.Height = Item.Height;
+        Desc.DepthOrArraySize = Item.Depth;
+        Desc.MipLevels = Item.Mips;
+        Desc.Format = Item.Format;
+        Desc.SampleDesc.Count = Item.Samples;
+        Desc.Layout = Item.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR : D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        Desc.Flags = Item.Flags;
+        Info = Device->GetResourceAllocationInfo(0, 1, &Desc);
+        TcAppend(Result, &Info, sizeof(Info));
+        Desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+        Info = Device->GetResourceAllocationInfo(0, 1, &Desc);
+        TcAppend(Result, &Info, sizeof(Info));
+    }
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+
+    Upload = TcBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, 65536, D3D12_RESOURCE_FLAG_NONE);
+    Middle = TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, 65536, D3D12_RESOURCE_FLAG_NONE);
+    Readback = TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, 65536, D3D12_RESOURCE_FLAG_NONE);
+    Texture = TcTexture(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 37, 21, 2, 3, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    Copy = TcTexture(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 37, 21, 2, 3, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (Upload == NULL || Middle == NULL || Readback == NULL || Texture == NULL || Copy == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        goto Done;
+    }
+
+    /* Addresses as offsets from the first buffer, which keeps them independent of the process */
+    {
+        UINT64 Base = Upload->GetGPUVirtualAddress();
+        UINT64 Offsets[3] = { Middle->GetGPUVirtualAddress() - Base, Readback->GetGPUVirtualAddress() - Base,
+                              Texture->GetGPUVirtualAddress() };
+
+        TcAppend(Result, Offsets, sizeof(Offsets));
+    }
+
+    hr = TcFill(Upload, 65536, 3);
+    if (FAILED(hr))
+        goto Done;
+
+    /* Buffer to buffer in pieces, overlapping offsets and a whole resource copy */
+    Queue.List->CopyBufferRegion(Middle, 0, Upload, 0, 65536);
+    Queue.List->CopyBufferRegion(Middle, 100, Upload, 5000, 1234);
+    Queue.List->CopyBufferRegion(Middle, 40000, Upload, 1, 3);
+    {
+        D3D12_RESOURCE_BARRIER Barrier = {};
+
+        Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        Barrier.Transition.pResource = Middle;
+        Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        Queue.List->ResourceBarrier(1, &Barrier);
+    }
+    Queue.List->CopyResource(Readback, Middle);
+    hr = Queue.Submit();
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        goto Done;
+    TcReadback(Readback, 65536, Result);
+
+    /* Upload footprints into every subresource, then a box from one texture to another */
+    {
+        D3D12_RESOURCE_DESC Desc = Texture->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT Layouts[6] = {};
+        UINT Rows[6];
+        UINT64 RowBytes[6];
+        UINT64 Total;
+
+        Device->GetCopyableFootprints(&Desc, 0, 6, 0, Layouts, Rows, RowBytes, &Total);
+        TcAppend(Result, Layouts, sizeof(Layouts));
+        TcAppend(Result, &Total, sizeof(Total));
+        for (UINT Index = 0; Index < 6; Index++)
+        {
+            D3D12_TEXTURE_COPY_LOCATION To = {};
+            D3D12_TEXTURE_COPY_LOCATION From = {};
+
+            To.pResource = Texture;
+            To.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            To.SubresourceIndex = Index;
+            From.pResource = Upload;
+            From.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            From.PlacedFootprint = Layouts[Index];
+            Queue.List->CopyTextureRegion(&To, 0, 0, 0, &From, NULL);
+        }
+        {
+            D3D12_TEXTURE_COPY_LOCATION To = {};
+            D3D12_TEXTURE_COPY_LOCATION From = {};
+            D3D12_BOX Box = { 3, 2, 0, 30, 19, 1 };
+
+            Queue.List->CopyResource(Copy, Texture);
+            To.pResource = Copy;
+            To.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            To.SubresourceIndex = 3;
+            From.pResource = Texture;
+            From.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            From.SubresourceIndex = 0;
+            Queue.List->CopyTextureRegion(&To, 5, 1, 0, &From, &Box);
+        }
+        hr = Queue.Submit();
+        TcAppend(Result, &hr, sizeof(hr));
+        if (SUCCEEDED(hr))
+            hr = TcReadTexture(Device, &Queue, Copy, 6, Result);
+        if (FAILED(hr))
+            goto Done;
+    }
+
+    /* Two buffers placed over one heap see each other's bytes */
+    {
+        D3D12_HEAP_DESC HeapDesc = {};
+        D3D12_RESOURCE_DESC Desc = {};
+
+        HeapDesc.SizeInBytes = 4 * 65536;
+        HeapDesc.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        HeapDesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        hr = Device->CreateHeap(&HeapDesc, IID_PPV_ARGS(&Heap));
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            goto Done;
+        Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        Desc.Width = 2 * 65536;
+        Desc.Height = 1;
+        Desc.DepthOrArraySize = 1;
+        Desc.MipLevels = 1;
+        Desc.SampleDesc.Count = 1;
+        Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        hr = Device->CreatePlacedResource(Heap, 0, &Desc, D3D12_RESOURCE_STATE_COMMON, NULL, IID_PPV_ARGS(&Placed[0]));
+        if (SUCCEEDED(hr))
+            hr = Device->CreatePlacedResource(Heap, 65536, &Desc, D3D12_RESOURCE_STATE_COMMON, NULL, IID_PPV_ARGS(&Placed[1]));
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            goto Done;
+        {
+            UINT64 Offset = Placed[1]->GetGPUVirtualAddress() - Placed[0]->GetGPUVirtualAddress();
+
+            TcAppend(Result, &Offset, sizeof(Offset));
+        }
+        Queue.List->CopyBufferRegion(Placed[1], 0, Upload, 0, 65536);
+        Queue.List->CopyBufferRegion(Readback, 0, Placed[0], 65536, 65536);
+        hr = Queue.Submit();
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            goto Done;
+        TcReadback(Readback, 65536, Result);
+    }
+
+    /* A reserved resource comes up without memory */
+    {
+        D3D12_RESOURCE_DESC Desc = {};
+        ID3D12Resource *Reserved = NULL;
+
+        Desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        Desc.Width = 256;
+        Desc.Height = 256;
+        Desc.DepthOrArraySize = 1;
+        Desc.MipLevels = 1;
+        Desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        Desc.SampleDesc.Count = 1;
+        Desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+        hr = Device->CreateReservedResource(&Desc, D3D12_RESOURCE_STATE_COMMON, NULL, IID_PPV_ARGS(&Reserved));
+        TcAppend(Result, &hr, sizeof(hr));
+        if (Reserved)
+            Reserved->Release();
+        hr = S_OK;
+    }
+
+Done:
+    for (ID3D12Resource *Item : Placed)
+    {
+        if (Item)
+            Item->Release();
+    }
+    if (Heap)
+        Heap->Release();
+    if (Copy)
+        Copy->Release();
+    if (Texture)
+        Texture->Release();
+    if (Readback)
+        Readback->Release();
+    if (Middle)
+        Middle->Release();
+    if (Upload)
+        Upload->Release();
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* Render target, depth stencil and unordered access clears, whole and in rectangles */
+static
+HRESULT
+SceneClear(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const DXGI_FORMAT Targets[] =
+    {
+        DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R8G8_SNORM, DXGI_FORMAT_R11G11B10_FLOAT,
+    };
+    static const DXGI_FORMAT Depths[] = { DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_D32_FLOAT_S8X24_UINT };
+    static const FLOAT Color[4] = { 0.25f, -0.5f, 0.75f, 1.5f };
+    static const FLOAT Color2[4] = { 0.125f, 0.333f, 2.0f, 0.5f };
+    static const D3D12_RECT Rects[2] = { { 1, 2, 9, 5 }, { 7, 6, 14, 11 } };
+    SIZE_T LogStart = TcLogMark();
+    D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
+    ID3D12DescriptorHeap *Rtvs = NULL;
+    ID3D12DescriptorHeap *Dsvs = NULL;
+    ID3D12DescriptorHeap *Visible = NULL;
+    ID3D12DescriptorHeap *Hidden = NULL;
+    TcQueue Queue;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    HeapDesc.NumDescriptors = 4;
+    if (SUCCEEDED(hr))
+        hr = Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Rtvs));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    if (SUCCEEDED(hr))
+        hr = Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Dsvs));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    if (SUCCEEDED(hr))
+        hr = Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Hidden));
+    HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (SUCCEEDED(hr))
+        hr = Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Visible));
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        goto Done;
+
+    for (DXGI_FORMAT Format : Targets)
+    {
+        ID3D12Resource *Target = TcTexture(Device, Format, 16, 12, 2, 2, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        D3D12_CPU_DESCRIPTOR_HANDLE Rtv = Rtvs->GetCPUDescriptorHandleForHeapStart();
+        D3D12_CPU_DESCRIPTOR_HANDLE Second = { Rtv.ptr + Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) };
+        D3D12_RENDER_TARGET_VIEW_DESC Desc = {};
+        D3D12_RESOURCE_BARRIER Barrier = {};
+
+        if (Target == NULL)
+        {
+            hr = E_OUTOFMEMORY;
+            goto Done;
+        }
+        Device->CreateRenderTargetView(Target, NULL, Rtv);
+        Desc.Format = Format;
+        Desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+        Desc.Texture2DArray.MipSlice = 1;
+        Desc.Texture2DArray.FirstArraySlice = 1;
+        Desc.Texture2DArray.ArraySize = 1;
+        Device->CreateRenderTargetView(Target, &Desc, Second);
+        Queue.List->ClearRenderTargetView(Rtv, Color, 0, NULL);
+        Queue.List->ClearRenderTargetView(Rtv, Color2, 2, Rects);
+        Queue.List->ClearRenderTargetView(Second, Color2, 0, NULL);
+        Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        Barrier.Transition.pResource = Target;
+        Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        Queue.List->ResourceBarrier(1, &Barrier);
+        hr = TcReadTexture(Device, &Queue, Target, 4, Result);
+        Target->Release();
+        if (FAILED(hr))
+            goto Done;
+    }
+
+    for (DXGI_FORMAT Format : Depths)
+    {
+        ID3D12Resource *Target = TcTexture(Device, Format, 16, 12, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        D3D12_CPU_DESCRIPTOR_HANDLE Dsv = Dsvs->GetCPUDescriptorHandleForHeapStart();
+        D3D12_RESOURCE_BARRIER Barrier = {};
+        UINT Planes = (Format == DXGI_FORMAT_D24_UNORM_S8_UINT || Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT) ? 2 : 1;
+
+        if (Target == NULL)
+        {
+            hr = E_OUTOFMEMORY;
+            goto Done;
+        }
+        Device->CreateDepthStencilView(Target, NULL, Dsv);
+        Queue.List->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.375f, 0x5A, 0, NULL);
+        Queue.List->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_DEPTH, 0.875f, 0, 1, Rects);
+        if (Planes == 2)
+            Queue.List->ClearDepthStencilView(Dsv, D3D12_CLEAR_FLAG_STENCIL, 0.0f, 0xC3, 1, Rects + 1);
+        Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        Barrier.Transition.pResource = Target;
+        Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        Queue.List->ResourceBarrier(1, &Barrier);
+        hr = TcReadTexture(Device, &Queue, Target, Planes, Result);
+        Target->Release();
+        if (FAILED(hr))
+            goto Done;
+    }
+
+    /* Unordered access clears need the view in a shader visible heap and in a CPU only one */
+    {
+        static const UINT Values[4] = { 0x11223344, 5, 6, 7 };
+        static const FLOAT Floats[4] = { 0.5f, 0.25f, -1.0f, 3.0f };
+        ID3D12Resource *Buffer = TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, 4096, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        ID3D12Resource *Texture = TcTexture(Device, DXGI_FORMAT_R16G16B16A16_FLOAT, 16, 12, 1, 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ID3D12Resource *Readback = TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, 4096, D3D12_RESOURCE_FLAG_NONE);
+        UINT Increment = Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_UNORDERED_ACCESS_VIEW_DESC Desc = {};
+        D3D12_CPU_DESCRIPTOR_HANDLE Cpu = Hidden->GetCPUDescriptorHandleForHeapStart();
+        D3D12_CPU_DESCRIPTOR_HANDLE VisibleCpu = Visible->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE Gpu = Visible->GetGPUDescriptorHandleForHeapStart();
+        ID3D12DescriptorHeap *Heaps[] = { Visible };
+        D3D12_RESOURCE_BARRIER Barrier = {};
+
+        if (Buffer == NULL || Texture == NULL || Readback == NULL)
+        {
+            hr = E_OUTOFMEMORY;
+        }
+        else
+        {
+            Desc.Format = DXGI_FORMAT_R32_TYPELESS;
+            Desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            Desc.Buffer.NumElements = 1024;
+            Desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            Device->CreateUnorderedAccessView(Buffer, NULL, &Desc, Cpu);
+            Desc.Format = DXGI_FORMAT_R8G8B8A8_UINT;
+            Desc.Buffer.FirstElement = 512;
+            Desc.Buffer.NumElements = 100;
+            Desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+            Device->CreateUnorderedAccessView(Buffer, NULL, &Desc, { Cpu.ptr + Increment });
+            Device->CreateUnorderedAccessView(Texture, NULL, NULL, { Cpu.ptr + 2 * Increment });
+            Device->CopyDescriptorsSimple(3, VisibleCpu, Cpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            Queue.List->SetDescriptorHeaps(1, Heaps);
+            Queue.List->ClearUnorderedAccessViewUint(Gpu, Cpu, Buffer, Values, 0, NULL);
+            Queue.List->ClearUnorderedAccessViewUint({ Gpu.ptr + Increment }, { Cpu.ptr + Increment }, Buffer, Values, 0, NULL);
+            Queue.List->ClearUnorderedAccessViewFloat({ Gpu.ptr + 2 * Increment }, { Cpu.ptr + 2 * Increment }, Texture, Floats, 0, NULL);
+            Queue.List->ClearUnorderedAccessViewFloat({ Gpu.ptr + 2 * Increment }, { Cpu.ptr + 2 * Increment }, Texture, Color, 1, Rects);
+            Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            Barrier.Transition.pResource = Buffer;
+            Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            Queue.List->ResourceBarrier(1, &Barrier);
+            Queue.List->CopyResource(Readback, Buffer);
+            Barrier.Transition.pResource = Texture;
+            Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            Queue.List->ResourceBarrier(1, &Barrier);
+            hr = Queue.Submit();
+            TcAppend(Result, &hr, sizeof(hr));
+            if (SUCCEEDED(hr))
+            {
+                TcReadback(Readback, 4096, Result);
+                hr = TcReadTexture(Device, &Queue, Texture, 1, Result);
+            }
+        }
+        if (Readback)
+            Readback->Release();
+        if (Texture)
+            Texture->Release();
+        if (Buffer)
+            Buffer->Release();
+    }
+
+Done:
+    if (Visible)
+        Visible->Release();
+    if (Hidden)
+        Hidden->Release();
+    if (Dsvs)
+        Dsvs->Release();
+    if (Rtvs)
+        Rtvs->Release();
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
+/* Lists run in submission order across queues that wait on each other's fences */
+static
+HRESULT
+SceneFence(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    SIZE_T LogStart = TcLogMark();
+    TcQueue Direct;
+    TcQueue Copy;
+    ID3D12Resource *Upload = NULL;
+    ID3D12Resource *Middle = NULL;
+    ID3D12Resource *Readback = NULL;
+    ID3D12GraphicsCommandList *Second = NULL;
+    ID3D12Fence *Shared = NULL;
+    HRESULT hr;
+
+    hr = Direct.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Copy.Create(Device, D3D12_COMMAND_LIST_TYPE_COPY);
+    if (SUCCEEDED(hr))
+        hr = Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, Direct.Allocator, NULL, IID_PPV_ARGS(&Second));
+    if (SUCCEEDED(hr))
+        hr = Device->CreateFence(5, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Shared));
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        goto Done;
+    Upload = TcBuffer(Device, D3D12_HEAP_TYPE_UPLOAD, 8192, D3D12_RESOURCE_FLAG_NONE);
+    Middle = TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, 8192, D3D12_RESOURCE_FLAG_NONE);
+    Readback = TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, 8192, D3D12_RESOURCE_FLAG_NONE);
+    if (Upload == NULL || Middle == NULL || Readback == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        goto Done;
+    }
+    hr = TcFill(Upload, 8192, 11);
+    if (FAILED(hr))
+        goto Done;
+
+    {
+        UINT64 Value = Shared->GetCompletedValue();
+
+        TcAppend(Result, &Value, sizeof(Value));
+    }
+
+    /* The copy queue waits for the direct queue, which waits on a value the CPU signals */
+    Direct.Queue->Wait(Shared, 6);
+    Direct.List->CopyBufferRegion(Middle, 0, Upload, 0, 4096);
+    hr = Direct.List->Close();
+    Second->CopyBufferRegion(Middle, 4096, Upload, 100, 4096);
+    if (SUCCEEDED(hr))
+        hr = Second->Close();
+    if (SUCCEEDED(hr))
+    {
+        ID3D12CommandList *Lists[] = { Direct.List, Second };
+        UINT64 Value;
+
+        Direct.Queue->ExecuteCommandLists(2, Lists);
+        Direct.Queue->Signal(Shared, 7);
+        Copy.Queue->Wait(Shared, 7);
+        Copy.List->CopyResource(Readback, Middle);
+        hr = Copy.List->Close();
+        if (SUCCEEDED(hr))
+        {
+            ID3D12CommandList *CopyLists[] = { Copy.List };
+
+            Copy.Queue->ExecuteCommandLists(1, CopyLists);
+        }
+        Value = Shared->GetCompletedValue();
+        TcAppend(Result, &Value, sizeof(Value));
+        hr = Shared->Signal(6);
+        if (SUCCEEDED(hr))
+            hr = Copy.Wait();
+        Value = Shared->GetCompletedValue();
+        TcAppend(Result, &Value, sizeof(Value));
+    }
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        TcReadback(Readback, 8192, Result);
+
+    /* Reusing the allocator after the queue is done with it */
+    if (SUCCEEDED(hr))
+        hr = Direct.Allocator->Reset();
+    if (SUCCEEDED(hr))
+        hr = Direct.List->Reset(Direct.Allocator, NULL);
+    if (SUCCEEDED(hr))
+    {
+        Direct.List->CopyBufferRegion(Readback, 0, Upload, 4096, 4096);
+        hr = Direct.Submit();
+    }
+    TcAppend(Result, &hr, sizeof(hr));
+    if (SUCCEEDED(hr))
+        TcReadback(Readback, 8192, Result);
+
+Done:
+    if (Shared)
+        Shared->Release();
+    if (Second)
+        Second->Release();
+    if (Readback)
+        Readback->Release();
+    if (Middle)
+        Middle->Release();
+    if (Upload)
+        Upload->Release();
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
 static const TcScene Scenes[] =
 {
     { "ddi", SceneDdi },
     { "features", SceneFeatures },
     { "formats", SceneFormats },
+    { "copy", SceneCopy },
+    { "clear", SceneClear },
+    { "fence", SceneFence },
 };
 
 static
