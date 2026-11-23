@@ -498,10 +498,13 @@ DdPresentThroughDwm(
         return S_OK;
     }
 
+    /* A window DWM has not given a surface yet takes nothing; the blit still succeeds */
     *Handled = TRUE;
     ThroughGdi = hr == DdDwmBltThroughGdi;
     if (ThroughGdi)
         Share = NULL;
+    else if (Share == NULL)
+        return S_OK;
 
     hr = DdOpenWindowSurface(Hardware, static_cast<D3DKMT_HANDLE>(reinterpret_cast<ULONG_PTR>(Share)),
                              DdDirect3DFromDxgi(Format));
