@@ -356,18 +356,80 @@ ScAssemble(
     return TRUE;
 }
 
-/* The pixel shader inputs a typical vertex shader leaves: position, two colors and eight coordinates */
+/* Adds one vertex shader output with the flag its usage sets */
 static
 VOID
-ScDefaultPixelInputs(
-    _Out_ NineScOutputs* Outputs)
+ScAddLinked(
+    _Inout_ NineScOutputs* Outputs,
+    _In_ UINT Usage,
+    _In_ UINT Index,
+    _In_ UINT Register,
+    _In_ UINT Mask)
+{
+    Outputs->Outputs[Outputs->Count++] = Usage | (Index << 5) | (Register << 9) | (Mask << 13);
+    switch (Usage)
+    {
+        case 0:
+            if (Index == 0)
+                Outputs->Flags |= 1;
+            break;
+        case 5:
+            Outputs->Flags |= 8u << Index;
+            break;
+        case 10:
+            if (Index <= 1)
+                Outputs->Flags |= 2u << Index;
+            break;
+        case 11:
+            if (Index == 0)
+                Outputs->Flags |= 0x80000;
+            break;
+    }
+}
+
+/* Number of vertex shader output sets the pixel shaders are linked against */
+static constexpr UINT ScPixelInputSets = 4;
+
+/*
+ * The vertex shader outputs a pixel shader is linked against: the usual position, two colors and eight
+ * coordinates, the same with fog, a shuffled set with partial masks, and a sparse one.
+ */
+static
+VOID
+ScPixelInputs(
+    _Out_ NineScOutputs* Outputs,
+    _In_ UINT Set)
 {
     ZeroMemory(Outputs, sizeof(*Outputs));
-    Outputs->Outputs[Outputs->Count++] = 0 | (0 << 9) | (0xF << 13);
-    Outputs->Outputs[Outputs->Count++] = 10 | (0 << 5) | (1 << 9) | (0xF << 13);
-    Outputs->Outputs[Outputs->Count++] = 10 | (1 << 5) | (2 << 9) | (0xF << 13);
-    for (UINT Index = 0; Index < 8; Index += 1)
-        Outputs->Outputs[Outputs->Count++] = 5 | (Index << 5) | ((3 + Index) << 9) | (0xF << 13);
+    switch (Set)
+    {
+        case 0:
+        case 1:
+            ScAddLinked(Outputs, 0, 0, 0, 0xF);
+            ScAddLinked(Outputs, 10, 0, 1, 0xF);
+            ScAddLinked(Outputs, 10, 1, 2, 0xF);
+            for (UINT Index = 0; Index < 8; Index += 1)
+                ScAddLinked(Outputs, 5, Index, 3 + Index, 0xF);
+            if (Set == 1)
+                ScAddLinked(Outputs, 11, 0, 11, 0x1);
+            break;
+
+        case 2:
+            ScAddLinked(Outputs, 0, 0, 0, 0xF);
+            ScAddLinked(Outputs, 11, 0, 1, 0x1);
+            ScAddLinked(Outputs, 10, 0, 2, 0xF);
+            for (UINT Index = 0; Index < 8; Index += 1)
+                ScAddLinked(Outputs, 5, Index, 10 - Index, Index & 1 ? 0x3 : 0xF);
+            break;
+
+        default:
+            ScAddLinked(Outputs, 5, 0, 0, 0x3);
+            ScAddLinked(Outputs, 0, 0, 1, 0xF);
+            ScAddLinked(Outputs, 10, 0, 2, 0x7);
+            ScAddLinked(Outputs, 10, 1, 3, 0xF);
+            ScAddLinked(Outputs, 5, 2, 4, 0x7);
+            break;
+    }
 }
 
 int
@@ -378,7 +440,7 @@ main(
 {
     ScContext Context;
     NineScRasterStates Raster;
-    NineScOutputs PixelInputs;
+    NineScOutputs Linked[ScPixelInputSets];
     PCSTR Only = NULL;
     UINT Fuzz = 0;
     BOOL Dump = FALSE;
@@ -400,7 +462,8 @@ main(
     ZeroMemory(&Raster, sizeof(Raster));
     for (UINT Index = 0; Index < _countof(Raster.Samplers); Index += 1)
         Raster.Samplers[Index] = 1;
-    ScDefaultPixelInputs(&PixelInputs);
+    for (UINT Set = 0; Set < ScPixelInputSets; Set += 1)
+        ScPixelInputs(&Linked[Set], Set);
 
     for (UINT Index = 0; Index < _countof(ScCorpus); Index += 1)
     {
@@ -415,7 +478,17 @@ main(
             continue;
         }
 
-        ScRunCase(&Context, Case, Code, &Raster, &PixelInputs, "");
+        ScRunCase(&Context, Case, Code, &Raster, &Linked[0], "");
+        if (Case->Pixel)
+        {
+            for (UINT Set = 1; Set < ScPixelInputSets; Set += 1)
+            {
+                char Label[32];
+
+                sprintf_s(Label, " inputs %u", Set);
+                ScRunCase(&Context, Case, Code, &Raster, &Linked[Set], Label);
+            }
+        }
 
         for (UINT Round = 0; Round < Fuzz; Round += 1)
         {
@@ -425,7 +498,8 @@ main(
             for (UINT Byte = 0; Byte < sizeof(Random); Byte += 1)
                 reinterpret_cast<PBYTE>(&Random)[Byte] = static_cast<BYTE>(ScRandom(&Context));
             sprintf_s(Label, " raster %u", Round);
-            ScRunCase(&Context, Case, Code, &Random, &PixelInputs, Label);
+            ScRunCase(&Context, Case, Code, &Random, &Linked[Round % ScPixelInputSets], Label);
+
         }
     }
 
