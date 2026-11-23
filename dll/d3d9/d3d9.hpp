@@ -266,6 +266,57 @@ private:
         _In_ D3DDEVTYPE DeviceType,
         _Outptr_ const D9Adapter** Table);
 
+    UINT
+    HeadCount(
+        _In_ UINT Adapter,
+        _In_ DWORD BehaviorFlags) const;
+
+    HRESULT
+    AdapterCaps(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _Outptr_ const D3DCAPS9** Caps);
+
+    HRESULT
+    ValidateOverlay(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _In_ DWORD BehaviorFlags,
+        _In_ const D3DPRESENT_PARAMETERS* Parameters);
+
+    HRESULT
+    ValidatePresentation(
+        _In_ UINT Adapter,
+        _In_ UINT Heads,
+        _In_ D3DDEVTYPE DeviceType,
+        _In_ DWORD BehaviorFlags,
+        _Inout_updates_(Heads) D3DPRESENT_PARAMETERS* Parameters,
+        _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes);
+
+    HRESULT
+    ValidateCreation(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _In_ DWORD BehaviorFlags,
+        _Inout_ D3DPRESENT_PARAMETERS* Parameters,
+        _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes);
+
+    HRESULT
+    ValidateWindows(
+        _In_ UINT Heads,
+        _In_opt_ HWND FocusWindow,
+        _In_reads_(Heads) const D3DPRESENT_PARAMETERS* Parameters);
+
+    HRESULT
+    CreateDeviceCommon(
+        _In_ UINT Adapter,
+        _In_ D3DDEVTYPE DeviceType,
+        _In_opt_ HWND FocusWindow,
+        _In_ DWORD BehaviorFlags,
+        _Inout_ D3DPRESENT_PARAMETERS* Parameters,
+        _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes,
+        _COM_Outptr_ IDirect3DDevice9Ex** Device);
+
     HRESULT
     FindMode(
         _In_ UINT Adapter,
@@ -376,6 +427,11 @@ D9IsDesktopFormat(
     _In_ BOOLEAN IsEx);
 
 /* formats.cpp */
+BOOLEAN
+D9IsBackBufferFormat(
+    _In_ D3DFORMAT Format,
+    _In_ BOOLEAN IsEx);
+
 LONG
 D9BytesPerPixel(
     _In_ D3DFORMAT Format);

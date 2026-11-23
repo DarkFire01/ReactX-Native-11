@@ -206,6 +206,60 @@ D9Enum::GetAdapterMonitor(
     return Search.second;
 }
 
+/* The checks and creation CreateDevice and CreateDeviceEx share */
+HRESULT
+D9Enum::CreateDeviceCommon(
+    _In_ UINT Adapter,
+    _In_ D3DDEVTYPE DeviceType,
+    _In_opt_ HWND FocusWindow,
+    _In_ DWORD BehaviorFlags,
+    _Inout_ D3DPRESENT_PARAMETERS* Parameters,
+    _In_opt_ const D3DDISPLAYMODEEX* FullscreenModes,
+    _COM_Outptr_ IDirect3DDevice9Ex** Device)
+{
+    UINT Heads = 1;
+    HRESULT hr;
+
+    *Device = nullptr;
+    if (DeviceType == D3DDEVTYPE_NULLREF && (BehaviorFlags & D3DCREATE_ADAPTERGROUP_DEVICE) != 0)
+    {
+        D9_TRACE_ONCE(L"CreateDevice: the null reference device has no adapter groups");
+        return D3DERR_INVALIDCALL;
+    }
+
+    /* Turning off driver management for resources also turns it off for the rest */
+    if ((BehaviorFlags & D3DCREATE_DISABLE_DRIVER_MANAGEMENT_EX) != 0)
+        BehaviorFlags |= D3DCREATE_DISABLE_DRIVER_MANAGEMENT;
+
+    hr = ValidateCreation(Adapter, DeviceType, BehaviorFlags, Parameters, FullscreenModes);
+    if (FAILED(hr))
+        return hr;
+
+    if ((BehaviorFlags & D3DCREATE_ADAPTERGROUP_DEVICE) != 0)
+    {
+        Heads = HeadCount(Adapter, BehaviorFlags);
+        if (Heads == 1)
+            BehaviorFlags &= ~D3DCREATE_ADAPTERGROUP_DEVICE;
+    }
+
+    hr = ValidateWindows(Heads, FocusWindow, Parameters);
+    if (FAILED(hr))
+        return hr;
+
+    /* ReactX never takes a display for itself */
+    for (UINT Head = 0; Head < Heads; Head++)
+    {
+        if (!Parameters[Head].Windowed)
+        {
+            D9_TRACE_ONCE(L"CreateDevice: fullscreen devices are not implemented");
+            return D3DERR_NOTAVAILABLE;
+        }
+    }
+
+    RX_UNIMPLEMENTED();
+    return D3DERR_NOTAVAILABLE;
+}
+
 STDMETHODIMP
 D9Enum::CreateDevice(
     _In_ UINT Adapter,
@@ -215,9 +269,39 @@ D9Enum::CreateDevice(
     _Inout_ D3DPRESENT_PARAMETERS* Parameters,
     _COM_Outptr_ IDirect3DDevice9** Device)
 {
-    RX_UNIMPLEMENTED();
+    D9LockScope Scope(&Lock);
+    D3DDISPLAYMODEEX Modes[D9MaxAdapters];
+    const D3DDISPLAYMODEEX* FullscreenModes = nullptr;
+    IDirect3DDevice9Ex* Created = nullptr;
+    HRESULT hr;
+
     *Device = nullptr;
-    return D3DERR_NOTAVAILABLE;
+    if (Adapter >= AdapterCount && !(AdapterCount == 0 && DeviceType == D3DDEVTYPE_NULLREF && Adapter == 0))
+    {
+        D9_TRACE_ONCE(L"CreateDevice: adapter %u does not exist", Adapter);
+        return D3DERR_INVALIDCALL;
+    }
+
+    /* The plain entry point describes each fullscreen head's mode with its back buffer */
+    if (!Parameters->Windowed)
+    {
+        UINT Heads = (BehaviorFlags & D3DCREATE_ADAPTERGROUP_DEVICE) != 0 ? Adapters[Adapter].AdaptersInGroup : 1;
+
+        for (UINT Head = 0; Head < Heads && Head < D9MaxAdapters; Head++)
+        {
+            Modes[Head].Size = sizeof(Modes[Head]);
+            Modes[Head].Width = Parameters[Head].BackBufferWidth;
+            Modes[Head].Height = Parameters[Head].BackBufferHeight;
+            Modes[Head].RefreshRate = Parameters[Head].FullScreen_RefreshRateInHz;
+            Modes[Head].Format = Parameters[Head].BackBufferFormat;
+            Modes[Head].ScanLineOrdering = D3DSCANLINEORDERING_UNKNOWN;
+        }
+        FullscreenModes = Modes;
+    }
+
+    hr = CreateDeviceCommon(Adapter, DeviceType, FocusWindow, BehaviorFlags, Parameters, FullscreenModes, &Created);
+    *Device = Created;
+    return hr;
 }
 
 STDMETHODIMP
@@ -230,9 +314,9 @@ D9Enum::CreateDeviceEx(
     _Inout_opt_ D3DDISPLAYMODEEX* FullscreenMode,
     _COM_Outptr_ IDirect3DDevice9Ex** Device)
 {
-    RX_UNIMPLEMENTED();
-    *Device = nullptr;
-    return D3DERR_NOTAVAILABLE;
+    D9LockScope Scope(&Lock);
+
+    return CreateDeviceCommon(Adapter, DeviceType, FocusWindow, BehaviorFlags, Parameters, FullscreenMode, Device);
 }
 
 STDMETHODIMP

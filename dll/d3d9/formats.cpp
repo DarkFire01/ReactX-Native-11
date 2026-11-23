@@ -137,7 +137,6 @@ D9OpaqueTwin(
 }
 
 /* Formats a swap chain may use for its back buffers */
-static
 BOOLEAN
 D9IsBackBufferFormat(
     _In_ D3DFORMAT Format,
