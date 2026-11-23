@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "ddi.hpp"
+#include "internalshaders.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -1891,6 +1892,113 @@ TrScenarioRootSignatures(
     }
 }
 
+/* Pipeline states and the shaders and states shared between them */
+static
+VOID
+TrScenarioPipelines(
+    _In_ TrRun& Run)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12RootSignature> Root;
+    ComPtr<ID3DBlob> Blob;
+    ComPtr<ID3DBlob> Errors;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Graphics = {};
+    D3D12_COMPUTE_PIPELINE_STATE_DESC Compute = {};
+    ComPtr<ID3D12PipelineState> States[6];
+
+    if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))) ||
+        Run.SerializeVersioned == nullptr)
+    {
+        return;
+    }
+
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    RootDesc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    if (FAILED(Run.SerializeVersioned(&RootDesc, &Blob, &Errors)))
+        return;
+    TrPhase("CreateRootSignature");
+    printf("result %08X\n", (UINT)Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(),
+                                                              IID_PPV_ARGS(&Root)));
+    if (Root == nullptr)
+        return;
+
+    Graphics.pRootSignature = Root.Get();
+    Graphics.VS = { RxInternalVertexDxil, sizeof(RxInternalVertexDxil) };
+    for (D3D12_RENDER_TARGET_BLEND_DESC& Target : Graphics.BlendState.RenderTarget)
+    {
+        Target.SrcBlend = D3D12_BLEND_ONE;
+        Target.DestBlend = D3D12_BLEND_ZERO;
+        Target.BlendOp = D3D12_BLEND_OP_ADD;
+        Target.SrcBlendAlpha = D3D12_BLEND_ONE;
+        Target.DestBlendAlpha = D3D12_BLEND_ZERO;
+        Target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        Target.LogicOp = D3D12_LOGIC_OP_NOOP;
+        Target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    Graphics.SampleMask = UINT_MAX;
+    Graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    Graphics.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    Graphics.RasterizerState.DepthClipEnable = TRUE;
+    Graphics.DepthStencilState.DepthEnable = TRUE;
+    Graphics.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    Graphics.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    Graphics.DepthStencilState.StencilReadMask = 0xFF;
+    Graphics.DepthStencilState.StencilWriteMask = 0xFF;
+    for (D3D12_DEPTH_STENCILOP_DESC* Face : { &Graphics.DepthStencilState.FrontFace,
+                                              &Graphics.DepthStencilState.BackFace })
+    {
+        Face->StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        Face->StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        Face->StencilPassOp = D3D12_STENCIL_OP_KEEP;
+        Face->StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    }
+    Graphics.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    Graphics.NumRenderTargets = 1;
+    Graphics.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Graphics.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    Graphics.SampleDesc.Count = 1;
+
+    TrPhase("CreateGraphicsPipelineState");
+    printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&States[0])));
+    TrPhase("CreateGraphicsPipelineState same desc");
+    printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&States[1])));
+
+    Graphics.BlendState.IndependentBlendEnable = TRUE;
+    Graphics.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    Graphics.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    Graphics.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    Graphics.BlendState.RenderTarget[1].LogicOpEnable = TRUE;
+    Graphics.BlendState.RenderTarget[1].LogicOp = D3D12_LOGIC_OP_XOR;
+    Graphics.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    Graphics.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
+    Graphics.RasterizerState.DepthBias = 4;
+    Graphics.RasterizerState.MultisampleEnable = TRUE;
+    Graphics.DepthStencilState.StencilEnable = TRUE;
+    Graphics.DepthStencilState.StencilReadMask = 0x0F;
+    Graphics.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_INCR;
+    Graphics.DepthStencilState.BackFace.StencilFailOp = D3D12_STENCIL_OP_ZERO;
+    TrPhase("CreateGraphicsPipelineState other states");
+    printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&States[2])));
+
+    Graphics.VS = { RxInternalVertexDxbc, sizeof(RxInternalVertexDxbc) };
+    TrPhase("CreateGraphicsPipelineState dxbc");
+    printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&States[3])));
+
+    Compute.pRootSignature = Root.Get();
+    Compute.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
+    TrPhase("CreateComputePipelineState");
+    printf("result %08X\n", (UINT)Device->CreateComputePipelineState(&Compute, IID_PPV_ARGS(&States[4])));
+    Compute.CS = { RxInternalComputeDxbc, sizeof(RxInternalComputeDxbc) };
+    TrPhase("CreateComputePipelineState dxbc");
+    printf("result %08X\n", (UINT)Device->CreateComputePipelineState(&Compute, IID_PPV_ARGS(&States[5])));
+
+    TrPhase("Release");
+    for (ComPtr<ID3D12PipelineState>& State : States)
+        State.Reset();
+    Root.Reset();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -1905,6 +2013,7 @@ static const TrScenario TrScenarios[] =
     { "copy", TrScenarioCopy },
     { "features", TrScenarioFeatures },
     { "rootsigs", TrScenarioRootSignatures },
+    { "pipelines", TrScenarioPipelines },
 };
 
 int

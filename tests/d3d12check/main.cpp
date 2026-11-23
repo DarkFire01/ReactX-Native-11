@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "internalshaders.h"
+
 using Microsoft::WRL::ComPtr;
 
 struct TwelveCheck
@@ -2602,6 +2604,196 @@ TcCheckRootSignatures(
     Check.Report("device_refs_after", "%ld", (LONG)TcRefCount(Device.Get()) - (LONG)DeviceRefs);
 }
 
+/* A graphics desc like the one every device makes for itself: position only, default states */
+static
+VOID
+TcDefaultGraphicsDesc(
+    _In_ ID3D12RootSignature* Root,
+    _Out_ D3D12_GRAPHICS_PIPELINE_STATE_DESC* Desc)
+{
+    ZeroMemory(Desc, sizeof(*Desc));
+    Desc->pRootSignature = Root;
+    Desc->VS = { RxInternalVertexDxil, sizeof(RxInternalVertexDxil) };
+    for (D3D12_RENDER_TARGET_BLEND_DESC& Target : Desc->BlendState.RenderTarget)
+    {
+        Target.SrcBlend = D3D12_BLEND_ONE;
+        Target.DestBlend = D3D12_BLEND_ZERO;
+        Target.BlendOp = D3D12_BLEND_OP_ADD;
+        Target.SrcBlendAlpha = D3D12_BLEND_ONE;
+        Target.DestBlendAlpha = D3D12_BLEND_ZERO;
+        Target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        Target.LogicOp = D3D12_LOGIC_OP_NOOP;
+        Target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    Desc->SampleMask = UINT_MAX;
+    Desc->RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    Desc->RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    Desc->RasterizerState.DepthClipEnable = TRUE;
+    Desc->DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    Desc->DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    Desc->DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    Desc->DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    for (D3D12_DEPTH_STENCILOP_DESC* Face : { &Desc->DepthStencilState.FrontFace, &Desc->DepthStencilState.BackFace })
+    {
+        Face->StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        Face->StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        Face->StencilPassOp = D3D12_STENCIL_OP_KEEP;
+        Face->StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    }
+    Desc->PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    Desc->SampleDesc.Count = 1;
+}
+
+static
+VOID
+TcReportGraphics(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device* Device,
+    _In_z_ PCSTR Key,
+    _In_ const D3D12_GRAPHICS_PIPELINE_STATE_DESC& Desc)
+{
+    ComPtr<ID3D12PipelineState> State;
+    HRESULT hr;
+
+    hr = Device->CreateGraphicsPipelineState(&Desc, IID_PPV_ARGS(&State));
+    Check.Report(Key, "0x%08lX %s", hr, State != nullptr ? "object" : "null");
+}
+
+static
+VOID
+TcReportCompute(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device* Device,
+    _In_z_ PCSTR Key,
+    _In_ const D3D12_COMPUTE_PIPELINE_STATE_DESC& Desc)
+{
+    ComPtr<ID3D12PipelineState> State;
+    HRESULT hr;
+
+    hr = Device->CreateComputePipelineState(&Desc, IID_PPV_ARGS(&State));
+    Check.Report(Key, "0x%08lX %s", hr, State != nullptr ? "object" : "null");
+}
+
+/* pipelines: graphics and compute pipeline creation from fixed descs */
+static
+VOID
+TcCheckPipelines(
+    _In_ TwelveCheck& Check)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12RootSignature> Root;
+    ComPtr<ID3D12PipelineState> First;
+    ComPtr<ID3D12PipelineState> Second;
+    ComPtr<IUnknown> Unknown;
+    ComPtr<ID3D12Device> Owner;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Graphics;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Changed;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC Compute = {};
+    TcRootBlob Blob;
+    void* Raw;
+    ULONG DeviceRefs;
+    HRESULT hr;
+
+    if (FAILED(Check.MakeDevice(&Device)))
+    {
+        Check.Report("device", "none");
+        return;
+    }
+
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    if (!TcSerializeRoot(Check, RootDesc, &Blob) ||
+        FAILED(Device->CreateRootSignature(0, Blob.Bytes.data(), Blob.Bytes.size(), IID_PPV_ARGS(&Root))))
+    {
+        Check.Report("root", "failed");
+        return;
+    }
+
+    TcDefaultGraphicsDesc(Root.Get(), &Graphics);
+    DeviceRefs = TcRefCount(Device.Get());
+    hr = Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&First));
+    Check.Report("graphics", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+    Check.Report("device_refs", "%ld", (LONG)TcRefCount(Device.Get()) - (LONG)DeviceRefs);
+    Check.Report("root_refs", "%lu", TcRefCount(Root.Get()));
+    hr = Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Second));
+    Check.Report("graphics_again", "0x%08lX same %u", hr, First.Get() == Second.Get());
+    Second.Reset();
+
+    for (const IID* Iid : { &__uuidof(IUnknown), &__uuidof(ID3D12Object), &__uuidof(ID3D12DeviceChild),
+                            &__uuidof(ID3D12Pageable), &__uuidof(ID3D12PipelineState),
+                            &__uuidof(ID3D12RootSignature) })
+    {
+        Unknown.Reset();
+        Check.Report("qi", "0x%08lX", First->QueryInterface(*Iid, &Unknown));
+    }
+    hr = First->GetDevice(IID_PPV_ARGS(&Owner));
+    Check.Report("get_device", "0x%08lX same %u", hr, Owner.Get() == Device.Get());
+    Owner.Reset();
+
+    Check.Report("null_out", "0x%08lX", Device->CreateGraphicsPipelineState(&Graphics, __uuidof(ID3D12PipelineState),
+                                                                             nullptr));
+    Raw = reinterpret_cast<void*>(1);
+    hr = Device->CreateGraphicsPipelineState(&Graphics, __uuidof(ID3D12Fence), &Raw);
+    Check.Report("bad_riid", "0x%08lX %s", hr, Raw == nullptr ? "null" : "set");
+
+    Changed = Graphics;
+    Changed.VS = {};
+    TcReportGraphics(Check, Device.Get(), "no_vs", Changed);
+    Changed = Graphics;
+    Changed.pRootSignature = nullptr;
+    TcReportGraphics(Check, Device.Get(), "no_root", Changed);
+    Changed = Graphics;
+    Changed.VS = { RxInternalVertexDxbc, sizeof(RxInternalVertexDxbc) };
+    TcReportGraphics(Check, Device.Get(), "dxbc_vs", Changed);
+    Changed = Graphics;
+    Changed.NodeMask = 2;
+    TcReportGraphics(Check, Device.Get(), "node2", Changed);
+    Changed = Graphics;
+    Changed.SampleDesc.Count = 0;
+    TcReportGraphics(Check, Device.Get(), "samples0", Changed);
+    Changed = Graphics;
+    Changed.SampleMask = 0;
+    TcReportGraphics(Check, Device.Get(), "sample_mask0", Changed);
+    Changed = Graphics;
+    Changed.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    Changed.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    TcReportGraphics(Check, Device.Get(), "raster", Changed);
+    Changed = Graphics;
+    Changed.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    Changed.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    Changed.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    TcReportGraphics(Check, Device.Get(), "blend", Changed);
+    Changed = Graphics;
+    Changed.DepthStencilState.DepthEnable = TRUE;
+    Changed.DepthStencilState.StencilEnable = TRUE;
+    Changed.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_INCR;
+    TcReportGraphics(Check, Device.Get(), "depth_stencil", Changed);
+
+    Compute.pRootSignature = Root.Get();
+    Compute.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
+    TcReportCompute(Check, Device.Get(), "compute", Compute);
+    Compute.CS = { RxInternalComputeDxbc, sizeof(RxInternalComputeDxbc) };
+    TcReportCompute(Check, Device.Get(), "compute_dxbc", Compute);
+    Compute.CS = {};
+    TcReportCompute(Check, Device.Get(), "compute_none", Compute);
+    Compute.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
+    Compute.pRootSignature = nullptr;
+    TcReportCompute(Check, Device.Get(), "compute_no_root", Compute);
+    Compute.pRootSignature = Root.Get();
+    Compute.NodeMask = 2;
+    TcReportCompute(Check, Device.Get(), "compute_node2", Compute);
+    Compute.NodeMask = 0;
+    Check.Report("compute_null_out", "0x%08lX", Device->CreateComputePipelineState(&Compute,
+                                                                                    __uuidof(ID3D12PipelineState),
+                                                                                    nullptr));
+
+    First.Reset();
+    Check.Report("root_refs_after", "%lu", TcRefCount(Root.Get()));
+    Check.Report("device_refs_after", "%ld", (LONG)TcRefCount(Device.Get()) - (LONG)DeviceRefs);
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -2627,6 +2819,7 @@ static const CheckInfo Checks[] =
     { "heaps", TcCheckDescriptorHeaps },
     { "layouts", TcCheckLayouts },
     { "rootsigs", TcCheckRootSignatures },
+    { "pipelines", TcCheckPipelines },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
