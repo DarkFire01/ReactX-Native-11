@@ -748,6 +748,299 @@ RxBuildRasterizer(
     return RxDevice12::TakeDriverError();
 }
 
+/* State checks, run as each state is made, after the pipeline's shaders */
+
+/* How a blend factor may be used: by color only, as dual source, or behind the alpha factor cap */
+enum class RxFactorUse
+{
+    Invalid,
+    Plain,
+    ColorOnly,
+    DualSource,
+    AlphaFactor,
+};
+
+static
+RxFactorUse
+RxClassifyFactor(
+    _In_ D3D12_BLEND Factor)
+{
+    switch (Factor)
+    {
+        case D3D12_BLEND_ZERO:
+        case D3D12_BLEND_ONE:
+        case D3D12_BLEND_SRC_ALPHA:
+        case D3D12_BLEND_INV_SRC_ALPHA:
+        case D3D12_BLEND_DEST_ALPHA:
+        case D3D12_BLEND_INV_DEST_ALPHA:
+        case D3D12_BLEND_SRC_ALPHA_SAT:
+        case D3D12_BLEND_BLEND_FACTOR:
+        case D3D12_BLEND_INV_BLEND_FACTOR:
+            return RxFactorUse::Plain;
+        case D3D12_BLEND_SRC_COLOR:
+        case D3D12_BLEND_INV_SRC_COLOR:
+        case D3D12_BLEND_DEST_COLOR:
+        case D3D12_BLEND_INV_DEST_COLOR:
+        case D3D12_BLEND_SRC1_COLOR:
+        case D3D12_BLEND_INV_SRC1_COLOR:
+            return RxFactorUse::ColorOnly;
+        case D3D12_BLEND_SRC1_ALPHA:
+        case D3D12_BLEND_INV_SRC1_ALPHA:
+            return RxFactorUse::DualSource;
+        case D3D12_BLEND_ALPHA_FACTOR:
+        case D3D12_BLEND_INV_ALPHA_FACTOR:
+            return RxFactorUse::AlphaFactor;
+        default:
+            return RxFactorUse::Invalid;
+    }
+}
+
+static
+BOOLEAN
+RxIsSecondSourceColor(
+    _In_ D3D12_BLEND Factor)
+{
+    return Factor == D3D12_BLEND_SRC1_COLOR || Factor == D3D12_BLEND_INV_SRC1_COLOR;
+}
+
+static
+BOOLEAN
+RxIsBlendOp(
+    _In_ D3D12_BLEND_OP Op)
+{
+    return Op >= D3D12_BLEND_OP_ADD && Op <= D3D12_BLEND_OP_MAX;
+}
+
+static
+BOOLEAN
+RxIsMinMax(
+    _In_ D3D12_BLEND_OP Op)
+{
+    return Op == D3D12_BLEND_OP_MIN || Op == D3D12_BLEND_OP_MAX;
+}
+
+static
+HRESULT
+RxCheckBlend(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_BLEND_DESC& Desc)
+{
+    const BOOLEAN SameBlendOnly = Device.GetFeatureLevel() <= D3D_FEATURE_LEVEL_10_0;
+    const BOOLEAN LogicOps = Device.GetOptions().OutputMergerLogicOp != FALSE;
+    const BOOLEAN AlphaFactors = Device.GetDdiBuild() >= 52;
+    const D3D12_RENDER_TARGET_BLEND_DESC* FirstBlended = nullptr;
+    BOOLEAN ColorDual = FALSE;
+    BOOLEAN AlphaDual = FALSE;
+    UINT Errors = 0;
+    UINT Targets = Desc.IndependentBlendEnable ? D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT : 1;
+
+    for (UINT Index = 0; Index < Targets; Index++)
+    {
+        const D3D12_RENDER_TARGET_BLEND_DESC& Target = Desc.RenderTarget[Index];
+
+        if (Target.BlendEnable)
+        {
+            BOOLEAN ColorDualHere = FALSE;
+            BOOLEAN AlphaDualHere = FALSE;
+
+            if (FirstBlended == nullptr)
+                FirstBlended = &Target;
+
+            for (D3D12_BLEND Factor : { Target.SrcBlend, Target.DestBlend })
+            {
+                switch (RxClassifyFactor(Factor))
+                {
+                    case RxFactorUse::Plain:
+                        break;
+                    case RxFactorUse::ColorOnly:
+                    case RxFactorUse::DualSource:
+                        if (RxClassifyFactor(Factor) == RxFactorUse::DualSource || RxIsSecondSourceColor(Factor))
+                        {
+                            Errors += Index != 0;
+                            ColorDualHere = TRUE;
+                            ColorDual = TRUE;
+                        }
+                        break;
+                    case RxFactorUse::AlphaFactor:
+                        Errors += !AlphaFactors;
+                        break;
+                    default:
+                        Errors++;
+                        break;
+                }
+            }
+            if (!RxIsBlendOp(Target.BlendOp))
+                Errors++;
+            else if (RxIsMinMax(Target.BlendOp) && ColorDualHere)
+                Errors++;
+
+            for (UINT Which = 0; Which < 2; Which++)
+            {
+                D3D12_BLEND Factor = Which == 0 ? Target.SrcBlendAlpha : Target.DestBlendAlpha;
+
+                switch (RxClassifyFactor(Factor))
+                {
+                    case RxFactorUse::Plain:
+                        break;
+                    case RxFactorUse::DualSource:
+                        Errors += Index != 0;
+                        AlphaDualHere = TRUE;
+                        if (Which == 0)
+                            AlphaDual = TRUE;
+                        break;
+                    case RxFactorUse::AlphaFactor:
+                        Errors += !AlphaFactors;
+                        break;
+                    default:
+                        Errors++;
+                        break;
+                }
+            }
+            if (!RxIsBlendOp(Target.BlendOpAlpha))
+                Errors++;
+            else if (RxIsMinMax(Target.BlendOpAlpha) && AlphaDualHere)
+                Errors++;
+
+            /* Level 10.0 hardware blends every target alike */
+            if (SameBlendOnly &&
+                (Target.SrcBlend != FirstBlended->SrcBlend || Target.DestBlend != FirstBlended->DestBlend ||
+                 Target.BlendOp != FirstBlended->BlendOp || Target.SrcBlendAlpha != FirstBlended->SrcBlendAlpha ||
+                 Target.DestBlendAlpha != FirstBlended->DestBlendAlpha ||
+                 Target.BlendOpAlpha != FirstBlended->BlendOpAlpha))
+            {
+                Errors++;
+            }
+
+            if (Index != 0 && (ColorDual || AlphaDual))
+                Errors++;
+        }
+
+        if ((Target.RenderTargetWriteMask & 0xF0) != 0)
+            Errors++;
+
+        if (Target.LogicOpEnable)
+        {
+            Errors += !LogicOps;
+            Errors += Desc.IndependentBlendEnable != FALSE;
+            Errors += Target.BlendEnable != FALSE;
+            Errors += (UINT)Target.LogicOp > D3D12_LOGIC_OP_OR_INVERTED;
+        }
+    }
+
+    return Errors != 0 ? E_INVALIDARG : S_OK;
+}
+
+static
+BOOLEAN
+RxIsStencilOp(
+    _In_ UINT Op)
+{
+    return Op >= D3D12_STENCIL_OP_KEEP && Op <= D3D12_STENCIL_OP_DECR;
+}
+
+static
+BOOLEAN
+RxIsComparison(
+    _In_ UINT Function)
+{
+    return Function >= D3D12_COMPARISON_FUNC_NEVER && Function <= D3D12_COMPARISON_FUNC_ALWAYS;
+}
+
+static
+HRESULT
+RxCheckDepthStencil(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_DEPTH_STENCIL_DESC2& Desc)
+{
+    UINT Errors = 0;
+
+    Errors += (UINT)Desc.DepthWriteMask > D3D12_DEPTH_WRITE_MASK_ALL;
+    if (Desc.DepthEnable)
+        Errors += !RxIsComparison(Desc.DepthFunc);
+
+    if (Desc.StencilEnable)
+    {
+        for (const D3D12_DEPTH_STENCILOP_DESC1* Face : { &Desc.FrontFace, &Desc.BackFace })
+        {
+            Errors += !RxIsStencilOp(Face->StencilFailOp);
+            Errors += !RxIsStencilOp(Face->StencilDepthFailOp);
+            Errors += !RxIsStencilOp(Face->StencilPassOp);
+            Errors += !RxIsComparison(Face->StencilFunc);
+        }
+    }
+
+    if (Desc.DepthBoundsTestEnable && !Device.GetOptions().DepthBoundsTestSupported)
+        Errors++;
+
+    /* Drivers before build 55 take one pair of masks for both faces */
+    if (Device.GetDdiBuild() < 55 && (Desc.FrontFace.StencilReadMask != Desc.BackFace.StencilReadMask ||
+                                      Desc.FrontFace.StencilWriteMask != Desc.BackFace.StencilWriteMask))
+    {
+        Errors++;
+    }
+
+    return Errors != 0 ? E_INVALIDARG : S_OK;
+}
+
+static
+HRESULT
+RxCheckRasterizer(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_RASTERIZER_DESC2& Desc)
+{
+    const D3D_FEATURE_LEVEL Level = Device.GetFeatureLevel();
+    BOOLEAN Quadrilateral = FALSE;
+    UINT Errors = 0;
+
+    Errors += Desc.FillMode != D3D12_FILL_MODE_WIREFRAME && Desc.FillMode != D3D12_FILL_MODE_SOLID;
+    Errors += (UINT)Desc.CullMode < D3D12_CULL_MODE_NONE || (UINT)Desc.CullMode > D3D12_CULL_MODE_BACK;
+
+    switch (Desc.LineRasterizationMode)
+    {
+        case D3D12_LINE_RASTERIZATION_MODE_ALIASED:
+        case D3D12_LINE_RASTERIZATION_MODE_ALPHA_ANTIALIASED:
+            break;
+        case D3D12_LINE_RASTERIZATION_MODE_QUADRILATERAL_WIDE:
+        case D3D12_LINE_RASTERIZATION_MODE_QUADRILATERAL_NARROW:
+            Quadrilateral = TRUE;
+            break;
+        default:
+            Errors++;
+            break;
+    }
+
+    switch (Desc.ForcedSampleCount)
+    {
+        case 0:
+            break;
+        case 1:
+            Errors += Level < D3D_FEATURE_LEVEL_11_1 && Quadrilateral;
+            break;
+        case 4:
+        case 8:
+            Errors += Level < D3D_FEATURE_LEVEL_11_0;
+            break;
+        case 16:
+            Errors += Level < D3D_FEATURE_LEVEL_11_1;
+            break;
+        default:
+            Errors++;
+            break;
+    }
+
+    if (Desc.ConservativeRaster == D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON)
+    {
+        Errors += Device.GetOptions().ConservativeRasterizationTier == 0;
+        Errors += Desc.FillMode != D3D12_FILL_MODE_SOLID;
+    }
+    else if (Desc.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF)
+    {
+        Errors++;
+    }
+
+    return Errors != 0 ? E_INVALIDARG : S_OK;
+}
+
 /* Pipeline states */
 
 HRESULT
@@ -854,18 +1147,27 @@ RxPipelineState::Initialize(
                 return hr;
         }
 
+        hr = RxCheckBlend(Device, Desc.Blend);
+        if (FAILED(hr))
+            return hr;
         RxToDdiBlend(Desc.Blend, &Blend);
         hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::Blend, reinterpret_cast<const BYTE*>(&Blend),
                                      sizeof(Blend), RxBuildBlend, &Blend, &BlendState);
         if (FAILED(hr))
             return hr;
 
+        hr = RxCheckDepthStencil(Device, Desc.DepthStencil);
+        if (FAILED(hr))
+            return hr;
         RxToDdiDepthStencil(Desc.DepthStencil, &Depth);
         hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::DepthStencil, reinterpret_cast<const BYTE*>(&Depth),
                                      sizeof(Depth), RxBuildDepthStencil, &Depth, &DepthStencilState);
         if (FAILED(hr))
             return hr;
 
+        hr = RxCheckRasterizer(Device, Desc.Rasterizer);
+        if (FAILED(hr))
+            return hr;
         RxToDdiRasterizer(Desc.Rasterizer, &Raster);
         hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::Rasterizer, reinterpret_cast<const BYTE*>(&Raster),
                                      sizeof(Raster), RxBuildRasterizer, &Raster, &RasterizerState);
