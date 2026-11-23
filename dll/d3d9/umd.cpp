@@ -27,6 +27,9 @@ static constexpr DWORD D9Caps2QueuedFlips = 0x00200000;
 static constexpr DWORD D9IntervalsImmediate = 0x80000001;
 static constexpr DWORD D9IntervalsAll = 0x8000000F;
 
+/* Fog coordinates in the vertex format; the runtime derives fog and specular alpha from it */
+static constexpr DWORD D9MiscCapsFogInFvf = 0x00002000;
+
 /* A Direct3D 8 vertex cap a Direct3D 9 driver must not report */
 static constexpr DWORD D9VertexCapsNoUbyte4 = 0x00000080;
 
@@ -317,6 +320,85 @@ D9CollectWideModes(
     return TRUE;
 }
 
+/* Keeps only the capability bits Direct3D 9 defines, field by field */
+static
+VOID
+D9MaskDriverCaps(
+    _Inout_ D3DCAPS9* Caps)
+{
+    DWORD PrimitiveMisc = Caps->PrimitiveMiscCaps;
+
+    if (Caps->MaxPointSize == 1.0f)
+        Caps->MaxPointSize = 0.0f;
+    if ((PrimitiveMisc & D3DPMISCCAPS_CULLNONE) == 0)
+        Caps->StencilCaps &= ~D3DSTENCILCAPS_TWOSIDED;
+
+    Caps->PresentationIntervals &= 0x8000000F;
+    Caps->CursorCaps &= 0x00000003;
+    Caps->DevCaps &= 0x07FBFFF0;
+    Caps->PrimitiveMiscCaps = PrimitiveMisc & 0x003FFFF6;
+    if ((PrimitiveMisc & D9MiscCapsFogInFvf) != 0)
+        Caps->PrimitiveMiscCaps |= D3DPMISCCAPS_FOGANDSPECULARALPHA;
+    Caps->DevCaps2 = (Caps->DevCaps2 | D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES) & 0x0000007F;
+    Caps->RasterCaps &= 0x0F77E191;
+    Caps->ZCmpCaps &= 0x000000FF;
+    Caps->SrcBlendCaps &= 0x0000FFFF;
+    Caps->DestBlendCaps &= 0x0000FFFF;
+    Caps->AlphaCmpCaps &= 0x000000FF;
+    Caps->ShadeCaps &= 0x00084208;
+    Caps->TextureCaps &= 0x0027EDE7;
+    Caps->TextureFilterCaps &= 0x1F071F00;
+    Caps->CubeTextureFilterCaps &= 0x1F071F00;
+    Caps->VolumeTextureFilterCaps &= 0x1F071F00;
+    Caps->TextureAddressCaps &= 0x0000003F;
+    Caps->VolumeTextureAddressCaps &= 0x0000003F;
+    Caps->LineCaps &= 0x0000003F;
+    Caps->StencilCaps &= 0x000001FF;
+    Caps->FVFCaps &= 0x0018FFFF;
+    Caps->TextureOpCaps &= 0x03FFFFFF;
+    Caps->StretchRectFilterCaps &= 0x1F071F00;
+    Caps->VertexTextureFilterCaps &= 0x1F071F00;
+    Caps->VS20Caps.Caps &= 0x00000001;
+    Caps->PS20Caps.Caps &= 0x0000001F;
+
+    /* Copies between video and system memory are always offered on hardware */
+    Caps->Caps3 |= D3DCAPS3_COPY_TO_VIDMEM | D3DCAPS3_COPY_TO_SYSTEMMEM;
+
+    if ((Caps->Caps2 & 0x00000200) == 0)
+        Caps->DevCaps &= ~D3DDEVCAPS_TEXTURENONLOCALVIDMEM;
+    if (Caps->MaxAnisotropy == 0)
+        Caps->MaxAnisotropy = 1;
+    if ((Caps->DevCaps2 & D3DDEVCAPS2_STREAMOFFSET) == 0)
+        Caps->NumSimultaneousRTs = 1;
+    Caps->Caps2 &= ~0x00800000;
+    if ((Caps->DevCaps & D3DDEVCAPS_SEPARATETEXTUREMEMORIES) != 0)
+    {
+        Caps->MaxSimultaneousTextures = 1;
+        Caps->DevCaps &= ~D3DDEVCAPS_SEPARATETEXTUREMEMORIES;
+    }
+}
+
+/* Drops format operations Direct3D 9 does not define and fills in the ones others imply */
+static
+VOID
+D9NormalizeFormatOps(
+    _Inout_updates_(Count) FORMATOP* Formats,
+    _In_ UINT Count)
+{
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        UINT Ops = Formats[Index].Operations & 0x01FFFFDF;
+
+        if ((Ops & FORMATOP_OFFSCREEN_RENDERTARGET) != 0)
+            Ops |= FORMATOP_SAME_FORMAT_RENDERTARGET | FORMATOP_SAME_FORMAT_UP_TO_ALPHA_RENDERTARGET;
+        if ((Ops & FORMATOP_SAME_FORMAT_UP_TO_ALPHA_RENDERTARGET) != 0)
+            Ops |= FORMATOP_SAME_FORMAT_RENDERTARGET;
+        if ((Ops & FORMATOP_ZSTENCIL_WITH_ARBITRARY_COLOR_DEPTH) != 0)
+            Ops |= FORMATOP_ZSTENCIL;
+        Formats[Index].Operations = Ops;
+    }
+}
+
 /* Reads the capabilities, formats and queries and applies the runtime's corrections */
 static
 BOOLEAN
@@ -413,6 +495,9 @@ D9QueryDriverCaps(
         D9Trace(L"the driver sets the retired D3DVTXPCAPS_NO_VSDT_UBYTE4 cap; its HAL is not used");
         return FALSE;
     }
+
+    D9MaskDriverCaps(Caps);
+    D9NormalizeFormatOps(Adapter->Formats, Adapter->FormatCount);
     return TRUE;
 }
 

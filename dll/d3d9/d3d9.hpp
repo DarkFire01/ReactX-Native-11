@@ -61,6 +61,12 @@ struct D9Adapter
     LUID AdapterLuid;
     D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId;
 
+    /* The adapter LUID GetAdapterLUID reports and groups are formed by; zero without a driver */
+    LUID GroupLuid;
+    UINT MasterOrdinal;
+    UINT OrdinalInGroup;
+    UINT AdaptersInGroup;
+
     /* The user mode driver, present when OpenAdapter and the capability queries succeeded */
     BOOLEAN HasDriver;
     HMODULE Module;
@@ -248,6 +254,12 @@ private:
     VOID
     CollectDisplays(VOID);
 
+    VOID
+    GroupAdapters(VOID);
+
+    VOID
+    ReadSwitches(VOID);
+
     HRESULT
     FindMode(
         _In_ UINT Adapter,
@@ -262,6 +274,9 @@ private:
 
     D9Adapter Adapters[D9MaxAdapters] = {};
     UINT AdapterCount = 0;
+
+    BOOLEAN SoftwareOnly = FALSE;
+    BOOLEAN CanCalibrateGamma = FALSE;
 };
 
 /* Serializes one IDirect3D9 object's methods */

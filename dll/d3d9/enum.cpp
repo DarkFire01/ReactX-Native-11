@@ -109,9 +109,11 @@ D9Enum::Initialize(
     /* The extended object only drives displays that have a WDDM driver */
     for (UINT Index = 0; Index < AdapterCount; Index++)
     {
-        if (D9State.HasWddmDriver || !IsEx)
-            D9OpenDriver(&Adapters[Index], IsEx);
+        if ((D9State.HasWddmDriver || !IsEx) && D9OpenDriver(&Adapters[Index], IsEx))
+            Adapters[Index].GroupLuid = Adapters[Index].AdapterLuid;
     }
+    GroupAdapters();
+    ReadSwitches();
 
     /* The mapping layer is not part of ReactX; a request for it gets the native driver */
     for (UINT Index = 0; Overrides != nullptr && Index < OverrideCount; Index++)
@@ -162,14 +164,6 @@ D9Enum::GetAdapterCount()
     D9LockScope Scope(&Lock);
 
     return AdapterCount;
-}
-
-STDMETHODIMP
-D9Enum::RegisterSoftwareDevice(
-    _In_ VOID* InitializeFunction)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
 }
 
 STDMETHODIMP
@@ -228,16 +222,6 @@ D9Enum::CheckDeviceFormatConversion(
     _In_ D3DDEVTYPE DeviceType,
     _In_ D3DFORMAT SourceFormat,
     _In_ D3DFORMAT TargetFormat)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_NOTAVAILABLE;
-}
-
-STDMETHODIMP
-D9Enum::GetDeviceCaps(
-    _In_ UINT Adapter,
-    _In_ D3DDEVTYPE DeviceType,
-    _Out_ D3DCAPS9* Caps)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_NOTAVAILABLE;
@@ -325,6 +309,6 @@ D9Enum::GetAdapterLUID(
         return D3DERR_INVALIDCALL;
     }
 
-    *Luid = Adapters[Adapter].AdapterLuid;
+    *Luid = Adapters[Adapter].GroupLuid;
     return S_OK;
 }

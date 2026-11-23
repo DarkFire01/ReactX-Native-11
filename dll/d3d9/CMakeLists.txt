@@ -2,6 +2,7 @@ nt_add_usermode_dll(d3d9
     DEF d3d9.def
     SOURCES
         adapter.cpp
+        caps.cpp
         enum.cpp
         identity.cpp
         main.cpp
