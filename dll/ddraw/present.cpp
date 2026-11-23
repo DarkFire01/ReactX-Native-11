@@ -12,7 +12,6 @@
 
 /* dwmapi hands out a window's redirection surface by ordinal only */
 typedef HRESULT (WINAPI* PDD_GET_WINDOW_SURFACE)(HWND, LUID, HMONITOR, DWORD, DXGI_FORMAT*, HANDLE*, UINT64*);
-typedef NTSTATUS (APIENTRY* PDD_OPEN_RESOURCE2)(D3DKMT_OPENRESOURCE*);
 
 static constexpr WORD DdGetWindowSurfaceOrdinal = 100;
 static constexpr DWORD DdWindowSurfaceForBlt = 0x10;
@@ -145,7 +144,7 @@ DdReleaseWindowSurface(
     Hardware->WindowShare = 0;
 }
 
-/* Opens a resource another process shared by its global handle and hands it to the driver */
+/* Opens a resource shared by its global handle and hands it to the driver; every display model uses the first open call */
 static
 HRESULT
 DdOpenSharedResource(
@@ -154,10 +153,7 @@ DdOpenSharedResource(
     _In_ BOOLEAN NeedsRuntimeData,
     _Inout_ DdResource* Resource)
 {
-    static PDD_OPEN_RESOURCE2 OpenResource2 =
-        reinterpret_cast<PDD_OPEN_RESOURCE2>(GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "D3DKMTOpenResource2"));
     const KmtThunks* Kmt = RxGetKmtThunks();
-    BOOLEAN Virtual = Hardware->RuntimeVersion >= D3D_UMD_INTERFACE_VERSION_WDDM2_0 && OpenResource2 != nullptr;
     D3DKMT_QUERYRESOURCEINFO Query = {};
     D3DKMT_OPENRESOURCE Open = {};
     D3DKMT_DESTROYALLOCATION Destroy = {};
@@ -185,8 +181,7 @@ DdOpenSharedResource(
     Runtime.resize(Query.PrivateRuntimeDataSize);
     Driver.resize(Query.ResourcePrivateDriverDataSize);
     Total.resize(Query.TotalPrivateDriverDataSize);
-    Infos.resize(Query.NumAllocations *
-                 (Virtual ? sizeof(D3DDDI_OPENALLOCATIONINFO2) : sizeof(D3DDDI_OPENALLOCATIONINFO)));
+    Infos.resize(Query.NumAllocations * sizeof(D3DDDI_OPENALLOCATIONINFO));
 
     Open.hDevice = Hardware->DeviceHandle;
     Open.hGlobalShare = Share;
@@ -198,7 +193,7 @@ DdOpenSharedResource(
     Open.ResourcePrivateDriverDataSize = Query.ResourcePrivateDriverDataSize;
     Open.pTotalPrivateDriverDataBuffer = Total.data();
     Open.TotalPrivateDriverDataBufferSize = Query.TotalPrivateDriverDataSize;
-    Status = Virtual ? OpenResource2(&Open) : Kmt->OpenResource(&Open);
+    Status = Kmt->OpenResource(&Open);
     if (!NT_SUCCESS(Status))
     {
         DdTrace(L"D3DKMTOpenResource failed 0x%08lX for share 0x%X", Status, Share);
