@@ -133,7 +133,7 @@ static const RxFormatLayout12 RxLayouts[] =
     { 0, 0, 1, 1, RxLayoutHidden },  /* 120 */
     { 0, 0, 1, 1, RxLayoutHidden },  /* 121 */
     { 0, 0, 1, 1, RxLayoutHidden },  /* 122 */
-    { 0, 0, 1, 1, RxLayoutHidden },  /* 123 */
+    { 123, 8, 1, 1, RxLayoutHidden },  /* 123 */
     { 0, 0, 1, 1, RxLayoutHidden },  /* 124 */
     { 0, 0, 1, 1, RxLayoutHidden },  /* 125 */
     { 0, 0, 1, 1, RxLayoutHidden },  /* 126 */
@@ -143,62 +143,62 @@ static const RxFormatLayout12 RxLayouts[] =
     { 130, 8, 2, 1, RxLayoutPlanar | RxLayoutYuv },  /* 130 P208 */
     { 131, 8, 1, 2, RxLayoutPlanar | RxLayoutYuv },  /* 131 V208 */
     { 132, 8, 1, 1, RxLayoutPlanar | RxLayoutYuv },  /* 132 V408 */
-    { 0, 0, 1, 1, 0 },  /* 133 */
-    { 0, 0, 1, 1, 0 },  /* 134 */
-    { 0, 0, 1, 1, 0 },  /* 135 */
-    { 0, 0, 1, 1, 0 },  /* 136 */
-    { 0, 0, 1, 1, 0 },  /* 137 */
-    { 0, 0, 1, 1, 0 },  /* 138 */
-    { 0, 0, 1, 1, 0 },  /* 139 */
-    { 0, 0, 1, 1, 0 },  /* 140 */
-    { 0, 0, 1, 1, 0 },  /* 141 */
-    { 0, 0, 1, 1, 0 },  /* 142 */
-    { 0, 0, 1, 1, 0 },  /* 143 */
-    { 0, 0, 1, 1, 0 },  /* 144 */
-    { 0, 0, 1, 1, 0 },  /* 145 */
-    { 0, 0, 1, 1, 0 },  /* 146 */
-    { 0, 0, 1, 1, 0 },  /* 147 */
-    { 0, 0, 1, 1, 0 },  /* 148 */
-    { 0, 0, 1, 1, 0 },  /* 149 */
-    { 0, 0, 1, 1, 0 },  /* 150 */
-    { 0, 0, 1, 1, 0 },  /* 151 */
-    { 0, 0, 1, 1, 0 },  /* 152 */
-    { 0, 0, 1, 1, 0 },  /* 153 */
-    { 0, 0, 1, 1, 0 },  /* 154 */
-    { 0, 0, 1, 1, 0 },  /* 155 */
-    { 0, 0, 1, 1, 0 },  /* 156 */
-    { 0, 0, 1, 1, 0 },  /* 157 */
-    { 0, 0, 1, 1, 0 },  /* 158 */
-    { 0, 0, 1, 1, 0 },  /* 159 */
-    { 0, 0, 1, 1, 0 },  /* 160 */
-    { 0, 0, 1, 1, 0 },  /* 161 */
-    { 0, 0, 1, 1, 0 },  /* 162 */
-    { 0, 0, 1, 1, 0 },  /* 163 */
-    { 0, 0, 1, 1, 0 },  /* 164 */
-    { 0, 0, 1, 1, 0 },  /* 165 */
-    { 0, 0, 1, 1, 0 },  /* 166 */
-    { 0, 0, 1, 1, 0 },  /* 167 */
-    { 0, 0, 1, 1, 0 },  /* 168 */
-    { 0, 0, 1, 1, 0 },  /* 169 */
-    { 0, 0, 1, 1, 0 },  /* 170 */
-    { 0, 0, 1, 1, 0 },  /* 171 */
-    { 0, 0, 1, 1, 0 },  /* 172 */
-    { 0, 0, 1, 1, 0 },  /* 173 */
-    { 0, 0, 1, 1, 0 },  /* 174 */
-    { 0, 0, 1, 1, 0 },  /* 175 */
-    { 0, 0, 1, 1, 0 },  /* 176 */
-    { 0, 0, 1, 1, 0 },  /* 177 */
-    { 0, 0, 1, 1, 0 },  /* 178 */
-    { 0, 0, 1, 1, 0 },  /* 179 */
-    { 0, 0, 1, 1, 0 },  /* 180 */
-    { 0, 0, 1, 1, 0 },  /* 181 */
-    { 0, 0, 1, 1, 0 },  /* 182 */
-    { 0, 0, 1, 1, 0 },  /* 183 */
-    { 0, 0, 1, 1, 0 },  /* 184 */
-    { 0, 0, 1, 1, 0 },  /* 185 */
-    { 0, 0, 1, 1, 0 },  /* 186 */
-    { 0, 0, 1, 1, 0 },  /* 187 */
-    { 0, 0, 1, 1, 0 },  /* 188 */
+    { 133, 128, 4, 4, RxLayoutTypeless | RxLayoutHidden },  /* 133 */
+    { 133, 128, 4, 4, RxLayoutHidden },  /* 134 */
+    { 133, 128, 4, 4, RxLayoutHidden },  /* 135 */
+    { 133, 128, 4, 4, RxLayoutHidden },  /* 136 */
+    { 137, 128, 5, 4, RxLayoutTypeless | RxLayoutHidden },  /* 137 */
+    { 137, 128, 5, 4, RxLayoutHidden },  /* 138 */
+    { 137, 128, 5, 4, RxLayoutHidden },  /* 139 */
+    { 137, 128, 5, 4, RxLayoutHidden },  /* 140 */
+    { 141, 128, 5, 5, RxLayoutTypeless | RxLayoutHidden },  /* 141 */
+    { 141, 128, 5, 5, RxLayoutHidden },  /* 142 */
+    { 141, 128, 5, 5, RxLayoutHidden },  /* 143 */
+    { 141, 128, 5, 5, RxLayoutHidden },  /* 144 */
+    { 145, 128, 6, 5, RxLayoutTypeless | RxLayoutHidden },  /* 145 */
+    { 145, 128, 6, 5, RxLayoutHidden },  /* 146 */
+    { 145, 128, 6, 5, RxLayoutHidden },  /* 147 */
+    { 145, 128, 6, 5, RxLayoutHidden },  /* 148 */
+    { 149, 128, 6, 6, RxLayoutTypeless | RxLayoutHidden },  /* 149 */
+    { 149, 128, 6, 6, RxLayoutHidden },  /* 150 */
+    { 149, 128, 6, 6, RxLayoutHidden },  /* 151 */
+    { 149, 128, 6, 6, RxLayoutHidden },  /* 152 */
+    { 153, 128, 8, 5, RxLayoutTypeless | RxLayoutHidden },  /* 153 */
+    { 153, 128, 8, 5, RxLayoutHidden },  /* 154 */
+    { 153, 128, 8, 5, RxLayoutHidden },  /* 155 */
+    { 153, 128, 8, 5, RxLayoutHidden },  /* 156 */
+    { 157, 128, 8, 6, RxLayoutTypeless | RxLayoutHidden },  /* 157 */
+    { 157, 128, 8, 6, RxLayoutHidden },  /* 158 */
+    { 157, 128, 8, 6, RxLayoutHidden },  /* 159 */
+    { 157, 128, 8, 6, RxLayoutHidden },  /* 160 */
+    { 161, 128, 8, 8, RxLayoutTypeless | RxLayoutHidden },  /* 161 */
+    { 161, 128, 8, 8, RxLayoutHidden },  /* 162 */
+    { 161, 128, 8, 8, RxLayoutHidden },  /* 163 */
+    { 161, 128, 8, 8, RxLayoutHidden },  /* 164 */
+    { 165, 128, 10, 5, RxLayoutTypeless | RxLayoutHidden },  /* 165 */
+    { 165, 128, 10, 5, RxLayoutHidden },  /* 166 */
+    { 165, 128, 10, 5, RxLayoutHidden },  /* 167 */
+    { 165, 128, 10, 5, RxLayoutHidden },  /* 168 */
+    { 169, 128, 10, 6, RxLayoutTypeless | RxLayoutHidden },  /* 169 */
+    { 169, 128, 10, 6, RxLayoutHidden },  /* 170 */
+    { 169, 128, 10, 6, RxLayoutHidden },  /* 171 */
+    { 169, 128, 10, 6, RxLayoutHidden },  /* 172 */
+    { 173, 128, 10, 8, RxLayoutTypeless | RxLayoutHidden },  /* 173 */
+    { 173, 128, 10, 8, RxLayoutHidden },  /* 174 */
+    { 173, 128, 10, 8, RxLayoutHidden },  /* 175 */
+    { 173, 128, 10, 8, RxLayoutHidden },  /* 176 */
+    { 177, 128, 10, 10, RxLayoutTypeless | RxLayoutHidden },  /* 177 */
+    { 177, 128, 10, 10, RxLayoutHidden },  /* 178 */
+    { 177, 128, 10, 10, RxLayoutHidden },  /* 179 */
+    { 177, 128, 10, 10, RxLayoutHidden },  /* 180 */
+    { 181, 128, 12, 10, RxLayoutTypeless | RxLayoutHidden },  /* 181 */
+    { 181, 128, 12, 10, RxLayoutHidden },  /* 182 */
+    { 181, 128, 12, 10, RxLayoutHidden },  /* 183 */
+    { 181, 128, 12, 10, RxLayoutHidden },  /* 184 */
+    { 185, 128, 12, 12, RxLayoutTypeless | RxLayoutHidden },  /* 185 */
+    { 185, 128, 12, 12, RxLayoutHidden },  /* 186 */
+    { 185, 128, 12, 12, RxLayoutHidden },  /* 187 */
+    { 185, 128, 12, 12, RxLayoutHidden },  /* 188 */
     { 0, 8, 1, 1, 0 },  /* 189 SAMPLER_FEEDBACK_MIN_MIP_OPAQUE */
     { 0, 8, 1, 1, 0 },  /* 190 SAMPLER_FEEDBACK_MIP_REGION_USED_OPAQUE */
     { 191, 16, 1, 1, 0 },  /* 191 A4B4G4R4_UNORM */
