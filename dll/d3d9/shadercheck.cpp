@@ -135,8 +135,9 @@ struct D9ShaderWalk
 {
     BOOLEAN Pixel;
     UINT Version;
-    ULONG Declared[11];
-    ULONG Written[11];
+    BYTE Declared[11][D9TrackedRegisters];
+    BYTE Written[11][D9TrackedRegisters];
+    BYTE SamplerTypes[D9TrackedRegisters];
     BOOLEAN PositionWritten;
 };
 
@@ -166,53 +167,76 @@ D9HasAddressToken(
     return Walk->Version >= D9V(2, 0) && (Token & (1u << 13)) != 0;
 }
 
+/* The components of a register a walk has seen declared or written */
 static
-BOOLEAN
-D9RegisterBit(
-    _In_reads_(11) const ULONG* Bits,
+BYTE
+D9RegisterMask(
+    _In_ const BYTE (*Masks)[D9TrackedRegisters],
     _In_ UINT Type,
     _In_ UINT Number)
 {
-    return Type < 11 && Number < D9TrackedRegisters && (Bits[Type] & (1u << Number)) != 0;
+    if (Type >= 11 || Number >= D9TrackedRegisters)
+        return 0;
+    return Masks[Type][Number];
 }
 
 static
 VOID
-D9SetRegisterBit(
-    _Inout_updates_(11) ULONG* Bits,
+D9AddRegisterMask(
+    _Inout_ BYTE (*Masks)[D9TrackedRegisters],
     _In_ UINT Type,
-    _In_ UINT Number)
+    _In_ UINT Number,
+    _In_ BYTE Mask)
 {
     if (Type < 11 && Number < D9TrackedRegisters)
-        Bits[Type] |= 1u << Number;
+        Masks[Type][Number] |= Mask;
 }
 
-/* A source must name something the shader declared or wrote before */
+/* The components a source's swizzle picks for the positions an instruction reads */
+static
+BYTE
+D9ComponentsRead(
+    _In_ DWORD Token,
+    _In_ BYTE Positions)
+{
+    BYTE Read = 0;
+
+    for (UINT Position = 0; Position < 4; Position++)
+    {
+        if ((Positions & (1u << Position)) != 0)
+            Read |= static_cast<BYTE>(1u << ((Token >> (16 + Position * 2)) & 3));
+    }
+    return Read;
+}
+
+/* A source must name components the shader declared or wrote before */
 static
 BOOLEAN
 D9SourceReady(
     _In_ const D9ShaderWalk* Walk,
-    _In_ DWORD Token)
+    _In_ DWORD Token,
+    _In_ BYTE Positions)
 {
     UINT Type = D9RegisterType(Token);
     UINT Number = D9RegisterNumber(Token);
+    BYTE Needed = D9ComponentsRead(Token, Positions);
 
     switch (Type)
     {
     case D9RegTemp:
-        return D9RegisterBit(Walk->Written, Type, Number);
+        return (D9RegisterMask(Walk->Written, Type, Number) & Needed) == Needed;
     case D9RegInput:
         if (Walk->Pixel && Walk->Version < D9V(2, 0))
             return TRUE;
-        return D9RegisterBit(Walk->Declared, Type, Number);
+        return (D9RegisterMask(Walk->Declared, Type, Number) & Needed) == Needed;
     case D9RegTexture:
         if (!Walk->Pixel)
             return TRUE;
         if (Walk->Version >= D9V(2, 0))
-            return D9RegisterBit(Walk->Declared, Type, Number);
-        return Walk->Version == D9V(1, 4) || D9RegisterBit(Walk->Written, Type, Number);
+            return (D9RegisterMask(Walk->Declared, Type, Number) & Needed) == Needed;
+        return Walk->Version == D9V(1, 4) || D9RegisterMask(Walk->Written, Type, Number) != 0;
     case D9RegSampler:
-        return D9RegisterBit(Walk->Declared, Type, Number);
+        return D9RegisterMask(Walk->Declared, Type, Number) != 0;
     default:
         return TRUE;
     }
@@ -228,13 +252,56 @@ D9NoteWrite(
     UINT Type = D9RegisterType(Token);
     UINT Number = D9RegisterNumber(Token);
 
-    D9SetRegisterBit(Walk->Written, Type, Number);
+    D9AddRegisterMask(Walk->Written, Type, Number, static_cast<BYTE>((Token >> 16) & 0xF));
     if (Walk->Pixel)
         return;
     if (Type == D9RegRastOut && Number == 0)
         Walk->PositionWritten = TRUE;
-    if (Type == D9RegOutput && Walk->Version >= D9V(3, 0) && D9RegisterBit(Walk->Declared, Type, Number))
+    if (Type == D9RegOutput && Walk->Version >= D9V(3, 0) && D9RegisterMask(Walk->Declared, Type, Number) != 0)
         Walk->PositionWritten = TRUE;
+}
+
+/* Which positions of a source an instruction reads: the destination's components for most, fixed ones for dot
+   products and matrices, and the coordinates a sampler's kind of texture needs for a lookup */
+static
+BYTE
+D9SourcePositions(
+    _In_ const D9ShaderWalk* Walk,
+    _In_ DWORD Instruction,
+    _In_ BYTE Written,
+    _In_ UINT Source,
+    _In_opt_ const DWORD* Sampler)
+{
+    switch (Instruction & 0xFFFF)
+    {
+    case 8:
+    case 22:
+    case 23:
+    case 24:
+    case 33:
+    case 36:
+        return 0x7;
+    case 9:
+    case 20:
+    case 21:
+        return 0xF;
+    case 90:
+        return Source < 2 ? 0x3 : 0x1;
+    case 66:
+        if (Walk->Version >= D9V(2, 0) && Source == 0 && Sampler != nullptr)
+        {
+            UINT Number = D9RegisterNumber(*Sampler);
+            BYTE Kind = Number < D9TrackedRegisters ? Walk->SamplerTypes[Number] : 0;
+            BYTE Coordinates = Kind == (D3DSTT_2D >> D3DSP_TEXTURETYPE_SHIFT) ? 0x3 : 0x7;
+
+            if (((Instruction >> 16) & 0xFF) != 0)
+                Coordinates |= 0x8;
+            return Coordinates;
+        }
+        return Written != 0 ? Written : 0xF;
+    default:
+        return Written != 0 ? Written : 0xF;
+    }
 }
 
 /* Keeps a defined register in order, once */
@@ -360,7 +427,14 @@ D9CheckShaderTokens(
             if (Walk.Version >= D9V(2, 0) && ((Instruction >> 24) & 0xF) != Expected)
                 return FALSE;
             if (Opcode == D9OpDcl)
-                D9SetRegisterBit(Walk.Declared, D9RegisterType(Target), D9RegisterNumber(Target));
+            {
+                UINT Type = D9RegisterType(Target);
+                UINT Number = D9RegisterNumber(Target);
+
+                D9AddRegisterMask(Walk.Declared, Type, Number, static_cast<BYTE>((Target >> 16) & 0xF));
+                if (Type == D9RegSampler && Number < D9TrackedRegisters)
+                    Walk.SamplerTypes[Number] = static_cast<BYTE>((Token[1] >> D3DSP_TEXTURETYPE_SHIFT) & 0xF);
+            }
             else if (Opcode == D9OpDef)
                 D9AddDef(Layout->FloatDefs, &Layout->FloatDefCount, D9RegisterNumber(Target));
             else if (Opcode == D9OpDefi)
@@ -413,18 +487,24 @@ D9CheckShaderTokens(
         /* Sources must be ready before the destination counts as written */
         {
             UINT Index = 1;
+            UINT Source = 0;
             BOOLEAN HasDestination = Rule->Destination != 0 || Opcode == D9OpTex || Opcode == D9OpTexcoord;
             DWORD Destination = HasDestination ? Token[1] : 0;
+            BYTE Written = static_cast<BYTE>((Destination >> 16) & 0xF);
+            const DWORD* Sampler = nullptr;
 
             if (HasDestination)
                 Index += D9HasAddressToken(&Walk, Token[1]) ? 2 : 1;
+            if (Opcode == D9OpTex && Walk.Version >= D9V(2, 0) && Parameters >= 3)
+                Sampler = &Token[Parameters];
             while (Index <= Parameters)
             {
                 DWORD Param = Token[Index];
 
-                if (!D9SourceReady(&Walk, Param))
+                if (!D9SourceReady(&Walk, Param, D9SourcePositions(&Walk, Instruction, Written, Source, Sampler)))
                     return FALSE;
                 Index += D9HasAddressToken(&Walk, Param) ? 2 : 1;
+                Source += 1;
             }
             if (HasDestination)
                 D9NoteWrite(&Walk, Destination);
@@ -436,10 +516,10 @@ D9CheckShaderTokens(
     /* What each machine must leave written */
     if (Pixel)
     {
-        if (Walk.Version < D9V(2, 0) && !D9RegisterBit(Walk.Written, D9RegTemp, 0))
+        if (Walk.Version < D9V(2, 0) && D9RegisterMask(Walk.Written, D9RegTemp, 0) == 0)
             return FALSE;
-        if (Walk.Version >= D9V(2, 0) && !D9RegisterBit(Walk.Written, D9RegColorOut, 0) &&
-            !D9RegisterBit(Walk.Written, D9RegDepthOut, 0))
+        if (Walk.Version >= D9V(2, 0) && D9RegisterMask(Walk.Written, D9RegColorOut, 0) == 0 &&
+            D9RegisterMask(Walk.Written, D9RegDepthOut, 0) == 0)
             return FALSE;
     }
     else if (!Walk.PositionWritten)
