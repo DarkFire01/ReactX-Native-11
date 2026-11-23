@@ -3492,6 +3492,171 @@ XcCheckFxReverb(VOID)
     delete &Run;
 }
 
+/* Parameter sets for the environmental reverb, spread over every density band and room size branch */
+static const XAUDIO2FX_REVERB_PARAMETERS XcReverbSettings[] =
+{
+    { 100.0f, 5, 5, 5, 5, 6, 6, 27, 27, 8, 8, 8, 4, 8, 4, 5000.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 100.0f, 100.0f, FALSE },
+    { 60.0f, 20, 30, 3, 2, 0, 30, 30, 28, 15, 2, 0, 9, 3, 14, 1200.0f, -6.0f, -12.0f, -3.0f, 4.0f, 2.5f, 80.0f, 40.0f, FALSE },
+    { 35.0f, 0, 0, 0, 1, 12, 20, 28, 29, 0, 15, 12, 0, 0, 0, 20.0f, -20.0f, 0.0f, 6.0f, -10.0f, 0.3f, 60.0f, 10.0f, FALSE },
+    { 80.0f, 300, 85, 5, 5, 30, 0, 29, 30, 4, 11, 5, 7, 8, 9, 20000.0f, 0.0f, -100.0f, -40.0f, 20.0f, 8.0f, 30.0f, 0.0f, FALSE },
+    { 100.0f, 1, 1, 0, 0, 18, 9, 27, 27, 9, 6, 7, 5, 2, 11, 9000.0f, -3.0f, -1.0f, 0.0f, -2.0f, 20.0f, 10.0f, 75.0f, FALSE },
+    { 50.0f, 40, 10, 2, 4, 3, 25, 30, 27, 12, 3, 10, 2, 6, 6, 3000.0f, 0.0f, -3.0f, 2.0f, 0.0f, 0.1f, 0.0f, 55.0f, TRUE },
+    { 10.0f, 7, 60, 1, 3, 27, 4, 28, 28, 1, 14, 4, 8, 4, 1, 400.0f, -40.0f, -50.0f, -6.0f, 6.0f, 1.5f, 50.0f, 49.0f, FALSE },
+    { 0.0f, 100, 40, 4, 0, 15, 15, 29, 29, 7, 9, 2, 1, 7, 13, 15000.0f, 0.0f, 0.0f, -100.0f, -100.0f, 4.0f, 74.9f, 25.0f, FALSE },
+};
+
+static
+VOID
+XcReverbParameters(
+    _In_z_ PCSTR Name,
+    _In_ IXAPO* Apo,
+    _In_ UINT32 Size)
+{
+    IXAPOParameters* Parameters = nullptr;
+    BYTE Read[64];
+
+    if (FAILED(Apo->QueryInterface(IID_PPV_ARGS(&Parameters))))
+        return;
+    memset(Read, 0xCC, sizeof(Read));
+    Parameters->GetParameters(Read, Size);
+    XcBytes(Name, Read, sizeof(Read));
+    Parameters->Release();
+}
+
+/* The 2.8 block lacks the side delay; its other fields follow in order */
+static
+VOID
+XcReverbLegacy(
+    _Out_writes_bytes_(56) BYTE* Old,
+    _In_ const XAUDIO2FX_REVERB_PARAMETERS* New)
+{
+    const BYTE* Bytes = reinterpret_cast<const BYTE*>(New);
+
+    memcpy(Old, Bytes, 10);
+    memcpy(Old + 10, Bytes + 11, 46);
+}
+
+/* Runs one locked layout through a few parameter changes and the enable fades */
+static
+VOID
+XcReverbLayout(
+    _In_z_ PCSTR Name,
+    _In_ IXAPO* Apo,
+    _Inout_ XcApoRun* Run,
+    _In_ DWORD Rate,
+    _In_ BOOLEAN Legacy)
+{
+    HRESULT hr;
+
+    Run->Block = 0;
+    hr = XcApoLock(Run, Rate);
+    printf("%s lock %u to %u at %lu = %08lX\n", Name, Run->InChannels, Run->OutChannels, Rate, hr);
+    if (FAILED(hr))
+        return;
+    XcReverbParameters(Name, Apo, Legacy ? 56 : sizeof(XAUDIO2FX_REVERB_PARAMETERS));
+    for (UINT Block = 0; Block < 3; Block++)
+        XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+    for (UINT Index = 1; Index < ARRAYSIZE(XcReverbSettings); Index++)
+    {
+        BYTE Old[56];
+
+        if (Legacy)
+        {
+            XcReverbLegacy(Old, &XcReverbSettings[Index]);
+            XcApoSet(Apo, Old, sizeof(Old));
+        }
+        else
+        {
+            XcApoSet(Apo, &XcReverbSettings[Index], sizeof(XcReverbSettings[Index]));
+        }
+        XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+        XcReverbParameters(Name, Apo, Legacy ? 56 : sizeof(XAUDIO2FX_REVERB_PARAMETERS));
+        for (UINT Block = 0; Block < 3; Block++)
+            XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+    }
+    XcApoSet(Apo, &XcReverbSettings[1], sizeof(XcReverbSettings[1]));
+    XcApoBlock(Name, Run, XAPO_BUFFER_SILENT, TRUE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_VALID, FALSE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_SILENT, FALSE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_SILENT, TRUE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_SILENT, FALSE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_SILENT, FALSE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->Reset();
+    XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+    XcApoBlock(Name, Run, XAPO_BUFFER_VALID, TRUE);
+    Apo->UnlockForProcess();
+}
+
+/*
+ * CreateAudioReverb and its 2.8 twin. The system writes through a null buffer when parameters are
+ * set or the XAPO is reset before the first lock, and it has no network after a second lock, so
+ * neither happens here; GetParameters spins when a set lands between a pick up and the next get.
+ */
+static
+VOID
+XcCheckReverb(
+    _In_z_ PCSTR Export,
+    _In_ BOOLEAN Legacy)
+{
+    PXC_CREATE_APO Create = reinterpret_cast<PXC_CREATE_APO>(GetProcAddress(XcModule, Export));
+    static const struct
+    {
+        UINT32 Channels;
+        UINT32 Frames;
+        DWORD Rate;
+        BOOLEAN InPlace;
+    } Layouts[] =
+    {
+        { 1, 480, 48000, FALSE },
+        { 1, 441, 44100, TRUE },
+        { 1, 200, 20000, FALSE },
+        { 1, 1, 32000, FALSE },
+    };
+    IUnknown* Object = nullptr;
+    IXAPO* Apo = nullptr;
+    HRESULT hr;
+
+    if (Create == nullptr)
+        return;
+    printf("%s null = %08lX\n", Export, Create(nullptr));
+    for (UINT Index = 0; Index < ARRAYSIZE(Layouts); Index++)
+    {
+        XcApoRun& Run = *new XcApoRun();
+        CHAR Name[64];
+
+        hr = Create(&Object);
+        printf("%s create = %08lX\n", Export, hr);
+        if (FAILED(hr))
+        {
+            delete &Run;
+            return;
+        }
+        sprintf_s(Name, "%s %u", Export, Index);
+        if (Index == 0)
+            XcApoIdentity(Name, Object);
+        Object->QueryInterface(IID_PPV_ARGS(&Apo));
+        Object->Release();
+        if (Index == 0)
+        {
+            XcApoFormats(Name, Apo);
+            XcReverbParameters(Name, Apo, Legacy ? 56 : sizeof(XAUDIO2FX_REVERB_PARAMETERS));
+        }
+        Run.Apo = Apo;
+        Run.InChannels = Layouts[Index].Channels;
+        Run.OutChannels = Layouts[Index].Channels;
+        Run.Frames = Layouts[Index].Frames;
+        Run.InPlace = Layouts[Index].InPlace;
+        Run.Amplitude = 0.5f;
+        Run.Seed = 11 + Index;
+        XcReverbLayout(Name, Apo, &Run, Layouts[Index].Rate, Legacy);
+        printf("%s release %lu\n", Name, Apo->Release());
+        delete &Run;
+    }
+}
+
 static
 VOID
 XcCheckApos(VOID)
@@ -3510,6 +3675,8 @@ XcCheckApos(VOID)
     XcCheckEcho();
     XcCheckLimiter();
     XcCheckFxReverb();
+    XcCheckReverb("CreateAudioReverb", FALSE);
+    XcCheckReverb("CreateAudioReverbV2_8", TRUE);
     Engine->Release();
 }
 
