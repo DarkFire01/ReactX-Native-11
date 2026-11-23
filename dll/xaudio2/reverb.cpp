@@ -734,6 +734,9 @@ struct XaRvbPairDelay
     float Fade;
     float Last[2];
 
+    /* The stereo network rounds the fade with the new tap last, the surround ones with the old tap last */
+    BOOLEAN NewLast;
+
     VOID
     SetDelay(
         _In_ UINT32 Floats)
@@ -759,11 +762,21 @@ struct XaRvbPairDelay
         for (UINT32 Frame = 0; Frame < Frames; Frame++)
         {
             float Keep = 1.0f - Fade;
-            float OldLeft = Line[(Write - Previous) & Mask] * Fade;
-            float OldRight = Line[(Write - Previous - 1) & Mask] * Fade;
+            float NewLeft = Line[(Write - Delay) & Mask];
+            float NewRight = Line[(Write - Delay - 1) & Mask];
+            float OldLeft = Line[(Write - Previous) & Mask];
+            float OldRight = Line[(Write - Previous - 1) & Mask];
 
-            Last[0] = fmaf(Keep, Line[(Write - Delay) & Mask], OldLeft);
-            Last[1] = fmaf(Keep, Line[(Write - Delay - 1) & Mask], OldRight);
+            if (NewLast)
+            {
+                Last[0] = fmaf(Keep, NewLeft, OldLeft * Fade);
+                Last[1] = fmaf(Keep, NewRight, OldRight * Fade);
+            }
+            else
+            {
+                Last[0] = fmaf(OldLeft, Fade, NewLeft * Keep);
+                Last[1] = fmaf(OldRight, Fade, NewRight * Keep);
+            }
             Output[Frame * 2 + 2] = Last[0];
             Output[Frame * 2 + 3] = Last[1];
             if (Fade > 0.0f)
@@ -783,6 +796,82 @@ struct XaRvbPairDelay
             Line[Write] = Input[Frame * 2 + 1];
             Write = (Write + 1) & Mask;
         }
+    }
+};
+
+/* Interleaved surround feed delay; the left tap fades like the reflections delay, the right like the rear one */
+template <UINT32 Size>
+struct XaRvbPairRear
+{
+    float Line[Size];
+    UINT32 Write;
+    UINT32 Delay;
+    UINT32 Previous;
+    UINT32 Target;
+    float Rate;
+    float Fade;
+    float Last[2];
+
+    VOID
+    SetDelay(
+        _In_ UINT32 Floats)
+    {
+        if (Previous == Delay)
+        {
+            Delay = Floats;
+            Fade = 1.0f;
+        }
+        Target = Floats;
+    }
+
+    VOID
+    Retime(
+        _In_ float NewRate)
+    {
+        float Ratio = NewRate / Rate;
+
+        Rate = NewRate;
+        Delay = 2 * XaRvbCount(fmaf(Ratio, static_cast<float>(Delay), 0.5f));
+        Previous = Delay;
+    }
+
+    VOID
+    Step(
+        _In_ float Left,
+        _In_ float Right,
+        _Out_writes_(2) float* Before)
+    {
+        float Keep = 1.0f - Fade;
+
+        Before[0] = Last[0];
+        Before[1] = Last[1];
+        Last[0] = fmaf(Line[(Write - Previous) & (Size - 1)], Fade, Line[(Write - Delay) & (Size - 1)] * Keep);
+        Last[1] = fmaf(Line[(Write - Delay - 1) & (Size - 1)], Keep, Line[(Write - Previous - 1) & (Size - 1)] * Fade);
+        if (Fade > 0.0f)
+        {
+            Fade = Fade - 0.000199999995f;
+        }
+        else
+        {
+            UINT32 Reached = Delay;
+
+            Previous = Reached;
+            Delay = Target;
+            Fade = Target == Reached ? 0.0f : 1.0f;
+        }
+        Line[Write] = Left;
+        Write = (Write + 1) & (Size - 1);
+        Line[Write] = Right;
+        Write = (Write + 1) & (Size - 1);
+    }
+
+    VOID
+    Clear(VOID)
+    {
+        memset(Line, 0, sizeof(Line));
+        Write = 0;
+        Last[0] = 0.0f;
+        Last[1] = 0.0f;
     }
 };
 
@@ -883,6 +972,10 @@ private:
     XaRvbPairDelay PairPre;
     XaRvbPairRoom PairRoom;
     XaRvbEarly Right;
+    XaRvbAllPass<512> CenterA;
+    XaRvbAllPass<512> CenterB;
+    XaRvbPairRear<512> PairSide;
+    XaRvbPairRear<2048> PairBack;
 };
 
 VOID
@@ -932,9 +1025,18 @@ XaRvbNetwork::Construct(
     PairPre.Previous = 80;
     PairPre.Target = 80;
     PairPre.Rate = 48000.0f;
+    PairPre.NewLast = NewChannels == 2;
     PairRoom.Shape.Rate = 48000.0f;
     PairRoom.Shape.Frequency = 24000.0f;
     PairRoom.Shape.Update();
+    PairSide.Delay = 40;
+    PairSide.Previous = 40;
+    PairSide.Target = 40;
+    PairSide.Rate = 48000.0f;
+    PairBack.Delay = 160;
+    PairBack.Previous = 160;
+    PairBack.Target = 160;
+    PairBack.Rate = 48000.0f;
 }
 
 VOID
@@ -999,9 +1101,9 @@ XaRvbNetwork::Tune(
     ChainB3.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0102291666f, 0.5f)));
     Left.Outlet1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00272916653f, 0.5f)));
     Left.Outlet2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.0023541667f, 0.5f)));
-    if (Channels > 2)
+    if (Channels > 2 && !Stereo)
         Side.Retime(NewRate);
-    if (Channels == 8)
+    if (Channels == 8 && !Stereo)
         Back.Retime(NewRate);
     if (!Stereo)
         return;
@@ -1026,6 +1128,14 @@ XaRvbNetwork::Tune(
     Right.Feed.Delay[1] = Pick;
     Right.Outlet1.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00222916668f, 0.5f)));
     Right.Outlet2.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00264583342f, 0.5f)));
+    if (Channels > 2)
+    {
+        CenterA.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00214583334f, 0.5f)));
+        CenterB.SetLength(XaRvbPrimeOf(fmaf(NewRate, 0.00202083332f, 0.5f)));
+        PairSide.Retime(NewRate);
+    }
+    if (Channels == 8)
+        PairBack.Retime(NewRate);
 }
 
 VOID
@@ -1145,11 +1255,11 @@ XaRvbNetwork::Configure(
     LateOff = Parameters->DisableLateField;
 
     /* 5.1 feeds the rear pair through the rear delay; 7.1 adds the side delay and moves the rear one */
-    if (Channels == 6)
+    if (!Stereo && Channels == 6)
     {
         Side.SetDelay(XaRvbMilliseconds(Parameters->RearDelay));
     }
-    else if (Channels == 8)
+    else if (!Stereo && Channels == 8)
     {
         Side.SetDelay(XaRvbMilliseconds(Parameters->SideDelay));
         Back.SetDelay(XaRvbMilliseconds(Parameters->RearDelay));
@@ -1188,6 +1298,23 @@ XaRvbNetwork::Configure(
     PairRoom.Shape.Main = Parameters->RoomFilterMain;
     PairRoom.Shape.High = Parameters->RoomFilterHF;
     PairRoom.Shape.Update();
+    if (Channels <= 2)
+        return;
+
+    /* 7.1 sends both its delays to the back line one after the other; the side line keeps its start */
+    CenterA.Gain = Late * 0.600000024f;
+    CenterA.Back = Late * -0.600000024f;
+    CenterB.Gain = Late * 0.600000024f;
+    CenterB.Back = Late * -0.600000024f;
+    if (Channels == 6)
+    {
+        PairSide.SetDelay(2 * XaRvbMilliseconds(Parameters->RearDelay));
+    }
+    else
+    {
+        PairBack.SetDelay(2 * XaRvbMilliseconds(Parameters->SideDelay));
+        PairBack.SetDelay(2 * XaRvbMilliseconds(Parameters->RearDelay));
+    }
 }
 
 VOID
@@ -1224,9 +1351,9 @@ XaRvbNetwork::Clear(VOID)
     ChainB3.Clear();
     ChainBLoop.Clear();
     ChainBTail.Clear();
-    if (Channels > 2)
+    if (Channels > 2 && !Stereo)
         Side.Clear();
-    if (Channels == 8)
+    if (Channels == 8 && !Stereo)
         Back.Clear();
     if (!Stereo)
         return;
@@ -1239,6 +1366,14 @@ XaRvbNetwork::Clear(VOID)
     PairRoom.StageA[0] = 0.0f;
     PairRoom.StageB[1] = 0.0f;
     Right.Clear();
+    if (Channels > 2)
+    {
+        CenterA.Clear();
+        CenterB.Clear();
+        PairSide.Clear();
+    }
+    if (Channels == 8)
+        PairBack.Clear();
 }
 
 VOID
@@ -1268,6 +1403,7 @@ XaRvbNetwork::Process(
     for (UINT32 Frame = 0; Frame < Frames; Frame++)
     {
         float Surround = 0.0f;
+        float SurroundRight = 0.0f;
         float Wetted;
 
         Left.Step(Scratch[Frame * Stride]);
@@ -1336,6 +1472,7 @@ XaRvbNetwork::Process(
             TailLeft = LoopD + LoopA;
             TailRight = LoopC + LoopB;
             Surround = LoopA;
+            SurroundRight = LoopB;
 
             /* The four branches cross into the inlets of the next pass */
             Tapped = InletA.Tap();
@@ -1352,6 +1489,39 @@ XaRvbNetwork::Process(
             CrossB.Feed(Fed, Tapped);
         }
 
+        if (Stereo && Channels > 2)
+        {
+            float* Speakers = Output + Frame * Channels;
+            float Dry = 1.0f - Mix;
+            float Sides[2];
+            float Center;
+
+            /* The center takes both sides' sums ahead of the outlets, its dry part halved */
+            Center = fmaf(Right.Sum, Reflections, TailRight) + fmaf(Left.Sum, Reflections, TailLeft);
+            PairSide.Step(Surround, SurroundRight, Sides);
+            Speakers[0] = fmaf(Left.Finish(TailLeft, Reflections), Mix, Dry * Input[Frame * 2]);
+            Speakers[1] = fmaf(Right.Finish(TailRight, Reflections), Mix, Dry * Input[Frame * 2 + 1]);
+            Center = CenterB.Step(CenterA.Step(Center));
+            Speakers[2] = fmaf(Center, Mix, ((Input[Frame * 2 + 1] + Input[Frame * 2]) * Dry) * 0.5f);
+            Speakers[3] = 0.0f;
+            if (Channels == 6)
+            {
+                Speakers[4] = (Sides[0] + Sides[0]) * Mix;
+                Speakers[5] = (Sides[1] + Sides[1]) * Mix;
+            }
+            else
+            {
+                float Backs[2];
+
+                PairBack.Step(Surround, SurroundRight, Backs);
+                Speakers[4] = -(Backs[0] * Mix);
+                Speakers[5] = -(Backs[1] * Mix);
+                Speakers[6] = (Sides[0] + Sides[0]) * Mix;
+                Speakers[7] = (Sides[1] + Sides[1]) * Mix;
+            }
+            Mix = Mix + Step;
+            continue;
+        }
         Wetted = Left.Finish(TailLeft, Reflections);
         if (Stereo)
         {
@@ -1600,16 +1770,10 @@ XaRvb::Build(
     _In_ UINT32 MaxFrames,
     _In_ UINT32 Rate)
 {
-    BOOLEAN Stereo = OutputChannels == 2;
+    BOOLEAN Stereo = OutputChannels == 2 || (OutputChannels > 2 && InputChannels != 1);
     UINT32 Layout;
 
     /* The output alone picks mono or stereo; surround outputs pick by the input */
-    if (InputChannels != 1 && OutputChannels > 2)
-    {
-        XA_TRACE_ONCE(L"CreateAudioReverb: stereo to surround is not available yet");
-        return XAPO_E_FORMAT_UNSUPPORTED;
-    }
-
     /* Any output other than mono, stereo or 5.1 gets the 7.1 network */
     Layout = OutputChannels <= 2 || OutputChannels == 6 ? OutputChannels : 8;
     Network = new (std::nothrow) XaRvbNetwork();
