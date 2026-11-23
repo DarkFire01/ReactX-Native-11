@@ -867,6 +867,22 @@ VOID
 DsUnregisterSound(
     _In_ DsSound* Sound);
 
+DsSound*
+DsFirstSound(VOID);
+
+/* Receives an object's interface pointer and the device it renders to or records from */
+typedef VOID (*PDS_OBJECT_VISITOR)(PVOID Context, PVOID Face, const GUID* Device);
+
+VOID
+DsVisitCaptures(
+    _In_ PDS_OBJECT_VISITOR Visitor,
+    _In_opt_ PVOID Context);
+
+BOOLEAN
+DsFindBufferDevice(
+    _In_opt_ const VOID* Interface,
+    _Out_ GUID* Device);
+
 VOID
 DsUpdateFocus(
     _In_ BOOLEAN Force);

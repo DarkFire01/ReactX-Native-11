@@ -127,6 +127,7 @@ class DsCapture final : public DsObject
 {
 public:
     DsCapture();
+    ~DsCapture() override;
 
     HRESULT
     Initialize(
@@ -136,8 +137,13 @@ public:
     HRESULT InitStatus;
     UINT WaveId;
     BOOLEAN Busy;
+    GUID Id;
+    DsCapture* NextCapture;
     DsCaptureFace Face;
 };
+
+/* Every capture object in the process, oldest first */
+static DsCapture* DsCaptures;
 
 class DsCaptureBuffer final : public DsObject
 {
@@ -264,10 +270,48 @@ DsCapture::DsCapture()
     InitStatus = DSERR_UNINITIALIZED;
     WaveId = WAVE_MAPPER;
     Busy = FALSE;
+    Id = GUID_NULL;
+    NextCapture = nullptr;
     Face.Link.Object = this;
     Face.Link.Count = 0;
     Face.Self = this;
     Expose(IID_IDirectSoundCapture, &Face, &Face.Link);
+
+    {
+        DsApiGuard Guard;
+        DsCapture** Link = &DsCaptures;
+
+        while (*Link != nullptr)
+            Link = &(*Link)->NextCapture;
+        *Link = this;
+    }
+}
+
+DsCapture::~DsCapture()
+{
+    DsApiGuard Guard;
+
+    for (DsCapture** Link = &DsCaptures; *Link != nullptr; Link = &(*Link)->NextCapture)
+    {
+        if (*Link == this)
+        {
+            *Link = NextCapture;
+            break;
+        }
+    }
+}
+
+/* Hands each initialized capture object of the process to the visitor; called with the API lock held */
+VOID
+DsVisitCaptures(
+    _In_ PDS_OBJECT_VISITOR Visitor,
+    _In_opt_ PVOID Context)
+{
+    for (DsCapture* Capture = DsCaptures; Capture != nullptr; Capture = Capture->NextCapture)
+    {
+        if (SUCCEEDED(Capture->InitStatus))
+            Visitor(Context, &Capture->Face, &Capture->Id);
+    }
 }
 
 HRESULT
@@ -277,7 +321,7 @@ DsCapture::Initialize(
     IMMDevice* Endpoint = nullptr;
     HRESULT hr;
 
-    hr = DsFindEndpoint(eCapture, Guid, &Endpoint, nullptr);
+    hr = DsFindEndpoint(eCapture, Guid, &Endpoint, &Id);
     if (FAILED(hr))
         return hr;
     WaveId = DsWaveForEndpoint(Endpoint);

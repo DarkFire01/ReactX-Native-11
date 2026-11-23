@@ -28,9 +28,44 @@ DsRegisterSound(
     _In_ DsSound* Sound)
 {
     DsApiGuard Guard;
+    DsSound** Link = &DsSounds;
 
-    Sound->NextSound = DsSounds;
-    DsSounds = Sound;
+    /* Oldest first, the order the object list property reports them in */
+    while (*Link != nullptr)
+        Link = &(*Link)->NextSound;
+    Sound->NextSound = nullptr;
+    *Link = Sound;
+}
+
+/* Called with the API lock held */
+DsSound*
+DsFirstSound(VOID)
+{
+    return DsSounds;
+}
+
+/* Finds the device behind a buffer interface pointer of any DirectSound object in the process */
+BOOLEAN
+DsFindBufferDevice(
+    _In_opt_ const VOID* Interface,
+    _Out_ GUID* Device)
+{
+    *Device = GUID_NULL;
+    if (Interface == nullptr)
+        return FALSE;
+    for (DsSound* Sound = DsSounds; Sound != nullptr; Sound = Sound->NextSound)
+    {
+        BOOLEAN Found = Sound->Primary != nullptr && Interface == &Sound->Primary->Face;
+
+        for (DsSecondary* Buffer = Sound->Buffers; Buffer != nullptr && !Found; Buffer = Buffer->NextBuffer)
+            Found = Interface == &Buffer->Face;
+        if (Found && Sound->Device != nullptr)
+        {
+            *Device = Sound->Device->Id;
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 VOID

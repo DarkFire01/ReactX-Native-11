@@ -398,40 +398,553 @@ DsGetMappingA(
     return hr;
 }
 
+/* Copies a wide string into a fixed field of the old style description, cut to fit */
+static
+VOID
+DsCopyField1(
+    _Out_writes_(Room) WCHAR* Target,
+    _In_ ULONG Room,
+    _In_z_ const WCHAR* Source)
+{
+    ULONG Length = static_cast<ULONG>(wcslen(Source));
+
+    if (Length >= Room)
+        Length = Room - 1;
+    memcpy(Target, Source, Length * sizeof(*Target));
+    Target[Length] = L'\0';
+}
+
+static
+VOID
+DsCopyField1A(
+    _Out_writes_(Room) CHAR* Target,
+    _In_ ULONG Room,
+    _In_z_ const WCHAR* Source)
+{
+    int Size = WideCharToMultiByte(CP_ACP, 0, Source, -1, nullptr, 0, nullptr, nullptr);
+    CHAR* Narrow;
+    ULONG Length;
+
+    Target[0] = '\0';
+    if (Size <= 0)
+        return;
+    Narrow = static_cast<CHAR*>(HeapAlloc(GetProcessHeap(), 0, Size));
+    if (Narrow == nullptr)
+        return;
+    WideCharToMultiByte(CP_ACP, 0, Source, -1, Narrow, Size, nullptr, nullptr);
+    Length = static_cast<ULONG>(strlen(Narrow));
+    if (Length >= Room)
+        Length = Room - 1;
+    memcpy(Target, Narrow, Length);
+    Target[Length] = '\0';
+    HeapFree(GetProcessHeap(), 0, Narrow);
+}
+
+/* Fills the old style description, which carries both string widths in fixed fields */
+static
+VOID
+DsWriteDescription1(
+    _In_ const DsDeviceRecord* Record,
+    _Out_ PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA Data)
+{
+    Data->Type = DIRECTSOUNDDEVICE_TYPE_WDM;
+    Data->DataFlow = Record->Capture ? DIRECTSOUNDDEVICE_DATAFLOW_CAPTURE : DIRECTSOUNDDEVICE_DATAFLOW_RENDER;
+    Data->DeviceId = Record->Id;
+    DsCopyField1A(Data->DescriptionA, ARRAYSIZE(Data->DescriptionA), Record->Name);
+    DsCopyField1(Data->DescriptionW, ARRAYSIZE(Data->DescriptionW), Record->Name);
+    DsCopyField1A(Data->ModuleA, ARRAYSIZE(Data->ModuleA), Record->Module);
+    DsCopyField1(Data->ModuleW, ARRAYSIZE(Data->ModuleW), Record->Module);
+    Data->WaveDeviceId = Record->WaveId;
+    Data->Devnode = 0;
+}
+
+static
+HRESULT
+DsGetDescription1(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA Description = static_cast<PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA>(Data);
+    const DsDeviceRecord* Record;
+    DsDeviceRecord* Records;
+    ULONG Count;
+    HRESULT hr;
+
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    hr = DsListDeviceRecords(&Records, &Count);
+    if (FAILED(hr))
+        return hr;
+    hr = DsFindRecord(&Description->DeviceId, Description->DataFlow == DIRECTSOUNDDEVICE_DATAFLOW_CAPTURE, Records, Count, &Record);
+    if (SUCCEEDED(hr))
+        DsWriteDescription1(Record, Description);
+    DsFreeDeviceRecords(Records, Count);
+    return hr;
+}
+
+/* One description block serves every callback, rewritten for each endpoint */
+static
+HRESULT
+DsEnumerate1(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    PDSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_1_DATA Request = static_cast<PDSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_1_DATA>(Data);
+    PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA Description;
+    DsDeviceRecord* Records;
+    ULONG Count;
+    HRESULT hr;
+
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    Description = static_cast<PDSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA>(
+        HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Description)));
+    if (Description == nullptr)
+        return E_OUTOFMEMORY;
+    hr = DsListDeviceRecords(&Records, &Count);
+    if (SUCCEEDED(hr))
+    {
+        for (ULONG Index = 0; Index < Count; Index++)
+        {
+            DsWriteDescription1(&Records[Index], Description);
+            if (!Request->Callback(Description, Request->Context))
+                break;
+        }
+        DsFreeDeviceRecords(Records, Count);
+    }
+    HeapFree(GetProcessHeap(), 0, Description);
+    return hr;
+}
+
+/* The device id leads every presence, mixer and acceleration property, and the value follows at the given offset */
+static
+VOID
+DsWriteValue(
+    _Out_ PVOID Data,
+    _In_ ULONG Offset,
+    _In_ ULONG Value)
+{
+    *reinterpret_cast<ULONG*>(static_cast<BYTE*>(Data) + Offset) = Value;
+}
+
+/* Values the system keeps for the process only, changing nothing in the mix */
+static ULONG DsSrcQuality = 3;
+static ULONG DsMixerAcceleration = 15;
+static ULONG DsAccelerationLevel = 1;
+
+static
+HRESULT
+DsGetPresent(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsWriteValue(Data, sizeof(GUID), TRUE);
+    return S_OK;
+}
+
+static
+HRESULT
+DsGetPresentFlow(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsWriteValue(Data, sizeof(GUID) + sizeof(ULONG), TRUE);
+    return S_OK;
+}
+
+/* Writes the system takes and drops */
+static
+HRESULT
+DsSetIgnored(
+    _In_opt_ PVOID Owner,
+    _In_opt_ PVOID Data,
+    _In_ ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Data);
+    UNREFERENCED_PARAMETER(Length);
+    return S_OK;
+}
+
+static
+HRESULT
+DsGetSrcQuality(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsWriteValue(Data, sizeof(GUID), DsSrcQuality);
+    return S_OK;
+}
+
+static
+HRESULT
+DsSetSrcQuality(
+    _In_opt_ PVOID Owner,
+    _In_opt_ PVOID Data,
+    _In_ ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsSrcQuality = *reinterpret_cast<const ULONG*>(static_cast<const BYTE*>(Data) + sizeof(GUID));
+    return S_OK;
+}
+
+static
+HRESULT
+DsGetMixerAcceleration(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsWriteValue(Data, sizeof(GUID), DsMixerAcceleration);
+    return S_OK;
+}
+
+static
+HRESULT
+DsSetMixerAcceleration(
+    _In_opt_ PVOID Owner,
+    _In_opt_ PVOID Data,
+    _In_ ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsMixerAcceleration = *reinterpret_cast<const ULONG*>(static_cast<const BYTE*>(Data) + sizeof(GUID));
+    return S_OK;
+}
+
+static
+HRESULT
+DsGetAcceleration(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsWriteValue(Data, sizeof(GUID), DsAccelerationLevel);
+    return S_OK;
+}
+
+static
+HRESULT
+DsSetAcceleration(
+    _In_opt_ PVOID Owner,
+    _In_opt_ PVOID Data,
+    _In_ ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    DsAccelerationLevel = *reinterpret_cast<const ULONG*>(static_cast<const BYTE*>(Data) + sizeof(GUID));
+    return S_OK;
+}
+
+/* No debug output is kept, so the level, the flags and the module name come back empty */
+static
+HRESULT
+DsGetDebugInfoA(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    ZeroMemory(Data, 3 * sizeof(ULONG) + sizeof(CHAR));
+    return S_OK;
+}
+
+static
+HRESULT
+DsGetDebugInfoW(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    ZeroMemory(Data, 3 * sizeof(ULONG) + sizeof(WCHAR));
+    return S_OK;
+}
+
+struct DsCodeText
+{
+    ULONG Code;
+    const WCHAR* Name;
+    const WCHAR* Text;
+};
+
+static const DsCodeText DsCodeTexts[] =
+{
+    { 0x00000000, L"DS_OK", L"The function completed successfully" },
+    { 0x00000001, L"S_FALSE", L"Special success code" },
+    { 0x0878000A, L"DS_NO_VIRTUALIZATION", L"The function succeeded, substituting the Pan3D algorithm" },
+    { 0x80004001, L"DSERR_UNSUPPORTED", L"The function called is not supported at this time" },
+    { 0x80004002, L"DSERR_NOINTERFACE", L"The requested COM interface is not available" },
+    { 0x80004005, L"DSERR_GENERIC", L"An undetermined error occurred inside the DirectSound subsystem" },
+    { 0x80040110, L"DSERR_NOAGGREGATION", L"This object does not support aggregation" },
+    { 0x80040154, L"REGDB_E_CLASSNOTREG", L"Class not registered" },
+    { 0x80040205, L"DMO_E_TYPE_NOT_ACCEPTED", L"Wave format not supported by effect" },
+    { 0x80070005, L"DSERR_ACCESSDENIED", L"Access is denied" },
+    { 0x8007000E, L"DSERR_OUTOFMEMORY", L"Not enough free memory is available to complete the operation" },
+    { 0x80070057, L"DSERR_INVALIDPARAM", L"An invalid parameter was passed to the returning function" },
+    { 0x8878000A, L"DSERR_ALLOCATED",
+      L"The call failed because resources (such as a priority level) were already being used by another caller" },
+    { 0x8878001E, L"DSERR_CONTROLUNAVAIL", L"The control (vol, pan, etc.) requested by the caller is not available" },
+    { 0x88780032, L"DSERR_INVALIDCALL", L"This call is not valid for the current state of this object" },
+    { 0x88780046, L"DSERR_PRIOLEVELNEEDED", L"The caller does not have the priority level required for the function to succeed" },
+    { 0x88780064, L"DSERR_BADFORMAT", L"The specified WAVE format is not supported" },
+    { 0x88780078, L"DSERR_NODRIVER", L"No sound device is available for use, or the given device ID isn't valid" },
+    { 0x88780082, L"DSERR_ALREADYINITIALIZED", L"This object is already initialized" },
+    { 0x88780096, L"DSERR_BUFFERLOST", L"The buffer memory has been lost, and must be restored" },
+    { 0x887800A0, L"DSERR_OTHERAPPHASPRIO", L"Another app has a higher priority level, preventing this call from succeeding" },
+    { 0x887800AA, L"DSERR_UNINITIALIZED", L"This object has not been initialized" },
+    { 0x887800BE, L"DSERR_DS8_REQUIRED", L"Attempt to use DirectSound 8 functionality on an older DirectSound object" },
+    { 0x887800C8, L"DSERR_SENDLOOP", L"A circular loop of send effects was detected" },
+    { 0x887800D2, L"DSERR_BADSENDBUFFERGUID", L"The GUID specified does not match a valid MIXIN buffer" },
+    { 0x88781161, L"DSERR_OBJECTNOTFOUND", L"The object was not found" },
+    { 0x887D0003, L"APOERR_FORMAT_NOT_SUPPORTED", L"A pin supporting the format cannot be found" },
+    { 0x88880007, L"LEAP_E_INVALID_FORMAT", L"An invalid or unsupported audio format was used" },
+    { 0x88880101, L"LEAP_E_NOT_INITIALIZED", L"LEAP wasn't successfully initialized" },
+    { 0x88880302, L"LEAP_E_RENDERER_INVALIDATED", L"Audio device was removed or output format was changed" },
+    { 0x88880304, L"LEAP_E_INTERNAL_ERROR", L"An internal error such as memory corruption was detected" },
+    { 0x88890004, L"AUDCLNT_E_DEVICE_INVALIDATED", L"Output device is no longer available" },
+    { 0x88890008, L"AUDCLNT_E_UNSUPPORTED_FORMAT", L"Audio format not supported by the device" },
+    { 0x8889000A, L"AUDCLNT_E_DEVICE_IN_USE", L"Could not connect to the audio driver" },
+    { 0x8889000F, L"AUDCLNT_E_ENDPOINT_CREATE_FAILED", L"Could not create an audio endpoint" },
+    { 0x88890010, L"AUDCLNT_E_SERVICE_NOT_RUNNING", L"Windows Audio service is not running" },
+};
+
+/* The code, then pointers to its name and description, which follow as strings when they fit */
+struct DsCodeHead
+{
+    HRESULT Code;
+    PVOID Name;
+    PVOID Text;
+};
+
+static
+HRESULT
+DsTranslate(
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length,
+    _In_ BOOLEAN Wide)
+{
+    DsCodeHead* Head = static_cast<DsCodeHead*>(Data);
+    const WCHAR* Strings[2] = { nullptr, L"Unknown error" };
+    WCHAR Unknown[16];
+    ULONG Sizes[2];
+    ULONG Needed = sizeof(*Head);
+
+    for (ULONG Index = 0; Index < ARRAYSIZE(DsCodeTexts); Index++)
+    {
+        if (DsCodeTexts[Index].Code == static_cast<ULONG>(Head->Code))
+        {
+            Strings[0] = DsCodeTexts[Index].Name;
+            Strings[1] = DsCodeTexts[Index].Text;
+            break;
+        }
+    }
+    if (Strings[0] == nullptr)
+    {
+        swprintf_s(Unknown, L"0x%8.8lX", static_cast<ULONG>(Head->Code));
+        Strings[0] = Unknown;
+    }
+
+    for (ULONG Index = 0; Index < 2; Index++)
+    {
+        Sizes[Index] = Wide ? static_cast<ULONG>(wcslen(Strings[Index]) + 1) * sizeof(WCHAR) :
+                              static_cast<ULONG>(WideCharToMultiByte(CP_ACP, 0, Strings[Index], -1, nullptr, 0, nullptr, nullptr));
+        Needed += Sizes[Index];
+    }
+    if (*Length >= Needed)
+    {
+        BYTE* Next = reinterpret_cast<BYTE*>(Head + 1);
+        PVOID* Targets[2] = { &Head->Name, &Head->Text };
+
+        for (ULONG Index = 0; Index < 2; Index++)
+        {
+            *Targets[Index] = Next;
+            if (Wide)
+                memcpy(Next, Strings[Index], Sizes[Index]);
+            else
+                WideCharToMultiByte(CP_ACP, 0, Strings[Index], -1, reinterpret_cast<CHAR*>(Next), static_cast<int>(Sizes[Index]), nullptr, nullptr);
+            Next += Sizes[Index];
+        }
+    }
+    *Length = Needed;
+    return S_OK;
+}
+
+static
+HRESULT
+DsTranslateA(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    return DsTranslate(Data, Length, FALSE);
+}
+
+static
+HRESULT
+DsTranslateW(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    UNREFERENCED_PARAMETER(Owner);
+    return DsTranslate(Data, Length, TRUE);
+}
+
+/* A buffer interface pointer in, the device it plays on out */
+struct DsBufferDeviceData
+{
+    PVOID Buffer;
+    GUID DeviceId;
+};
+
+static
+HRESULT
+DsGetBufferDevice(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    DsBufferDeviceData* Request = static_cast<DsBufferDeviceData*>(Data);
+    GUID Device;
+
+    UNREFERENCED_PARAMETER(Owner);
+    UNREFERENCED_PARAMETER(Length);
+    if (!DsFindBufferDevice(Request->Buffer, &Device))
+        return E_INVALIDARG;
+    Request->DeviceId = Device;
+    return S_OK;
+}
+
+/* A device filter in, then a count and one entry per object the room allows */
+struct DsObjectEntry
+{
+    PVOID Object;
+    GUID DeviceId;
+};
+
+struct DsObjectListData
+{
+    GUID DeviceId;
+    ULONG Count;
+    DsObjectEntry Entries[1];
+};
+
+struct DsObjectWalk
+{
+    DsObjectListData* List;
+    ULONG Room;
+};
+
+static
+VOID
+DsAddObject(
+    _In_ PVOID Context,
+    _In_ PVOID Face,
+    _In_ const GUID* Device)
+{
+    DsObjectWalk* Walk = static_cast<DsObjectWalk*>(Context);
+    DsObjectListData* List = Walk->List;
+
+    if (List->DeviceId != GUID_NULL && List->DeviceId != *Device)
+        return;
+    if (FIELD_OFFSET(DsObjectListData, Entries) + (List->Count + 1) * sizeof(DsObjectEntry) <= Walk->Room)
+    {
+        List->Entries[List->Count].Object = Face;
+        List->Entries[List->Count].DeviceId = *Device;
+    }
+    List->Count += 1;
+}
+
+static
+HRESULT
+DsGetObjects(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    DsObjectWalk Walk = { static_cast<DsObjectListData*>(Data), *Length };
+
+    UNREFERENCED_PARAMETER(Owner);
+    Walk.List->Count = 0;
+    for (DsSound* Sound = DsFirstSound(); Sound != nullptr; Sound = Sound->NextSound)
+    {
+        if (SUCCEEDED(Sound->InitStatus) && Sound->Device != nullptr)
+            DsAddObject(&Walk, &Sound->Face, &Sound->Device->Id);
+    }
+    *Length = static_cast<ULONG>(FIELD_OFFSET(DsObjectListData, Entries) + Walk.List->Count * sizeof(DsObjectEntry));
+    return S_OK;
+}
+
+static
+HRESULT
+DsGetCaptureObjects(
+    _In_opt_ PVOID Owner,
+    _Inout_ PVOID Data,
+    _Inout_ ULONG* Length)
+{
+    DsObjectWalk Walk = { static_cast<DsObjectListData*>(Data), *Length };
+
+    UNREFERENCED_PARAMETER(Owner);
+    Walk.List->Count = 0;
+    DsVisitCaptures(DsAddObject, &Walk);
+    *Length = static_cast<ULONG>(FIELD_OFFSET(DsObjectListData, Entries) + Walk.List->Count * sizeof(DsObjectEntry));
+    return S_OK;
+}
+
 static const DsPropertyItem DsMixerItems[] =
 {
-    { 0, DsPrivateGetMissing, DsPrivateSetMissing, 20 },
-    { 1, DsPrivateGetMissing, DsPrivateSetMissing, 20 },
+    { 0, DsGetSrcQuality, DsSetSrcQuality, 20 },
+    { 1, DsGetMixerAcceleration, DsSetMixerAcceleration, 20 },
 };
 
 static const DsPropertyItem DsDeviceItems[] =
 {
-    { 0, DsPrivateGetMissing, DsPrivateSetMissing, 20 },
+    { 0, DsGetPresent, DsSetIgnored, 20 },
     { DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_A, DsGetMappingA, nullptr, 32 },
-    { DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1, DsPrivateGetMissing, nullptr, sizeof(DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA) },
-    { DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_1, DsPrivateGetMissing, nullptr, 16 },
+    { DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1, DsGetDescription1, nullptr, sizeof(DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_1_DATA) },
+    { DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_1, DsEnumerate1, nullptr, 16 },
     { DSPROPERTY_DIRECTSOUNDDEVICE_WAVEDEVICEMAPPING_W, DsGetMappingW, nullptr, 32 },
     { DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_A, DsGetDescriptionA, nullptr, DS_DESCRIPTION_HEAD },
     { DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION_W, DsGetDescriptionW, nullptr, DS_DESCRIPTION_HEAD },
     { DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_A, DsEnumerateA, nullptr, 16 },
     { DSPROPERTY_DIRECTSOUNDDEVICE_ENUMERATE_W, DsEnumerateW, nullptr, 16 },
-    { 9, DsPrivateGetMissing, DsPrivateSetMissing, 24 },
+    { 9, DsGetPresentFlow, DsSetIgnored, 24 },
     { 10, DsGetMappingA, nullptr, 32 },
     { 11, DsGetMappingW, nullptr, 32 },
 };
 
 static const DsPropertyItem DsAccelerationItems[] =
 {
-    { 0, DsPrivateGetMissing, DsPrivateSetMissing, 20 },
-    { 1, DsPrivateGetMissing, nullptr, 20 },
+    { 0, DsGetAcceleration, DsSetAcceleration, 20 },
+    { 1, DsGetPresent, nullptr, 20 },
 };
 
 static const DsPropertyItem DsDebugItems[] =
 {
-    { 0, DsPrivateGetMissing, DsPrivateSetMissing, 272 },
-    { 1, DsPrivateGetMissing, DsPrivateSetMissing, 532 },
-    { 2, DsPrivateGetMissing, nullptr, 24 },
-    { 3, DsPrivateGetMissing, nullptr, 24 },
+    { 0, DsGetDebugInfoA, DsSetIgnored, 272 },
+    { 1, DsGetDebugInfoW, DsSetIgnored, 532 },
+    { 2, DsTranslateA, nullptr, 24 },
+    { 3, DsTranslateW, nullptr, 24 },
 };
 
 static const DsPropertyItem DsPersistentItems[] =
@@ -442,13 +955,13 @@ static const DsPropertyItem DsPersistentItems[] =
 
 static const DsPropertyItem DsBufferItems[] =
 {
-    { 0, DsPrivateGetMissing, nullptr, 24 },
+    { 0, DsGetBufferDevice, nullptr, 24 },
 };
 
 static const DsPropertyItem DsObjectItems[] =
 {
-    { 0, DsPrivateGetMissing, nullptr, 24 },
-    { 1, DsPrivateGetMissing, nullptr, 24 },
+    { 0, DsGetObjects, nullptr, 24 },
+    { 1, DsGetCaptureObjects, nullptr, 24 },
 };
 
 static const DsPropertyTable DsPrivateTables[] =
