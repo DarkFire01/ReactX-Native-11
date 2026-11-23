@@ -78,7 +78,11 @@ ScContext::TranslateInstructions()
 
         if (Instr.Opcode > 0xFFFD)
             return E_INVALIDARG;
-        if (Instr.Opcode != 0xFFFD)
+        if (Instr.Opcode == 44)
+        {
+            Token = TranslateBreak(Token);
+        }
+        else if (Instr.Opcode != 0xFFFD)
         {
             hr = Translate(Instr);
             if (FAILED(hr))
@@ -696,6 +700,223 @@ ScTranslateLerp(
     ScResult(Context, Instr, D3D10_SB_OPCODE_MAD, Dst, &Weight, &Result, &From);
 }
 
+/* Emits the Direct3D 10 comparison for a Direct3D 9 one; gt and le swap their operands */
+static
+VOID
+ScCompare(
+    _In_ ScContext* Context,
+    _In_ UINT Comparison,
+    _In_ const SB::COperandBase& Dst,
+    _In_ const SB::COperandBase& Left,
+    _In_ const SB::COperandBase& Right)
+{
+    D3D10_SB_OPCODE_TYPE Opcode;
+    BOOL Swap = FALSE;
+
+    switch (Comparison)
+    {
+        case 2:
+            Opcode = D3D10_SB_OPCODE_EQ;
+            break;
+        case 3:
+            Opcode = D3D10_SB_OPCODE_GE;
+            break;
+        case 4:
+            Opcode = D3D10_SB_OPCODE_LT;
+            break;
+        case 5:
+            Opcode = D3D10_SB_OPCODE_NE;
+            break;
+        case 1:
+            Opcode = D3D10_SB_OPCODE_LT;
+            Swap = TRUE;
+            break;
+        default:
+            Opcode = D3D10_SB_OPCODE_GE;
+            Swap = TRUE;
+            break;
+    }
+    ScEmit(Context->Asm, Opcode, 3, &Dst, Swap ? &Right : &Left, Swap ? &Left : &Right);
+}
+
+/* ifc and breakc: the comparison goes to r0, the branch tests r0.x */
+static
+VOID
+ScTranslateCompareBranch(
+    _In_ ScContext* Context,
+    _In_ ScInstr& Instr,
+    _In_ D3D10_SB_OPCODE_TYPE Opcode,
+    _In_ UINT Mask)
+{
+    SB::COperandBase Left;
+    SB::COperandBase Right;
+    SB::COperandBase Test = ScTempDst(0, Mask);
+    SB::COperandBase Result = SB::COperand4(D3D10_SB_OPERAND_TYPE_TEMP, 0, D3D10_SB_4_COMPONENT_X);
+    SB::CInstruction Branch(Opcode, Result, D3D10_SB_INSTRUCTION_TEST_NONZERO);
+
+    Context->SourceOperand(&Left, Instr, 0, 0, 4);
+    Context->SourceOperand(&Right, Instr, 1, 0, 4);
+    ScCompare(Context, (Instr.OpcodeToken >> 16) & 7, Test, Left, Right);
+    Context->Asm->Add(Branch);
+}
+
+/* if, breakp and callnz: a branch on one component of a boolean or predicate, inverted by the not modifier */
+static
+VOID
+ScTranslateBoolBranch(
+    _In_ ScContext* Context,
+    _In_ ScInstr& Instr,
+    _In_ D3D10_SB_OPCODE_TYPE Opcode,
+    _In_ UINT Index)
+{
+    SB::COperandBase Condition;
+    SB::COperandBase Selected;
+    D3D10_SB_INSTRUCTION_TEST_BOOLEAN Test = (Instr.Src[Index].Token & 0xD000000) ? D3D10_SB_INSTRUCTION_TEST_ZERO
+                                                                                 : D3D10_SB_INSTRUCTION_TEST_NONZERO;
+
+    if (Opcode == D3D10_SB_OPCODE_CALLC)
+    {
+        SB::COperandBase Label;
+
+        Context->SourceOperand(&Label, Instr, 0, 0, 4);
+        Context->SourceOperand(&Condition, Instr, 1, 0, 1);
+        Selected = ScComponent(Condition, Condition.m_Swizzle[0]);
+
+        SB::CInstruction Call(Opcode, Selected, Label);
+
+        Call.m_Test = Test;
+        Context->Asm->Add(Call);
+        return;
+    }
+
+    Context->SourceOperand(&Condition, Instr, Index, 0, 1);
+    Selected = ScComponent(Condition, Condition.m_Swizzle[0]);
+
+    SB::CInstruction Branch(Opcode, Selected, Test);
+
+    Context->Asm->Add(Branch);
+}
+
+/* Code after an unconditional break up to the end of its block never runs, so it is left out */
+const DWORD*
+ScContext::TranslateBreak(
+    _In_ const DWORD* Next)
+{
+    SB::CInstruction Break(D3D10_SB_OPCODE_BREAK);
+
+    Asm->Add(Break);
+    for (;;)
+    {
+        switch (*Next & 0xFFFF)
+        {
+            case 28:
+            case 29:
+            case 39:
+            case 42:
+            case 43:
+            case 0xFFFF:
+                return Next;
+            case 0xFFFE:
+                Next += ((*Next >> 16) & 0x7FFF) + 1;
+                break;
+            case 0x1F:
+                Next += 3;
+                break;
+            default:
+                Next += 1;
+                while (*Next & 0x80000000)
+                    Next += 1;
+                break;
+        }
+    }
+}
+
+/* loop and rep count down x of their own temp; loop also steps aL through y by z */
+VOID
+ScContext::BeginLoop(
+    _In_ ScInstr& Instr)
+{
+    BOOL Loop = Instr.Opcode == 27;
+    UINT Counter = TempBase;
+    UINT LoopRegister = Map->Special[ScSlotLoop];
+    SB::COperandBase Count;
+    SB::COperandBase CounterX = SB::COperand4(D3D10_SB_OPERAND_TYPE_TEMP, Counter, D3D10_SB_4_COMPONENT_X);
+    SB::CInstruction Start(D3D10_SB_OPCODE_LOOP);
+    SB::CInstruction Exit(D3D10_SB_OPCODE_BREAKC, CounterX, D3D10_SB_INSTRUCTION_TEST_ZERO);
+
+    IfDepth += 1;
+    LoopDepth += 1;
+    TempBase += 1;
+    LoopTemps[LoopDepth & 3] = Counter;
+
+    if (Loop)
+    {
+        SB::COperandBase Dst = ScTempDst(Counter, ScMaskAll);
+
+        SourceOperand(&Count, Instr, 1, 0, 4);
+        ScEmit(Asm, D3D10_SB_OPCODE_MOV, 2, &Dst, &Count);
+    }
+    else
+    {
+        SB::COperandBase Dst = ScTempDst(Counter, ScMaskX);
+        SB::COperandBase Times;
+
+        SourceOperand(&Count, Instr, 0, 0, 4);
+        Times = ScSwizzled(Count, ScSwzXXXX);
+        ScEmit(Asm, D3D10_SB_OPCODE_MOV, 2, &Dst, &Times);
+    }
+    Asm->Add(Start);
+    Asm->Add(Exit);
+
+    if (Loop && LoopRegister != ScNoRegister)
+    {
+        SB::COperandBase Index = ScTempDst(LoopRegister, ScMaskAll);
+        SB::COperandBase Value = ScSwizzled(ScTempOperand(Counter), ScSwzYYYY);
+
+        ScEmit(Asm, D3D10_SB_OPCODE_MOV, 2, &Index, &Value);
+    }
+}
+
+VOID
+ScContext::EndLoop(
+    _In_ BOOL Loop)
+{
+    UINT Counter = LoopTemps[LoopDepth & 3];
+    UINT LoopRegister = Map->Special[ScSlotLoop];
+    BYTE Outer = LoopDepth;
+    SB::CInstruction End(D3D10_SB_OPCODE_ENDLOOP);
+
+    /* A break right before the end already left the loop */
+    if (!LastWasBreak)
+    {
+        SB::COperand Decrement(0xFFFFFFFFu);
+        SB::COperandBase CountX = ScTempDst(Counter, ScMaskX);
+        SB::COperandBase ReadX = ScSwizzled(ScTempOperand(Counter), ScSwzXXXX);
+
+        ScEmit(Asm, D3D10_SB_OPCODE_IADD, 3, &CountX, &ReadX, &Decrement);
+        if (Loop)
+        {
+            SB::COperandBase IndexY = ScTempDst(Counter, ScMaskY);
+            SB::COperandBase ReadY = ScSwizzled(ScTempOperand(Counter), ScSwzYYYY);
+            SB::COperandBase ReadZ = ScSwizzled(ScTempOperand(Counter), ScSwzZZZZ);
+
+            ScEmit(Asm, D3D10_SB_OPCODE_IADD, 3, &IndexY, &ReadY, &ReadZ);
+        }
+    }
+    Asm->Add(End);
+    LoopDepth -= 1;
+    IfDepth -= 1;
+
+    /* Back in an outer loop, aL is that loop's again */
+    if (Loop && Outer != 0 && LoopRegister != ScNoRegister)
+    {
+        SB::COperandBase Index = ScTempDst(LoopRegister, ScMaskAll);
+        SB::COperandBase Value = ScSwizzled(ScTempOperand(LoopTemps[(Outer - 1) & 3]), ScSwzYYYY);
+
+        ScEmit(Asm, D3D10_SB_OPCODE_MOV, 2, &Index, &Value);
+    }
+}
+
 HRESULT
 ScContext::Translate(
     _In_ ScInstr& Instr)
@@ -781,6 +1002,82 @@ ScContext::Translate(
         case 37:
             ScTranslateSinCos(this, Instr);
             break;
+        case 25:
+        {
+            SB::COperand Label(D3D10_SB_OPERAND_TYPE_LABEL, Instr.Src[0].Token & 0x7FF);
+            SB::CInstruction Call(D3D10_SB_OPCODE_CALL, Label, D3D10_SB_INSTRUCTION_TEST_ZERO);
+
+            Asm->Add(Call);
+            break;
+        }
+        case 26:
+            ScTranslateBoolBranch(this, Instr, D3D10_SB_OPCODE_CALLC, 1);
+            break;
+        case 27:
+        case 38:
+            BeginLoop(Instr);
+            break;
+        case 28:
+        {
+            SB::CInstruction Return(D3D10_SB_OPCODE_RET);
+
+            /* A ret outside every block ends the main program */
+            if (!IfDepth)
+                WriteOutputs();
+            Asm->Add(Return);
+            break;
+        }
+        case 29:
+        case 39:
+            EndLoop(Instr.Opcode == 29);
+            break;
+        case 30:
+        {
+            SB::COperand Label(D3D10_SB_OPERAND_TYPE_LABEL, Instr.Src[0].Token & 0x7FF);
+            SB::CInstruction Start(D3D10_SB_OPCODE_LABEL, Label, D3D10_SB_INSTRUCTION_TEST_ZERO);
+
+            Asm->Add(Start);
+            break;
+        }
+        case 40:
+            IfDepth += 1;
+            ScTranslateBoolBranch(this, Instr, D3D10_SB_OPCODE_IF, 0);
+            break;
+        case 41:
+            IfDepth += 1;
+            ScTranslateCompareBranch(this, Instr, D3D10_SB_OPCODE_IF, ScMaskX);
+            break;
+        case 45:
+            ScTranslateCompareBranch(this, Instr, D3D10_SB_OPCODE_BREAKC, ScMaskAll);
+            break;
+        case 96:
+            ScTranslateBoolBranch(this, Instr, D3D10_SB_OPCODE_BREAKC, 0);
+            break;
+        case 46:
+        {
+            SB::COperandBase Dst;
+            SB::COperandBase Source;
+            SB::COperandBase Rounded = ScTempDst(0, ScMaskAll);
+            SB::COperandBase Read = ScTempOperand(0);
+
+            Instr.Destination(&Dst);
+            SourceOperand(&Source, Instr, 0, 0, 4);
+            ScEmit(Asm, D3D10_SB_OPCODE_ROUND_NE, 2, &Rounded, &Source);
+            ScResult(this, Instr, D3D10_SB_OPCODE_FTOI, Dst, &Read);
+            break;
+        }
+        case 94:
+        {
+            SB::COperandBase Dst;
+            SB::COperandBase Left;
+            SB::COperandBase Right;
+
+            Instr.Destination(&Dst);
+            SourceOperand(&Left, Instr, 0, 0, 4);
+            SourceOperand(&Right, Instr, 1, 0, 4);
+            ScCompare(this, (Instr.OpcodeToken >> 16) & 7, Dst, Left, Right);
+            break;
+        }
         case 78:
             ScTranslateExpPartial(this, Instr);
             break;

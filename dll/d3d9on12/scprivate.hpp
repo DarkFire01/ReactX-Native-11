@@ -200,8 +200,13 @@ public:
     const BYTE* OutputTemps;
     ScShader* Shader;
     BYTE InputTemps[16];
+    UINT LoopTemps[4];
+    /* Nesting of if, loop and rep blocks; ret below every block writes the outputs */
     BYTE IfDepth;
     BOOLEAN OutputsWritten;
+    /* Index into LoopTemps of the innermost loop, 0xFF outside every loop */
+    BYTE LoopDepth;
+    /* Next temp a loop or rep counter takes */
     UINT TempBase;
     BOOLEAN LastWasBreak;
 
@@ -289,6 +294,18 @@ public:
     /* Instruction translations */
     VOID TranslateMov(_In_ ScInstr& Instr);
     VOID TranslateBinary(_In_ ScInstr& Instr, _In_ D3D10_SB_OPCODE_TYPE Opcode);
+
+    const DWORD*
+    TranslateBreak(
+        _In_ const DWORD* Next);
+
+    VOID
+    BeginLoop(
+        _In_ ScInstr& Instr);
+
+    VOID
+    EndLoop(
+        _In_ BOOL Loop);
 };
 
 /* Emits one instruction through the writer */

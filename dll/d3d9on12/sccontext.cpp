@@ -572,10 +572,12 @@ ScContext::ScContext(
     Shader(Info),
     IfDepth(0),
     OutputsWritten(FALSE),
+    LoopDepth(0xFF),
     TempBase(0),
     LastWasBreak(FALSE)
 {
     ZeroMemory(InputTemps, sizeof(InputTemps));
+    ZeroMemory(LoopTemps, sizeof(LoopTemps));
 }
 
 VOID
