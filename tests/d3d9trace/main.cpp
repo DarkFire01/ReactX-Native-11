@@ -4573,6 +4573,164 @@ TrScenarioStatesSoftware(
     Plain->Release();
 }
 
+/* Prints a few states a block may touch, so captures and applies show in what the device reads back */
+static
+VOID
+TrPrintBlockState(
+    _In_z_ PCSTR Name,
+    _In_ IDirect3DDevice9* Device)
+{
+    DWORD Cull = 0xDEADBEEF;
+    DWORD Fog = 0xDEADBEEF;
+    DWORD Stage = 0xDEADBEEF;
+    DWORD Sampler = 0xDEADBEEF;
+    D3DMATRIX View;
+    D3DVIEWPORT9 Viewport = {};
+
+    Device->GetRenderState(D3DRS_CULLMODE, &Cull);
+    Device->GetRenderState(D3DRS_FOGCOLOR, &Fog);
+    Device->GetTextureStageState(1, D3DTSS_COLOROP, &Stage);
+    Device->GetSamplerState(2, D3DSAMP_MAGFILTER, &Sampler);
+    FillMemory(&View, sizeof(View), 0xCD);
+    Device->GetTransform(D3DTS_VIEW, &View);
+    Device->GetViewport(&Viewport);
+    TrCloseLine();
+    printf("api %s = cull %lu fog %08lX stage %lu sampler %lu view %08X viewport %lu %lu\n", Name, Cull, Fog, Stage,
+           Sampler, TrHash(&View, sizeof(View)), Viewport.X, Viewport.Width);
+}
+
+/* Sets the states the block checks look at */
+static
+VOID
+TrSetBlockState(
+    _In_ IDirect3DDevice9* Device,
+    _In_ DWORD Seed)
+{
+    D3DMATRIX View = {};
+    D3DVIEWPORT9 Viewport = { Seed, 0, 8 + Seed, 8, 0.0f, 1.0f };
+
+    View._11 = static_cast<FLOAT>(Seed);
+    TrApi("SetRenderState cull", Device->SetRenderState(D3DRS_CULLMODE, Seed % 3 + 1));
+    TrApi("SetRenderState fog", Device->SetRenderState(D3DRS_FOGCOLOR, 0x00101010 * Seed));
+    TrApi("SetTextureStageState", Device->SetTextureStageState(1, D3DTSS_COLOROP, Seed % 4 + 2));
+    TrApi("SetSamplerState", Device->SetSamplerState(2, D3DSAMP_MAGFILTER, Seed % 2 + 1));
+    TrApi("SetTransform", Device->SetTransform(D3DTS_VIEW, &View));
+    TrApi("SetViewport", Device->SetViewport(&Viewport));
+}
+
+/* Recorded, created, captured and applied state blocks of each type */
+static
+VOID
+TrStateBlockWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DSTATEBLOCKTYPE Types[] = { D3DSBT_ALL, D3DSBT_PIXELSTATE, D3DSBT_VERTEXSTATE };
+    IDirect3DStateBlock9* Recorded = nullptr;
+    IDirect3DStateBlock9* Nested = nullptr;
+    IDirect3DStateBlock9* Made = nullptr;
+    char Name[64];
+    DWORD Value = 0xDEADBEEF;
+    HRESULT hr;
+
+    TrPhase("blocks record");
+    TrApi("EndStateBlock idle", Device->EndStateBlock(&Nested));
+    TrApi("BeginStateBlock", Device->BeginStateBlock());
+    TrApi("BeginStateBlock again", Device->BeginStateBlock());
+    TrSetBlockState(Device, 1);
+    TrApi("SetRenderState retired", Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(30), 1));
+    TrApi("SetRenderState 300", Device->SetRenderState(static_cast<D3DRENDERSTATETYPE>(300), 1));
+    hr = Device->GetRenderState(D3DRS_CULLMODE, &Value);
+    TrApiValue("GetRenderState cull recording", hr, &Value);
+    TrApi("CreateStateBlock recording", Device->CreateStateBlock(D3DSBT_ALL, &Nested));
+    TrApi("EndStateBlock", Device->EndStateBlock(&Recorded));
+    TrPrintBlockState("state after record", Device);
+
+    TrPhase("blocks apply");
+    TrSetBlockState(Device, 2);
+    if (Recorded != nullptr)
+    {
+        TrApi("Apply recorded", Recorded->Apply());
+        TrPrintBlockState("state after apply", Device);
+        TrApi("Apply recorded again", Recorded->Apply());
+        TrSetBlockState(Device, 3);
+        TrApi("Capture recorded", Recorded->Capture());
+        TrSetBlockState(Device, 4);
+        TrApi("Apply captured", Recorded->Apply());
+        TrPrintBlockState("state after capture apply", Device);
+        TrApi("BeginStateBlock", Device->BeginStateBlock());
+        TrApi("Apply recording", Recorded->Apply());
+        TrApi("Capture recording", Recorded->Capture());
+        TrApi("EndStateBlock", Device->EndStateBlock(&Nested));
+        TrRelease(Nested);
+        Nested = nullptr;
+    }
+
+    for (D3DSTATEBLOCKTYPE Type : Types)
+    {
+        sprintf_s(Name, "blocks create %u", Type);
+        TrPhase(Name);
+        TrSetBlockState(Device, 5);
+        TrApi("CreateStateBlock", Device->CreateStateBlock(Type, &Made));
+        TrSetBlockState(Device, 6);
+        if (Made != nullptr)
+        {
+            TrApi("Apply", Made->Apply());
+            TrPrintBlockState("state after apply", Device);
+            TrSetBlockState(Device, 7);
+            TrApi("Capture", Made->Capture());
+            TrSetBlockState(Device, 8);
+            TrApi("Apply captured", Made->Apply());
+            TrPrintBlockState("state after capture apply", Device);
+            TrRelease(Made);
+            Made = nullptr;
+        }
+    }
+    TrApi("CreateStateBlock bad type", Device->CreateStateBlock(static_cast<D3DSTATEBLOCKTYPE>(4), &Made));
+    TrRelease(Made);
+    TrPhase("blocks release");
+    TrRelease(Recorded);
+}
+
+/* State blocks on a hardware vertex processing extended device and a pure device of the plain object */
+static
+VOID
+TrScenarioStateBlocks(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("blocks extended");
+    Made = Parameters;
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Made, nullptr, &DeviceEx));
+    if (DeviceEx != nullptr)
+    {
+        TrStateBlockWork(DeviceEx);
+        TrRelease(DeviceEx);
+    }
+    TrPhase("blocks plain");
+    Made = Parameters;
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window,
+                                              D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE, &Made,
+                                              &Device));
+    if (Device != nullptr)
+    {
+        TrStateBlockWork(Device);
+        TrRelease(Device);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -4601,6 +4759,7 @@ static const TrScenario TrScenarios[] =
     { "states", TrScenarioStates },
     { "states_plain", TrScenarioStatesPlain },
     { "states_software", TrScenarioStatesSoftware },
+    { "stateblocks", TrScenarioStateBlocks },
 };
 
 static
