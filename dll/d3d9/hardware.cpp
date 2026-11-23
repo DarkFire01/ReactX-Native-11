@@ -1960,6 +1960,14 @@ D9Device::DdiClipPlane(
 }
 
 VOID
+D9Device::DdiStreamSourceFreq(
+    _In_ const D3DDDIARG_SETSTREAMSOURCEFREQ* Args)
+{
+    if (!D9RecordCall(Batch, D9BatchCall::StreamSourceFreq, Args, sizeof(*Args)))
+        DeviceFunctions.pfnSetStreamSourceFreq(DriverDevice, Args);
+}
+
+VOID
 D9Device::DdiWInfo(
     _In_ const D3DDDIARG_WINFO* Args)
 {

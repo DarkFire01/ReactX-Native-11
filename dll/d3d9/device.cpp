@@ -212,6 +212,8 @@ D9Device::D9Device(
 D9Device::~D9Device()
 {
     UnbindTextures();
+    UnbindStreams();
+    delete[] Lights;
     StopBatch();
     delete AutoDepthStencil;
     delete ImplicitChain;
@@ -331,11 +333,10 @@ VOID
 D9Device::SendViewport(VOID)
 {
     const D3DPRESENT_PARAMETERS& Parameters = ImplicitChain->PresentParameters();
-    RECT Scissor;
 
     SendViewportRange();
-    SetRect(&Scissor, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
-    DdiScissorRect(&Scissor);
+    SetRect(&ScissorRect, 0, 0, Parameters.BackBufferWidth, Parameters.BackBufferHeight);
+    DdiScissorRect(&ScissorRect);
 }
 
 VOID
@@ -351,6 +352,13 @@ D9Device::SendViewportRange(VOID)
     Range.MaxZ = 1.0f;
     DdiViewport(&Viewport);
     DdiZRange(&Range);
+
+    CurrentViewport.X = 0;
+    CurrentViewport.Y = 0;
+    CurrentViewport.Width = Viewport.Width;
+    CurrentViewport.Height = Viewport.Height;
+    CurrentViewport.MinZ = Range.MinZ;
+    CurrentViewport.MaxZ = Range.MaxZ;
 }
 
 /* Fills the render state table with its defaults; the driver keeps what it was last sent */
@@ -405,6 +413,17 @@ D9Device::SetDefaultState(
         Types[D3DTSS_RESULTARG] = D3DTA_CURRENT;
         Types[D3DTSS_CONSTANT] = 0;
     }
+
+    for (D3DMATRIX& Matrix : Transforms)
+    {
+        ZeroMemory(&Matrix, sizeof(Matrix));
+        Matrix._11 = 1.0f;
+        Matrix._22 = 1.0f;
+        Matrix._33 = 1.0f;
+        Matrix._44 = 1.0f;
+    }
+    for (D9Stream& Stream : Streams)
+        Stream.Frequency = 1;
 
     /* The displacement map sampler starts unset unless the driver can sample one */
     for (UINT Slot = 0; Slot < D9TextureSlotCount; Slot++)
@@ -2225,119 +2244,6 @@ D9Device::EndScene()
 }
 
 STDMETHODIMP
-D9Device::SetTransform(
-    _In_ D3DTRANSFORMSTATETYPE State,
-    _In_opt_ const D3DMATRIX* Matrix)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetTransform(
-    _In_ D3DTRANSFORMSTATETYPE State,
-    _Out_ D3DMATRIX* Matrix)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::MultiplyTransform(
-    _In_ D3DTRANSFORMSTATETYPE State,
-    _In_opt_ const D3DMATRIX* Matrix)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetViewport(
-    _In_opt_ const D3DVIEWPORT9* Viewport)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetViewport(
-    _Out_ D3DVIEWPORT9* Viewport)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetMaterial(
-    _In_opt_ const D3DMATERIAL9* Material)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetMaterial(
-    _Out_ D3DMATERIAL9* Material)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetLight(
-    _In_ DWORD Index,
-    _In_opt_ const D3DLIGHT9* Light)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetLight(
-    _In_ DWORD Index,
-    _Out_ D3DLIGHT9* Light)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::LightEnable(
-    _In_ DWORD Index,
-    _In_ BOOL Enable)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetLightEnable(
-    _In_ DWORD Index,
-    _Out_ BOOL* Enable)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetClipPlane(
-    _In_ DWORD Index,
-    _In_opt_ const float* Plane)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetClipPlane(
-    _In_ DWORD Index,
-    _Out_ float* Plane)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::CreateStateBlock(
     _In_ D3DSTATEBLOCKTYPE Type,
     _Out_ IDirect3DStateBlock9** SB)
@@ -2356,22 +2262,6 @@ D9Device::BeginStateBlock()
 STDMETHODIMP
 D9Device::EndStateBlock(
     _In_ IDirect3DStateBlock9** SB)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetClipStatus(
-    _In_opt_ const D3DCLIPSTATUS9* ClipStatus)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetClipStatus(
-    _Out_ D3DCLIPSTATUS9* ClipStatus)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;
@@ -2417,52 +2307,6 @@ D9Device::GetCurrentTexturePalette(
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetScissorRect(
-    _In_opt_ const RECT* Rect)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetScissorRect(
-    _Out_ RECT* Rect)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetSoftwareVertexProcessing(
-    _In_ BOOL Software)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP_(BOOL)
-D9Device::GetSoftwareVertexProcessing()
-{
-    RX_UNIMPLEMENTED();
-    return 0;
-}
-
-STDMETHODIMP
-D9Device::SetNPatchMode(
-    _In_ FLOAT NSegments)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP_(float)
-D9Device::GetNPatchMode()
-{
-    RX_UNIMPLEMENTED();
-    return 0;
 }
 
 STDMETHODIMP
@@ -2553,22 +2397,6 @@ D9Device::GetVertexDeclaration(
 }
 
 STDMETHODIMP
-D9Device::SetFVF(
-    _In_ DWORD FVF)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetFVF(
-    _Out_ DWORD* FVF)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::CreateVertexShader(
     _In_opt_ const DWORD* Function,
     _Out_ IDirect3DVertexShader9** Shader)
@@ -2648,62 +2476,6 @@ D9Device::GetVertexShaderConstantB(
     _In_ UINT StartRegister,
     _Out_ BOOL* ConstantData,
     _In_ UINT BoolCount)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetStreamSource(
-    _In_ UINT StreamNumber,
-    _In_opt_ IDirect3DVertexBuffer9* StreamData,
-    _In_ UINT OffsetInBytes,
-    _In_ UINT Stride)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetStreamSource(
-    _In_ UINT StreamNumber,
-    _Out_ IDirect3DVertexBuffer9** StreamData,
-    _Out_ UINT* OffsetInBytes,
-    _Out_ UINT* Stride)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetStreamSourceFreq(
-    _In_ UINT StreamNumber,
-    _In_ UINT Setting)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetStreamSourceFreq(
-    _In_ UINT StreamNumber,
-    _Out_ UINT* Setting)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetIndices(
-    _In_opt_ IDirect3DIndexBuffer9* IndexData)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetIndices(
-    _Out_ IDirect3DIndexBuffer9** IndexData)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

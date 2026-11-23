@@ -362,6 +362,9 @@ D9Batch::Run(
         case D9BatchCall::WInfo:
             Funcs->pfnUpdateWInfo(Driver, reinterpret_cast<D3DDDIARG_WINFO*>(Args));
             break;
+        case D9BatchCall::StreamSourceFreq:
+            Funcs->pfnSetStreamSourceFreq(Driver, reinterpret_cast<D3DDDIARG_SETSTREAMSOURCEFREQ*>(Args));
+            break;
         case D9BatchCall::RenderTarget:
             Funcs->pfnSetRenderTarget(Driver, reinterpret_cast<D3DDDIARG_SETRENDERTARGET*>(Args));
             break;

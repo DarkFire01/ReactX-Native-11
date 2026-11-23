@@ -121,10 +121,14 @@ template <class Interface, class Description>
 STDMETHODIMP_(ULONG)
 D9Buffer<Interface, Description>::AddRef()
 {
-    return AddRefChild();
+    ULONG Count = AddRefChild();
+
+    if (Count == 1)
+        Orphaned = FALSE;
+    return Count;
 }
 
-/* The device outlives the buffer it destroys */
+/* The device outlives the buffer it destroys; a bound buffer waits for its binding to let go */
 template <class Interface, class Description>
 STDMETHODIMP_(ULONG)
 D9Buffer<Interface, Description>::Release()
@@ -134,10 +138,22 @@ D9Buffer<Interface, Description>::Release()
 
     if (Count == 0)
     {
-        delete this;
+        if (BindCount > 0)
+            Orphaned = TRUE;
+        else
+            delete this;
         Owner->Release();
     }
     return static_cast<ULONG>(Count);
+}
+
+template <class Interface, class Description>
+VOID
+D9Buffer<Interface, Description>::Unbind(VOID)
+{
+    BindCount -= 1;
+    if (BindCount == 0 && Orphaned)
+        delete this;
 }
 
 template <class Interface, class Description>

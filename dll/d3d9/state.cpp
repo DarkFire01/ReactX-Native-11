@@ -22,6 +22,9 @@ static const BYTE D9ShaderPipelineStates[] =
     137, 139, 140, 141, 142, 143, 145, 146, 147, 148, 151, 157, 158, 159, 160, 167, 170,
 };
 
+/* The retired render state that carries the N patch segment count */
+static constexpr UINT D9PatchSegmentsState = 164;
+
 /* Where the fixed function pixel shaders keep their values among the pixel constants: the texture factor,
    each stage's constant, the luminance scale and offset of two stages per register, and two registers of
    bump matrix per stage */
@@ -327,4 +330,638 @@ D9Device::SetSamplerState(
     }
     SendSamplerValue(Accepted, Type, Value);
     return S_OK;
+}
+
+/* Where a transform is kept, or -1 for a type the runtime does not keep */
+static
+INT
+D9TransformSlot(
+    _In_ DWORD Type)
+{
+    if (Type == D3DTS_VIEW)
+        return 0;
+    if (Type == D3DTS_PROJECTION)
+        return 1;
+    if (Type >= D3DTS_TEXTURE0 && Type <= D3DTS_TEXTURE7)
+        return 2 + static_cast<INT>(Type - D3DTS_TEXTURE0);
+    if (Type >= D3DTS_WORLDMATRIX(0) && Type <= D3DTS_WORLDMATRIX(255))
+        return 10 + static_cast<INT>(Type - D3DTS_WORLDMATRIX(0));
+    return -1;
+}
+
+/* Left times right, each sum taken in the order the system's own product takes it */
+static
+VOID
+D9MultiplyMatrices(
+    _Out_ D3DMATRIX* Result,
+    _In_ const D3DMATRIX* Left,
+    _In_ const D3DMATRIX* Right)
+{
+    for (UINT Row = 0; Row < 4; Row++)
+    {
+        for (UINT Column = 0; Column < 4; Column++)
+        {
+            FLOAT Sum = Left->m[Row][1] * Right->m[1][Column];
+
+            Sum += Left->m[Row][0] * Right->m[0][Column];
+            Sum += Left->m[Row][2] * Right->m[2][Column];
+            Sum += Left->m[Row][3] * Right->m[3][Column];
+            Result->m[Row][Column] = Sum;
+        }
+    }
+}
+
+/* The range of W the projection gives, which the driver needs for W buffering */
+VOID
+D9Device::SendWInfo(
+    _In_ const D3DMATRIX* Projection)
+{
+    D3DDDIARG_WINFO Info = {};
+    FLOAT ZScale = Projection->_33;
+    FLOAT WScale = Projection->_34;
+    FLOAT ZOffset = Projection->_43;
+    FLOAT WOffset = Projection->_44;
+
+    if (ZScale == WScale || ZScale == 0.0f)
+        return;
+    Info.WNear = WOffset - (ZOffset / ZScale) * WScale;
+    Info.WFar = ((WOffset - ZOffset) / (ZScale - WScale)) * WScale + WOffset;
+    DdiWInfo(&Info);
+}
+
+STDMETHODIMP
+D9Device::SetTransform(
+    _In_ D3DTRANSFORMSTATETYPE State,
+    _In_opt_ const D3DMATRIX* Matrix)
+{
+    D9_DEVICE_LOCK();
+    DWORD Type = D9Clamp(State, D3DTS_WORLDMATRIX(255));
+    INT Slot = D9TransformSlot(Type);
+
+    if (Matrix == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    /* Types the runtime does not keep are accepted and dropped */
+    if (Slot >= 0)
+        Transforms[Slot] = *Matrix;
+    if (Type == D3DTS_PROJECTION)
+        SendWInfo(Matrix);
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetTransform(
+    _In_ D3DTRANSFORMSTATETYPE State,
+    _Out_ D3DMATRIX* Matrix)
+{
+    D9_DEVICE_LOCK();
+    INT Slot = D9TransformSlot(State);
+
+    if (Slot < 0 || Matrix == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Matrix = Transforms[Slot];
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::MultiplyTransform(
+    _In_ D3DTRANSFORMSTATETYPE State,
+    _In_opt_ const D3DMATRIX* Matrix)
+{
+    D9_DEVICE_LOCK();
+    INT Slot = D9TransformSlot(State);
+    D3DMATRIX Product;
+
+    if (Slot < 0 || Matrix == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    /* The matrix given is applied before the one the device holds */
+    D9MultiplyMatrices(&Product, Matrix, &Transforms[Slot]);
+    Transforms[Slot] = Product;
+    if (State == D3DTS_PROJECTION)
+        SendWInfo(&Product);
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::SetViewport(
+    _In_opt_ const D3DVIEWPORT9* Viewport)
+{
+    D9_DEVICE_LOCK();
+    D3DDDIARG_VIEWPORTINFO Area = {};
+    D3DDDIARG_ZRANGE Range = {};
+    D3DVIEWPORT9* Kept = &CurrentViewport;
+
+    if (Viewport == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    /* A depth range thinner than a thousandth is widened away from the nearer end of the unit range */
+    *Kept = *Viewport;
+    if (!KeepsNoState() && Kept->MaxZ - Kept->MinZ < 0.001f)
+    {
+        if (Kept->MaxZ < 0.5f)
+            Kept->MaxZ = Kept->MinZ + 0.001f;
+        else
+            Kept->MinZ = Kept->MaxZ - 0.001f;
+    }
+
+    Area.X = Kept->X;
+    Area.Y = Kept->Y;
+    Area.Width = Kept->Width;
+    Area.Height = Kept->Height;
+    Range.MinZ = Kept->MinZ;
+    Range.MaxZ = Kept->MaxZ;
+    DdiViewport(&Area);
+    DdiZRange(&Range);
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetViewport(
+    _Out_ D3DVIEWPORT9* Viewport)
+{
+    D9_DEVICE_LOCK();
+
+    if (Viewport == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Viewport = CurrentViewport;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::SetScissorRect(
+    _In_opt_ const RECT* Rect)
+{
+    D9_DEVICE_LOCK();
+
+    if (Rect == nullptr)
+        return D3DERR_INVALIDCALL;
+    ScissorRect = *Rect;
+    DdiScissorRect(&ScissorRect);
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetScissorRect(
+    _Out_ RECT* Rect)
+{
+    D9_DEVICE_LOCK();
+
+    if (Rect == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Rect = ScissorRect;
+    return S_OK;
+}
+
+/* The fixed function vertex pipeline takes the material; the driver never sees it */
+STDMETHODIMP
+D9Device::SetMaterial(
+    _In_opt_ const D3DMATERIAL9* Material)
+{
+    D9_DEVICE_LOCK();
+
+    if (Material == nullptr)
+        return D3DERR_INVALIDCALL;
+    CurrentMaterial = *Material;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetMaterial(
+    _Out_ D3DMATERIAL9* Material)
+{
+    D9_DEVICE_LOCK();
+
+    if (Material == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Material = CurrentMaterial;
+    return S_OK;
+}
+
+/* A light the application has set, or null when the index never was */
+static
+D9Light*
+D9FindLight(
+    _In_reads_opt_(Capacity) D9Light* Lights,
+    _In_ UINT Capacity,
+    _In_ DWORD Index)
+{
+    if (Index >= Capacity || !Lights[Index].Made)
+        return nullptr;
+    return &Lights[Index];
+}
+
+STDMETHODIMP
+D9Device::SetLight(
+    _In_ DWORD Index,
+    _In_opt_ const D3DLIGHT9* Light)
+{
+    D9_DEVICE_LOCK();
+
+    if (Light == nullptr)
+        return D3DERR_INVALIDCALL;
+
+    /* The table grows past the index so that nearby lights fit without growing it again */
+    if (Index >= LightCapacity)
+    {
+        UINT Capacity = Index + 32;
+        D9Light* Grown;
+
+        if (Capacity < Index)
+            return E_OUTOFMEMORY;
+        Grown = new D9Light[Capacity];
+        if (Grown == nullptr)
+        {
+            D9Trace(L"SetLight: no memory for %u lights", Capacity);
+            return E_OUTOFMEMORY;
+        }
+        ZeroMemory(Grown, Capacity * sizeof(*Grown));
+        if (Lights != nullptr)
+            CopyMemory(Grown, Lights, LightCapacity * sizeof(*Lights));
+        delete[] Lights;
+        Lights = Grown;
+        LightCapacity = Capacity;
+    }
+
+    Lights[Index].Made = TRUE;
+    Lights[Index].Light = *Light;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetLight(
+    _In_ DWORD Index,
+    _Out_ D3DLIGHT9* Light)
+{
+    D9_DEVICE_LOCK();
+    const D9Light* Found = D9FindLight(Lights, LightCapacity, Index);
+
+    if (Found == nullptr || Light == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Light = Found->Light;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::LightEnable(
+    _In_ DWORD Index,
+    _In_ BOOL Enable)
+{
+    D9_DEVICE_LOCK();
+    D9Light* Found = D9FindLight(Lights, LightCapacity, Index);
+
+    /* Turning on a light never set gives it a white directional light pointing along Z first */
+    if (Found == nullptr)
+    {
+        D3DLIGHT9 White = {};
+        HRESULT hr;
+
+        White.Type = D3DLIGHT_DIRECTIONAL;
+        White.Diffuse.r = 1.0f;
+        White.Diffuse.g = 1.0f;
+        White.Diffuse.b = 1.0f;
+        White.Direction.z = 1.0f;
+        hr = SetLight(Index, &White);
+        if (FAILED(hr))
+            return hr;
+        Found = &Lights[Index];
+    }
+    Found->Enabled = Enable != FALSE;
+    return S_OK;
+}
+
+/* An enabled light reads back as the runtime's own flag for it rather than TRUE */
+STDMETHODIMP
+D9Device::GetLightEnable(
+    _In_ DWORD Index,
+    _Out_ BOOL* Enable)
+{
+    D9_DEVICE_LOCK();
+    static constexpr BOOL D9LightOnFlag = 0x80;
+    const D9Light* Found = D9FindLight(Lights, LightCapacity, Index);
+
+    if (Found == nullptr || Enable == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Enable = Found->Enabled ? D9LightOnFlag : 0;
+    return S_OK;
+}
+
+/* A clip plane reaches the driver more than once while the runtime's vertex shaders stand in for the fixed
+   function pipeline, and not at all while the runtime processes vertices itself */
+VOID
+D9Device::SendClipPlane(
+    _In_ UINT Index,
+    _In_ UINT Repeats)
+{
+    D3DDDIARG_SETCLIPPLANE Args = {};
+
+    if (SoftwareVertices)
+        return;
+    Args.Index = Index;
+    CopyMemory(Args.Plane, ClipPlanes[Index], sizeof(Args.Plane));
+    for (UINT Sent = 0; Sent < Repeats; Sent++)
+        DdiClipPlane(&Args);
+}
+
+/* Indices past the device's planes land on its last one */
+static
+UINT
+D9ClipPlaneSlot(
+    _In_ DWORD Index,
+    _In_ DWORD Planes)
+{
+    return D9Clamp(Index, Planes != 0 ? Planes - 1 : 0);
+}
+
+STDMETHODIMP
+D9Device::SetClipPlane(
+    _In_ DWORD Index,
+    _In_opt_ const float* Plane)
+{
+    D9_DEVICE_LOCK();
+    UINT Slot = D9ClipPlaneSlot(Index, Caps.MaxUserClipPlanes);
+
+    if (Plane == nullptr)
+        return D3DERR_INVALIDCALL;
+    /* A mixed device's driver sees the plane from both of the runtime's vertex pipelines */
+    CopyMemory(ClipPlanes[Slot], Plane, sizeof(ClipPlanes[Slot]));
+    SendClipPlane(Slot, (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0 ? 4 : 2);
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetClipPlane(
+    _In_ DWORD Index,
+    _Out_ float* Plane)
+{
+    D9_DEVICE_LOCK();
+    UINT Slot = D9ClipPlaneSlot(Index, Caps.MaxUserClipPlanes);
+
+    if (Plane == nullptr)
+        return D3DERR_INVALIDCALL;
+    CopyMemory(Plane, ClipPlanes[Slot], sizeof(ClipPlanes[Slot]));
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::SetClipStatus(
+    _In_opt_ const D3DCLIPSTATUS9* ClipStatus)
+{
+    D9_DEVICE_LOCK();
+
+    if (ClipStatus == nullptr)
+        return D3DERR_INVALIDCALL;
+    CurrentClipStatus = *ClipStatus;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetClipStatus(
+    _Out_ D3DCLIPSTATUS9* ClipStatus)
+{
+    D9_DEVICE_LOCK();
+
+    if (ClipStatus == nullptr)
+        return D3DERR_INVALIDCALL;
+    *ClipStatus = CurrentClipStatus;
+    return S_OK;
+}
+
+/* The segment count reaches the driver as the retired patch segments render state, every time */
+STDMETHODIMP
+D9Device::SetNPatchMode(
+    _In_ FLOAT NSegments)
+{
+    D9_DEVICE_LOCK();
+    D3DDDIARG_RENDERSTATE Args = {};
+
+    PatchSegments = NSegments;
+    Args.State = static_cast<D3DDDIRENDERSTATETYPE>(D9PatchSegmentsState);
+    CopyMemory(&Args.Value, &NSegments, sizeof(Args.Value));
+    DdiRenderState(&Args);
+    return S_OK;
+}
+
+STDMETHODIMP_(float)
+D9Device::GetNPatchMode()
+{
+    D9_DEVICE_LOCK();
+
+    return PatchSegments;
+}
+
+/* Back on the hardware pipeline the driver learns what the software pipeline kept from it */
+VOID
+D9Device::SwitchVertexProcessing(
+    _In_ BOOLEAN Software)
+{
+    SoftwareVertices = Software;
+    if (Software)
+        return;
+
+    if (FrequenciesPending)
+    {
+        for (UINT Stream = 0; Stream < Caps.MaxStreams; Stream++)
+            SendStreamFrequency(Stream);
+        FrequenciesPending = FALSE;
+    }
+    for (BYTE State : D9SoftwareOnlyStates)
+        SendStateValue(State, RenderStates[State]);
+    for (UINT Plane = 0; Plane < Caps.MaxUserClipPlanes; Plane++)
+        SendClipPlane(Plane, 2);
+}
+
+STDMETHODIMP
+D9Device::SetSoftwareVertexProcessing(
+    _In_ BOOL Software)
+{
+    D9_DEVICE_LOCK();
+
+    if ((BehaviorFlags & D3DCREATE_HARDWARE_VERTEXPROCESSING) != 0)
+        return Software ? D3DERR_INVALIDCALL : S_OK;
+    if ((BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) != 0)
+        return Software ? S_OK : D3DERR_INVALIDCALL;
+    if ((Software != FALSE) != (SoftwareVertices != FALSE))
+        SwitchVertexProcessing(Software != FALSE);
+    return S_OK;
+}
+
+STDMETHODIMP_(BOOL)
+D9Device::GetSoftwareVertexProcessing()
+{
+    D9_DEVICE_LOCK();
+
+    return SoftwareVertices;
+}
+
+/* The vertex declaration a format stands for is made when something draws with it */
+STDMETHODIMP
+D9Device::SetFVF(
+    _In_ DWORD FVF)
+{
+    D9_DEVICE_LOCK();
+
+    CurrentFvf = FVF;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetFVF(
+    _Out_ DWORD* FVF)
+{
+    D9_DEVICE_LOCK();
+
+    if (FVF == nullptr)
+        return D3DERR_INVALIDCALL;
+    *FVF = CurrentFvf;
+    return S_OK;
+}
+
+/* Buffers reach the driver when something draws from them */
+STDMETHODIMP
+D9Device::SetStreamSource(
+    _In_ UINT StreamNumber,
+    _In_opt_ IDirect3DVertexBuffer9* StreamData,
+    _In_ UINT OffsetInBytes,
+    _In_ UINT Stride)
+{
+    D9_DEVICE_LOCK();
+    D9Stream* Stream;
+
+    if (StreamNumber >= D9StreamCount)
+        return D3DERR_INVALIDCALL;
+
+    Stream = &Streams[StreamNumber];
+    if (Stream->Buffer == StreamData && Stream->Offset == OffsetInBytes && Stream->Stride == Stride)
+        return S_OK;
+
+    /* Taking a buffer away leaves the offset and stride it had */
+    if (StreamData != nullptr)
+    {
+        static_cast<D9VertexBuffer*>(StreamData)->Bind();
+        Stream->Offset = OffsetInBytes;
+        Stream->Stride = Stride;
+    }
+    if (Stream->Buffer != nullptr)
+        static_cast<D9VertexBuffer*>(Stream->Buffer)->Unbind();
+    Stream->Buffer = StreamData;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetStreamSource(
+    _In_ UINT StreamNumber,
+    _Out_ IDirect3DVertexBuffer9** StreamData,
+    _Out_ UINT* OffsetInBytes,
+    _Out_ UINT* Stride)
+{
+    D9_DEVICE_LOCK();
+    const D9Stream* Stream = &Streams[D9Clamp(StreamNumber, D9StreamCount - 1)];
+
+    if (StreamData == nullptr || OffsetInBytes == nullptr || Stride == nullptr)
+        return D3DERR_INVALIDCALL;
+    *StreamData = Stream->Buffer;
+    if (Stream->Buffer != nullptr)
+        Stream->Buffer->AddRef();
+    *OffsetInBytes = Stream->Offset;
+    *Stride = Stream->Stride;
+    return S_OK;
+}
+
+VOID
+D9Device::SendStreamFrequency(
+    _In_ UINT Stream)
+{
+    D3DDDIARG_SETSTREAMSOURCEFREQ Args = {};
+
+    Args.Stream = Stream;
+    Args.Divider = Streams[Stream].Frequency;
+    DdiStreamSourceFreq(&Args);
+}
+
+/* The software pipeline keeps frequencies to itself until the device goes back to hardware */
+STDMETHODIMP
+D9Device::SetStreamSourceFreq(
+    _In_ UINT StreamNumber,
+    _In_ UINT Setting)
+{
+    D9_DEVICE_LOCK();
+    static constexpr UINT Indexed = D3DSTREAMSOURCE_INDEXEDDATA;
+    static constexpr UINT Instanced = static_cast<UINT>(D3DSTREAMSOURCE_INSTANCEDATA);
+    UINT Stream = D9Clamp(StreamNumber, D9StreamCount - 1);
+    UINT Kind = Setting & (Indexed | Instanced);
+
+    if (Setting == 0 || Kind == (Indexed | Instanced) || (Kind == Instanced && Stream == 0))
+        return D3DERR_INVALIDCALL;
+
+    Streams[Stream].Frequency = Setting;
+    if (SoftwareVertices)
+    {
+        FrequenciesPending = TRUE;
+        return S_OK;
+    }
+    SendStreamFrequency(Stream);
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetStreamSourceFreq(
+    _In_ UINT StreamNumber,
+    _Out_ UINT* Setting)
+{
+    D9_DEVICE_LOCK();
+
+    if (Setting == nullptr)
+        return D3DERR_INVALIDCALL;
+    *Setting = Streams[D9Clamp(StreamNumber, D9StreamCount - 1)].Frequency;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::SetIndices(
+    _In_opt_ IDirect3DIndexBuffer9* IndexData)
+{
+    D9_DEVICE_LOCK();
+
+    if (Indices == IndexData)
+        return S_OK;
+    if (IndexData != nullptr)
+        static_cast<D9IndexBuffer*>(IndexData)->Bind();
+    if (Indices != nullptr)
+        static_cast<D9IndexBuffer*>(Indices)->Unbind();
+    Indices = IndexData;
+    return S_OK;
+}
+
+STDMETHODIMP
+D9Device::GetIndices(
+    _Out_ IDirect3DIndexBuffer9** IndexData)
+{
+    D9_DEVICE_LOCK();
+
+    if (IndexData == nullptr)
+        return D3DERR_INVALIDCALL;
+    *IndexData = Indices;
+    if (Indices != nullptr)
+        Indices->AddRef();
+    return S_OK;
+}
+
+/* Lets go of every bound vertex and index buffer, destroying those the application already released */
+VOID
+D9Device::UnbindStreams(VOID)
+{
+    IDirect3DIndexBuffer9* Bound = Indices;
+
+    for (D9Stream& Stream : Streams)
+    {
+        IDirect3DVertexBuffer9* Buffer = Stream.Buffer;
+
+        Stream.Buffer = nullptr;
+        if (Buffer != nullptr)
+            static_cast<D9VertexBuffer*>(Buffer)->Unbind();
+    }
+    Indices = nullptr;
+    if (Bound != nullptr)
+        static_cast<D9IndexBuffer*>(Bound)->Unbind();
 }

@@ -38,6 +38,29 @@ static constexpr UINT D9StageStateCount = 33;
 /* Sampler state types a device keeps per sampler */
 static constexpr UINT D9SamplerStateCount = 14;
 
+/* Transforms a device keeps: view, projection, eight texture transforms and 256 world matrices */
+static constexpr UINT D9TransformCount = 2 + 8 + 256;
+
+/* Vertex streams a device binds */
+static constexpr UINT D9StreamCount = 16;
+
+/* A light the application set, and whether it is on */
+struct D9Light
+{
+    BOOLEAN Made;
+    BOOLEAN Enabled;
+    D3DLIGHT9 Light;
+};
+
+/* One vertex stream: its buffer, where its vertices start, their size and how often they repeat */
+struct D9Stream
+{
+    IDirect3DVertexBuffer9* Buffer;
+    UINT Offset;
+    UINT Stride;
+    UINT Frequency;
+};
+
 /* How a resource takes part in sharing */
 enum class D9ShareMode : UINT
 {
@@ -129,6 +152,7 @@ enum class D9BatchCall : UINT
     ScissorRect,
     ClipPlane,
     WInfo,
+    StreamSourceFreq,
     RenderTarget,
     DepthStencil,
     Clear,
@@ -1126,6 +1150,16 @@ public:
     VOID
     Evict(VOID) override;
 
+    /* A stream or the index binding holds the buffer past its last release */
+    VOID
+    Bind(VOID)
+    {
+        BindCount += 1;
+    }
+
+    VOID
+    Unbind(VOID);
+
 private:
     BOOLEAN
     IsManaged() const
@@ -1163,6 +1197,9 @@ private:
     D9Resource* VideoResource = nullptr;
     UINT DirtyStart = 0;
     UINT DirtyEnd = 0;
+
+    LONG BindCount = 0;
+    BOOLEAN Orphaned = FALSE;
 };
 
 typedef D9Buffer<IDirect3DVertexBuffer9, D3DVERTEXBUFFER_DESC> D9VertexBuffer;
@@ -2308,6 +2345,26 @@ private:
         _In_ DWORD Value);
 
     VOID
+    SendWInfo(
+        _In_ const D3DMATRIX* Projection);
+
+    VOID
+    SendClipPlane(
+        _In_ UINT Index,
+        _In_ UINT Repeats);
+
+    VOID
+    SendStreamFrequency(
+        _In_ UINT Stream);
+
+    VOID
+    SwitchVertexProcessing(
+        _In_ BOOLEAN Software);
+
+    VOID
+    UnbindStreams(VOID);
+
+    VOID
     SendInitialState(VOID);
 
     HRESULT
@@ -2363,6 +2420,10 @@ private:
     VOID
     DdiClipPlane(
         _In_ const D3DDDIARG_SETCLIPPLANE* Args);
+
+    VOID
+    DdiStreamSourceFreq(
+        _In_ const D3DDDIARG_SETSTREAMSOURCEFREQ* Args);
 
     VOID
     DdiWInfo(
@@ -2539,6 +2600,27 @@ private:
 
     DWORD StageStates[D9StageCount][D9StageStateCount];
     DWORD SamplerStates[D9TextureSlotCount][D9SamplerStateCount];
+
+    /* Fixed function state the driver never sees directly */
+    D3DMATRIX Transforms[D9TransformCount];
+    D3DMATERIAL9 CurrentMaterial = {};
+    D9Light* Lights = nullptr;
+    UINT LightCapacity = 0;
+    FLOAT ClipPlanes[D3DMAXUSERCLIPPLANES][4] = {};
+    D3DCLIPSTATUS9 CurrentClipStatus = { 0, 0xFFFFFFFF };
+    FLOAT PatchSegments = 0.0f;
+
+    /* The viewport and scissor rectangle as last set, with any depth range fix the runtime made */
+    D3DVIEWPORT9 CurrentViewport = {};
+    RECT ScissorRect = {};
+
+    /* What vertices and indices come from */
+    DWORD CurrentFvf = 0;
+    D9Stream Streams[D9StreamCount] = {};
+    IDirect3DIndexBuffer9* Indices = nullptr;
+
+    /* Stream frequencies set while vertices went through the software pipeline, which the driver has not seen */
+    BOOLEAN FrequenciesPending = FALSE;
 
     /* Vertices go through the runtime's software pipeline; a mixed device switches this */
     BOOLEAN SoftwareVertices;
