@@ -152,10 +152,10 @@ NineFillDeviceFuncs(
     Functions->pfnBlt = NineBlt;
     Functions->pfnColorFill = NineColorFill;
     NINE_MISSING(pfnDepthFill, 57);
-    NINE_MISSING(pfnCreateQuery, 58);
-    NINE_MISSING(pfnDestroyQuery, 59);
-    NINE_MISSING(pfnIssueQuery, 60);
-    NINE_MISSING(pfnGetQueryData, 61);
+    Functions->pfnCreateQuery = NineCreateQuery;
+    Functions->pfnDestroyQuery = NineDestroyQuery;
+    Functions->pfnIssueQuery = NineIssueQuery;
+    Functions->pfnGetQueryData = NineGetQueryData;
     Functions->pfnSetRenderTarget = NineSetRenderTarget;
     Functions->pfnSetDepthStencil = NineSetDepthStencil;
     NINE_MISSING(pfnGenerateMipSubLevels, 64);

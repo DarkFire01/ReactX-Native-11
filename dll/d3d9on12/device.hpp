@@ -381,6 +381,31 @@ VOID
 NineUnbindOutputs(
     _Inout_ NineResource* Resource);
 
+/* query.cpp */
+HRESULT
+APIENTRY
+NineCreateQuery(
+    _In_ HANDLE hDevice,
+    _Inout_ D3DDDIARG_CREATEQUERY* Args);
+
+HRESULT
+APIENTRY
+NineDestroyQuery(
+    _In_ HANDLE hDevice,
+    _In_ HANDLE hQuery);
+
+HRESULT
+APIENTRY
+NineIssueQuery(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_ISSUEQUERY* Args);
+
+HRESULT
+APIENTRY
+NineGetQueryData(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_GETQUERYDATA* Args);
+
 /* interop.cpp */
 VOID
 APIENTRY

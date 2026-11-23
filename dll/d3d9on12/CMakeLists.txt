@@ -11,6 +11,7 @@ nt_add_usermode_dll(d3d9on12
         main.cpp
         output.cpp
         present.cpp
+        query.cpp
         resource.cpp
         settings.cpp
         share.cpp
