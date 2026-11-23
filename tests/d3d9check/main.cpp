@@ -1628,6 +1628,220 @@ NcCheckSurfaces(
     Plain->Release();
 }
 
+/* Nested locks, offsets against a whole lock, and bytes written through one lock and read through another */
+template <class Buffer>
+static
+VOID
+NcCheckBufferLocks(
+    _In_z_ PCSTR Name,
+    _In_ Buffer* Target)
+{
+    static const UINT Ranges[][2] = { { 0, 0 }, { 16, 0 }, { 16, 32 }, { 0, 64 }, { 200, 100 }, { 300, 0 } };
+    static const DWORD Flags[] =
+    {
+        0, D3DLOCK_READONLY, D3DLOCK_DISCARD, D3DLOCK_NOOVERWRITE, D3DLOCK_DISCARD | D3DLOCK_READONLY,
+        D3DLOCK_NOSYSLOCK, D3DLOCK_DONOTWAIT, 0x00000001, 0x00040000,
+    };
+    VOID* Whole = nullptr;
+    VOID* Data = nullptr;
+    VOID* Again = nullptr;
+    HRESULT hr;
+
+    hr = Target->Lock(0, 0, &Whole, 0);
+    printf("%s_lock = %08lX %s\n", Name, hr, Whole != nullptr ? "mem" : "nomem");
+    if (SUCCEEDED(hr))
+    {
+        static_cast<BYTE*>(Whole)[0] = 0x3C;
+        static_cast<BYTE*>(Whole)[20] = 0xC3;
+    }
+    hr = Target->Lock(0, 0, &Again, 0);
+    printf("%s_lock_nested = %08lX %s\n", Name, hr, Again == Whole ? "same" : "other");
+    printf("%s_unlock = %08lX\n", Name, Target->Unlock());
+    printf("%s_unlock_outer = %08lX\n", Name, Target->Unlock());
+
+    for (const auto& Range : Ranges)
+    {
+        Whole = nullptr;
+        if (SUCCEEDED(Target->Lock(0, 0, &Whole, D3DLOCK_READONLY)))
+            Target->Unlock();
+        Data = nullptr;
+        hr = Target->Lock(Range[0], Range[1], &Data, D3DLOCK_READONLY);
+        printf("%s_range(%u,%u) = %08lX offset %lld\n", Name, Range[0], Range[1], hr,
+               SUCCEEDED(hr) && Whole != nullptr && Data != nullptr
+                   ? static_cast<long long>(static_cast<BYTE*>(Data) - static_cast<BYTE*>(Whole)) : -1LL);
+        if (SUCCEEDED(hr))
+            Target->Unlock();
+    }
+    for (DWORD Flag : Flags)
+    {
+        Data = nullptr;
+        hr = Target->Lock(0, 16, &Data, Flag);
+        printf("%s_flags[%08lX] = %08lX %s\n", Name, Flag, hr, Data != nullptr ? "mem" : "nomem");
+        if (SUCCEEDED(hr))
+            Target->Unlock();
+    }
+
+    Data = nullptr;
+    hr = Target->Lock(16, 16, &Data, D3DLOCK_READONLY);
+    printf("%s_bytes = %08lX %02X\n", Name, hr, SUCCEEDED(hr) && Data != nullptr ? static_cast<BYTE*>(Data)[4] : 0);
+    if (SUCCEEDED(hr))
+        Target->Unlock();
+}
+
+/* Vertex and index buffer creation across pools, usages, formats and sizes, and their locks */
+static
+VOID
+NcCheckBuffersOn(
+    _In_z_ PCSTR Prefix,
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DPOOL Pools[] = { D3DPOOL_DEFAULT, D3DPOOL_MANAGED, D3DPOOL_SYSTEMMEM, D3DPOOL_SCRATCH,
+                                     static_cast<D3DPOOL>(4), static_cast<D3DPOOL>(6) };
+    static const DWORD Usages[] =
+    {
+        0, D3DUSAGE_RENDERTARGET, D3DUSAGE_DEPTHSTENCIL, D3DUSAGE_WRITEONLY, D3DUSAGE_SOFTWAREPROCESSING,
+        D3DUSAGE_DONOTCLIP, D3DUSAGE_POINTS, D3DUSAGE_RTPATCHES, D3DUSAGE_NPATCHES, D3DUSAGE_DYNAMIC,
+        D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DUSAGE_AUTOGENMIPMAP, D3DUSAGE_DMAP, D3DUSAGE_RESTRICTED_CONTENT,
+        D3DUSAGE_RESTRICT_SHARED_RESOURCE, D3DUSAGE_NONSECURE, D3DUSAGE_TEXTAPI, 0x00000004, 0x00400000,
+    };
+    static const struct
+    {
+        UINT Length;
+        DWORD Fvf;
+    } Sizes[] =
+    {
+        { 0, 0 }, { 1, 0 }, { 11, D3DFVF_XYZ }, { 12, D3DFVF_XYZ }, { 27, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 },
+        { 28, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 }, { 39, D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX2 },
+        { 40, D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX2 }, { 31, D3DFVF_XYZB4 | D3DFVF_LASTBETA_UBYTE4 },
+        { 15, D3DFVF_XYZW }, { 16, D3DFVF_XYZW }, { 23, D3DFVF_XYZ | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0) },
+        { 23, D3DFVF_XYZ | D3DFVF_PSIZE | D3DFVF_SPECULAR | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE1(0) },
+    };
+    static const D3DFORMAT IndexFormats[] =
+    {
+        D3DFMT_INDEX16, D3DFMT_INDEX32, D3DFMT_UNKNOWN, D3DFMT_VERTEXDATA, D3DFMT_A8R8G8B8, D3DFMT_L16,
+    };
+    IDirect3DVertexBuffer9* Vertex;
+    IDirect3DIndexBuffer9* Index;
+    char Name[96];
+    HRESULT hr;
+
+    for (D3DPOOL Pool : Pools)
+    {
+        for (DWORD Usage : Usages)
+        {
+            D3DVERTEXBUFFER_DESC VertexDesc = {};
+            D3DINDEXBUFFER_DESC IndexDesc = {};
+
+            Vertex = nullptr;
+            hr = Device->CreateVertexBuffer(64, Usage, 0, Pool, &Vertex, nullptr);
+            if (Vertex != nullptr)
+                Vertex->GetDesc(&VertexDesc);
+            printf("%s_vb[%u,%08lX] = %08lX fmt %u type %u usage %08lX pool %u size %u fvf %08lX rtype %u\n", Prefix,
+                   Pool, Usage, hr, VertexDesc.Format, VertexDesc.Type, VertexDesc.Usage, VertexDesc.Pool,
+                   VertexDesc.Size, VertexDesc.FVF, Vertex != nullptr ? Vertex->GetType() : 0);
+            if (Vertex != nullptr)
+                Vertex->Release();
+
+            Index = nullptr;
+            hr = Device->CreateIndexBuffer(64, Usage, D3DFMT_INDEX16, Pool, &Index, nullptr);
+            if (Index != nullptr)
+                Index->GetDesc(&IndexDesc);
+            printf("%s_ib[%u,%08lX] = %08lX fmt %u type %u usage %08lX pool %u size %u rtype %u\n", Prefix, Pool,
+                   Usage, hr, IndexDesc.Format, IndexDesc.Type, IndexDesc.Usage, IndexDesc.Pool, IndexDesc.Size,
+                   Index != nullptr ? Index->GetType() : 0);
+            if (Index != nullptr)
+                Index->Release();
+        }
+    }
+
+    for (const auto& Size : Sizes)
+    {
+        Vertex = nullptr;
+        hr = Device->CreateVertexBuffer(Size.Length, 0, Size.Fvf, D3DPOOL_DEFAULT, &Vertex, nullptr);
+        printf("%s_vb_size[%u,%08lX] = %08lX\n", Prefix, Size.Length, Size.Fvf, hr);
+        if (Vertex != nullptr)
+            Vertex->Release();
+    }
+    for (D3DFORMAT Format : IndexFormats)
+    {
+        for (UINT Length = 1; Length <= 5; Length++)
+        {
+            Index = nullptr;
+            hr = Device->CreateIndexBuffer(Length, 0, Format, D3DPOOL_DEFAULT, &Index, nullptr);
+            printf("%s_ib_format[%u,%u] = %08lX\n", Prefix, Format, Length, hr);
+            if (Index != nullptr)
+                Index->Release();
+        }
+    }
+
+    for (D3DPOOL Pool : Pools)
+    {
+        Vertex = nullptr;
+        if (SUCCEEDED(Device->CreateVertexBuffer(256, 0, 0, Pool, &Vertex, nullptr)))
+        {
+            sprintf_s(Name, "%s_vb_locks[%u]", Prefix, Pool);
+            NcCheckBufferLocks(Name, Vertex);
+            Vertex->Release();
+        }
+        Index = nullptr;
+        if (SUCCEEDED(Device->CreateIndexBuffer(256, 0, D3DFMT_INDEX32, Pool, &Index, nullptr)))
+        {
+            sprintf_s(Name, "%s_ib_locks[%u]", Prefix, Pool);
+            NcCheckBufferLocks(Name, Index);
+            Index->Release();
+        }
+    }
+}
+
+/* Buffers on an extended hardware device and on plain hardware, mixed and software devices */
+static
+VOID
+NcCheckBuffers(
+    _Inout_ NineCheck* Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        DWORD Behavior;
+    } PlainDevices[] =
+    {
+        { "buffers_hardware", D3DCREATE_HARDWARE_VERTEXPROCESSING },
+        { "buffers_mixed", D3DCREATE_MIXED_VERTEXPROCESSING },
+        { "buffers_software", D3DCREATE_SOFTWARE_VERTEXPROCESSING },
+    };
+    IDirect3D9* Plain = Check->Create(D3D_SDK_VERSION);
+    HWND Window = NcCreateWindow(TRUE);
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+    hr = Check->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Parameters,
+                                   nullptr, &DeviceEx);
+    printf("buffers_create_ex = %08lX\n", hr);
+    if (DeviceEx != nullptr)
+    {
+        NcCheckBuffersOn("buffers_ex", DeviceEx);
+        printf("buffers_ex_release = %lu\n", DeviceEx->Release());
+    }
+
+    for (const auto& Kind : PlainDevices)
+    {
+        IDirect3DDevice9* Device = nullptr;
+
+        hr = Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Kind.Behavior, &Parameters, &Device);
+        printf("%s_create = %08lX\n", Kind.Name, hr);
+        if (Device == nullptr)
+            continue;
+        NcCheckBuffersOn(Kind.Name, Device);
+        printf("%s_release = %lu\n", Kind.Name, Device->Release());
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 static const NineCheckInfo NcChecks[] =
 {
     { "exports", NcCheckExports },
@@ -1646,6 +1860,7 @@ static const NineCheckInfo NcChecks[] =
     { "device", NcCheckDevice },
     { "device_plain", NcCheckDevicePlain },
     { "surfaces", NcCheckSurfaces },
+    { "buffers", NcCheckBuffers },
 };
 
 static
