@@ -265,6 +265,14 @@ struct D9ConstantLimits
     UINT DriverVertexInts;
 };
 
+/* Where a batch remembers what is bound: targets, depth, streams, indices, then the sampler stages with the
+   displacement and vertex samplers after the pixel ones */
+static constexpr UINT D9BoundDepth = D9MaxRenderTargets;
+static constexpr UINT D9BoundStreams = D9BoundDepth + 1;
+static constexpr UINT D9BoundIndices = D9BoundStreams + 16;
+static constexpr UINT D9BoundTextures = D9BoundIndices + 1;
+static constexpr UINT D9BoundSlots = D9BoundTextures + 21;
+
 /* Slots of the table that remembers which batch last used a driver resource */
 static constexpr UINT D9BatchReferenceSlots = 0x1FFF;
 
@@ -343,6 +351,10 @@ public:
     WaitForWorker(VOID);
 
     VOID
+    Settle(
+        _In_ HANDLE Resource);
+
+    VOID
     DrawMemory(
         _In_ const D3DDDIARG_DRAWPRIMITIVE* Draw,
         _In_ UINT Stride,
@@ -408,8 +420,9 @@ private:
     UINT64 Generation = 0;
     BYTE References[D9BatchReferenceSlots] = {};
 
-    /* The bound targets every new generation uses again, the depth buffer last */
-    HANDLE Bound[D9MaxRenderTargets + 1] = {};
+    /* What stays bound for every new generation: the targets, the depth buffer, the streams, the indices and
+       the textures */
+    HANDLE Bound[D9BoundSlots] = {};
 };
 
 /* Data the application attaches to a resource under a GUID, copied or as an interface it holds */

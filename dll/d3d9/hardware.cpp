@@ -1346,12 +1346,7 @@ D9Device::DestroyDriverSurface(
 
     /* Only a resource the batch still uses waits for the batch to run; any other waits for the worker alone */
     if (Batch != nullptr)
-    {
-        if (Batch->IsReferenced(Resource->DriverResource))
-            Batch->Drain();
-        else
-            Batch->WaitForWorker();
-    }
+        Batch->Settle(Resource->DriverResource);
     DeviceFunctions.pfnDestroyResource(DriverDevice, Resource->DriverResource);
     Resource->DriverResource = NULL;
 }
@@ -1483,7 +1478,8 @@ D9Device::LockDriverResource(
         return S_OK;
     }
 
-    DrainBatch();
+    if (Batch != nullptr)
+        Batch->Settle(Args->hResource);
     hr = DeviceFunctions.pfnLock(DriverDevice, Args);
     if (FAILED(hr) && hr != D3DERR_WASSTILLDRAWING)
         D9Trace(L"UMD Lock failed 0x%08lX", hr);
@@ -1510,7 +1506,8 @@ D9Device::UnlockDriverResource(
     Unlock.hResource = Resource->DriverResource;
     Unlock.SubResourceIndex = Index;
     Unlock.Flags.NotifyOnly = Resource->Pool == D3DDDIPOOL_SYSTEMMEM;
-    DrainBatch();
+    if (Batch != nullptr)
+        Batch->Settle(Unlock.hResource);
     return DeviceFunctions.pfnUnlock(DriverDevice, &Unlock);
 }
 
@@ -1548,7 +1545,8 @@ D9Device::LockDriverBuffer(
     }
     *Asynchronous = FALSE;
 
-    DrainBatch();
+    if (Batch != nullptr)
+        Batch->Settle(Args.hResource);
     hr = DeviceFunctions.pfnLock(DriverDevice, &Args);
     if (FAILED(hr))
     {
@@ -2056,7 +2054,7 @@ D9Device::DdiTexture(
     D9TextureRecord Record = { Stage, Resource };
 
     if (Batch != nullptr)
-        Batch->Reference(Resource);
+        Batch->NoteBound(D9BoundTextures + (Stage < 256 ? Stage : Stage - 240), Resource);
     if (!D9RecordCall(Batch, D9BatchCall::Texture, &Record, sizeof(Record)))
         DeviceFunctions.pfnSetTexture(DriverDevice, Stage, Resource);
 }
@@ -2066,7 +2064,7 @@ D9Device::DdiStreamSource(
     _In_ const D3DDDIARG_SETSTREAMSOURCE* Args)
 {
     if (Batch != nullptr)
-        Batch->Reference(Args->hVertexBuffer);
+        Batch->NoteBound(D9BoundStreams + Args->Stream, Args->hVertexBuffer);
     if (!D9RecordCall(Batch, D9BatchCall::StreamSource, Args, sizeof(*Args)))
         DeviceFunctions.pfnSetStreamSource(DriverDevice, Args);
 }
@@ -2076,7 +2074,7 @@ D9Device::DdiIndices(
     _In_ const D3DDDIARG_SETINDICES* Args)
 {
     if (Batch != nullptr)
-        Batch->Reference(Args->hIndexBuffer);
+        Batch->NoteBound(D9BoundIndices, Args->hIndexBuffer);
     if (!D9RecordCall(Batch, D9BatchCall::Indices, Args, sizeof(*Args)))
         DeviceFunctions.pfnSetIndices(DriverDevice, Args);
 }
@@ -2194,7 +2192,7 @@ D9Device::DdiDepthStencil(
         DeviceFunctions.pfnSetDepthStencil(DriverDevice, Args);
         return;
     }
-    Batch->NoteBound(D9MaxRenderTargets, Args->hZBuffer);
+    Batch->NoteBound(D9BoundDepth, Args->hZBuffer);
 }
 
 /* A recorded clear keeps its rectangle count and then the rectangles after the arguments */

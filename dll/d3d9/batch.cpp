@@ -476,6 +476,7 @@ D9Batch::DrawMemory(
     D9BatchFill* Fill;
     VOID* Slot;
 
+    Bound[D9BoundStreams] = NULL;
     if (Count > D9FillDrawLimit)
     {
         RecordMemory(D9BatchCall::StreamSourceUm, Stride, Vertices);
@@ -523,6 +524,8 @@ D9Batch::DrawIndexedMemory(
     BYTE* Target;
     VOID* Slot;
 
+    Bound[D9BoundStreams] = NULL;
+    Bound[D9BoundIndices] = NULL;
     if (Draw->NumVertices > D9FillDrawLimit || Indices > D9FillDrawLimit)
     {
         RecordMemory(D9BatchCall::StreamSourceUm, Stride, Vertices);
@@ -579,7 +582,7 @@ D9Batch::DrawIndexedMemory(
     IndexFill->Used += IndexBytes;
 }
 
-/* A new generation starts with the bound targets already in use */
+/* A new generation starts with everything bound already in use */
 VOID
 D9Batch::Advance(VOID)
 {
@@ -606,6 +609,17 @@ D9Batch::IsReferenced(
     if (Last == static_cast<BYTE>(Generation))
         return TRUE;
     return Pending && Last == static_cast<BYTE>(Generation - 1);
+}
+
+/* Before the driver touches a resource itself, a batch that uses it runs; otherwise only the worker is waited on */
+VOID
+D9Batch::Settle(
+    _In_ HANDLE Resource)
+{
+    if (IsReferenced(Resource))
+        Drain();
+    else
+        WaitForWorker();
 }
 
 VOID
