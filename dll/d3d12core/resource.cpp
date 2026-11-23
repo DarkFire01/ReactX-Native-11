@@ -421,6 +421,54 @@ RxImplicitHeapFlags(
     return Flags | D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES;
 }
 
+/* Whether a resource may live in a heap of this type and these flags */
+static
+BOOLEAN
+RxResourceFitsHeap(
+    _In_ const RxDevice12& Device,
+    _In_ D3D12_HEAP_TYPE Type,
+    _In_ D3D12_HEAP_FLAGS HeapFlags,
+    _In_ const D3D12_RESOURCE_DESC1& Desc)
+{
+    BOOLEAN CrossAdapter = (HeapFlags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0;
+    BOOLEAN CpuHeap = Type == D3D12_HEAP_TYPE_UPLOAD || Type == D3D12_HEAP_TYPE_READBACK;
+    BOOLEAN TargetOrDepth = (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                           D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) != 0;
+
+    /* Cross adapter resources and heaps only come together */
+    if (CrossAdapter != ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER) != 0))
+        return FALSE;
+
+    if (Desc.Layout == D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE && !Device.HasStandardSwizzle() &&
+        (!CrossAdapter || (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+                                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) != 0))
+    {
+        return FALSE;
+    }
+
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+    {
+        if (CpuHeap && (Desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) != 0)
+        {
+            return FALSE;
+        }
+        return (HeapFlags & D3D12_HEAP_FLAG_DENY_BUFFERS) == 0;
+    }
+
+    /* CPU visible textures go through custom or GPU upload heaps instead */
+    if (CpuHeap)
+        return FALSE;
+    if (TargetOrDepth && (HeapFlags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES) != 0)
+        return FALSE;
+    if (!TargetOrDepth && (HeapFlags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES) != 0)
+        return FALSE;
+
+    /* Row major textures are for sharing across adapters */
+    return Desc.Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR ||
+           (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && CrossAdapter);
+}
+
 HRESULT
 RxResource::CreateCommitted(
     _In_ RxDevice12& Device,
@@ -453,6 +501,9 @@ RxResource::CreateCommitted(
     {
         return E_INVALIDARG;
     }
+
+    if (!RxResourceFitsHeap(Device, HeapProperties.Type, HeapFlags, Normal))
+        return E_INVALIDARG;
 
     hr = Device.CheckUsable();
     if (FAILED(hr))

@@ -355,6 +355,13 @@ public:
         return HighestShaderModel;
     }
 
+    /* 64KB standard swizzle textures without sharing across adapters */
+    BOOLEAN
+    HasStandardSwizzle() const
+    {
+        return TextureLayout.Supports64KStandardSwizzle != FALSE;
+    }
+
     BOOLEAN
     IsTileBased() const
     {
