@@ -3437,6 +3437,85 @@ DcCheckEnumSurfaces(
     Draw7->Release();
 }
 
+static
+HRESULT
+WINAPI
+DcEnumPitch(
+    _In_ LPDIRECTDRAWSURFACE7 Surface,
+    _In_ LPDDSURFACEDESC2 Desc,
+    _In_ LPVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+
+    printf("    enum caps=%08lX pitch=%ld refs=%lu\n", Desc->ddsCaps.dwCaps, Desc->lPitch, Surface->Release());
+    return DDENUMRET_OK;
+}
+
+static
+VOID
+DcPrimaryPitchCase(
+    _In_z_ PCSTR Name,
+    _In_ LPDIRECTDRAW7 Draw7,
+    _In_ LPDIRECTDRAWSURFACE7 Primary)
+{
+    DDSURFACEDESC2 Desc;
+    HRESULT hr;
+
+    printf("%s:\n", Name);
+    Draw7->EnumSurfaces(DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, nullptr, DcEnumPitch);
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    hr = Primary->GetSurfaceDesc(&Desc);
+    printf("  get_desc = %08lX pitch=%ld lost=%08lX\n", hr, Desc.lPitch, Primary->IsLost());
+    Draw7->EnumSurfaces(DDENUMSURFACES_ALL | DDENUMSURFACES_DOESEXIST, nullptr, nullptr, DcEnumPitch);
+}
+
+/* When the primary's pitch shows up, and what a mode restore and Restore do to it */
+static
+VOID
+DcCheckPrimaryPitch(
+    _Inout_ DrawCheck* Check)
+{
+    LPDIRECTDRAWSURFACE7 Primary = nullptr;
+    LPDIRECTDRAW7 Draw7;
+    LPDIRECTDRAW7 Other;
+    DDSURFACEDESC2 Desc;
+    HRESULT hr;
+
+    Draw7 = DcCreate7(Check);
+    if (Draw7 == nullptr)
+        return;
+    Draw7->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+    memset(&Desc, 0, sizeof(Desc));
+    Desc.dwSize = sizeof(Desc);
+    Desc.dwFlags = DDSD_CAPS;
+    Desc.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE;
+    hr = Draw7->CreateSurface(&Desc, &Primary, nullptr);
+    printf("primary = %08lX\n", hr);
+    if (FAILED(hr))
+    {
+        Draw7->Release();
+        return;
+    }
+    DcPrimaryPitchCase("fresh", Draw7, Primary);
+
+    /* A failed mode change still makes the release restore the registry mode */
+    Other = DcCreate7(Check);
+    if (Other != nullptr)
+    {
+        Other->SetCooperativeLevel(Check->Window, DDSCL_NORMAL);
+        printf("set_mode_bad = %08lX\n", Other->SetDisplayMode(1, 1, 7, 0, 0));
+        printf("release_other = %lu\n", Other->Release());
+        DcSettleDisplay();
+        DcPrimaryPitchCase("after_mode_restore", Draw7, Primary);
+    }
+    printf("restore = %08lX\n", Primary->Restore());
+    DcPrimaryPitchCase("after_restore", Draw7, Primary);
+    printf("release = %lu\n", Primary->Release());
+    Draw7->Release();
+    DcSettleDisplay();
+}
+
 /* DEPTHFILL and the other fills of Z buffers, read back where the buffer can be locked */
 static
 VOID
@@ -3798,6 +3877,7 @@ static const DrawCheckInfo DcChecks[] =
     { "blt_batch", DcCheckBltBatch },
     { "depth_fill", DcCheckDepthFill },
     { "enum_surfaces", DcCheckEnumSurfaces },
+    { "primary_pitch", DcCheckPrimaryPitch },
     { "color_keys", DcCheckColorKeys },
 };
 
