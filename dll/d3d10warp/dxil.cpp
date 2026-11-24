@@ -2081,7 +2081,8 @@ RxLowering::LowerCall(
     if (Code == OpCode::MakeDouble || Code == OpCode::SplitDouble ||
         (Call->getNumArgOperands() > 1 && RxIsWide(Call->getArgOperand(1)->getType()) && Code != OpCode::WaveActiveAllEqual &&
          Code != OpCode::WaveReadLaneAt && Code != OpCode::WaveReadLaneFirst && Code != OpCode::WaveActiveOp &&
-         Code != OpCode::WaveActiveBit && Code != OpCode::WavePrefixOp && Code != OpCode::QuadReadLaneAt && Code != OpCode::QuadOp))
+         Code != OpCode::WaveActiveBit && Code != OpCode::WavePrefixOp && Code != OpCode::QuadReadLaneAt && Code != OpCode::QuadOp &&
+         Code != OpCode::WaveMatch && Code != OpCode::WaveMultiPrefixOp))
     {
         return LowerWideCall(Call, Code);
     }
@@ -2265,6 +2266,9 @@ RxLowering::LowerCall(
         case OpCode::WavePrefixBitCount:
         case OpCode::QuadReadLaneAt:
         case OpCode::QuadOp:
+        case OpCode::WaveMatch:
+        case OpCode::WaveMultiPrefixOp:
+        case OpCode::WaveMultiPrefixBitCount:
             return LowerWave(Call, Code);
         default:
             /* Native 16 bit resource data has its own memory layout, not lowered yet */
@@ -2316,6 +2320,9 @@ RxLowering::LowerWave(
         case OpCode::WaveAllBitCount: Kind = RxWarpWaveCount; break;
         case OpCode::WavePrefixBitCount: Kind = RxWarpWavePrefixCount; break;
         case OpCode::QuadReadLaneAt: Kind = RxWarpWaveQuadRead; break;
+        case OpCode::WaveMatch: Kind = RxWarpWaveMatch; break;
+        case OpCode::WaveMultiPrefixOp: Kind = RxWarpWaveMultiPrefix; break;
+        case OpCode::WaveMultiPrefixBitCount: Kind = RxWarpWaveMultiCount; break;
         default: Kind = RxWarpWaveQuadSwap; break;
     }
 
@@ -2330,18 +2337,26 @@ RxLowering::LowerWave(
         if (Variant > 3 || (Kind == RxWarpWavePrefix && Variant > 1))
             return FALSE;
     }
-    if ((Kind == RxWarpWaveReduce || Kind == RxWarpWavePrefix) && Type != RxWarpWaveFloat)
+    if (Kind == RxWarpWaveMultiPrefix)
     {
-        llvm::ConstantInt *Signed = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(3));
+        llvm::ConstantInt *Operation = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(6));
+
+        if (Operation == nullptr || Operation->getZExtValue() > 4)
+            return FALSE;
+        Variant = (UINT)Operation->getZExtValue();
+    }
+    if ((Kind == RxWarpWaveReduce || Kind == RxWarpWavePrefix || Kind == RxWarpWaveMultiPrefix) && Type != RxWarpWaveFloat)
+    {
+        llvm::ConstantInt *Signed = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand((Kind == RxWarpWaveMultiPrefix) ? 7 : 3));
 
         if (Signed == nullptr)
             return FALSE;
         Type = (Signed->getZExtValue() == (UINT64)hlsl::DXIL::SignedOpKind::Signed) ? RxWarpWaveSigned : RxWarpWaveUnsigned;
     }
-    if (Kind == RxWarpWaveReadLane || Kind == RxWarpWaveQuadRead)
+    if (Kind == RxWarpWaveReadLane || Kind == RxWarpWaveQuadRead || Kind == RxWarpWaveMultiPrefix || Kind == RxWarpWaveMultiCount)
         Lane = Source(Call->getArgOperand(2));
 
-    if (Kind == RxWarpWaveBallot)
+    if (Kind == RxWarpWaveBallot || Kind == RxWarpWaveMatch)
         Target = Temp(ResultRegister(Call), RxMaskMode, 0xF);
     else
         Target = Dest(Call);

@@ -2181,6 +2181,16 @@ RxWarpMachine::Wave(
     FetchAll(Instruction.Operands[2], TRUE, Where);
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         Value[Lane] = Words[Lane][0] | (Wide ? ((UINT64)Words[Lane][1] << 32) : 0);
+
+    /* Reads of other lanes see zero from lanes that are not running */
+    if (Kind == RxWarpWaveReadLane || Kind == RxWarpWaveQuadRead || Kind == RxWarpWaveQuadSwap)
+    {
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        {
+            if (!(Active & Invocation->Live & (1u << Lane)))
+                Value[Lane] = 0;
+        }
+    }
     if (Lanes == 0)
         return;
     First = 0;
@@ -2301,8 +2311,52 @@ RxWarpMachine::Wave(
                 break;
             case RxWarpWaveReadLane:
             case RxWarpWaveQuadRead:
-                Scalar = Value[Where[Lane][0] & (RxWarpLanes - 1)];
+                /* A lane past the wave reads as zero */
+                Scalar = (Where[Lane][0] < RxWarpLanes) ? Value[Where[Lane][0]] : 0;
                 break;
+            case RxWarpWaveMatch:
+                for (UINT Other = 0; Other < RxWarpLanes; Other++)
+                {
+                    BOOLEAN Same = Value[Other] == Value[Lane];
+
+                    if (Type == RxWarpWaveFloat)
+                    {
+                        Same = RxWarpAsFloat((UINT)Value[Other]) == RxWarpAsFloat((UINT)Value[Lane]);
+                    }
+                    else if (Type == (RxWarpWaveFloat | RxWarpWaveWide))
+                    {
+                        double Left;
+                        double Right;
+
+                        memcpy(&Left, &Value[Other], sizeof(Left));
+                        memcpy(&Right, &Value[Lane], sizeof(Right));
+                        Same = Left == Right;
+                    }
+                    if ((Lanes & (1u << Other)) && Same)
+                        Scalar |= 1u << Other;
+                }
+                break;
+            case RxWarpWaveMultiPrefix:
+            case RxWarpWaveMultiCount:
+            {
+                static const UINT Codes[] = { 0, 4, 5, 6, 1 };
+                UINT Members = Lanes & Below & Where[Lane][0];
+                UINT Code = Codes[(Variant < ARRAYSIZE(Codes)) ? Variant : 0];
+
+                if (Kind == RxWarpWaveMultiCount)
+                {
+                    for (UINT Other = 0; Other < Lane; Other++)
+                        Scalar += ((Members & (1u << Other)) && Value[Other] != 0) ? 1 : 0;
+                    break;
+                }
+                Scalar = (Variant == 4) ? RxWarpWaveIdentity(1, Type) : (Variant == 1) ? UINT64_MAX : 0;
+                for (UINT Other = 0; Other < Lane; Other++)
+                {
+                    if (Members & (1u << Other))
+                        Scalar = RxWarpWaveCombine(Code, Type, Scalar, Value[Other]);
+                }
+                break;
+            }
             case RxWarpWaveReadFirst:
                 /* The reference's 64 bit form merges every running lane's bits instead of picking the first */
                 Scalar = Value[First];
@@ -2334,7 +2388,7 @@ RxWarpMachine::Wave(
         /* Scalars land in whichever component the destination masks, 64 bit ones as pairs; a ballot fills x to w */
         Out[0] = Out[2] = (UINT)Scalar;
         Out[1] = Out[3] = (Wide && Kind != RxWarpWaveAllEqual) ? (UINT)(Scalar >> 32) : (UINT)Scalar;
-        if (Kind == RxWarpWaveBallot)
+        if (Kind == RxWarpWaveBallot || Kind == RxWarpWaveMatch)
             Out[1] = Out[2] = Out[3] = 0;
     }
     Store(Instruction, 0, Result, FALSE);
