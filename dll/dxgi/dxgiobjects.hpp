@@ -253,6 +253,17 @@ public:
     UntrackSwapChain(
         _In_ RxSwapChain* SwapChain);
 
+    /* The DXGI_MWA flags a new swapchain made here starts with */
+    UINT
+    GetAssociationFlags() const
+    {
+        return AssociationFlags;
+    }
+
+    /* Alt+Enter: every swapchain of this factory leaves fullscreen if one is in it, else all enter */
+    VOID
+    ToggleFullscreen();
+
     /* The desktop window manager's fullscreen swapchain for one output */
     HRESULT
     STDMETHODCALLTYPE
@@ -288,4 +299,7 @@ private:
     /* Swapchains made here, so window association flags can reach them */
     SRWLOCK SwapChainLock = SRWLOCK_INIT;
     std::vector<RxSwapChain*> SwapChains;
+
+    /* Flags a MakeWindowAssociation for every window left for swapchains made later */
+    UINT AssociationFlags = 0;
 };

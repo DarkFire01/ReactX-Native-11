@@ -649,3 +649,134 @@ RxPresentBridge::CopyBufferRegions(
     To->Release();
     return S_OK;
 }
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::GetRemovedReason()
+{
+    return Device.GetDeviceRemovedReason();
+}
+
+/* The typeless family of a back buffer format; formats outside these families stand for themselves */
+static
+DXGI_FORMAT
+RxFormatFamily(
+    _In_ DXGI_FORMAT Format)
+{
+    switch (Format)
+    {
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+            return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            return DXGI_FORMAT_R16G16B16A16_TYPELESS;
+
+        default:
+            return Format;
+    }
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::BltToTarget(
+    _In_ IUnknown* Buffer,
+    _In_ IUnknown* Target,
+    _In_ const RECT* DestRect)
+{
+    static LONG Reports;
+    static LONG Described;
+    RxTexture2D* Source = RxUnwrap<RxTexture2D>(Buffer);
+    RxPresentTarget* Destination = RxUnwrap<RxPresentTarget>(Target);
+    D3D11_TEXTURE2D_DESC SourceDesc;
+    DXGI_DDI_ARG_BLT Blt = {};
+    LONG Count;
+    HRESULT hr;
+
+    if (Source == nullptr || Destination == nullptr || Destination->GetResource() == nullptr ||
+        Device.GetDxgiFuncs().pfnBlt == nullptr || IsRectEmpty(DestRect))
+    {
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    Source->GetDesc(&SourceDesc);
+
+    Blt.hDevice = (DXGI_DDI_HDEVICE)Device.GetDriverDevice().pDrvPrivate;
+    Blt.hDstResource = (DXGI_DDI_HRESOURCE)Destination->GetResource()->GetHandle().pDrvPrivate;
+    Blt.DstSubresource = 0;
+    Blt.DstLeft = (UINT)DestRect->left;
+    Blt.DstTop = (UINT)DestRect->top;
+    Blt.DstRight = (UINT)DestRect->right;
+    Blt.DstBottom = (UINT)DestRect->bottom;
+    Blt.hSrcResource = (DXGI_DDI_HRESOURCE)Source->GetDdiResource().GetHandle().pDrvPrivate;
+    Blt.SrcSubresource = 0;
+    Blt.Flags.Resolve = SourceDesc.SampleDesc.Count > 1;
+    Blt.Flags.Convert = RxFormatFamily(SourceDesc.Format) != RxFormatFamily(Destination->Record.Format);
+    Blt.Flags.Stretch = Blt.DstRight - Blt.DstLeft != SourceDesc.Width || Blt.DstBottom - Blt.DstTop != SourceDesc.Height;
+    Blt.Flags.Present = 1;
+    Blt.Rotate = DXGI_DDI_MODE_ROTATION_IDENTITY;
+
+    hr = Device.GetDxgiFuncs().pfnBlt(&Blt);
+    if (SUCCEEDED(hr))
+        hr = Device.TakeDriverError();
+    Device.FlushDriver(0);
+
+    if (SUCCEEDED(hr) && RxIsTraceEnabled() && InterlockedExchange(&Described, 1) == 0)
+    {
+        RxTrace(L"first UMD Blt to the DWM surface: %ux%u format %u to (%ld,%ld)-(%ld,%ld) format %u, flags %X",
+                SourceDesc.Width, SourceDesc.Height, SourceDesc.Format, DestRect->left, DestRect->top, DestRect->right,
+                DestRect->bottom, Destination->Record.Format, Blt.Flags.Value);
+    }
+
+    if (FAILED(hr) && RxIsTraceEnabled())
+    {
+        Count = InterlockedIncrement(&Reports);
+        if (Count <= 8 || (Count % 256) == 0)
+        {
+            RxTrace(L"UMD Blt to the DWM surface failed 0x%08lX (flags %X, format %u to %u, %ld so far)", hr,
+                    Blt.Flags.Value, SourceDesc.Format, Destination->Record.Format, Count);
+        }
+    }
+
+    return RxApiResult(hr);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxPresentBridge::GetTargetSize(
+    _In_ IUnknown* Target,
+    _Out_ UINT* Width,
+    _Out_ UINT* Height)
+{
+    RxPresentTarget* Opened = RxUnwrap<RxPresentTarget>(Target);
+
+    *Width = 0;
+    *Height = 0;
+    if (Opened == nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *Width = Opened->Record.Width;
+    *Height = Opened->Record.Height;
+    return S_OK;
+}
+
+BOOL
+STDMETHODCALLTYPE
+RxPresentBridge::IsBufferDcHeld(
+    _In_ IUnknown* Buffer)
+{
+    RxTexture2D* Texture = RxUnwrap<RxTexture2D>(Buffer);
+
+    return Texture != nullptr && Texture->GetDxgiSurface().IsDcHeld();
+}

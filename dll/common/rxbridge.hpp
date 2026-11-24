@@ -156,4 +156,38 @@ struct __declspec(uuid("3c8a5e71-94d2-4f06-b1e8-6d27a0c45f93")) IRxPresentDevice
         _In_reads_(Count) const RECT* Rects,
         _In_ UINT Count,
         _In_ POINT Offset) = 0;
+
+    /* The device's removal reason as GetDeviceRemovedReason reports it */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    GetRemovedReason() = 0;
+
+    /*
+     * Has the driver blt a buffer into a rectangle of a present target, resolving, converting
+     * and stretching as needed, then flushes so a compositor reading the target sees it.
+     */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    BltToTarget(
+        _In_ IUnknown* Buffer,
+        _In_ IUnknown* Target,
+        _In_ const RECT* DestRect) = 0;
+
+    /* The width and height a present target was opened with */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    GetTargetSize(
+        _In_ IUnknown* Target,
+        _Out_ UINT* Width,
+        _Out_ UINT* Height) = 0;
+
+    /* TRUE while a GDI DC from IDXGISurface1::GetDC on the buffer is not released */
+    virtual
+    BOOL
+    STDMETHODCALLTYPE
+    IsBufferDcHeld(
+        _In_ IUnknown* Buffer) = 0;
 };

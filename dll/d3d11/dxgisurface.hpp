@@ -175,6 +175,13 @@ public:
 
     ~RxDxgiSurface();
 
+    /* TRUE between GetDC and ReleaseDC */
+    BOOLEAN
+    IsDcHeld() const
+    {
+        return GdiDc != NULL;
+    }
+
 private:
     /* Copies the texture into the DIB behind the DC */
     HRESULT

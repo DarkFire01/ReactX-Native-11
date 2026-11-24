@@ -169,12 +169,7 @@ public:
     /* A CoreWindow swapchain renders to the window's HWND but answers for the CoreWindow */
     VOID
     AttachCoreWindow(
-        _In_ IUnknown* Owner)
-    {
-        Owner->AddRef();
-        CoreWindow = Owner;
-        SetPropW(Window, RxCoreWindowRootProperty, RxCoreWindowRootSwapChain);
-    }
+        _In_ IUnknown* Owner);
 
     IUnknown*
     GetCoreWindowIdentity() const
@@ -182,13 +177,14 @@ public:
         return CoreWindow;
     }
 
-    /* DXGI_MWA flags from the factory; they only matter once fullscreen exists */
+    /* DXGI_MWA flags from the factory; without NO_WINDOW_CHANGES the window's messages are watched */
     VOID
     SetWindowAssociation(
-        _In_ UINT Flags)
-    {
-        AssociationFlags = Flags;
-    }
+        _In_ UINT Flags);
+
+    /* Alt+Enter reached the window */
+    VOID
+    OnAltEnter();
 
 private:
     /* How DWM wants this window's frames: the order matches what the shared surface call reports */
@@ -217,6 +213,22 @@ private:
 
     VOID
     LeaveFullscreen();
+
+    /* Takes the window fullscreen on Target, or on the output holding it when Target is NULL */
+    HRESULT
+    EnterFullscreen(
+        _In_opt_ IDXGIOutput* Target);
+
+    /* Switches the output to the mode closest to Wanted when that is not the mode it shows */
+    HRESULT
+    ApplyTargetMode(
+        _In_ IDXGIOutput* Output,
+        _In_ const DXGI_MODE_DESC& Wanted);
+
+    /* Stretches the window over the whole output, above other windows */
+    VOID
+    CoverOutput(
+        _In_ IDXGIOutput* Output);
 
     VOID
     KeepPreviousFrame(
@@ -293,6 +305,13 @@ private:
     LONG_PTR WindowedStyle = 0;
     LONG_PTR WindowedExStyle = 0;
     RECT WindowedRect = {};
+
+    /* The display whose mode fullscreen changed, put back to its registry mode on leaving */
+    BOOLEAN IsModeChanged = FALSE;
+    WCHAR ModeDevice[CCHDEVICENAME] = {};
+
+    /* Watches the window's thread for Alt+Enter */
+    HHOOK WindowHook = NULL;
 
     HANDLE SharedSurface = NULL;
     IUnknown* RedirectionSurface = nullptr;

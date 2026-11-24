@@ -270,6 +270,37 @@ RxDwmSwapChain::GetDevice(
     return Device->QueryInterface(riid, ppDevice);
 }
 
+/* What a test present says about the output: the kernel knows whether someone else holds the source */
+static
+HRESULT
+RxCheckSourceOwnership(
+    _In_ RxDxgiOutput* Output)
+{
+    D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP Check = {};
+    NTSTATUS Status;
+
+    if (RxGetKmtThunks()->CheckVidPnExclusiveOwnership == nullptr)
+        return S_OK;
+
+    Check.hAdapter = Output->GetKernelAdapter();
+    Check.VidPnSourceId = Output->GetVidPnSourceId();
+    Status = RxGetKmtThunks()->CheckVidPnExclusiveOwnership(&Check);
+    switch (Status)
+    {
+        case STATUS_GRAPHICS_PRESENT_OCCLUDED:
+            return DXGI_STATUS_OCCLUDED;
+
+        case STATUS_GRAPHICS_PRESENT_MODE_CHANGED:
+            return DXGI_STATUS_MODE_CHANGED;
+
+        case STATUS_GRAPHICS_PRESENT_UNOCCLUDED:
+            return DXGI_STATUS_UNOCCLUDED;
+
+        default:
+            return RxHresultFromStatus(Status);
+    }
+}
+
 /* Flips buffer 0 onto the output, then moves the identities so buffer 0 is free to draw again */
 HRESULT
 STDMETHODCALLTYPE
@@ -286,7 +317,15 @@ RxDwmSwapChain::Present(
     if (!OwnsSource)
         return DXGI_STATUS_OCCLUDED;
     if (Flags & DXGI_PRESENT_TEST)
-        return S_OK;
+    {
+        static LONG LastTest;
+
+        /* Only changes are traced; the compositor asks often */
+        hr = RxCheckSourceOwnership(Output);
+        if (InterlockedExchange(&LastTest, hr) != hr)
+            RX_TRACE(L"test present on source %u: 0x%08lX", Output->GetVidPnSourceId(), hr);
+        return hr;
+    }
 
     /* Duplication clients get the frame before it is flipped away from buffer 0 */
     if (Output->HasDDAClient())

@@ -485,7 +485,41 @@ RxDxgiFactory::MakeWindowAssociation(
     }
     ReleaseSRWLockShared(&SwapChainLock);
 
+    /* Flags for every window also apply to swapchains made later, except on a legacy factory */
+    if (WindowHandle == NULL && !(CreationFlags & LegacyFactory))
+        AssociationFlags = Flags;
+
     return S_OK;
+}
+
+VOID
+RxDxgiFactory::ToggleFullscreen()
+{
+    std::vector<RxSwapChain*> Alive;
+    BOOL AnyFullscreen = FALSE;
+    BOOL Fullscreen;
+
+    /* A swapchain whose last reference is already gone is being destroyed and is skipped */
+    AcquireSRWLockShared(&SwapChainLock);
+    for (RxSwapChain* SwapChain : SwapChains)
+    {
+        if (SwapChain->AddRef() != 1)
+            Alive.push_back(SwapChain);
+    }
+    ReleaseSRWLockShared(&SwapChainLock);
+
+    for (RxSwapChain* SwapChain : Alive)
+    {
+        SwapChain->GetFullscreenState(&Fullscreen, nullptr);
+        AnyFullscreen |= Fullscreen;
+    }
+
+    RX_TRACE(L"Alt+Enter: %Iu swapchains %s fullscreen", Alive.size(), AnyFullscreen ? L"leave" : L"enter");
+    for (RxSwapChain* SwapChain : Alive)
+    {
+        SwapChain->SetFullscreenState(!AnyFullscreen, nullptr);
+        SwapChain->Release();
+    }
 }
 
 HRESULT

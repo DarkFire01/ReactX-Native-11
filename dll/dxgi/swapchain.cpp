@@ -72,6 +72,63 @@ RxUpdateSharedSurfaceRoutine(VOID)
     return Routine;
 }
 
+/* Window swapchains of the process, so the message hook can find the one a message is for */
+static SRWLOCK RxWindowSwapChainLock = SRWLOCK_INIT;
+static std::vector<RxSwapChain*> RxWindowSwapChains;
+
+/* Set in a key message's lParam while Alt is held */
+constexpr LPARAM RxAltDownBit = 1 << 29;
+
+/* The live swapchain for a window, referenced, or NULL */
+_Ret_maybenull_
+static
+RxSwapChain*
+RxFindWindowSwapChain(
+    _In_ HWND Window)
+{
+    RxSwapChain* Found = nullptr;
+
+    AcquireSRWLockShared(&RxWindowSwapChainLock);
+    for (RxSwapChain* SwapChain : RxWindowSwapChains)
+    {
+        if (SwapChain->GetWindow() == Window && SwapChain->AddRef() != 1)
+        {
+            Found = SwapChain;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&RxWindowSwapChainLock);
+
+    return Found;
+}
+
+/* WH_GETMESSAGE hook on a swapchain window's thread; Alt+Enter toggles fullscreen */
+static
+LRESULT
+CALLBACK
+RxSwapChainMessageHook(
+    _In_ int Code,
+    _In_ WPARAM wParam,
+    _In_ LPARAM lParam)
+{
+    const MSG* Message = reinterpret_cast<const MSG*>(lParam);
+    RxSwapChain* SwapChain;
+
+    if (Code >= 0 && Message != nullptr && Message->message == WM_SYSKEYDOWN && Message->wParam == VK_RETURN &&
+        (Message->lParam & RxAltDownBit) != 0)
+    {
+        SwapChain = RxFindWindowSwapChain(Message->hwnd);
+        if (SwapChain != nullptr)
+        {
+            SwapChain->OnAltEnter();
+            SwapChain->Release();
+            return 0;
+        }
+    }
+
+    return CallNextHookEx(NULL, Code, wParam, lParam);
+}
+
 static
 BOOLEAN
 RxIsFlipModel(
@@ -144,10 +201,26 @@ RxSwapChain::RxSwapChain(
         IsCrossAdapter = Caps.SupportCrossAdapterResource && !(IsSoftware && !Type.HybridDiscrete);
     }
     Factory.TrackSwapChain(this);
+
+    if (Window != NULL)
+    {
+        AcquireSRWLockExclusive(&RxWindowSwapChainLock);
+        RxWindowSwapChains.push_back(this);
+        ReleaseSRWLockExclusive(&RxWindowSwapChainLock);
+    }
 }
 
 RxSwapChain::~RxSwapChain()
 {
+    if (Window != NULL)
+    {
+        AcquireSRWLockExclusive(&RxWindowSwapChainLock);
+        std::erase(RxWindowSwapChains, this);
+        ReleaseSRWLockExclusive(&RxWindowSwapChainLock);
+    }
+    if (WindowHook != NULL)
+        UnhookWindowsHookEx(WindowHook);
+
     LeaveFullscreen();
     ReleaseBuffers();
     if (CompositionSurface != NULL)
@@ -256,8 +329,62 @@ RxSwapChain::Create(
         return hr;
     }
 
+    /* A window swapchain starts with what the factory was told for every window */
+    if (Window != NULL)
+        NewSwapChain->SetWindowAssociation(Factory.GetAssociationFlags());
+
     *SwapChain = NewSwapChain;
     return S_OK;
+}
+
+VOID
+RxSwapChain::AttachCoreWindow(
+    _In_ IUnknown* Owner)
+{
+    Owner->AddRef();
+    CoreWindow = Owner;
+    SetPropW(Window, RxCoreWindowRootProperty, RxCoreWindowRootSwapChain);
+
+    /* Only plain window swapchains watch their window */
+    if (WindowHook != NULL)
+    {
+        UnhookWindowsHookEx(WindowHook);
+        WindowHook = NULL;
+    }
+}
+
+VOID
+RxSwapChain::SetWindowAssociation(
+    _In_ UINT Flags)
+{
+    if (Window == NULL || CoreWindow != nullptr)
+        return;
+
+    if (Flags & DXGI_MWA_NO_WINDOW_CHANGES)
+    {
+        if (WindowHook != NULL)
+        {
+            UnhookWindowsHookEx(WindowHook);
+            WindowHook = NULL;
+        }
+    }
+    else if (WindowHook == NULL)
+    {
+        WindowHook = SetWindowsHookExW(WH_GETMESSAGE, RxSwapChainMessageHook, NULL,
+                                       GetWindowThreadProcessId(Window, nullptr));
+        if (WindowHook == NULL)
+            RX_TRACE(L"message hook for window %p failed (%lu)", Window, GetLastError());
+    }
+
+    AssociationFlags = Flags;
+}
+
+VOID
+RxSwapChain::OnAltEnter()
+{
+    /* A legacy factory ignores DXGI_MWA_NO_ALT_ENTER */
+    if ((Factory.GetCreationFlags() & RxDxgiFactory::LegacyFactory) || !(AssociationFlags & DXGI_MWA_NO_ALT_ENTER))
+        Factory.ToggleFullscreen();
 }
 
 HRESULT
@@ -459,11 +586,16 @@ HRESULT
 RxSwapChain::PresentByCopy(
     _In_ UINT SyncInterval)
 {
-    RxPresentContext* Context;
-    D3DKMT_PRESENT* Template;
+    static LONG Reports;
     Redirection Kind;
     UINT64 UpdateId;
+    RECT Client;
+    RECT Dest = {};
+    UINT SurfaceWidth;
+    UINT SurfaceHeight;
+    HRESULT UpdateHr;
     HRESULT hr;
+    LONG Count;
 
     if (RxGetPresentOverride() == RxPresentOverride::Gdi)
         return PresentGdi(SyncInterval);
@@ -475,52 +607,40 @@ RxSwapChain::PresentByCopy(
     if (Kind == Redirection::NotComposed || Kind == Redirection::GdiBlt)
         return PresentToWindow(SyncInterval);
 
-    /* The UMD may call back after this returns, so each present gets its own slot */
-    Context = &Contexts[NextContext];
-    NextContext = (NextContext + 1) % Contexts.size();
-    *Context = {};
-    Template = &Context->Template;
-
-    Context->SourceRect = { 0, 0, (LONG)Desc.Width, (LONG)Desc.Height };
-    Template->hWindow = Window;
-    Template->VidPnSourceId = D3DDDI_ID_UNINITIALIZED;
-    Template->SrcRect = Context->SourceRect;
-    Template->SubRectCnt = 1;
-    Template->pSrcSubRects = &Context->SourceRect;
-    Template->PresentCount = ++PresentCount;
-    Template->FlipInterval = D3DDDI_FLIPINTERVAL_ONE;
-    Template->Flags.Blt = 1;
-    Template->Flags.SrcRectValid = 1;
-    Template->Flags.PresentCountValid = 1;
-    Template->Flags.RedirectedBlt = 1;
-    Template->Flags.CrossAdapter = IsCrossAdapter;
-
-    /* The kernel copies into DWM's surface and tells DWM which frame it is */
-    Template->PresentHistoryToken.Model = D3DKMT_PM_REDIRECTED_BLT;
-    Template->PresentHistoryToken.Token.Blt.hPhysicalSurface = (ULONG64)(ULONG_PTR)SharedSurface;
-    Template->PresentHistoryToken.Token.Blt.EventId = UpdateId;
-    Template->PresentHistoryToken.Token.Blt.DirtyRegions.NumRects = 1;
-    Template->PresentHistoryToken.Token.Blt.DirtyRegions.Rects[0] = Context->SourceRect;
-
-    hr = Device->SubmitPresent(Buffers[0], RedirectionSurface, Context);
-    if (FAILED(hr))
-        RX_TRACE(L"present failed 0x%08lX", hr);
-
-    /* The kernel copied nothing because nothing of the window shows */
-    if (SUCCEEDED(hr) && Context->KernelStatus == STATUS_GRAPHICS_PRESENT_OCCLUDED)
-        hr = DXGI_STATUS_OCCLUDED;
-
-    /* DWM keeps showing the window's GDI contents until it hears the frame is in its surface */
-    if (hr == S_OK && Kind == Redirection::Surface && RxUpdateSharedSurfaceRoutine() != nullptr)
+    /* DWM's surface holds the client area from its corner, so the frame goes there, cut to the surface */
+    GetClientRect(Window, &Client);
+    hr = Device->GetTargetSize(RedirectionSurface, &SurfaceWidth, &SurfaceHeight);
+    if (SUCCEEDED(hr))
     {
-        HRESULT UpdateHr = RxUpdateSharedSurfaceRoutine()(Window, UpdateId, 0, NULL, &Context->SourceRect);
+        SetRect(&Dest, 0, 0, std::min<LONG>(Client.right - Client.left, (LONG)SurfaceWidth),
+                std::min<LONG>(Client.bottom - Client.top, (LONG)SurfaceHeight));
 
+        /* The device draws the frame in, as the kernel would not copy into a redirection surface */
+        hr = IsRectEmpty(&Dest) ? DXGI_STATUS_OCCLUDED : Device->BltToTarget(Buffers[0], RedirectionSurface, &Dest);
+    }
+
+    if (FAILED(hr) && RxIsTraceEnabled())
+    {
+        Count = InterlockedIncrement(&Reports);
+        if (Count <= 8 || (Count % 256) == 0)
+            RxTrace(L"blt into the DWM surface of window %p failed 0x%08lX (%ld so far)", Window, hr, Count);
+    }
+
+    /* DWM hears about every update it handed out, whether or not the frame made it in */
+    if (RxUpdateSharedSurfaceRoutine() != nullptr)
+    {
+        UpdateHr = RxUpdateSharedSurfaceRoutine()(Window, UpdateId, 0, NULL, &Dest);
         if (FAILED(UpdateHr))
             RX_TRACE(L"DWM did not take update %llu for window %p (0x%08lX)", UpdateId, Window, UpdateHr);
     }
 
-    /* The copy is queued behind the frame's rendering, so the frame slot is free again */
-    if (SUCCEEDED(hr) && LatencySemaphore != NULL)
+    if (FAILED(hr))
+        return hr;
+
+    PresentCount++;
+
+    /* The blt is queued behind the frame's rendering, so the frame slot is free again */
+    if (LatencySemaphore != NULL)
         ReleaseSemaphore(LatencySemaphore, 1, nullptr);
 
     return hr;
@@ -632,6 +752,8 @@ RxSwapChain::Present(
     _In_ UINT SyncInterval,
     _In_ UINT Flags)
 {
+    HRESULT hr;
+
     if (SyncInterval > RxMaximumSyncInterval)
         return DXGI_ERROR_INVALID_CALL;
 
@@ -651,8 +773,15 @@ RxSwapChain::Present(
         RX_TRACE(L"present %u", PresentCount + 1);
 
     if (UsesFlipPresent() && RxGetPresentOverride() == RxPresentOverride::None)
-        return PresentFlip(SyncInterval, Flags);
-    return PresentByCopy(SyncInterval);
+        hr = PresentFlip(SyncInterval, Flags);
+    else
+        hr = PresentByCopy(SyncInterval);
+
+    /* Once the device is lost every present says so, whatever the present itself returned */
+    if (FAILED(Device->GetRemovedReason()))
+        return DXGI_ERROR_DEVICE_REMOVED;
+
+    return hr;
 }
 
 HRESULT
@@ -682,12 +811,26 @@ RxSwapChain::SetFullscreenState(
     _In_ BOOL Fullscreen,
     _In_opt_ IDXGIOutput* pTarget)
 {
-    IDXGIOutput* Target = pTarget;
-    DXGI_OUTPUT_DESC OutputDesc;
-    RECT Area;
+    DXGI_ADAPTER_DESC AdapterDesc;
+    DXGI_OUTPUT_DESC Wanted;
+    DXGI_OUTPUT_DESC Current;
+    IDXGIAdapter* Adapter;
+    BOOLEAN IsSwitching = FALSE;
     HRESULT hr;
 
-    if (Window == NULL || CoreWindow != nullptr)
+    if (!Fullscreen && pTarget != nullptr)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* GDI must have given the back buffer's DC back */
+    if ((Desc.Flags & DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE) && !Buffers.empty() && Device->IsBufferDcHeld(Buffers[0]))
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* Stereo is never enabled here */
+    if (Desc.Stereo)
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+
+    /* Composition and CoreWindow swapchains have no fullscreen; waitable ones only on Direct3D 12 */
+    if (Window == NULL || CoreWindow != nullptr || (Desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
         return DXGI_ERROR_INVALID_CALL;
 
     if (!Fullscreen)
@@ -696,46 +839,240 @@ RxSwapChain::SetFullscreenState(
         return S_OK;
     }
 
-    /* The output shown on is the one asked for, else the one holding most of the window */
-    if (Target != nullptr)
-        Target->AddRef();
-    else if (FAILED(GetContainingOutput(&Target)))
-        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
-
-    hr = Target->GetDesc(&OutputDesc);
-    if (FAILED(hr))
+    /* Already fullscreen: only another output means anything */
+    if (FullscreenTarget != nullptr)
     {
-        Target->Release();
+        if (pTarget == nullptr || FAILED(pTarget->GetDesc(&Wanted)) || FAILED(FullscreenTarget->GetDesc(&Current)) ||
+            _wcsicmp(Wanted.DeviceName, Current.DeviceName) == 0)
+        {
+            return S_OK;
+        }
+        IsSwitching = TRUE;
+    }
+
+    /* An output has to be on the adapter the device renders with */
+    if (pTarget != nullptr)
+    {
+        hr = pTarget->GetParent(IID_PPV_ARGS(&Adapter));
+        if (FAILED(hr))
+            return hr;
+        hr = Adapter->GetDesc(&AdapterDesc);
+        Adapter->Release();
+        if (FAILED(hr))
+            return hr;
+        if (AdapterDesc.AdapterLuid.LowPart != AdapterLuid.LowPart ||
+            AdapterDesc.AdapterLuid.HighPart != AdapterLuid.HighPart)
+        {
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+
+    if (GetWindowLongPtrW(Window, GWL_STYLE) & WS_CHILD)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* A fullscreen window has to be the active one */
+    if (!SetForegroundWindow(Window))
+    {
+        RX_TRACE(L"window %p could not be brought to the foreground for fullscreen", Window);
         return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
     }
 
-    if (FullscreenTarget == nullptr)
+    if (IsSwitching)
+        LeaveFullscreen();
+
+    return EnterFullscreen(pTarget);
+}
+
+HRESULT
+RxSwapChain::EnterFullscreen(
+    _In_opt_ IDXGIOutput* Target)
+{
+    typedef VOID (WINAPI* PFN_RX_DISABLE_GHOSTING)(VOID);
+    PFN_RX_DISABLE_GHOSTING DisableGhosting;
+    DXGI_OUTPUT_DESC OutputDesc;
+    DXGI_MODE_DESC Wanted = {};
+    IDXGIOutput* Output;
+    HRESULT hr;
+
+    /* The output shown on is the one asked for, else the one holding most of the window */
+    if (Target != nullptr)
     {
-        WindowedStyle = GetWindowLongPtrW(Window, GWL_STYLE);
-        WindowedExStyle = GetWindowLongPtrW(Window, GWL_EXSTYLE);
-        GetWindowRect(Window, &WindowedRect);
+        Output = Target;
+        Output->AddRef();
     }
     else
     {
-        FullscreenTarget->Release();
+        hr = GetContainingOutput(&Output);
+        if (FAILED(hr))
+            return hr;
     }
 
-    FullscreenTarget = Target;
+    Wanted.Width = Desc.Width;
+    Wanted.Height = Desc.Height;
+    Wanted.RefreshRate = FullscreenDesc.RefreshRate;
+    Wanted.Format = Desc.Format;
+    Wanted.ScanlineOrdering = FullscreenDesc.ScanlineOrdering;
+    Wanted.Scaling = FullscreenDesc.Scaling;
+
+    hr = ApplyTargetMode(Output, Wanted);
+    if (FAILED(hr))
+    {
+        Output->Release();
+        return hr;
+    }
+
+    /* The window keeps its look to put back; caption, frame and edges go while it covers the output */
+    WindowedStyle = GetWindowLongPtrW(Window, GWL_STYLE);
+    WindowedExStyle = GetWindowLongPtrW(Window, GWL_EXSTYLE);
+    GetWindowRect(Window, &WindowedRect);
+    SetWindowLongPtrW(Window, GWL_STYLE,
+                      WindowedStyle & ~(LONG_PTR)(WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX |
+                                                   WS_MAXIMIZEBOX));
+    SetWindowLongPtrW(Window, GWL_EXSTYLE,
+                      WindowedExStyle & ~(LONG_PTR)(WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW | WS_EX_WINDOWEDGE |
+                                                     WS_EX_CLIENTEDGE | WS_EX_CONTEXTHELP));
+
+    FullscreenTarget = Output;
     FullscreenDesc.Windowed = FALSE;
 
-    Area = OutputDesc.DesktopCoordinates;
-    SetWindowLongPtrW(Window, GWL_STYLE, (WindowedStyle & ~(WS_OVERLAPPEDWINDOW | WS_DLGFRAME)) | WS_POPUP);
-    SetWindowLongPtrW(Window, GWL_EXSTYLE, WindowedExStyle | WS_EX_TOPMOST);
-    SetWindowPos(Window, HWND_TOPMOST, Area.left, Area.top, Area.right - Area.left, Area.bottom - Area.top,
-                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    /* A fullscreen window that stops pumping messages is not swapped for a ghost window */
+    DisableGhosting = reinterpret_cast<PFN_RX_DISABLE_GHOSTING>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "DisableProcessWindowsGhosting"));
+    if (DisableGhosting != nullptr)
+        DisableGhosting();
+
+    CoverOutput(Output);
+
+    if (RxIsTraceEnabled() && SUCCEEDED(Output->GetDesc(&OutputDesc)))
+    {
+        RxTrace(L"window %p entered fullscreen on %s (%ux%u buffers, mode %s)", Window, OutputDesc.DeviceName,
+                Desc.Width, Desc.Height, IsModeChanged ? L"changed" : L"kept");
+    }
     return S_OK;
+}
+
+HRESULT
+RxSwapChain::ApplyTargetMode(
+    _In_ IDXGIOutput* Output,
+    _In_ const DXGI_MODE_DESC& Wanted)
+{
+    DXGI_OUTPUT_DESC OutputDesc;
+    DXGI_MODE_DESC Asked = Wanted;
+    DXGI_MODE_DESC Found;
+    DEVMODEW Mode = {};
+    DWORD BitsPerPel;
+    DWORD Frequency;
+    DWORD Interlace;
+    LONG Result;
+    HRESULT hr;
+
+    hr = Output->GetDesc(&OutputDesc);
+    if (FAILED(hr))
+        return hr;
+
+    /* Without leave to switch modes the desktop resolution stays; only refresh and format are matched */
+    if (!(Desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH) && OutputDesc.AttachedToDesktop)
+    {
+        Asked.Width = OutputDesc.DesktopCoordinates.right - OutputDesc.DesktopCoordinates.left;
+        Asked.Height = OutputDesc.DesktopCoordinates.bottom - OutputDesc.DesktopCoordinates.top;
+    }
+
+    /* The window covers the output either way, so a mode list without a match keeps the desktop mode */
+    hr = Output->FindClosestMatchingMode(&Asked, &Found, Device);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"no fullscreen mode near %ux%u format %u on %s (0x%08lX), desktop mode kept", Asked.Width,
+                 Asked.Height, Asked.Format, OutputDesc.DeviceName, hr);
+        return S_OK;
+    }
+
+    Mode.dmSize = sizeof(Mode);
+    if (!EnumDisplaySettingsW(OutputDesc.DeviceName, ENUM_CURRENT_SETTINGS, &Mode))
+        return E_FAIL;
+
+    BitsPerPel = (Found.Format == DXGI_FORMAT_B5G6R5_UNORM || Found.Format == DXGI_FORMAT_B5G5R5A1_UNORM) ? 16 : 32;
+    Frequency = Found.RefreshRate.Denominator
+                    ? (DWORD)((double)Found.RefreshRate.Numerator / Found.RefreshRate.Denominator + 0.5)
+                    : 0;
+    Interlace = (Found.ScanlineOrdering != DXGI_MODE_SCANLINE_ORDER_PROGRESSIVE) ? DM_INTERLACED : 0;
+
+    if (Mode.dmPelsWidth == Found.Width && Mode.dmPelsHeight == Found.Height && Mode.dmBitsPerPel == BitsPerPel &&
+        Mode.dmDisplayFrequency == Frequency && (Mode.dmDisplayFlags & DM_INTERLACED) == Interlace)
+    {
+        return S_OK;
+    }
+
+    Mode.dmBitsPerPel = BitsPerPel;
+    Mode.dmPelsWidth = Found.Width;
+    Mode.dmPelsHeight = Found.Height;
+    Mode.dmDisplayFrequency = Frequency;
+    Mode.dmDisplayFlags = Interlace;
+    Mode.dmFields = (Mode.dmFields & DM_POSITION) | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFLAGS |
+                    DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION | DM_DISPLAYFIXEDOUTPUT;
+    Mode.dmDisplayFixedOutput = (Found.Scaling == DXGI_MODE_SCALING_CENTERED)    ? DMDFO_CENTER
+                                : (Found.Scaling == DXGI_MODE_SCALING_STRETCHED) ? DMDFO_STRETCH
+                                                                                 : DMDFO_DEFAULT;
+    Mode.dmDisplayOrientation = (OutputDesc.Rotation >= DXGI_MODE_ROTATION_IDENTITY &&
+                                 OutputDesc.Rotation <= DXGI_MODE_ROTATION_ROTATE270)
+                                    ? (DWORD)(OutputDesc.Rotation - DXGI_MODE_ROTATION_IDENTITY)
+                                    : DMDO_DEFAULT;
+    Mode.dmDeviceName[0] = UNICODE_NULL;
+
+    Result = ChangeDisplaySettingsExW(OutputDesc.DeviceName, &Mode, NULL, CDS_FULLSCREEN, nullptr);
+    RX_TRACE(L"fullscreen mode %ux%u %u Hz %u bpp on %s: %ld", Found.Width, Found.Height, Frequency, BitsPerPel,
+             OutputDesc.DeviceName, Result);
+    if (Result != DISP_CHANGE_SUCCESSFUL)
+        return E_FAIL;
+
+    IsModeChanged = TRUE;
+    wcscpy_s(ModeDevice, OutputDesc.DeviceName);
+    return S_OK;
+}
+
+VOID
+RxSwapChain::CoverOutput(
+    _In_ IDXGIOutput* Output)
+{
+    DXGI_OUTPUT_DESC OutputDesc;
+    DEVMODEW Mode = {};
+    RECT Area = {};
+
+    if (FAILED(Output->GetDesc(&OutputDesc)))
+        return;
+
+    /* The output's place in its current mode, which a mode change just set */
+    Mode.dmSize = sizeof(Mode);
+    if (EnumDisplaySettingsW(OutputDesc.DeviceName, ENUM_CURRENT_SETTINGS, &Mode))
+    {
+        SetRect(&Area, Mode.dmPosition.x, Mode.dmPosition.y, Mode.dmPosition.x + (int)Mode.dmPelsWidth,
+                Mode.dmPosition.y + (int)Mode.dmPelsHeight);
+    }
+    if (IsRectEmpty(&Area))
+        Area = OutputDesc.DesktopCoordinates;
+
+    SetWindowPos(Window, HWND_TOPMOST, Area.left, Area.top, Area.right - Area.left, Area.bottom - Area.top,
+                 SWP_FRAMECHANGED | SWP_NOACTIVATE);
+    SetWindowPos(Window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 VOID
 RxSwapChain::LeaveFullscreen()
 {
+    MONITORINFO Monitor = {};
+    HMONITOR Nearest;
+    LONG Width;
+    LONG Height;
+    LONG CenterX;
+    LONG CenterY;
+
     if (FullscreenTarget == nullptr)
         return;
+
+    if (IsModeChanged)
+    {
+        ChangeDisplaySettingsExW(ModeDevice, nullptr, NULL, CDS_FULLSCREEN | CDS_RESET, nullptr);
+        IsModeChanged = FALSE;
+    }
 
     FullscreenTarget->Release();
     FullscreenTarget = nullptr;
@@ -743,9 +1080,31 @@ RxSwapChain::LeaveFullscreen()
 
     SetWindowLongPtrW(Window, GWL_STYLE, WindowedStyle);
     SetWindowLongPtrW(Window, GWL_EXSTYLE, WindowedExStyle);
-    SetWindowPos(Window, (WindowedExStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_NOTOPMOST, WindowedRect.left,
-                 WindowedRect.top, WindowedRect.right - WindowedRect.left, WindowedRect.bottom - WindowedRect.top,
-                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+
+    /* A windowed place no longer on any display moves to the middle of the nearest one */
+    if (MonitorFromRect(&WindowedRect, MONITOR_DEFAULTTONULL) == NULL)
+    {
+        Nearest = MonitorFromRect(&WindowedRect, MONITOR_DEFAULTTONEAREST);
+        Monitor.cbSize = sizeof(Monitor);
+        if (Nearest != NULL && GetMonitorInfoW(Nearest, &Monitor))
+        {
+            Width = (WindowedRect.right - WindowedRect.left) / 2;
+            Height = (WindowedRect.bottom - WindowedRect.top) / 2;
+            CenterX = (Monitor.rcMonitor.left + Monitor.rcMonitor.right) / 2;
+            CenterY = (Monitor.rcMonitor.top + Monitor.rcMonitor.bottom) / 2;
+            SetRect(&WindowedRect, CenterX - Width, CenterY - Height, CenterX + Width, CenterY + Height);
+        }
+        else
+        {
+            SetRect(&WindowedRect, 0, 0, 320, 240);
+        }
+    }
+
+    /* A window that was topmost before stays in that band */
+    SetWindowPos(Window, HWND_NOTOPMOST, WindowedRect.left, WindowedRect.top, WindowedRect.right - WindowedRect.left,
+                 WindowedRect.bottom - WindowedRect.top,
+                 SWP_NOACTIVATE | ((WindowedExStyle & WS_EX_TOPMOST) ? SWP_NOZORDER : 0));
+    RX_TRACE(L"window %p left fullscreen", Window);
 }
 
 HRESULT
@@ -805,7 +1164,17 @@ RxSwapChain::ResizeBuffers(
 
     /* Every buffer reference the app took has to be gone first */
     if (!AreBuffersReleased())
+    {
+        if (RxIsTraceEnabled())
+        {
+            for (UINT Index = 0; Index < Buffers.size(); Index++)
+            {
+                Buffers[Index]->AddRef();
+                RxTrace(L"ResizeBuffers refused: buffer %u holds %lu references", Index, Buffers[Index]->Release());
+            }
+        }
         return DXGI_ERROR_INVALID_CALL;
+    }
 
     if (BufferCount != 0)
         Desc.BufferCount = BufferCount;
@@ -853,6 +1222,18 @@ RxSwapChain::GetContainingOutput(
     if (ppOutput == nullptr)
         return DXGI_ERROR_INVALID_CALL;
     *ppOutput = nullptr;
+
+    /* Fullscreen, the output is the one being covered */
+    if (FullscreenTarget != nullptr)
+    {
+        FullscreenTarget->AddRef();
+        *ppOutput = FullscreenTarget;
+        return S_OK;
+    }
+
+    /* A composition swapchain is not on any output */
+    if (Window == NULL)
+        return DXGI_ERROR_UNSUPPORTED;
 
     /* The output is the one on the device's adapter that shows most of the window */
     Monitor.cbSize = sizeof(Monitor);
@@ -1132,11 +1513,29 @@ RxSwapChain::ResizeTarget(
     _In_ const DXGI_MODE_DESC* pNewTargetParameters)
 {
     RECT Frame;
+    HRESULT hr;
 
     if (pNewTargetParameters == nullptr || Window == NULL ||
         (pNewTargetParameters->RefreshRate.Numerator != 0 && pNewTargetParameters->RefreshRate.Denominator == 0))
     {
         return DXGI_ERROR_INVALID_CALL;
+    }
+
+    /* Fullscreen, the target is the output: its mode follows and the window keeps covering it */
+    if (FullscreenTarget != nullptr)
+    {
+        hr = ApplyTargetMode(FullscreenTarget, *pNewTargetParameters);
+        if (FAILED(hr))
+            return hr;
+
+        FullscreenDesc.RefreshRate = pNewTargetParameters->RefreshRate;
+        FullscreenDesc.ScanlineOrdering = pNewTargetParameters->ScanlineOrdering;
+        FullscreenDesc.Scaling = pNewTargetParameters->Scaling;
+        CoverOutput(FullscreenTarget);
+        RX_TRACE(L"fullscreen target resized to %ux%u at %u/%u", pNewTargetParameters->Width,
+                 pNewTargetParameters->Height, pNewTargetParameters->RefreshRate.Numerator,
+                 pNewTargetParameters->RefreshRate.Denominator);
+        return S_OK;
     }
 
     /* Windowed, the target is the window: its client area takes the new size, its position stays */
