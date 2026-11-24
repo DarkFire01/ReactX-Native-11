@@ -1969,3 +1969,479 @@ RxDevice12::CreateDepthStencilView(
     Destination.ptr = DestDescriptor.ptr;
     Ddi().pfnCreateDepthStencilView(DriverDevice, &Args, Destination);
 }
+
+/* Render target views */
+
+static
+D3D12_RESOURCE_DIMENSION
+RxRtvResourceKind(
+    _In_ D3D12_RTV_DIMENSION Dimension)
+{
+    switch (Dimension)
+    {
+        case D3D12_RTV_DIMENSION_BUFFER:
+            return D3D12_RESOURCE_DIMENSION_BUFFER;
+        case D3D12_RTV_DIMENSION_TEXTURE1D:
+        case D3D12_RTV_DIMENSION_TEXTURE1DARRAY:
+            return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+        case D3D12_RTV_DIMENSION_TEXTURE2D:
+        case D3D12_RTV_DIMENSION_TEXTURE2DARRAY:
+        case D3D12_RTV_DIMENSION_TEXTURE2DMS:
+        case D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY:
+            return D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        case D3D12_RTV_DIMENSION_TEXTURE3D:
+            return D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        default:
+            return D3D12_RESOURCE_DIMENSION_UNKNOWN;
+    }
+}
+
+/* Render target formats the level promises, or leaves to the driver and the driver confirms */
+static
+BOOLEAN
+RxRenderable(
+    _In_ RxDevice12& Device,
+    _In_ DXGI_FORMAT Format)
+{
+    RxFormatRule12 Rule;
+
+    if (Format == DXGI_FORMAT_UNKNOWN)
+        return FALSE;
+
+    Rule = RxFormatCapRule12(Device.GetFeatureLevel(), Format, RxCapRenderTarget);
+    if (Rule == RxRuleRequired)
+        return TRUE;
+    if (Rule != RxRuleDriver)
+        return FALSE;
+    return (RxDriverFormatSupport(Device, Format) & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0;
+}
+
+/* Buffer render targets count bytes per element and hold at most a level dependent element count */
+static
+BOOLEAN
+RxCheckBufferRtv(
+    _In_ RxDevice12& Device,
+    _In_ BOOLEAN HasResource,
+    _In_ const RxViewTarget& Target,
+    _In_ const D3D12_RENDER_TARGET_VIEW_DESC& Desc,
+    _Inout_ UINT* Problems)
+{
+    const D3D_FEATURE_LEVEL Level = Device.GetFeatureLevel();
+    const RxFormatRule12 Rule = RxFormatCapRule12(Level, Desc.Format, RxCapBuffer);
+    const UINT MostElements = Level >= D3D_FEATURE_LEVEL_11_0 ? 0x4000 : 0x2000;
+    UINT Bytes;
+
+    if (Rule == RxRuleNone || Desc.Format == DXGI_FORMAT_UNKNOWN)
+        return FALSE;
+    if (Rule == RxRuleDriver && (RxDriverFormatSupport(Device, Desc.Format) & D3D12_FORMAT_SUPPORT1_BUFFER) == 0)
+        return FALSE;
+
+    if (RxFormatIsTypeless(Desc.Format))
+        *Problems += 1;
+
+    Bytes = RxFormatBits(Desc.Format) >> 3;
+    if (HasResource && Bytes != 0)
+    {
+        const UINT64 Limit = 0xFFFFFFFFu / Bytes;
+        const UINT64 First = Desc.Buffer.FirstElement;
+        const UINT Count = Desc.Buffer.NumElements;
+        UINT64 End = First + Count;
+
+        if (First > Limit || Bytes * First >= Target.Width || Count == 0 || End < Count || End > Limit ||
+            End * Bytes > Target.Width || Count > MostElements)
+        {
+            *Problems += 1;
+        }
+    }
+    return TRUE;
+}
+
+static
+UINT
+RxCheckTextureRtv(
+    _In_ RxDevice12& Device,
+    _In_ BOOLEAN HasResource,
+    _In_ const RxViewTarget& Target,
+    _In_ const D3D12_RENDER_TARGET_VIEW_DESC& Desc,
+    _Inout_ DXGI_FORMAT* ViewFormat)
+{
+    const D3D_FEATURE_LEVEL Level = Device.GetFeatureLevel();
+    UINT Problems = 0;
+
+    if (Target.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
+    {
+        if (!RxViewFormatFits(Target.Format, ViewFormat))
+            Problems += 1;
+        if (RxCapMissing(Level, *ViewFormat, RxCapTexture1D))
+            Problems += 1;
+        if (!HasResource)
+            return Problems;
+
+        if (Desc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE1DARRAY)
+        {
+            if (Desc.Texture1DArray.MipSlice >= Target.MipLevels ||
+                !RxWindowFits(Desc.Texture1DArray.FirstArraySlice, Desc.Texture1DArray.ArraySize, Target.ArraySize))
+            {
+                Problems += 1;
+            }
+        }
+        else if (Desc.Texture1D.MipSlice >= Target.MipLevels)
+        {
+            Problems += 1;
+        }
+        return Problems;
+    }
+
+    if (Target.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+    {
+        if (!RxViewFormatFits(Target.Format, ViewFormat))
+            Problems += 1;
+        if (RxCapMissing(Level, *ViewFormat, RxCapTexture3D))
+            Problems += 1;
+        if (HasResource)
+        {
+            UINT Depth = Desc.Texture3D.MipSlice < 32 ? Target.ArraySize >> Desc.Texture3D.MipSlice : 0;
+
+            if (Depth <= 1)
+                Depth = 1;
+            if (Desc.Texture3D.MipSlice >= Target.MipLevels ||
+                !RxWindowFits(Desc.Texture3D.FirstWSlice, Desc.Texture3D.WSize, Depth))
+            {
+                Problems += 1;
+            }
+        }
+        return Problems;
+    }
+
+    {
+        UINT Plane;
+
+        if (Desc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2D)
+            Plane = Desc.Texture2D.PlaneSlice;
+        else if (Desc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DARRAY)
+            Plane = Desc.Texture2DArray.PlaneSlice;
+        else
+            Plane = RxImpliedPlane(Target.Format, *ViewFormat);
+
+        if (RxFormatPlanarOrVideo(Target.Format))
+        {
+            if (!RxPlaneViewFits(Level, Target.Format, *ViewFormat, RxUsageRenderTarget, Plane))
+                Problems += 1;
+            else if ((Target.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
+                     RxCapMissing(Level, Target.Format, RxCapRenderTarget))
+                Problems += 1;
+        }
+        else
+        {
+            /* A typed resource viewed as another format has the driver asked about the resource's format */
+            if (RxFormatFullyTyped(Target.Format) && *ViewFormat != DXGI_FORMAT_UNKNOWN && *ViewFormat != Target.Format)
+                RxDriverFormatSupport(Device, Target.Format);
+
+            if (!RxViewFormatFits(Target.Format, ViewFormat))
+                Problems += 1;
+            if (Plane != 0)
+                Problems += 1;
+        }
+    }
+
+    if (RxCapMissing(Level, *ViewFormat, RxCapTexture2D))
+        Problems += 1;
+
+    if (HasResource)
+    {
+        switch (Desc.ViewDimension)
+        {
+            case D3D12_RTV_DIMENSION_TEXTURE2DARRAY:
+                if (Desc.Texture2DArray.MipSlice >= Target.MipLevels ||
+                    !RxWindowFits(Desc.Texture2DArray.FirstArraySlice, Desc.Texture2DArray.ArraySize, Target.ArraySize))
+                {
+                    Problems += 1;
+                }
+                break;
+            case D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY:
+                if (!RxWindowFits(Desc.Texture2DMSArray.FirstArraySlice, Desc.Texture2DMSArray.ArraySize,
+                                  Target.ArraySize))
+                {
+                    Problems += 1;
+                }
+                break;
+            case D3D12_RTV_DIMENSION_TEXTURE2D:
+                if (Desc.Texture2D.MipSlice >= Target.MipLevels)
+                    Problems += 1;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (Target.SampleCount > 1 && (Desc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2D ||
+                                   Desc.ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DARRAY))
+    {
+        Problems += 1;
+    }
+    return Problems;
+}
+
+static
+BOOLEAN
+RxRenderTargetViewValid(
+    _In_ RxDevice12& Device,
+    _In_opt_ RxResource* Resource,
+    _In_opt_ const D3D12_RENDER_TARGET_VIEW_DESC* pDesc)
+{
+    RxViewTarget Target = {};
+    DXGI_FORMAT ViewFormat = DXGI_FORMAT_UNKNOWN;
+    UINT Problems = 0;
+
+    if (Device.GetFeatureLevel() < D3D_FEATURE_LEVEL_9_1)
+        Problems += 1;
+
+    if (pDesc != nullptr && !RxViewFormatKnown(pDesc->Format))
+        return FALSE;
+
+    if (Resource != nullptr)
+    {
+        RxDescribeTarget(Resource, &Target);
+    }
+    else
+    {
+        if (pDesc == nullptr)
+            return FALSE;
+
+        Target.Dimension = RxRtvResourceKind(pDesc->ViewDimension);
+        if (Target.Dimension == D3D12_RESOURCE_DIMENSION_UNKNOWN)
+            return FALSE;
+        Target.ArraySize = 1;
+        Target.MipLevels = 1;
+        Target.Format = pDesc->Format;
+        Target.SampleCount = (pDesc->ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DMS ||
+                              pDesc->ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY) ? 2 : 1;
+        Target.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    }
+
+    if (pDesc != nullptr && RxRtvResourceKind(pDesc->ViewDimension) != Target.Dimension)
+        Problems += 1;
+
+    if (Target.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+    {
+        if (pDesc == nullptr)
+        {
+            Problems += 1;
+        }
+        else
+        {
+            if (!RxCheckBufferRtv(Device, Resource != nullptr, Target, *pDesc, &Problems))
+                return FALSE;
+            ViewFormat = pDesc->Format;
+        }
+    }
+    else if (pDesc == nullptr)
+    {
+        if (RxFormatIsTypeless(Target.Format))
+            Problems += 1;
+        else if (Target.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && RxFormatVideo(Target.Format))
+            Problems += 1;
+        ViewFormat = Target.Format;
+    }
+    else
+    {
+        ViewFormat = pDesc->Format;
+        Problems += RxCheckTextureRtv(Device, Resource != nullptr, Target, *pDesc, &ViewFormat);
+    }
+
+    if (!RxRenderable(Device, ViewFormat))
+        Problems += 1;
+    if ((Target.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0)
+        Problems += 1;
+
+    return Problems == 0;
+}
+
+/* The view a NULL desc stands for; buffers get a volume view that the checks then refuse */
+static
+VOID
+RxDefaultRtvDesc(
+    _In_opt_ RxResource* Resource,
+    _Out_ D3D12_RENDER_TARGET_VIEW_DESC* View)
+{
+    ZeroMemory(View, sizeof(*View));
+    if (Resource == nullptr)
+        return;
+
+    const D3D12_RESOURCE_DESC1& Desc = Resource->GetApiDesc();
+
+    View->Format = Desc.Format;
+    switch (Desc.Dimension)
+    {
+        case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+            View->ViewDimension = Desc.DepthOrArraySize > 1 ? D3D12_RTV_DIMENSION_TEXTURE1DARRAY
+                                                            : D3D12_RTV_DIMENSION_TEXTURE1D;
+            if (Desc.DepthOrArraySize > 1)
+                View->Texture1DArray.ArraySize = Desc.DepthOrArraySize;
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+            if (Desc.SampleDesc.Count > 1)
+            {
+                View->ViewDimension = Desc.DepthOrArraySize > 1 ? D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY
+                                                                : D3D12_RTV_DIMENSION_TEXTURE2DMS;
+                if (Desc.DepthOrArraySize > 1)
+                    View->Texture2DMSArray.ArraySize = Desc.DepthOrArraySize;
+            }
+            else
+            {
+                View->ViewDimension = Desc.DepthOrArraySize > 1 ? D3D12_RTV_DIMENSION_TEXTURE2DARRAY
+                                                                : D3D12_RTV_DIMENSION_TEXTURE2D;
+                if (Desc.DepthOrArraySize > 1)
+                    View->Texture2DArray.ArraySize = Desc.DepthOrArraySize;
+            }
+            break;
+        default:
+            View->ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+            View->Texture3D.WSize = Desc.DepthOrArraySize;
+            break;
+    }
+}
+
+static
+VOID
+RxResolveRtvDesc(
+    _In_opt_ RxResource* Resource,
+    _Inout_ D3D12_RENDER_TARGET_VIEW_DESC* View)
+{
+    if (Resource == nullptr)
+        return;
+
+    const D3D12_RESOURCE_DESC1& Desc = Resource->GetApiDesc();
+    const UINT Slices = Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Desc.DepthOrArraySize;
+
+    switch (View->ViewDimension)
+    {
+        case D3D12_RTV_DIMENSION_TEXTURE1DARRAY:
+        case D3D12_RTV_DIMENSION_TEXTURE2DARRAY:
+            if (View->Texture2DArray.ArraySize == (UINT)-1)
+                View->Texture2DArray.ArraySize = Slices - View->Texture2DArray.FirstArraySlice;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY:
+            if (View->Texture2DMSArray.ArraySize == (UINT)-1)
+                View->Texture2DMSArray.ArraySize = Slices - View->Texture2DMSArray.FirstArraySlice;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE3D:
+            if (View->Texture3D.WSize == (UINT)-1)
+            {
+                UINT Depth = (UINT)Desc.DepthOrArraySize >> View->Texture3D.MipSlice;
+
+                if (Depth <= 1)
+                    Depth = 1;
+                View->Texture3D.WSize = Depth - View->Texture3D.FirstWSlice;
+            }
+            break;
+        default:
+            break;
+    }
+
+    if (View->ViewDimension != D3D12_RTV_DIMENSION_BUFFER && View->Format == DXGI_FORMAT_UNKNOWN)
+        View->Format = Desc.Format;
+}
+
+static
+VOID
+RxBuildDdiRtv(
+    _In_opt_ RxResource* Resource,
+    _In_ const D3D12_RENDER_TARGET_VIEW_DESC& View,
+    _Out_ D3D12DDIARG_CREATE_RENDER_TARGET_VIEW_0002* Args)
+{
+    ZeroMemory(Args, sizeof(*Args));
+    Args->hDrvResource = Resource != nullptr ? Resource->GetDriverHandle() : D3D12DDI_HRESOURCE{};
+    Args->Format = View.Format;
+
+    switch (View.ViewDimension)
+    {
+        case D3D12_RTV_DIMENSION_BUFFER:
+            Args->ResourceDimension = D3D12DDI_RD_BUFFER;
+            Args->Buffer.FirstElement = View.Buffer.FirstElement;
+            Args->Buffer.NumElements = View.Buffer.NumElements;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE1D:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE1D;
+            Args->Tex1D.MipSlice = View.Texture1D.MipSlice;
+            Args->Tex1D.ArraySize = 1;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE1DARRAY:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE1D;
+            Args->Tex1D.MipSlice = View.Texture1DArray.MipSlice;
+            Args->Tex1D.FirstArraySlice = View.Texture1DArray.FirstArraySlice;
+            Args->Tex1D.ArraySize = View.Texture1DArray.ArraySize;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE2D:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+            Args->Tex2D.MipSlice = View.Texture2D.MipSlice;
+            Args->Tex2D.ArraySize = 1;
+            Args->Tex2D.PlaneSlice = View.Texture2D.PlaneSlice;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE2DARRAY:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+            Args->Tex2D.MipSlice = View.Texture2DArray.MipSlice;
+            Args->Tex2D.FirstArraySlice = View.Texture2DArray.FirstArraySlice;
+            Args->Tex2D.ArraySize = View.Texture2DArray.ArraySize;
+            Args->Tex2D.PlaneSlice = View.Texture2DArray.PlaneSlice;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE2DMS:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+            Args->Tex2D.ArraySize = 1;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+            Args->Tex2D.FirstArraySlice = View.Texture2DMSArray.FirstArraySlice;
+            Args->Tex2D.ArraySize = View.Texture2DMSArray.ArraySize;
+            break;
+        case D3D12_RTV_DIMENSION_TEXTURE3D:
+            Args->ResourceDimension = D3D12DDI_RD_TEXTURE3D;
+            Args->Tex3D.MipSlice = View.Texture3D.MipSlice;
+            Args->Tex3D.FirstW = View.Texture3D.FirstWSlice;
+            Args->Tex3D.WSize = View.Texture3D.WSize;
+            break;
+        default:
+            break;
+    }
+}
+
+VOID
+STDMETHODCALLTYPE
+RxDevice12::CreateRenderTargetView(
+    _In_opt_ ID3D12Resource* pResource,
+    _In_opt_ const D3D12_RENDER_TARGET_VIEW_DESC* pDesc,
+    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+    RxResource* Resource = RxUnwrap12<RxResource>(pResource);
+    RxRtvEntry* Entry = reinterpret_cast<RxRtvEntry*>(DestDescriptor.ptr);
+    D3D12_RENDER_TARGET_VIEW_DESC View;
+    D3D12DDIARG_CREATE_RENDER_TARGET_VIEW_0002 Args;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination = {};
+
+    if (pDesc != nullptr)
+    {
+        View = *pDesc;
+        RxResolveRtvDesc(Resource, &View);
+    }
+    else
+    {
+        RxDefaultRtvDesc(Resource, &View);
+    }
+
+    if (!RxRenderTargetViewValid(*this, Resource, pDesc))
+    {
+        RemoveOnBadView();
+        return;
+    }
+
+    /* The slot remembers the resource so command lists can find what the view names */
+    if (Entry != nullptr)
+    {
+        Entry->Resource = Resource;
+        Entry->Reserved = nullptr;
+        Destination.ptr = Entry->DriverHandle;
+    }
+
+    RxBuildDdiRtv(Resource, View, &Args);
+    Ddi().pfnCreateRenderTargetView(DriverDevice, &Args, Destination);
+}
