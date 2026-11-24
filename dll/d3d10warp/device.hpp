@@ -355,6 +355,26 @@ RxWarpBindUavs(
     _In_reads_opt_(Count) const UINT *InitialCounts);
 
 /* DDI entry points, grouped by the file that implements them */
+/* The resolve modes the Direct3D 12 resolve region takes, numbered like it */
+static constexpr UINT RxWarpResolveMinimum = 1;
+static constexpr UINT RxWarpResolveMaximum = 2;
+static constexpr UINT RxWarpResolveAverage = 3;
+
+VOID
+RxWarpResolveRegion(
+    _Inout_ RxWarpResource *To,
+    _In_ UINT ToIndex,
+    _In_ UINT ToX,
+    _In_ UINT ToY,
+    _In_ RxWarpResource *From,
+    _In_ UINT FromIndex,
+    _In_ UINT FromX,
+    _In_ UINT FromY,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ DXGI_FORMAT Format,
+    _In_ UINT Mode);
+
 namespace RxWarpDdi
 {
     /* resource.cpp */

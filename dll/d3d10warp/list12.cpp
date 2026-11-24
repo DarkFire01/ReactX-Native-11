@@ -507,6 +507,70 @@ RxWarp12ResourceCopy(
     });
 }
 
+static
+VOID
+APIENTRY
+RxWarp12ResolveSubresource(
+    _In_ D3D12DDI_HCOMMANDLIST List,
+    _In_ D3D12DDI_HRESOURCE Target,
+    _In_ UINT TargetIndex,
+    _In_ D3D12DDI_HRESOURCE Source,
+    _In_ UINT SourceIndex,
+    _In_ DXGI_FORMAT Format)
+{
+    RxWarpLock Lock;
+    RxWarp12Resource *To = RxWarp12GetResource(Target);
+    RxWarp12Resource *From = RxWarp12GetResource(Source);
+
+    if (To == nullptr || From == nullptr)
+        return;
+    RxWarp12Record(List, [=]()
+    {
+        RxWarpResolveRegion(&To->Storage, TargetIndex, 0, 0, &From->Storage, SourceIndex, 0, 0, UINT_MAX, UINT_MAX, Format,
+                            RxWarpResolveAverage);
+    });
+}
+
+/* A rectangle of a multisampled subresource, averaged or reduced to its minimum or maximum */
+static
+VOID
+APIENTRY
+RxWarp12ResolveSubresourceRegion(
+    _In_ D3D12DDI_HCOMMANDLIST List,
+    _In_ D3D12DDI_HRESOURCE Target,
+    _In_ UINT TargetIndex,
+    _In_ UINT TargetX,
+    _In_ UINT TargetY,
+    _In_ D3D12DDI_HRESOURCE Source,
+    _In_ UINT SourceIndex,
+    _In_opt_ D3D12DDI_RECT *Area,
+    _In_ DXGI_FORMAT Format,
+    _In_ D3D12DDI_RESOLVE_MODE Mode)
+{
+    RxWarpLock Lock;
+    RxWarp12Resource *To = RxWarp12GetResource(Target);
+    RxWarp12Resource *From = RxWarp12GetResource(Source);
+    UINT Left = (Area != nullptr) ? (UINT)Area->left : 0;
+    UINT Top = (Area != nullptr) ? (UINT)Area->top : 0;
+    UINT Width = (Area != nullptr) ? (UINT)(Area->right - Area->left) : UINT_MAX;
+    UINT Height = (Area != nullptr) ? (UINT)(Area->bottom - Area->top) : UINT_MAX;
+
+    if (To == nullptr || From == nullptr)
+        return;
+    if (Mode != D3D12DDI_RESOLVE_MODE_MIN && Mode != D3D12DDI_RESOLVE_MODE_MAX && Mode != D3D12DDI_RESOLVE_MODE_AVERAGE)
+    {
+        /* Nothing here is ever compressed, so decompressing leaves memory as it is */
+        if (Mode != D3D12DDI_RESOLVE_MODE_DECOMPRESS)
+            RX_WARP_TRACE("D3D12 ResolveSubresourceRegion mode %u not handled\n", (UINT)Mode);
+        return;
+    }
+    RxWarp12Record(List, [=]()
+    {
+        RxWarpResolveRegion(&To->Storage, TargetIndex, TargetX, TargetY, &From->Storage, SourceIndex, Left, Top, Width, Height, Format,
+                            (UINT)Mode);
+    });
+}
+
 /* Barriers order work on a GPU; here every command already finished before the next starts */
 static
 VOID
@@ -707,6 +771,8 @@ RxWarp12FillListTable(
     List->pfnCopyTextureRegion = RxWarp12CopyTextureRegion;
     List->pfnCopyBufferRegion = RxWarp12CopyBufferRegion;
     List->pfnResourceCopy = RxWarp12ResourceCopy;
+    List->pfnResourceResolveSubresource = RxWarp12ResolveSubresource;
+    List->pfnResourceResolveSubresourceRegion = RxWarp12ResolveSubresourceRegion;
     List->pfnResourceBarrier = RxWarp12ResourceBarrier;
     List->pfnClearRenderTargetView = RxWarp12ClearRenderTargetView;
     List->pfnClearDepthStencilView = RxWarp12ClearDepthStencilView;
