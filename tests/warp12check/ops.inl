@@ -1032,3 +1032,151 @@ SceneOpsWide(
 {
     return TcOpsRun(Device, Result, TcOpsWideSource, "wides", TcOpsWideBuilds, ARRAYSIZE(TcOpsWideBuilds), 1);
 }
+
+
+/*
+ * Pixel shaders built by DXC over a four sample target: system values per pixel and per
+ * sample, front and back faces, primitive IDs, and wave operations around helper lanes.
+ * Each invocation writes one record at its pixel and sample.
+ */
+static const char TcOpsPixelSource[] =
+    "RWByteAddressBuffer Out : register(u0);\n"
+    "struct VsOut { float4 Pos : SV_Position; float4 Color : COLOR; };\n"
+    "VsOut vs(float2 Pos : POSITION, float4 Color : COLOR, uint Id : SV_VertexID)\n"
+    "{\n"
+    "    VsOut o;\n"
+    "    o.Pos = float4(Pos.x, (Id >= 3) ? -Pos.y : Pos.y, 0.5, 1);\n"
+    "    o.Color = Color;\n"
+    "    return o;\n"
+    "}\n"
+    "uint Record(float4 Pos, uint Sample) { return (((uint)Pos.y * 16 + (uint)Pos.x) * 4 + Sample) * 32; }\n"
+    "float4 pixels(VsOut i, uint Coverage : SV_Coverage, bool Front : SV_IsFrontFace, uint Primitive : SV_PrimitiveID) : SV_Target\n"
+    "{\n"
+    "    uint At = Record(i.Pos, 0);\n"
+    "    uint Lane = WaveGetLaneIndex();\n"
+    "    float Value = i.Color.x * 100.0 + i.Pos.x;\n"
+    "    Out.Store4(At, uint4(Coverage | (Front ? 0x100 : 0) | (Primitive << 16), asuint(i.Pos.x), asuint(i.Pos.y), asuint(i.Pos.z)));\n"
+    "    Out.Store4(At + 16, uint4(WaveActiveCountBits(true) | (Lane << 8) | (WaveIsFirstLane() << 12) | (WavePrefixCountBits(true) << 16),\n"
+    "                              asuint(WaveActiveSum(Value)), asuint(QuadReadAcrossX(Value)), WaveActiveBallot(true).x | (QuadReadAcrossY(Lane) << 8) |\n"
+    "                              (WaveReadLaneFirst(Lane) << 16) | (QuadReadAcrossDiagonal(IsHelperLane() ? 1u : 0u) << 24)));\n"
+    "    return i.Color;\n"
+    "}\n"
+    "float4 samples(VsOut i, uint Sample : SV_SampleIndex, uint Coverage : SV_Coverage, bool Front : SV_IsFrontFace) : SV_Target\n"
+    "{\n"
+    "    uint At = Record(i.Pos, Sample);\n"
+    "    Out.Store4(At, uint4(Coverage | (Front ? 0x100 : 0) | (Sample << 12), asuint(i.Pos.x), asuint(i.Pos.y), asuint(i.Color.y)));\n"
+    "    Out.Store4(At + 16, uint4(WaveActiveCountBits(true), asuint(WavePrefixSum(i.Color.x)), WaveActiveBallot(true).x, QuadReadAcrossX(Sample)));\n"
+    "    return i.Color;\n"
+    "}\n";
+
+/* Pixel shader system values and waves over four samples, per pixel and per sample */
+static
+HRESULT
+SceneOpsPixel(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const TcVertex Vertices[] =
+    {
+        { { -0.9f, -0.8f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { { 0.1f, 0.95f }, { 0.0f, 1.0f, 0.0f, 0.5f } },
+        { { 0.85f, -0.7f }, { 0.0f, 0.0f, 1.0f, 0.25f } },
+        { { -0.6f, 0.3f }, { 1.0f, 1.0f, 0.0f, 0.75f } },
+        { { 0.7f, 0.45f }, { 0.0f, 1.0f, 1.0f, 1.0f } },
+        { { -0.2f, -0.95f }, { 1.0f, 0.0f, 1.0f, 0.6f } },
+    };
+    static const PCSTR Entries[] = { "pixels", "samples" };
+    static const UINT Size = 16 * 16 * 4 * 32;
+    SIZE_T LogStart = TcLogMark();
+    D3D12_ROOT_PARAMETER Parameter = {};
+    D3D12_ROOT_SIGNATURE_DESC Signature = {};
+    D3D12_VERTEX_BUFFER_VIEW View = {};
+    D3D12_VIEWPORT Viewport = { 0.0f, 0.0f, 16.0f, 16.0f, 0.0f, 1.0f };
+    D3D12_RECT Scissor = { 0, 0, 16, 16 };
+    ID3D12RootSignature *Root = NULL;
+    ID3D12Resource *Target;
+    ID3D12Resource *Records;
+    ID3D12Resource *Readback;
+    ID3D12Resource *Geometry;
+    ID3D12DescriptorHeap *Rtvs;
+    ID3DBlob *Vertex = NULL;
+    TcDrawKit Kit;
+    TcQueue Queue;
+    HRESULT hr;
+
+    Parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    Parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    Signature.NumParameters = 1;
+    Signature.pParameters = &Parameter;
+    Signature.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = TcRootSignature(Device, &Signature, &Root);
+    Kit.Keep(Root);
+    if (SUCCEEDED(hr))
+        hr = TcDxcCompile(TcOpsPixelSource, L"vs", L"vs_6_0", NULL, NULL, &Vertex);
+    Kit.Keep(Vertex);
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+
+    Target = Kit.Keep(TcTarget(Device, DXGI_FORMAT_R8G8B8A8_UNORM, 16, 16, 4, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET));
+    Readback = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_READBACK, Size, D3D12_RESOURCE_FLAG_NONE));
+    Geometry = Kit.Keep(TcUpload(Device, Vertices, sizeof(Vertices)));
+    Rtvs = TcDescriptorHeap(Device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, FALSE, &Kit);
+    if (Target == NULL || Readback == NULL || Geometry == NULL || Rtvs == NULL)
+    {
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    Device->CreateRenderTargetView(Target, NULL, Rtvs->GetCPUDescriptorHandleForHeapStart());
+    View.BufferLocation = Geometry->GetGPUVirtualAddress();
+    View.SizeInBytes = sizeof(Vertices);
+    View.StrideInBytes = sizeof(TcVertex);
+
+    for (UINT Index = 0; Index < ARRAYSIZE(Entries); Index++)
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE Rtv = Rtvs->GetCPUDescriptorHandleForHeapStart();
+        std::wstring Entry(Entries[Index], Entries[Index] + strlen(Entries[Index]));
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc;
+        ID3D12PipelineState *State = NULL;
+        ID3DBlob *Pixel = NULL;
+
+        hr = TcDxcCompile(TcOpsPixelSource, Entry.c_str(), L"ps_6_6", NULL, NULL, &Pixel);
+        Kit.Keep(Pixel);
+        if (SUCCEEDED(hr))
+        {
+            Desc = TcPipelineDesc(Root, Vertex, Pixel);
+            Desc.SampleDesc.Count = 4;
+            State = TcPipeline(Device, Desc, &Kit);
+            hr = (State != NULL) ? S_OK : E_FAIL;
+        }
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            continue;
+        /* A fresh buffer per pipeline starts out zero */
+        Records = Kit.Keep(TcBuffer(Device, D3D12_HEAP_TYPE_DEFAULT, Size, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
+        if (Records == NULL)
+            return E_OUTOFMEMORY;
+        TcBarrier(Queue.List, Records, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Queue.List->OMSetRenderTargets(1, &Rtv, FALSE, NULL);
+        Queue.List->SetGraphicsRootSignature(Root);
+        Queue.List->SetGraphicsRootUnorderedAccessView(0, Records->GetGPUVirtualAddress());
+        Queue.List->IASetVertexBuffers(0, 1, &View);
+        Queue.List->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        Queue.List->RSSetViewports(1, &Viewport);
+        Queue.List->RSSetScissorRects(1, &Scissor);
+        Queue.List->SetPipelineState(State);
+        Queue.List->DrawInstanced(ARRAYSIZE(Vertices), 1, 0, 0);
+        TcBarrier(Queue.List, Records, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Queue.List->CopyBufferRegion(Readback, 0, Records, 0, Size);
+        hr = Queue.Submit();
+        TcAppend(Result, &hr, sizeof(hr));
+        if (FAILED(hr))
+            return hr;
+        TcReadback(Readback, Size, Result);
+    }
+    TcLogSince(LogStart, Result);
+    return hr;
+}
