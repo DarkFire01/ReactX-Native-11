@@ -4,7 +4,9 @@
  * PURPOSE:     Direct3D 12 runtime behavior, printed as comparable facts
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  *
- * d3d12check [-runtime system|reactx|<dir>] [check ...]
+ * d3d12check [-runtime system|reactx|<dir>] [-warp] [check ...]
+ *
+ * With -warp every device made without an adapter is made on the system's WARP adapter instead.
  */
 
 #include <windows.h>
@@ -25,7 +27,8 @@ using Microsoft::WRL::ComPtr;
 struct TwelveCheck
 {
     HMODULE D3d12 = NULL;
-    PFN_D3D12_CREATE_DEVICE CreateDevice = nullptr;
+    PFN_D3D12_CREATE_DEVICE RealCreateDevice = nullptr;
+    IUnknown* DefaultAdapter = nullptr;
     PFN_D3D12_GET_DEBUG_INTERFACE GetDebugInterface = nullptr;
     PFN_D3D12_GET_INTERFACE GetInterface = nullptr;
     PFN_D3D12_SERIALIZE_ROOT_SIGNATURE SerializeRootSignature = nullptr;
@@ -33,6 +36,17 @@ struct TwelveCheck
     PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE SerializeVersioned = nullptr;
     PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER CreateVersionedDeserializer = nullptr;
     PCSTR CheckName = "";
+
+    /* D3D12CreateDevice, with the adapter chosen on the command line standing in for the default one */
+    HRESULT
+    CreateDevice(
+        _In_opt_ IUnknown* Adapter,
+        _In_ D3D_FEATURE_LEVEL Level,
+        _In_ REFIID riid,
+        _COM_Outptr_opt_ void** ppDevice)
+    {
+        return RealCreateDevice(Adapter != nullptr ? Adapter : DefaultAdapter, Level, riid, ppDevice);
+    }
 
     VOID
     Report(
@@ -3961,6 +3975,8 @@ wmain(
 {
     std::vector<std::string> Wanted;
     PCWSTR Runtime = L"system";
+    BOOLEAN UseWarp = FALSE;
+    ComPtr<IDXGIAdapter> Warp;
     TwelveCheck Check;
     int Index;
     char Name[128];
@@ -3972,6 +3988,11 @@ wmain(
         if (_wcsicmp(argv[Index], L"-runtime") == 0 && Index + 1 < argc)
         {
             Runtime = argv[++Index];
+            continue;
+        }
+        if (_wcsicmp(argv[Index], L"-warp") == 0)
+        {
+            UseWarp = TRUE;
             continue;
         }
 
@@ -3987,7 +4008,8 @@ wmain(
         return 1;
     }
 
-    Check.CreateDevice = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(Check.D3d12, "D3D12CreateDevice"));
+    Check.RealCreateDevice = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(Check.D3d12,
+                                                                                       "D3D12CreateDevice"));
     Check.GetDebugInterface = reinterpret_cast<PFN_D3D12_GET_DEBUG_INTERFACE>(
         GetProcAddress(Check.D3d12, "D3D12GetDebugInterface"));
     Check.GetInterface = reinterpret_cast<PFN_D3D12_GET_INTERFACE>(GetProcAddress(Check.D3d12, "D3D12GetInterface"));
@@ -3999,10 +4021,28 @@ wmain(
         GetProcAddress(Check.D3d12, "D3D12SerializeVersionedRootSignature"));
     Check.CreateVersionedDeserializer = reinterpret_cast<PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER>(
         GetProcAddress(Check.D3d12, "D3D12CreateVersionedRootSignatureDeserializer"));
-    if (Check.CreateDevice == nullptr || Check.SerializeRootSignature == nullptr || Check.CreateDeserializer == nullptr)
+    if (Check.RealCreateDevice == nullptr || Check.SerializeRootSignature == nullptr ||
+        Check.CreateDeserializer == nullptr)
     {
         fprintf(stderr, "error: missing d3d12 exports\n");
         return 1;
+    }
+
+    /* The system's DXGI hands out the system's WARP adapter for either runtime */
+    if (UseWarp)
+    {
+        decltype(&CreateDXGIFactory1) CreateFactory;
+        ComPtr<IDXGIFactory4> Factory;
+
+        CreateFactory = reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(LoadLibraryW(L"dxgi.dll"),
+                                                                                      "CreateDXGIFactory1"));
+        if (CreateFactory == nullptr || FAILED(CreateFactory(IID_PPV_ARGS(&Factory))) ||
+            FAILED(Factory->EnumWarpAdapter(IID_PPV_ARGS(&Warp))))
+        {
+            fprintf(stderr, "error: no WARP adapter\n");
+            return 1;
+        }
+        Check.DefaultAdapter = Warp.Get();
     }
 
     for (const CheckInfo& Info : Checks)
