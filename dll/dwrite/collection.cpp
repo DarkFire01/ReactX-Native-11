@@ -984,10 +984,15 @@ RxFontFamily::GetMatchingFonts(
         return E_INVALIDARG;
     *matchingFonts = nullptr;
 
+    std::sort(Sorted.begin(), Sorted.end(), [](const RxFontItem& A, const RxFontItem& B) { return A.Entry < B.Entry; });
+    Sorted.erase(std::unique(Sorted.begin(), Sorted.end(),
+                             [](const RxFontItem& A, const RxFontItem& B) { return A.Entry == B.Entry; }),
+                 Sorted.end());
     for (auto& Item : Sorted)
         Item.Simulations = RxPointFor(Data->Entries[Item.Entry], weight, style).Simulations;
 
-    std::stable_sort(Sorted.begin(), Sorted.end(), [&](const RxFontItem& A, const RxFontItem& B)
+    /* Not stable, so faces that tie keep whatever order the sort leaves them in */
+    std::sort(Sorted.begin(), Sorted.end(), [&](const RxFontItem& A, const RxFontItem& B)
     {
         return RxIsBetterMatch(RxPointFor(Data->Entries[A.Entry], weight, style),
                                RxPointFor(Data->Entries[B.Entry], weight, style), X, Y, Z) != FALSE;
