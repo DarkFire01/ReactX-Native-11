@@ -732,6 +732,169 @@ Done:
         Large->Release();
 }
 
+/* A screen space vertex with a three component texture coordinate */
+struct CkVolumeVertex
+{
+    FLOAT X;
+    FLOAT Y;
+    FLOAT Z;
+    FLOAT Rhw;
+    DWORD Color;
+    FLOAT U;
+    FLOAT V;
+    FLOAT W;
+};
+
+static constexpr DWORD CkVolumeFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0);
+
+/* Fills each slice of a system memory volume with its own color, or only one box of it */
+static
+VOID
+CkFillSlices(
+    _In_ IDirect3DVolumeTexture9* Volume,
+    _In_reads_(4) const DWORD* Colors,
+    _In_opt_ const D3DBOX* Area)
+{
+    D3DLOCKED_BOX Locked;
+    D3DBOX Whole = { 0, 0, 4, 4, 0, 4 };
+    const D3DBOX* Box = Area != nullptr ? Area : &Whole;
+
+    if (FAILED(Volume->LockBox(0, &Locked, Area, 0)))
+        return;
+    for (UINT Slice = 0; Slice < Box->Back - Box->Front; Slice += 1)
+    {
+        for (UINT Row = 0; Row < Box->Bottom - Box->Top; Row += 1)
+        {
+            DWORD* Line = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Locked.pBits) + Slice * Locked.SlicePitch +
+                                                   Row * Locked.RowPitch);
+
+            for (UINT Column = 0; Column < Box->Right - Box->Left; Column += 1)
+                Line[Column] = Colors[(Box->Front + Slice) & 3];
+        }
+    }
+    Volume->UnlockBox(0);
+}
+
+/* Draws each slice of a volume as a quad in one row of the target */
+static
+VOID
+CkShowSlices(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DVolumeTexture9* Volume,
+    _In_ FLOAT Top)
+{
+    Device->SetTexture(0, Volume);
+    for (UINT Slice = 0; Slice < 4; Slice += 1)
+    {
+        FLOAT Left = static_cast<FLOAT>(Slice * 16);
+        FLOAT W = (static_cast<FLOAT>(Slice) + 0.5f) / 4.0f;
+        const CkVolumeVertex Quad[4] =
+        {
+            { Left, Top, 0.5f, 1.0f, 0xFFFFFFFF, 0.0f, 0.0f, W },
+            { Left + 16.0f, Top, 0.5f, 1.0f, 0xFFFFFFFF, 1.0f, 0.0f, W },
+            { Left, Top + 16.0f, 0.5f, 1.0f, 0xFFFFFFFF, 0.0f, 1.0f, W },
+            { Left + 16.0f, Top + 16.0f, 0.5f, 1.0f, 0xFFFFFFFF, 1.0f, 1.0f, W },
+        };
+
+        Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0]));
+    }
+    Device->SetTexture(0, nullptr);
+}
+
+/*
+ * Copies the runtime makes for volumes and managed buffers: UpdateTexture on a volume, whole and
+ * through a dirty box, and a managed vertex buffer drawn, rewritten in part and drawn again.
+ */
+static
+VOID
+CkResourceCopies(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static const DWORD Colors[] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFFFF };
+    static const DWORD Later[] = { 0xFF00FFFF, 0xFFFF00FF, 0xFFFFFF00, 0xFF808080 };
+    static const D3DBOX Area = { 1, 1, 3, 3, 1, 3 };
+    static const CkTlVertex Triangle[] =
+    {
+        { 4.0f, 34.0f, 0.5f, 1.0f, 0xFFFF0000 },
+        { 28.0f, 34.0f, 0.5f, 1.0f, 0xFF00FF00 },
+        { 4.0f, 46.0f, 0.5f, 1.0f, 0xFF0000FF },
+        { 36.0f, 34.0f, 0.5f, 1.0f, 0xFFFFFF00 },
+        { 60.0f, 34.0f, 0.5f, 1.0f, 0xFF00FFFF },
+        { 36.0f, 46.0f, 0.5f, 1.0f, 0xFFFF00FF },
+    };
+    IDirect3DVolumeTexture9* Staged = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DVertexBuffer9* Managed = nullptr;
+    VOID* Data;
+
+    CkRun(Device->CreateVolumeTexture(4, 4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Staged, nullptr), "volumes",
+          "CreateVolumeTexture system memory");
+    CkRun(Device->CreateVolumeTexture(4, 4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Volume, nullptr), "volumes",
+          "CreateVolumeTexture");
+    CkRun(Device->CreateVertexBuffer(sizeof(Triangle), 0, CkTlFvf, D3DPOOL_MANAGED, &Managed, nullptr), "volumes",
+          "CreateVertexBuffer managed");
+    if (Staged == nullptr || Volume == nullptr || Managed == nullptr)
+        goto Done;
+
+    CkFillSlices(Staged, Colors, nullptr);
+    if (SUCCEEDED(Managed->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Triangle, sizeof(Triangle));
+        Managed->Unlock();
+    }
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "volumes", "Clear");
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    Device->BeginScene();
+    Device->SetFVF(CkVolumeFvf);
+    CkRun(Device->UpdateTexture(Staged, Volume), "volumes", "UpdateTexture");
+    CkShowSlices(Device, Volume, 0.0f);
+    Device->EndScene();
+
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, "volumes");
+    CkFillSlices(Staged, Later, &Area);
+    Device->BeginScene();
+    CkRun(Device->UpdateTexture(Staged, Volume), "volumes", "UpdateTexture dirty box");
+    CkShowSlices(Device, Volume, 16.0f);
+
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    Device->SetFVF(CkTlFvf);
+    Device->SetStreamSource(0, Managed, 0, sizeof(Triangle[0]));
+    CkRun(Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 2), "volumes", "managed buffer");
+    Device->EndScene();
+    CkReadRows(Device, Back, "volumes");
+
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, "volumes");
+    if (SUCCEEDED(Managed->Lock(3 * sizeof(Triangle[0]), sizeof(Triangle[0]), &Data, 0)))
+    {
+        CkTlVertex Moved = Triangle[3];
+
+        Moved.Y = 40.0f;
+        Moved.Color = 0xFFFFFFFF;
+        memcpy(Data, &Moved, sizeof(Moved));
+        Managed->Unlock();
+    }
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "volumes", "Clear");
+    Device->BeginScene();
+    CkRun(Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 2), "volumes", "managed buffer rewritten");
+    Device->EndScene();
+    CkReadRows(Device, Back, "managed");
+
+Done:
+    Device->SetStreamSource(0, nullptr, 0, 0);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    if (Managed != nullptr)
+        Managed->Release();
+    if (Volume != nullptr)
+        Volume->Release();
+    if (Staged != nullptr)
+        Staged->Release();
+}
+
 /* Depth testing, stencil writes and a stencil masked fill, then table fog and alpha testing */
 static
 VOID
@@ -968,6 +1131,7 @@ CkDraws(
     CkIndexedFans(Device, Back);
     CkTextured(Device, Back);
     CkTextureCopies(Device, Back);
+    CkResourceCopies(Device, Back);
     CkDepthStencilFog(Device, Back);
     CkPointSprites(Device, Back);
     CkDrawFlush = nullptr;
