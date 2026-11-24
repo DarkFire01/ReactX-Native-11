@@ -353,7 +353,7 @@ $Classes = @(
         Implemented = @(
             'SetPrivateData', 'SetPrivateDataInterface', 'GetPrivateData', 'GetParent', 'GetDesc',
             'GetDisplayModeList', 'FindClosestMatchingMode', 'WaitForVBlank', 'GetDisplayModeList1',
-            'FindClosestMatchingMode1', 'GetDesc1'
+            'FindClosestMatchingMode1', 'GetDesc1', 'DuplicateOutput', 'DuplicateOutput1'
         )
     },
     @{

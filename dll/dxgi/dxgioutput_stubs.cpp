@@ -98,19 +98,6 @@ RxDxgiOutput::GetDisplaySurfaceData1(
     return E_NOTIMPL;
 }
 
-HRESULT
-STDMETHODCALLTYPE
-RxDxgiOutput::DuplicateOutput(
-    _In_ IUnknown* pDevice,
-    _COM_Outptr_ IDXGIOutputDuplication** ppOutputDuplication)
-{
-    if (ppOutputDuplication != nullptr)
-        *ppOutputDuplication = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
 BOOL
 STDMETHODCALLTYPE
 RxDxgiOutput::SupportsOverlays(VOID)
@@ -143,22 +130,6 @@ RxDxgiOutput::CheckOverlayColorSpaceSupport(
 {
     if (pFlags != nullptr)
         memset(pFlags, 0, sizeof(*pFlags));
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxDxgiOutput::DuplicateOutput1(
-    _In_ IUnknown* pDevice,
-    UINT Flags,
-    _In_ UINT SupportedFormatsCount,
-    _In_reads_(SupportedFormatsCount) const DXGI_FORMAT* pSupportedFormats,
-    _COM_Outptr_ IDXGIOutputDuplication** ppOutputDuplication)
-{
-    if (ppOutputDuplication != nullptr)
-        *ppOutputDuplication = nullptr;
 
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

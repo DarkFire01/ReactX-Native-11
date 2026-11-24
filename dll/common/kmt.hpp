@@ -115,6 +115,16 @@ struct KmtThunks
 
     /* Video memory statistics */
     PFND3DKMT_QUERYSTATISTICS QueryStatistics;
+
+    /* Desktop duplication */
+    PFND3DKMT_CREATEOUTPUTDUPL CreateOutputDupl;
+    PFND3DKMT_DESTROYOUTPUTDUPL DestroyOutputDupl;
+    PFND3DKMT_OUTPUTDUPLGETFRAMEINFO OutputDuplGetFrameInfo;
+    PFND3DKMT_OUTPUTDUPLGETMETADATA OutputDuplGetMetaData;
+    PFND3DKMT_OUTPUTDUPLGETPOINTERSHAPEDATA OutputDuplGetPointerShapeData;
+    PFND3DKMT_OUTPUTDUPLRELEASEFRAME OutputDuplReleaseFrame;
+    PFND3DKMT_OUTPUTDUPLPRESENT OutputDuplPresent;
+    PFND3DKMT_OUTPUTDUPLPRESENTTOHWQUEUE OutputDuplPresentToHwQueue;
 };
 
 _Ret_maybenull_

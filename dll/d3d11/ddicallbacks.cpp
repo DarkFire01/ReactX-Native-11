@@ -642,6 +642,52 @@ static const D3DWDDM2_6DDI_CORELAYER_DEVICECALLBACKS CoreLayerCallbacks =
     .pfnQueryScanoutCapsCb = RxQueryScanoutCapsCb,
 };
 
+/* The duplication flags a DDA present carries over from the present the swapchain filled in */
+static
+D3DKMT_OUTPUTDUPLPRESENTFLAGS
+RxDuplicationFlags(
+    _In_ const D3DKMT_PRESENT& Template)
+{
+    D3DKMT_OUTPUTDUPLPRESENTFLAGS Flags = {};
+
+    Flags.ProtectedContentBlankedOut = Template.Flags.ProtectedContentBlankedOut;
+    Flags.RemoteSession = Template.Flags.RemoteSession;
+    Flags.PresentIndirect = Template.Flags.PresentIndirect;
+    return Flags;
+}
+
+/* A DDA present is not shown; the kernel copies its source into every desktop duplication of the output */
+static
+HRESULT
+RxDuplicationPresent(
+    _In_ const DXGIDDICB_PRESENT* Args,
+    _Inout_ RxPresentContext* Context)
+{
+    const D3DKMT_PRESENT& Template = Context->Template;
+    D3DKMT_OUTPUTDUPLPRESENT Present = {};
+    ULONG Index;
+
+    if (RxGetKmtThunks()->OutputDuplPresent == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Present.hContext = RxKmContext(Args->hContext);
+    Present.hSource = Args->hSrcAllocation;
+    Present.VidPnSourceId = Template.VidPnSourceId;
+    Present.BroadcastContextCount = Args->BroadcastContextCount;
+    for (Index = 0; Index < Args->BroadcastContextCount; Index++)
+        Present.BroadcastContext[Index] = RxKmContext(Args->BroadcastContext[Index]);
+    if (Template.pPresentRegions != nullptr)
+        Present.PresentRegions = *Template.pPresentRegions;
+    Present.Flags = RxDuplicationFlags(Template);
+    if (Template.Flags.PresentIndirect)
+        Present.hIndirectContext = Template.hIndirectContext;
+
+    Context->KernelStatus = RxGetKmtThunks()->OutputDuplPresent(&Present);
+    if (!NT_SUCCESS(Context->KernelStatus))
+        RX_TRACE(L"D3DKMTOutputDuplPresent failed 0x%08lX (source %u)", Context->KernelStatus, Present.VidPnSourceId);
+    return RxHresultFromStatus(Context->KernelStatus);
+}
+
 static
 HRESULT
 APIENTRY
@@ -659,6 +705,8 @@ RxDxgiPresentCb(
         return E_INVALIDARG;
     if (Args->BroadcastContextCount > D3DDDI_MAX_BROADCAST_CONTEXT)
         return E_INVALIDARG;
+    if (Context->Template.Flags.PresentDDA)
+        return RxDuplicationPresent(Args, Context);
 
     /*
      * The swapchain filled in everything but the allocations and the contexts.
@@ -677,6 +725,39 @@ RxDxgiPresentCb(
     if (!NT_SUCCESS(Context->KernelStatus))
         RX_TRACE(L"D3DKMTPresent failed 0x%08lX (flags %08X source %u)", Context->KernelStatus, Present.Flags.Value,
                  Present.VidPnSourceId);
+    return RxHresultFromStatus(Context->KernelStatus);
+}
+
+/* The hardware queue form of a DDA present; the kernel orders the copy after the work on every queue */
+static
+HRESULT
+RxDuplicationPresentToHwQueue(
+    _In_ const DXGIDDICB_SUBMITPRESENTTOHWQUEUE* Args,
+    _Inout_ RxPresentContext* Context,
+    _In_reads_(Args->BroadcastHwQueueCount) D3DKMT_HANDLE* Queues)
+{
+    const D3DKMT_PRESENT& Template = Context->Template;
+    D3DKMT_OUTPUTDUPLPRESENTTOHWQUEUE Present = {};
+
+    if (RxGetKmtThunks()->OutputDuplPresentToHwQueue == nullptr)
+        return DXGI_ERROR_UNSUPPORTED;
+
+    Present.hSource = Args->BroadcastSrcAllocations[0];
+    Present.VidPnSourceId = Template.VidPnSourceId;
+    Present.BroadcastHwQueueCount = Args->BroadcastHwQueueCount;
+    Present.hHwQueues = Queues;
+    if (Template.pPresentRegions != nullptr)
+        Present.PresentRegions = *Template.pPresentRegions;
+    Present.Flags = RxDuplicationFlags(Template);
+    if (Template.Flags.PresentIndirect)
+        Present.hIndirectHwQueue = Template.hIndirectContext;
+
+    Context->KernelStatus = RxGetKmtThunks()->OutputDuplPresentToHwQueue(&Present);
+    if (!NT_SUCCESS(Context->KernelStatus))
+    {
+        RX_TRACE(L"D3DKMTOutputDuplPresentToHwQueue failed 0x%08lX (source %u)", Context->KernelStatus,
+                 Present.VidPnSourceId);
+    }
     return RxHresultFromStatus(Context->KernelStatus);
 }
 
@@ -703,6 +784,9 @@ RxDxgiSubmitPresentToHwQueueCb(
 
     for (Index = 0; Index < Args->BroadcastHwQueueCount; Index++)
         Queues[Index] = (D3DKMT_HANDLE)(ULONG_PTR)Args->hHwQueues[Index];
+
+    if (Context->Template.Flags.PresentDDA)
+        return RxDuplicationPresentToHwQueue(Args, Context, Queues);
 
     Present = Context->Template;
     Present.pSrcSubRects = &Context->SourceRect;

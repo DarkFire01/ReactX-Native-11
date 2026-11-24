@@ -16,11 +16,23 @@ RxDxgiOutput::GetAdapterLuid() const
     return Adapter->GetLuid();
 }
 
+/* True while any process duplicates this output; the kernel counts them per source */
 BOOL
 STDMETHODCALLTYPE
 RxDxgiOutput::HasDDAClient()
 {
-    return FALSE;
+    D3DKMT_OUTPUTDUPLCONTEXTSCOUNT Count = {};
+    D3DKMT_QUERYADAPTERINFO Query = {};
+
+    Count.VidPnSourceId = Info.VidPnSourceId;
+    Query.hAdapter = KmtAdapter;
+    Query.Type = KMTQAITYPE_OUTPUTDUPLCONTEXTSCOUNT;
+    Query.pPrivateDriverData = &Count;
+    Query.PrivateDriverDataSize = sizeof(Count);
+    if (!NT_SUCCESS(RxGetKmtThunks()->QueryAdapterInfo(&Query)))
+        return FALSE;
+
+    return Count.OutputDuplicationCount != 0;
 }
 
 HRESULT

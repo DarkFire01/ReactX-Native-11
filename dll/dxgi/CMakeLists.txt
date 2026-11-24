@@ -14,6 +14,7 @@ nt_add_usermode_dll(dxgi
         dwmswapchain.cpp
         dxgioutput.cpp
         dxgioutput_stubs.cpp
+        outputdupl.cpp
         swapchain.cpp
         swapchainflip.cpp
         swapchain_stubs.cpp)

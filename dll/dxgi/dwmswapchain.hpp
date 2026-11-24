@@ -87,6 +87,10 @@ private:
     VOID
     ReleaseBuffers();
 
+    /* Hands buffer 0 to the kernel's desktop duplication; see dwmswapchain.cpp */
+    VOID
+    PresentToDuplication();
+
     LONG RefCount = 1;
     RxDxgiFactory& Factory;
     IRxPresentDevice* Device;
@@ -94,7 +98,8 @@ private:
     DXGI_SWAP_CHAIN_DESC Desc = {};
     std::vector<IUnknown*> Buffers;
     BOOLEAN OwnsSource = FALSE;
-    std::array<RxPresentContext, 4> Contexts;
+    /* A frame takes two contexts while it is duplicated */
+    std::array<RxPresentContext, 8> Contexts;
     UINT NextContext = 0;
     UINT PresentCount = 0;
     RxPrivateDataStore PrivateData;

@@ -137,6 +137,13 @@ public:
     const LUID&
     GetAdapterLuid() const;
 
+    /* The process wide kernel adapter handle that answers for this output */
+    D3DKMT_HANDLE
+    GetKernelAdapter() const
+    {
+        return KmtAdapter;
+    }
+
     /* What the desktop window manager asks an output; see dwmoutput.cpp */
     BOOL
     STDMETHODCALLTYPE

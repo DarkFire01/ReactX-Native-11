@@ -86,11 +86,12 @@ RxDwmSwapChain::TakeOwnership()
     if (Kmt->SetVidPnSourceOwner1 == nullptr && Kmt->SetVidPnSourceOwner == nullptr)
         return DXGI_ERROR_UNSUPPORTED;
 
-    /* The revision with flags when there is one; no output duplication is offered */
+    /* The revision with flags when there is one, so the source can be duplicated */
     Owner.Version0.hDevice = Device->GetKernelDevice();
     Owner.Version0.pType = &Type;
     Owner.Version0.pVidPnSourceId = &SourceId;
     Owner.Version0.VidPnSourceCount = 1;
+    Owner.Flags.AllowOutputDuplication = 1;
     if (Kmt->SetVidPnSourceOwner1 != nullptr)
         Status = Kmt->SetVidPnSourceOwner1(&Owner);
     else
@@ -287,6 +288,10 @@ RxDwmSwapChain::Present(
     if (Flags & DXGI_PRESENT_TEST)
         return S_OK;
 
+    /* Duplication clients get the frame before it is flipped away from buffer 0 */
+    if (Output->HasDDAClient())
+        PresentToDuplication();
+
     Context = &Contexts[NextContext];
     NextContext = (NextContext + 1) % Contexts.size();
     *Context = {};
@@ -309,11 +314,52 @@ RxDwmSwapChain::Present(
     hr = Device->PresentPrimary(Buffers[0], SyncInterval, Context);
     if (Context->KernelStatus == STATUS_GRAPHICS_PRESENT_OCCLUDED)
         return DXGI_STATUS_OCCLUDED;
+
+    /* The output runs another mode now, the compositor has to make its swapchain again */
+    if (Context->KernelStatus == STATUS_GRAPHICS_PRESENT_MODE_CHANGED)
+        return DXGI_STATUS_MODE_CHANGED;
     if (FAILED(hr))
         return hr;
 
     PresentCount++;
     return Device->RotateBuffers(Buffers.data(), (UINT)Buffers.size());
+}
+
+/*
+ * A blt of buffer 0 with no destination, marked as a DDA present. The runtime's present callback
+ * passes it to D3DKMTOutputDuplPresent, and the kernel copies the frame into each client's texture.
+ */
+VOID
+RxDwmSwapChain::PresentToDuplication()
+{
+    RxPresentContext* Context;
+    D3DKMT_PRESENT* Template;
+    HRESULT hr;
+
+    Context = &Contexts[NextContext];
+    NextContext = (NextContext + 1) % Contexts.size();
+    *Context = {};
+    Template = &Context->Template;
+
+    Context->SourceRect = { 0, 0, (LONG)Desc.BufferDesc.Width, (LONG)Desc.BufferDesc.Height };
+    Template->VidPnSourceId = Output->GetVidPnSourceId();
+    Template->SrcRect = Context->SourceRect;
+    Template->SubRectCnt = 1;
+    Template->pSrcSubRects = &Context->SourceRect;
+    Template->PresentCount = PresentCount + 1;
+    Template->FlipInterval = D3DDDI_FLIPINTERVAL_IMMEDIATE;
+    Template->Flags.Blt = 1;
+    Template->Flags.SrcRectValid = 1;
+    Template->Flags.PresentCountValid = 1;
+    Template->Flags.PresentDDA = 1;
+
+    /* The DWM keeps presenting whether or not the copy went through */
+    hr = Device->SubmitPresent(Buffers[0], nullptr, Context);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"Duplication present on source %u failed 0x%08lX (kernel 0x%08lX)", Output->GetVidPnSourceId(), hr,
+                 Context->KernelStatus);
+    }
 }
 
 HRESULT

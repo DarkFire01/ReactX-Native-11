@@ -137,6 +137,14 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTSetContextInProcessSchedulingPriority", Kmt.SetContextInProcessSchedulingPriority);
     RxResolve(Gdi32, "D3DKMTIsFeatureEnabled", Kmt.IsFeatureEnabled);
     RxResolve(Gdi32, "D3DKMTQueryStatistics", Kmt.QueryStatistics);
+    RxResolve(Gdi32, "D3DKMTCreateOutputDupl", Kmt.CreateOutputDupl);
+    RxResolve(Gdi32, "D3DKMTDestroyOutputDupl", Kmt.DestroyOutputDupl);
+    RxResolve(Gdi32, "D3DKMTOutputDuplGetFrameInfo", Kmt.OutputDuplGetFrameInfo);
+    RxResolve(Gdi32, "D3DKMTOutputDuplGetMetaData", Kmt.OutputDuplGetMetaData);
+    RxResolve(Gdi32, "D3DKMTOutputDuplGetPointerShapeData", Kmt.OutputDuplGetPointerShapeData);
+    RxResolve(Gdi32, "D3DKMTOutputDuplReleaseFrame", Kmt.OutputDuplReleaseFrame);
+    RxResolve(Gdi32, "D3DKMTOutputDuplPresent", Kmt.OutputDuplPresent);
+    RxResolve(Gdi32, "D3DKMTOutputDuplPresentToHwQueue", Kmt.OutputDuplPresentToHwQueue);
 
     /* Nothing works without these */
     KmtUsable = (Kmt.CloseAdapter != NULL &&
