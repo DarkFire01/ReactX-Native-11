@@ -25,6 +25,9 @@ struct CkTlVertex
 
 static constexpr DWORD CkTlFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
 
+/* Filled and locked before each readback so the runtime batch drains at a fixed point */
+static IDirect3DSurface9* CkDrawFlush;
+
 /* Prints every row of the target as a fingerprint so a difference shows where it is */
 static
 VOID
@@ -37,6 +40,9 @@ CkReadRows(
     D3DLOCKED_RECT Locked = {};
     D3DSURFACE_DESC Desc = {};
     HRESULT hr;
+
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, Label);
 
     Target->GetDesc(&Desc);
     hr = Device->CreateOffscreenPlainSurface(Desc.Width, Desc.Height, Desc.Format, D3DPOOL_SYSTEMMEM, &Copy, nullptr);
@@ -108,6 +114,8 @@ CkPretransformed(
     printf("pretransformed CreateVertexBuffer hr %08lX\n", hr);
     if (Buffer != nullptr)
     {
+        if (CkDrawFlush != nullptr)
+            CkFlushBatch(Device, CkDrawFlush, "pretransformed");
         hr = Buffer->Lock(0, 0, &Data, 0);
         if (SUCCEEDED(hr))
         {
@@ -289,6 +297,8 @@ CkShaderDraws(
         goto Done;
     }
 
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, "shader");
     if (SUCCEEDED(Buffers[0]->Lock(0, 0, &Data, 0)))
     {
         memcpy(Data, Quad, sizeof(Quad));
@@ -568,14 +578,17 @@ CkPointSprites(
 VOID
 CkDraws(
     _In_ IDirect3DDevice9* Device,
-    _In_ IDirect3DSurface9* Back)
+    _In_ IDirect3DSurface9* Back,
+    _In_opt_ IDirect3DSurface9* Flush)
 {
     printf("== draws\n");
+    CkDrawFlush = Flush;
     CkPretransformed(Device, Back);
     CkShaderDraws(Device, Back);
     CkFixedFunction(Device, Back);
     CkTextured(Device, Back);
     CkDepthStencilFog(Device, Back);
     CkPointSprites(Device, Back);
+    CkDrawFlush = nullptr;
     CkFlushState();
 }

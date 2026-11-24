@@ -520,7 +520,6 @@ CkQueryAdapter(
  * marked by the current batch, so a plain readback flushes at a point that depends on handle values.
  * Locking a surface that was just filled always flushes, which empties the batch at a fixed point.
  */
-static
 VOID
 CkFlushBatch(
     _In_ IDirect3DDevice9* Device,
@@ -946,7 +945,7 @@ CkScene(
 
     if (Flush != nullptr)
         CkShaders(Device, Flush);
-    CkDraws(Device, Back);
+    CkDraws(Device, Back, Flush);
     CkQueries(Device);
 
     if (Target != nullptr)
