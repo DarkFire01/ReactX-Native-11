@@ -25,6 +25,9 @@ static constexpr UINT RxWarpWaveLanes = 4;
  */
 static constexpr UINT RxWarpOpcodeHeap = 0x401;
 
+/* Float to half and back, rounding toward zero: dest, value */
+static constexpr UINT RxWarpOpcodeHalfTowardZero = 0x402;
+
 typedef enum _RX_WARP_WAVE_KIND
 {
     RxWarpWaveLaneIndex,

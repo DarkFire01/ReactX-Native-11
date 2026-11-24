@@ -52,6 +52,28 @@ constexpr UINT RxSwizzleMode = D3D10_SB_OPERAND_4_COMPONENT_SWIZZLE_MODE;
 constexpr UINT RxSelectMode = D3D10_SB_OPERAND_4_COMPONENT_SELECT_1_MODE;
 constexpr UINT RxWarpMaxHeapBinds = 4;
 
+/* TRUE when a call returns or takes a 16 bit value, alone or as a structure's first member */
+BOOLEAN
+RxNamesSixteen(
+    _In_ llvm::CallInst *Call)
+{
+    auto Sixteen = [](llvm::Type *Type)
+    {
+        if (llvm::StructType *Members = llvm::dyn_cast<llvm::StructType>(Type))
+            Type = (Members->getNumElements() != 0) ? Members->getElementType(0) : Type;
+        return Type->isHalfTy() || Type->isIntegerTy(16);
+    };
+
+    if (Sixteen(Call->getType()))
+        return TRUE;
+    for (UINT Argument = 1; Argument < Call->getNumArgOperands(); Argument++)
+    {
+        if (Sixteen(Call->getArgOperand(Argument)->getType()))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 UINT
 RxHeapOperandType(
     _In_ UINT Class)
@@ -278,6 +300,18 @@ private:
     BOOLEAN
     Lower(
         _In_ llvm::Instruction *Instruction);
+
+    BOOLEAN
+    LowerPlain(
+        _In_ llvm::Instruction *Instruction);
+
+    VOID
+    Narrow(
+        _In_ llvm::Value *Value);
+
+    RxTokens
+    SignedSource(
+        _In_ llvm::Value *Value);
 
     BOOLEAN
     LowerCall(
@@ -1158,17 +1192,72 @@ BOOLEAN
 RxLowering::Lower(
     _In_ llvm::Instruction *Instruction)
 {
-    RX_BINARY Binary;
-
     if (llvm::isa<llvm::PHINode>(Instruction) || llvm::isa<llvm::TerminatorInst>(Instruction))
         return TRUE;
     if (llvm::CallInst *Call = llvm::dyn_cast<llvm::CallInst>(Instruction))
-        return LowerCall(Call);
+    {
+        if (!LowerCall(Call))
+            return FALSE;
+        Narrow(Call);
+        return TRUE;
+    }
     if (!Instruction->getType()->isVoidTy() && !Instruction->getType()->isFloatTy() && !Instruction->getType()->isIntegerTy(32) &&
-        !Instruction->getType()->isIntegerTy(1) && !Instruction->getType()->isStructTy() && !Instruction->getType()->isPointerTy())
+        !Instruction->getType()->isIntegerTy(1) && !Instruction->getType()->isStructTy() && !Instruction->getType()->isPointerTy() &&
+        !Instruction->getType()->isHalfTy() && !Instruction->getType()->isIntegerTy(16))
     {
         return FALSE;
     }
+    if (!LowerPlain(Instruction))
+        return FALSE;
+    Narrow(Instruction);
+    return TRUE;
+}
+
+/*
+ * 16 bit values sit in 32 bit components: halves as the float they round to, 16 bit
+ * integers zero extended. Every operation that makes one rounds or wraps its result.
+ */
+VOID
+RxLowering::Narrow(
+    _In_ llvm::Value *Value)
+{
+    UINT Bits;
+
+    if (Value->getType()->isHalfTy())
+    {
+        Bits = Fresh();
+        Emit(D3D11_SB_OPCODE_F32TOF16, { Temp(Bits / 4, RxMaskMode, 1u << (Bits & 3)), Source(Value) });
+        Emit(D3D11_SB_OPCODE_F16TOF32, { Dest(Value), Temp(Bits / 4, RxSelectMode, Bits & 3) });
+    }
+    else if (Value->getType()->isIntegerTy(16))
+    {
+        Emit(D3D10_SB_OPCODE_AND, { Dest(Value), Source(Value), RxImmediate(0xFFFF) });
+    }
+}
+
+/* A 16 bit integer sign extended for operations that read it as signed; wider values as they are */
+RxTokens
+RxLowering::SignedSource(
+    _In_ llvm::Value *Value)
+{
+    UINT Wide;
+
+    if (!Value->getType()->isIntegerTy(16) || llvm::isa<llvm::Constant>(Value))
+    {
+        if (llvm::ConstantInt *Integer = llvm::dyn_cast<llvm::ConstantInt>(Value))
+            return RxImmediate((UINT)Integer->getSExtValue());
+        return Source(Value);
+    }
+    Wide = Fresh();
+    Emit(D3D11_SB_OPCODE_IBFE, { Temp(Wide / 4, RxMaskMode, 1u << (Wide & 3)), RxImmediate(16), RxImmediate(0), Source(Value) });
+    return Temp(Wide / 4, RxSelectMode, Wide & 3);
+}
+
+BOOLEAN
+RxLowering::LowerPlain(
+    _In_ llvm::Instruction *Instruction)
+{
+    RX_BINARY Binary;
 
     if (Instruction->getOpcode() == llvm::Instruction::Mul)
     {
@@ -1189,11 +1278,13 @@ RxLowering::Lower(
     {
         llvm::Value *First = Instruction->getOperand(Binary.Swap ? 1 : 0);
         llvm::Value *Second = Instruction->getOperand(Binary.Swap ? 0 : 1);
-        RxTokens Right = Source(Second);
+        BOOLEAN Signed = (Binary.Opcode == D3D10_SB_OPCODE_ILT || Binary.Opcode == D3D10_SB_OPCODE_IGE || Binary.Opcode == D3D10_SB_OPCODE_ISHR);
+        RxTokens Left = Signed ? SignedSource(First) : Source(First);
+        RxTokens Right = (Signed && Binary.Opcode != D3D10_SB_OPCODE_ISHR) ? SignedSource(Second) : Source(Second);
 
         if (Binary.Negate)
             Right = RxModified(Right, D3D10_SB_OPERAND_MODIFIER_NEG);
-        Emit(Binary.Opcode, { Dest(Instruction), Source(First), Right });
+        Emit(Binary.Opcode, { Dest(Instruction), Left, Right });
         return TRUE;
     }
 
@@ -1204,17 +1295,45 @@ RxLowering::Lower(
                                          Source(Instruction->getOperand(2)) });
             return TRUE;
         case llvm::Instruction::BitCast:
+            if (Instruction->getType()->isHalfTy())
+                Emit(D3D11_SB_OPCODE_F16TOF32, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            else if (Instruction->getOperand(0)->getType()->isHalfTy())
+                Emit(D3D11_SB_OPCODE_F32TOF16, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            else
+                Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        case llvm::Instruction::FPExt:
             Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
             return TRUE;
+        case llvm::Instruction::FPTrunc:
+        {
+            /* The reference converts fast math results toward zero and everything else to nearest */
+            llvm::FPMathOperator *Math = llvm::dyn_cast<llvm::FPMathOperator>(Instruction->getOperand(0));
+
+            if (Math != nullptr && Math->hasUnsafeAlgebra())
+                Emit(RxWarpOpcodeHalfTowardZero, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            else
+                Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            return TRUE;
+        }
         case llvm::Instruction::ZExt:
-            Emit(D3D10_SB_OPCODE_AND, { Dest(Instruction), Source(Instruction->getOperand(0)), RxImmediate(1) });
+            if (Instruction->getOperand(0)->getType()->isIntegerTy(1))
+                Emit(D3D10_SB_OPCODE_AND, { Dest(Instruction), Source(Instruction->getOperand(0)), RxImmediate(1) });
+            else
+                Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
             return TRUE;
         case llvm::Instruction::SExt:
-            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), SignedSource(Instruction->getOperand(0)) });
             return TRUE;
         case llvm::Instruction::Trunc:
         {
             UINT Low = Fresh();
+
+            if (Instruction->getType()->isIntegerTy(16))
+            {
+                Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+                return TRUE;
+            }
 
             Emit(D3D10_SB_OPCODE_AND, { Temp(Low / 4, RxMaskMode, 1u << (Low & 3)), Source(Instruction->getOperand(0)), RxImmediate(1) });
             Emit(D3D10_SB_OPCODE_INE, { Dest(Instruction), Temp(Low / 4, RxSelectMode, Low & 3), RxImmediate(0) });
@@ -1227,7 +1346,7 @@ RxLowering::Lower(
             Emit(D3D10_SB_OPCODE_FTOU, { Dest(Instruction), Source(Instruction->getOperand(0)) });
             return TRUE;
         case llvm::Instruction::SIToFP:
-            Emit(D3D10_SB_OPCODE_ITOF, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+            Emit(D3D10_SB_OPCODE_ITOF, { Dest(Instruction), SignedSource(Instruction->getOperand(0)) });
             return TRUE;
         case llvm::Instruction::UIToFP:
             if (Instruction->getOperand(0)->getType()->isIntegerTy(1))
@@ -1580,6 +1699,12 @@ RxLowering::LowerCall(
         }
     }
 
+    if ((Code == OpCode::IMax || Code == OpCode::IMin) && Call->getType()->isIntegerTy(16))
+    {
+        Emit((Code == OpCode::IMax) ? D3D10_SB_OPCODE_IMAX : D3D10_SB_OPCODE_IMIN,
+             { Dest(Call), SignedSource(Call->getArgOperand(1)), SignedSource(Call->getArgOperand(2)) });
+        return TRUE;
+    }
     for (const RX_SIMPLE &Simple : RxSimpleOps)
     {
         if (Simple.Code != Code)
@@ -1756,6 +1881,9 @@ RxLowering::LowerCall(
         case OpCode::QuadOp:
             return LowerWave(Call, Code);
         default:
+            /* Native 16 bit resource data has its own memory layout, not lowered yet */
+            if (!Dxil.GetUseMinPrecision() && RxNamesSixteen(Call))
+                return FALSE;
             return LowerResource(Call, Code);
     }
 }

@@ -238,6 +238,10 @@ private:
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
+    HalfTowardZero(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
     Grouped(
         _In_ const RX_WARP_INSTRUCTION &Prefix,
         _In_ const RX_WARP_INSTRUCTION &Instruction);
@@ -868,6 +872,9 @@ RxWarpMachine::Operate(
             break;
         case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
             FullyMapped(Instruction);
+            break;
+        case RxWarpOpcodeHalfTowardZero:
+            HalfTowardZero(Instruction);
             break;
         case RxWarpOpcodeWave:
             Wave(Instruction);
@@ -1859,6 +1866,46 @@ RxWarpWaveCombine(
         default:
             return A ^ B;
     }
+}
+
+/* The half nearest zero, as a float: finite values past the range stop at the largest half */
+static
+UINT
+RxWarpHalfTowardZero(
+    _In_ UINT Bits)
+{
+    UINT Sign = Bits & 0x80000000;
+    UINT Field = (Bits >> 23) & 0xFF;
+    INT Exponent = (INT)Field - 127;
+    UINT Keep;
+
+    if (Field == 0xFF)
+        return Bits;
+    if (Exponent > 15)
+        return Sign | 0x477FE000;
+    if (Exponent < -24)
+        return Sign;
+
+    /* Normal halves keep 10 mantissa bits; smaller ones lose one more per step down */
+    Keep = (Exponent >= -14) ? 10 : (UINT)(10 - (-14 - Exponent));
+    return Bits & ~((1u << (23 - Keep)) - 1);
+}
+
+VOID
+RxWarpMachine::HalfTowardZero(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Values;
+
+    if (Instruction.OperandCount < 2)
+        return;
+    FetchAll(Instruction.Operands[1], TRUE, Values);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Component = 0; Component < 4; Component++)
+            Values[Lane][Component] = RxWarpHalfTowardZero(Values[Lane][Component]);
+    }
+    Store(Instruction, 0, Values, FALSE);
 }
 
 /* The identity a prefix starts from */
