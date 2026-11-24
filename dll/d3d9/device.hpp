@@ -3531,7 +3531,18 @@ private:
         _In_ UINT PrimitiveCount,
         _In_reads_bytes_(VertexCount * Run->Stride) const BYTE* Data,
         _In_ UINT VertexCount,
-        _In_reads_(VertexCount) const WORD* Codes);
+        _In_reads_(VertexCount) const WORD* Codes,
+        _In_opt_ const VOID* IndexData,
+        _In_ UINT IndexSize,
+        _In_ UINT MinIndex);
+
+    VOID
+    DrawIndexedRun(
+        _In_ const VOID* IndexData,
+        _In_ UINT IndexSize,
+        _In_ UINT MinIndex,
+        _In_ UINT VertexCount,
+        _In_ UINT Primitives);
 
     HRESULT
     LockTransformed(

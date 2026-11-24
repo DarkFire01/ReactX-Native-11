@@ -1766,6 +1766,30 @@ D9Device::DrawTransformedRun(
     TransformedStart += Vertices * TransformedStride;
 }
 
+/* Draws a run of whole indexed triangles from the transformed vertex buffer with the indices where they lie */
+VOID
+D9Device::DrawIndexedRun(
+    _In_ const VOID* IndexData,
+    _In_ UINT IndexSize,
+    _In_ UINT MinIndex,
+    _In_ UINT VertexCount,
+    _In_ UINT Primitives)
+{
+    D3DDDIARG_DRAWINDEXEDPRIMITIVE2 Draw = {};
+
+    if ((DrawDirty & D9DrawTextures) != 0)
+        FlushTextures();
+    BindTransformed();
+    SendTargets();
+    SettleSwitch(D3DPT_TRIANGLELIST, TRUE);
+    Draw.PrimitiveType = D3DPT_TRIANGLELIST;
+    Draw.BaseVertexOffset = static_cast<INT>(TransformedStart) - static_cast<INT>(MinIndex * TransformedStride);
+    Draw.MinIndex = MinIndex;
+    Draw.NumVertices = VertexCount;
+    Draw.PrimitiveCount = Primitives;
+    DdiDrawIndexedPrimitive2(&Draw, IndexSize, IndexData);
+}
+
 /* Draws vertices the clipper made from memory of its own; stream 0 holds nothing the next draw can count on */
 VOID
 D9Device::DrawClippedVertices(
@@ -1854,7 +1878,10 @@ D9Device::DrawClipped(
     _In_ UINT PrimitiveCount,
     _In_reads_bytes_(VertexCount * Run->Stride) const BYTE* Data,
     _In_ UINT VertexCount,
-    _In_reads_(VertexCount) const WORD* Codes)
+    _In_reads_(VertexCount) const WORD* Codes,
+    _In_opt_ const VOID* IndexData,
+    _In_ UINT IndexSize,
+    _In_ UINT MinIndex)
 {
     DWORD Mask = Run->GuardBand ? ~D9PvSidePlanes : 0xFFFFFFFF;
     UINT Stride = Run->Stride;
@@ -1864,7 +1891,6 @@ D9Device::DrawClipped(
     UINT RunFirst = 0;
     HRESULT hr = S_OK;
 
-    UNREFERENCED_PARAMETER(VertexCount);
     Clipper = new (std::nothrow) D9Clipper;
     if (Clipper == nullptr)
         return E_OUTOFMEMORY;
@@ -1905,7 +1931,45 @@ D9Device::DrawClipped(
         Clipper->High[1] = static_cast<FLOAT>(CurrentViewport.Y) + static_cast<FLOAT>(CurrentViewport.Height);
     }
 
-    if (Type == D3DPT_TRIANGLELIST)
+    if (IndexData != nullptr)
+    {
+        /* Indices pick the vertices; runs of whole triangles draw with the indices where they lie */
+        const BYTE* RunIndices = static_cast<const BYTE*>(IndexData);
+
+        for (UINT Triangle = 0; Triangle < PrimitiveCount && SUCCEEDED(hr); Triangle++)
+        {
+            const BYTE* At = static_cast<const BYTE*>(IndexData) + Triangle * 3 * IndexSize;
+            UINT Picked[3];
+            WORD Three[3];
+
+            for (UINT Corner = 0; Corner < 3; Corner++)
+            {
+                if (IndexSize == 2)
+                    Picked[Corner] = reinterpret_cast<const WORD*>(At)[Corner];
+                else
+                    Picked[Corner] = reinterpret_cast<const DWORD*>(At)[Corner];
+                Picked[Corner] -= MinIndex;
+                Three[Corner] = Codes[Picked[Corner]];
+            }
+            if ((Three[0] & Three[1] & Three[2]) == 0 && ((Three[0] | Three[1] | Three[2]) & Mask) == 0)
+            {
+                Pending += 1;
+                continue;
+            }
+            if (Pending != 0)
+                DrawIndexedRun(RunIndices, IndexSize, MinIndex, VertexCount, Pending);
+            Pending = 0;
+            RunIndices = At + 3 * IndexSize;
+            if ((Three[0] & Three[1] & Three[2]) != 0)
+                continue;
+            for (UINT Corner = 0; Corner < 3; Corner++)
+                D9ClipFromTransformed(Clipper, Data + Picked[Corner] * Stride, Three[Corner], &Corners[Corner]);
+            hr = DrawClippedTriangle(Clipper, &Corners[0], &Corners[1], &Corners[2]);
+        }
+        if (SUCCEEDED(hr) && Pending != 0)
+            DrawIndexedRun(RunIndices, IndexSize, MinIndex, VertexCount, Pending);
+    }
+    else if (Type == D3DPT_TRIANGLELIST)
     {
         for (UINT Triangle = 0; Triangle < PrimitiveCount && SUCCEEDED(hr); Triangle++)
         {
@@ -2180,13 +2244,17 @@ D9Device::DrawSoftware(
         hr = D9PvRunVertices(&Run, Declaration, First, VertexCount, Data, Codes);
 
         /* A primitive wholly outside one plane draws nothing */
-        if (SUCCEEDED(hr) && Run.Clipping && Run.ClipIntersection == 0 && IndexData == nullptr &&
-            Run.Targets == nullptr && (Run.ClipUnion & (Run.GuardBand ? ~D9PvSidePlanes : 0xFFFFFFFF)) != 0 &&
-            (Type == D3DPT_TRIANGLELIST || Type == D3DPT_TRIANGLESTRIP || Type == D3DPT_TRIANGLEFAN))
+        if (SUCCEEDED(hr) && Run.Clipping && Run.ClipIntersection == 0 && Run.Targets == nullptr &&
+            (Run.ClipUnion & (Run.GuardBand ? ~D9PvSidePlanes : 0xFFFFFFFF)) != 0 &&
+            (Type == D3DPT_TRIANGLELIST ||
+             (IndexData == nullptr && (Type == D3DPT_TRIANGLESTRIP || Type == D3DPT_TRIANGLEFAN))))
         {
             /* Some triangles cross the frustum and go through the clipper */
-            hr = DrawClipped(&Run, Type, PrimitiveCount, Data, VertexCount, Codes);
-            TransformedUsed[TransformedBuffer] = TransformedStart;
+            hr = DrawClipped(&Run, Type, PrimitiveCount, Data, VertexCount, Codes, IndexData, IndexSize, MinIndex);
+            if (IndexData != nullptr)
+                TransformedUsed[TransformedBuffer] = TransformedStart + VertexCount * Run.Stride;
+            else
+                TransformedUsed[TransformedBuffer] = TransformedStart;
         }
         else if (SUCCEEDED(hr) && (Run.ClipIntersection == 0 || !Run.Clipping))
         {
