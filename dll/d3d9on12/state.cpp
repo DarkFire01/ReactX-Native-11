@@ -88,6 +88,21 @@ NineStateFloat(
     return Float;
 }
 
+/* A point size, its minimum or its maximum marks the extension constants only when the value changes */
+static
+VOID
+NineNotePointSize(
+    _Inout_ NineDeviceState* Draw,
+    _Inout_ FLOAT* Stored,
+    _In_ FLOAT Value)
+{
+    if (*Stored == Value)
+        return;
+    *Stored = Value;
+    Draw->PointSizeDirty = TRUE;
+    Draw->ExtensionDirty = TRUE;
+}
+
 /* Stores a render state and marks what the next draw has to build again */
 static
 VOID
@@ -116,19 +131,13 @@ NineNoteRenderState(
                 Draw->AlphaToCoverage = Value == NineAtocPointOn;
                 Draw->BlendDirty = TRUE;
             }
-            Point[0] = NineStateFloat(Value);
-            Draw->PointSizeDirty = TRUE;
-            Draw->ExtensionDirty = TRUE;
+            NineNotePointSize(Draw, &Point[0], NineStateFloat(Value));
             break;
         case D3DDDIRS_POINTSIZE_MIN:
-            Point[1] = std::max(NineStateFloat(Value), 1.0f);
-            Draw->PointSizeDirty = TRUE;
-            Draw->ExtensionDirty = TRUE;
+            NineNotePointSize(Draw, &Point[1], NineStateFloat(Value) >= 1.0f ? NineStateFloat(Value) : 1.0f);
             break;
         case D3DDDIRS_POINTSIZE_MAX:
-            Point[2] = std::min(NineStateFloat(Value), 8192.0f);
-            Draw->PointSizeDirty = TRUE;
-            Draw->ExtensionDirty = TRUE;
+            NineNotePointSize(Draw, &Point[2], NineStateFloat(Value) <= 8192.0f ? NineStateFloat(Value) : 8192.0f);
             break;
         case D3DDDIRS_ADAPTIVETESS_Y:
             /* Only the alpha to coverage codes are kept */
