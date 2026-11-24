@@ -15,12 +15,62 @@
  * a WDDM 1.x interface, so they are wired up whenever gdi32 exports the thunks.
  */
 
+/* Repeats are traced for the first few, then once every few hundred */
+static
+BOOLEAN
+RxShouldReport(
+    _Inout_ LONG* Reports,
+    _Out_ LONG* Count)
+{
+    *Count = InterlockedIncrement(Reports);
+    return *Count <= 8 || (*Count % 256) == 0;
+}
+
+static
+VOID
+RxReportMissingThunk(
+    _In_z_ PCSTR Name,
+    _Inout_ LONG* Misses)
+{
+    LONG Count;
+
+    if (RxIsTraceEnabled() && RxShouldReport(Misses, &Count))
+        RxTrace(L"D3DKMT%S is not exported by gdi32 (%ld so far)", Name, Count);
+}
+
 #define RX_REQUIRE_THUNK(Name) \
     do \
     { \
         if (RxGetKmtThunks()->Name == nullptr) \
+        { \
+            static LONG Misses; \
+            RxReportMissingThunk(#Name, &Misses); \
             return E_NOTIMPL; \
+        } \
     } while (0)
+
+HRESULT
+RxKernelResult(
+    _In_ RxKernelDevice& Device,
+    _In_ NTSTATUS Status,
+    _In_z_ PCSTR Call,
+    _Inout_opt_ LONG* Reports)
+{
+    LONG Count;
+    HRESULT hr;
+
+    if (Status != STATUS_SUCCESS && Reports != nullptr && RxIsTraceEnabled() && RxShouldReport(Reports, &Count))
+        RxTrace(L"%S returned 0x%08lX (%ld so far)", Call, Status, Count);
+
+    if (!NT_SUCCESS(Status) && Device.IsKernelDeviceRemoved())
+        return D3DDDIERR_DEVICEREMOVED;
+
+    hr = RxHresultFromStatus(Status);
+    if (hr == D3DDDIERR_DEVICEREMOVED)
+        Device.NoteKernelDeviceRemoved(Status, Call);
+
+    return hr;
+}
 
 _Success_(return != nullptr)
 D3DKMT_HANDLE*
@@ -56,8 +106,10 @@ RxCreatePagingQueueCb(
     _In_ HANDLE hDevice,
     _Out_ D3DDDICB_CREATEPAGINGQUEUE* Args)
 {
+    static LONG Reports;
     D3DKMT_CREATEPAGINGQUEUE Create = {};
     NTSTATUS Status;
+    HRESULT hr;
 
     RX_REQUIRE_THUNK(CreatePagingQueue);
 
@@ -66,11 +118,9 @@ RxCreatePagingQueueCb(
     Create.PhysicalAdapterIndex = Args->PhysicalAdapterIndex;
 
     Status = RxGetKmtThunks()->CreatePagingQueue(&Create);
+    hr = RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreatePagingQueue", &Reports);
     if (!NT_SUCCESS(Status))
-    {
-        RX_TRACE(L"D3DKMTCreatePagingQueue failed 0x%08lX", Status);
-        return RxHresultFromStatus(Status);
-    }
+        return hr;
 
     Args->hPagingQueue = Create.hPagingQueue;
     Args->hSyncObject = Create.hSyncObject;
@@ -87,7 +137,8 @@ RxDestroyPagingQueueCb(
     D3DDDI_DESTROYPAGINGQUEUE Destroy = *Args;
 
     RX_REQUIRE_THUNK(DestroyPagingQueue);
-    return RxHresultFromStatus(RxGetKmtThunks()->DestroyPagingQueue(&Destroy));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->DestroyPagingQueue(&Destroy),
+                          "D3DKMTDestroyPagingQueue", nullptr);
 }
 
 HRESULT
@@ -96,13 +147,14 @@ RxMakeResidentCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDI_MAKERESIDENT* Args)
 {
+    static LONG Reports;
     NTSTATUS Status;
 
     RX_REQUIRE_THUNK(MakeResident);
 
     /* E_PENDING tells the UMD to wait on the paging fence written into the arguments */
     Status = RxGetKmtThunks()->MakeResident(Args);
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTMakeResident", &Reports);
 }
 
 HRESULT
@@ -123,7 +175,7 @@ RxEvictCb(
 
     Status = RxGetKmtThunks()->Evict(&Evict);
     Args->NumBytesToTrim = Evict.NumBytesToTrim;
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTEvict", nullptr);
 }
 
 HRESULT
@@ -132,11 +184,14 @@ RxReserveGpuVirtualAddressCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDI_RESERVEGPUVIRTUALADDRESS* Args)
 {
+    static LONG Reports;
+
     RX_REQUIRE_THUNK(ReserveGpuVirtualAddress);
 
     /* The UMD leaves the adapter for the runtime to fill in */
     Args->hAdapter = RxKernelDeviceFromHandle(hDevice).KernelAdapter();
-    return RxHresultFromStatus(RxGetKmtThunks()->ReserveGpuVirtualAddress(Args));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->ReserveGpuVirtualAddress(Args),
+                          "D3DKMTReserveGpuVirtualAddress", &Reports);
 }
 
 HRESULT
@@ -145,12 +200,14 @@ RxMapGpuVirtualAddressCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDI_MAPGPUVIRTUALADDRESS* Args)
 {
+    static LONG Reports;
     HRESULT hr;
 
     RX_REQUIRE_THUNK(MapGpuVirtualAddress);
 
-    /* A lost device shows up on the next submit, so the mapping itself reports success */
-    hr = RxHresultFromStatus(RxGetKmtThunks()->MapGpuVirtualAddress(Args));
+    /* The removal is latched, but the mapping itself reports success; the next submit shows the loss */
+    hr = RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->MapGpuVirtualAddress(Args),
+                        "D3DKMTMapGpuVirtualAddress", &Reports);
     return (hr == D3DDDIERR_DEVICEREMOVED) ? S_OK : hr;
 }
 
@@ -168,7 +225,8 @@ RxFreeGpuVirtualAddressCb(
     Free.BaseAddress = Args->BaseAddress;
     Free.Size = Args->Size;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->FreeGpuVirtualAddress(&Free));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->FreeGpuVirtualAddress(&Free),
+                          "D3DKMTFreeGpuVirtualAddress", nullptr);
 }
 
 HRESULT
@@ -177,6 +235,7 @@ RxUpdateGpuVirtualAddressCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_UPDATEGPUVIRTUALADDRESS* Args)
 {
+    static LONG Reports;
     D3DKMT_UPDATEGPUVIRTUALADDRESS Update = {};
 
     RX_REQUIRE_THUNK(UpdateGpuVirtualAddress);
@@ -189,7 +248,8 @@ RxUpdateGpuVirtualAddressCb(
     Update.FenceValue = Args->FenceValue;
     Update.Flags.Value = Args->Flags.Value;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->UpdateGpuVirtualAddress(&Update));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->UpdateGpuVirtualAddress(&Update),
+                          "D3DKMTUpdateGpuVirtualAddress", &Reports);
 }
 
 HRESULT
@@ -215,7 +275,7 @@ RxCreateContextVirtualCb(
     if (!NT_SUCCESS(Status))
     {
         RX_TRACE(L"D3DKMTCreateContextVirtual(node %u) failed 0x%08lX", Args->NodeOrdinal, Status);
-        return RxHresultFromStatus(Status);
+        return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreateContextVirtual", nullptr);
     }
 
     RX_TRACE(L"virtual context 0x%X on node %u", Create.hContext, Args->NodeOrdinal);
@@ -230,6 +290,7 @@ RxSubmitCommandCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_SUBMITCOMMAND* Args)
 {
+    static LONG Reports;
     D3DKMT_SUBMITCOMMAND Submit = {};
     UINT Index;
 
@@ -251,7 +312,8 @@ RxSubmitCommandCb(
     Submit.NumHistoryBuffers = Args->NumHistoryBuffers;
     Submit.HistoryBufferArray = Args->HistoryBufferArray;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SubmitCommand(&Submit));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SubmitCommand(&Submit),
+                          "D3DKMTSubmitCommand", &Reports);
 }
 
 HRESULT
@@ -260,6 +322,7 @@ RxLock2Cb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDICB_LOCK2* Args)
 {
+    static LONG Reports;
     D3DKMT_LOCK2 Lock = {};
     NTSTATUS Status;
 
@@ -273,7 +336,7 @@ RxLock2Cb(
     if (NT_SUCCESS(Status))
         Args->pData = Lock.pData;
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTLock2", &Reports);
 }
 
 HRESULT
@@ -289,7 +352,8 @@ RxUnlock2Cb(
     Unlock.hDevice = RxKernelDeviceFromHandle(hDevice).KernelDevice();
     Unlock.hAllocation = Args->hAllocation;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->Unlock2(&Unlock));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->Unlock2(&Unlock), "D3DKMTUnlock2",
+                          nullptr);
 }
 
 HRESULT
@@ -307,7 +371,8 @@ RxInvalidateCacheCb(
     Invalidate.Offset = Args->Offset;
     Invalidate.Length = Args->Length;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->InvalidateCache(&Invalidate));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->InvalidateCache(&Invalidate),
+                          "D3DKMTInvalidateCache", nullptr);
 }
 
 HRESULT
@@ -340,7 +405,7 @@ RxDeallocate2Cb(
     if (NT_SUCCESS(Status) && Args->hResource != NULL)
         Device.RetireKernelResource(Args->hResource);
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(Device, Status, "D3DKMTDestroyAllocation2", nullptr);
 }
 
 HRESULT
@@ -372,7 +437,7 @@ RxReclaimAllocations2Cb(
     Args->PagingFenceValue = Reclaim.PagingFenceValue;
     delete[] Resources;
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTReclaimAllocations2", nullptr);
 }
 
 HRESULT
@@ -404,7 +469,7 @@ RxReclaimAllocations3Cb(
     Args->PagingFenceValue = Reclaim.PagingFenceValue;
     delete[] Resources;
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTReclaimAllocations2", nullptr);
 }
 
 HRESULT
@@ -418,7 +483,7 @@ RxUpdateAllocationPropertyCb(
     RX_REQUIRE_THUNK(UpdateAllocationProperty);
 
     Status = RxGetKmtThunks()->UpdateAllocationProperty(Args);
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTUpdateAllocationProperty", nullptr);
 }
 
 HRESULT
@@ -428,7 +493,8 @@ RxGetResourcePresentPrivateDriverDataCb(
     _Inout_ D3DDDI_GETRESOURCEPRESENTPRIVATEDRIVERDATA* Args)
 {
     RX_REQUIRE_THUNK(GetResourcePresentPrivateDriverData);
-    return RxHresultFromStatus(RxGetKmtThunks()->GetResourcePresentPrivateDriverData(Args));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->GetResourcePresentPrivateDriverData(Args),
+                          "D3DKMTGetResourcePresentPrivateDriverData", nullptr);
 }
 
 HRESULT
@@ -437,6 +503,7 @@ RxWaitForSynchronizationObjectFromCpuCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU* Args)
 {
+    static LONG Reports;
     D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU Wait = {};
     HRESULT hr;
 
@@ -449,7 +516,9 @@ RxWaitForSynchronizationObjectFromCpuCb(
     Wait.hAsyncEvent = Args->hAsyncEvent;
     Wait.Flags = Args->Flags;
 
-    hr = RxHresultFromStatus(RxGetKmtThunks()->WaitForSynchronizationObjectFromCpu(&Wait));
+    /* Waits on a lost device return at once; the removal is latched and the UMD sees success */
+    hr = RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->WaitForSynchronizationObjectFromCpu(&Wait),
+                        "D3DKMTWaitForSynchronizationObjectFromCpu", &Reports);
     return (hr == D3DDDIERR_DEVICEREMOVED) ? S_OK : hr;
 }
 
@@ -468,7 +537,8 @@ RxSignalSynchronizationObjectFromCpuCb(
     Signal.ObjectHandleArray = Args->ObjectHandleArray;
     Signal.FenceValueArray = Args->FenceValueArray;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SignalSynchronizationObjectFromCpu(&Signal));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SignalSynchronizationObjectFromCpu(&Signal),
+                          "D3DKMTSignalSynchronizationObjectFromCpu", nullptr);
 }
 
 HRESULT
@@ -477,6 +547,7 @@ RxWaitForSynchronizationObjectFromGpuCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU* Args)
 {
+    static LONG Reports;
     D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMGPU Wait = {};
 
     RX_REQUIRE_THUNK(WaitForSynchronizationObjectFromGpu);
@@ -487,7 +558,8 @@ RxWaitForSynchronizationObjectFromGpuCb(
     static_assert(sizeof(Wait.Reserved) == sizeof(Args->Reserved));
     memcpy(Wait.Reserved, Args->Reserved, sizeof(Wait.Reserved));
 
-    return RxHresultFromStatus(RxGetKmtThunks()->WaitForSynchronizationObjectFromGpu(&Wait));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->WaitForSynchronizationObjectFromGpu(&Wait),
+                          "D3DKMTWaitForSynchronizationObjectFromGpu", &Reports);
 }
 
 HRESULT
@@ -496,6 +568,7 @@ RxSignalSynchronizationObjectFromGpuCb(
     _In_ HANDLE hDevice,
     _In_ const D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU* Args)
 {
+    static LONG Reports;
     D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU Signal = {};
 
     RX_REQUIRE_THUNK(SignalSynchronizationObjectFromGpu);
@@ -506,7 +579,8 @@ RxSignalSynchronizationObjectFromGpuCb(
     static_assert(sizeof(Signal.Reserved) == sizeof(Args->Reserved));
     memcpy(Signal.Reserved, Args->Reserved, sizeof(Signal.Reserved));
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SignalSynchronizationObjectFromGpu(&Signal));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SignalSynchronizationObjectFromGpu(&Signal),
+                          "D3DKMTSignalSynchronizationObjectFromGpu", &Reports);
 }
 
 HRESULT
@@ -535,7 +609,8 @@ RxSignalSynchronizationObjectFromGpu2Cb(
     static_assert(sizeof(Signal.Reserved) == sizeof(Args->Reserved));
     memcpy(Signal.Reserved, Args->Reserved, sizeof(Signal.Reserved));
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SignalSynchronizationObjectFromGpu2(&Signal));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SignalSynchronizationObjectFromGpu2(&Signal),
+                          "D3DKMTSignalSynchronizationObjectFromGpu2", nullptr);
 }
 
 /* Hardware scheduling: queue and hardware context handles pass through like contexts */
@@ -568,7 +643,7 @@ RxCreateHwContextCb(
 
     Status = RxGetKmtThunks()->CreateHwContext(&Create);
     if (!NT_SUCCESS(Status))
-        return RxHresultFromStatus(Status);
+        return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreateHwContext", nullptr);
 
     Args->hHwContext = (HANDLE)(ULONG_PTR)Create.hHwContext;
     return S_OK;
@@ -585,7 +660,8 @@ RxDestroyHwContextCb(
     RX_REQUIRE_THUNK(DestroyHwContext);
 
     Destroy.hHwContext = RxKmContext(Args->hHwContext);
-    return RxHresultFromStatus(RxGetKmtThunks()->DestroyHwContext(&Destroy));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->DestroyHwContext(&Destroy),
+                          "D3DKMTDestroyHwContext", nullptr);
 }
 
 HRESULT
@@ -608,7 +684,7 @@ RxCreateHwQueueCb(
     if (!NT_SUCCESS(Status))
     {
         RX_TRACE(L"D3DKMTCreateHwQueue failed 0x%08lX", Status);
-        return RxHresultFromStatus(Status);
+        return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreateHwQueue", nullptr);
     }
 
     RX_TRACE(L"hardware queue 0x%X on context 0x%X", Create.hHwQueue, Create.hHwContext);
@@ -637,7 +713,7 @@ RxDestroyHwQueueCb(
     if (NT_SUCCESS(Status))
         RxKernelDeviceFromHandle(hDevice).ForgetKernelQueue(Destroy.hHwQueue);
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTDestroyHwQueue", nullptr);
 }
 
 HRESULT
@@ -659,7 +735,8 @@ RxSubmitCommandToHwQueueCb(
     Submit.NumPrimaries = Args->NumPrimaries;
     Submit.WrittenPrimaries = Args->WrittenPrimaries;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SubmitCommandToHwQueue(&Submit));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SubmitCommandToHwQueue(&Submit),
+                          "D3DKMTSubmitCommandToHwQueue", nullptr);
 }
 
 HRESULT
@@ -677,7 +754,8 @@ RxSubmitWaitForSyncObjectsToHwQueueCb(
     Wait.ObjectHandleArray = Args->ObjectHandleArray;
     Wait.FenceValueArray = Args->FenceValueArray;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SubmitWaitForSyncObjectsToHwQueue(&Wait));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SubmitWaitForSyncObjectsToHwQueue(&Wait),
+                          "D3DKMTSubmitWaitForSyncObjectsToHwQueue", nullptr);
 }
 
 HRESULT
@@ -709,7 +787,7 @@ RxSubmitSignalSyncObjectsToHwQueueCb(
 
     Status = RxGetKmtThunks()->SubmitSignalSyncObjectsToHwQueue(&Signal);
     delete[] Queues;
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTSubmitSignalSyncObjectsToHwQueue", nullptr);
 }
 
 /* Kernel callbacks that are not WDDM 2 specific */
@@ -731,7 +809,8 @@ RxSetPriorityCb(
     }
     Priority.pPriorities = Args->pPriorities;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SetAllocationPriority(&Priority));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SetAllocationPriority(&Priority),
+                          "D3DKMTSetAllocationPriority", nullptr);
 }
 
 HRESULT
@@ -751,7 +830,8 @@ RxQueryResidencyCb(
     }
     Query.pResidencyStatus = reinterpret_cast<D3DKMT_ALLOCATIONRESIDENCYSTATUS*>(Args->pResidencyStatus);
 
-    return RxHresultFromStatus(RxGetKmtThunks()->QueryAllocationResidency(&Query));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->QueryAllocationResidency(&Query),
+                          "D3DKMTQueryAllocationResidency", nullptr);
 }
 
 HRESULT
@@ -760,10 +840,12 @@ RxRenderCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDICB_RENDER* Args)
 {
+    static LONG Reports;
     D3DKMT_RENDER Render = {};
     UINT Flags;
     UINT Index;
     NTSTATUS Status;
+    HRESULT hr;
 
     Render.hContext = RxKmContext(Args->hContext);
     Render.CommandOffset = Args->CommandOffset;
@@ -786,11 +868,9 @@ RxRenderCb(
         Render.BroadcastContext[Index] = RxKmContext(Args->BroadcastContext[Index]);
 
     Status = RxGetKmtThunks()->Render(&Render);
+    hr = RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTRender", &Reports);
     if (!NT_SUCCESS(Status))
-    {
-        RX_TRACE(L"D3DKMTRender failed 0x%08lX", Status);
-        return RxHresultFromStatus(Status);
-    }
+        return hr;
 
     Args->pNewCommandBuffer = Render.pNewCommandBuffer;
     Args->NewCommandBufferSize = Render.NewCommandBufferSize;
@@ -821,7 +901,7 @@ RxLockCb(
 
     Status = RxGetKmtThunks()->Lock(&Lock);
     if (!NT_SUCCESS(Status))
-        return RxHresultFromStatus(Status);
+        return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTLock", nullptr);
 
     Args->hAllocation = Lock.hAllocation;
     Args->pData = Lock.pData;
@@ -841,7 +921,8 @@ RxUnlockCb(
     Unlock.NumAllocations = Args->NumAllocations;
     Unlock.phAllocations = Args->phAllocations;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->Unlock(&Unlock));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->Unlock(&Unlock),
+                          "D3DKMTUnlock", nullptr);
 }
 
 HRESULT
@@ -865,7 +946,7 @@ RxCreateContextCb(
     if (!NT_SUCCESS(Status))
     {
         RX_TRACE(L"D3DKMTCreateContext(node %u) failed 0x%08lX", Args->NodeOrdinal, Status);
-        return RxHresultFromStatus(Status);
+        return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreateContext", nullptr);
     }
 
     RX_TRACE(L"context 0x%X on node %u", Create.hContext, Args->NodeOrdinal);
@@ -892,7 +973,8 @@ RxDestroyContextCb(
 
     Destroy.hContext = RxKmContext(Args->hContext);
     RxKernelDeviceFromHandle(hDevice).ForgetKernelContext(Destroy.hContext);
-    return RxHresultFromStatus(RxGetKmtThunks()->DestroyContext(&Destroy));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->DestroyContext(&Destroy),
+                          "D3DKMTDestroyContext", nullptr);
 }
 
 HRESULT
@@ -911,7 +993,7 @@ RxCreateSynchronizationObjectCb(
     if (NT_SUCCESS(Status))
         Args->hSyncObject = Create.hSyncObject;
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreateSynchronizationObject", nullptr);
 }
 
 HRESULT
@@ -933,7 +1015,7 @@ RxCreateSynchronizationObject2Cb(
         Args->hSyncObject = Create.hSyncObject;
     }
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTCreateSynchronizationObject2", nullptr);
 }
 
 HRESULT
@@ -945,7 +1027,8 @@ RxDestroySynchronizationObjectCb(
     D3DKMT_DESTROYSYNCHRONIZATIONOBJECT Destroy;
 
     Destroy.hSyncObject = Args->hSyncObject;
-    return RxHresultFromStatus(RxGetKmtThunks()->DestroySynchronizationObject(&Destroy));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->DestroySynchronizationObject(&Destroy),
+                          "D3DKMTDestroySynchronizationObject", nullptr);
 }
 
 HRESULT
@@ -960,7 +1043,8 @@ RxWaitForSynchronizationObjectCb(
     Wait.ObjectCount = Args->ObjectCount;
     memcpy(Wait.ObjectHandleArray, Args->ObjectHandleArray, sizeof(Wait.ObjectHandleArray));
 
-    return RxHresultFromStatus(RxGetKmtThunks()->WaitForSynchronizationObject(&Wait));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->WaitForSynchronizationObject(&Wait),
+                          "D3DKMTWaitForSynchronizationObject", nullptr);
 }
 
 HRESULT
@@ -976,7 +1060,8 @@ RxWaitForSynchronizationObject2Cb(
     memcpy(Wait.ObjectHandleArray, Args->ObjectHandleArray, sizeof(Wait.ObjectHandleArray));
     Wait.Fence.FenceValue = Args->FenceValue;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->WaitForSynchronizationObject2(&Wait));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->WaitForSynchronizationObject2(&Wait),
+                          "D3DKMTWaitForSynchronizationObject2", nullptr);
 }
 
 HRESULT
@@ -992,7 +1077,8 @@ RxSignalSynchronizationObjectCb(
     memcpy(Signal.ObjectHandleArray, Args->ObjectHandleArray, sizeof(Signal.ObjectHandleArray));
     Signal.Flags = Args->Flags;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SignalSynchronizationObject(&Signal));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SignalSynchronizationObject(&Signal),
+                          "D3DKMTSignalSynchronizationObject", nullptr);
 }
 
 HRESULT
@@ -1016,7 +1102,8 @@ RxSignalSynchronizationObject2Cb(
     /* Copies either the fence value or the CPU event, they share storage on both sides */
     Signal.Fence.FenceValue = Args->FenceValue;
 
-    return RxHresultFromStatus(RxGetKmtThunks()->SignalSynchronizationObject2(&Signal));
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), RxGetKmtThunks()->SignalSynchronizationObject2(&Signal),
+                          "D3DKMTSignalSynchronizationObject2", nullptr);
 }
 
 HRESULT
@@ -1054,7 +1141,7 @@ RxOfferAllocationsCb(
 
     Status = RxGetKmtThunks()->OfferAllocations(&Offer);
     delete[] Resources;
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTOfferAllocations", nullptr);
 }
 
 HRESULT
@@ -1082,7 +1169,7 @@ RxReclaimAllocationsCb(
 
     Status = RxGetKmtThunks()->ReclaimAllocations(&Reclaim);
     delete[] Resources;
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(RxKernelDeviceFromHandle(hDevice), Status, "D3DKMTReclaimAllocations", nullptr);
 }
 
 HRESULT

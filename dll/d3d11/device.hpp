@@ -644,6 +644,29 @@ public:
         _In_ UINT FlipInterval,
         _In_ RxPresentContext* Context) override;
 
+    HRESULT
+    STDMETHODCALLTYPE
+    GetRemovedReason() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    BltToTarget(
+        _In_ IUnknown* Buffer,
+        _In_ IUnknown* Target,
+        _In_ const RECT* DestRect) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetTargetSize(
+        _In_ IUnknown* Target,
+        _Out_ UINT* Width,
+        _Out_ UINT* Height) override;
+
+    BOOL
+    STDMETHODCALLTYPE
+    IsBufferDcHeld(
+        _In_ IUnknown* Buffer) override;
+
     ~RxPresentBridge();
 
 private:
@@ -953,6 +976,24 @@ public:
     }
 
     VOID
+    NoteKernelDeviceRemoved(
+        _In_ NTSTATUS Status,
+        _In_z_ PCSTR Call) override;
+
+    BOOLEAN
+    IsKernelDeviceRemoved() const override
+    {
+        return RemovedReason < 0;
+    }
+
+    /* Latches the device as removed; the first reason sticks, Status and Call say what saw it */
+    VOID
+    RemoveDevice(
+        _In_ HRESULT Reason,
+        _In_ LONG Status,
+        _In_z_ PCSTR Call);
+
+    VOID
     UntrackContext(
         _In_ D3DKMT_HANDLE KmContext);
 
@@ -1078,6 +1119,13 @@ private:
     SRWLOCK RemovedLock = SRWLOCK_INIT;
     DWORD RemovedCookie = 0;
     std::vector<RemovedEvent> RemovedEvents;
+
+    /* Why the device was removed, S_OK while it works */
+    volatile LONG RemovedReason = S_OK;
+
+    /* The kernel's execution state for the device, active when it cannot be asked */
+    D3DKMT_DEVICEEXECUTION_STATE
+    QueryExecutionState() const;
 
 public:
     /* Made through d3d10.dll or d3d10_1.dll: the device and its objects also answer as Direct3D 10 */

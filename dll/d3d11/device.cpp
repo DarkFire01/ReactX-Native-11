@@ -305,8 +305,86 @@ RxDevice::SetDriverError(
 {
     if (Error != DXGI_DDI_ERR_WASSTILLDRAWING)
         RX_TRACE(L"UMD reported error 0x%08lX", Error);
+
+    /* A lost device is latched for every thread; the failing call reports it as DXGI does */
+    if (Error == D3DDDIERR_DEVICEREMOVED)
+    {
+        RemoveDevice(DXGI_ERROR_DEVICE_REMOVED, Error, "SetErrorCb");
+        Error = DXGI_ERROR_DEVICE_REMOVED;
+    }
+
     if (RxThreadDriverError == S_OK)
         RxThreadDriverError = Error;
+}
+
+D3DKMT_DEVICEEXECUTION_STATE
+RxDevice::QueryExecutionState() const
+{
+    D3DKMT_GETDEVICESTATE State = {};
+
+    State.hDevice = KmDevice;
+    State.StateType = D3DKMT_DEVICESTATE_EXECUTION;
+    State.ExecutionState = D3DKMT_DEVICEEXECUTION_ACTIVE;
+    if (KmDevice != 0 && RxGetKmtThunks()->GetDeviceState != nullptr)
+        RxGetKmtThunks()->GetDeviceState(&State);
+
+    return State.ExecutionState;
+}
+
+VOID
+RxDevice::RemoveDevice(
+    _In_ HRESULT Reason,
+    _In_ LONG Status,
+    _In_z_ PCSTR Call)
+{
+    if (RemovedReason < 0)
+        return;
+
+    /* A plain removal is refined by what the kernel says happened to the device */
+    if (Reason == DXGI_ERROR_DEVICE_REMOVED)
+    {
+        switch (QueryExecutionState())
+        {
+            case D3DKMT_DEVICEEXECUTION_RESET:
+                Reason = DXGI_ERROR_DEVICE_RESET;
+                break;
+
+            case D3DKMT_DEVICEEXECUTION_HUNG:
+            case D3DKMT_DEVICEEXECUTION_ERROR_DMAFAULT:
+            case D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT:
+                Reason = DXGI_ERROR_DEVICE_HUNG;
+                break;
+
+            case D3DKMT_DEVICEEXECUTION_ERROR_OUTOFMEMORY:
+                Reason = E_OUTOFMEMORY;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    if (InterlockedCompareExchange(&RemovedReason, Reason, S_OK) != S_OK)
+        return;
+
+    RX_TRACE(L"device removed: reason 0x%08lX, status 0x%08lX from %S", Reason, Status, Call);
+
+    AcquireSRWLockShared(&RemovedLock);
+    for (const RemovedEvent& Each : RemovedEvents)
+        SetEvent(Each.Event);
+    ReleaseSRWLockShared(&RemovedLock);
+}
+
+VOID
+RxDevice::NoteKernelDeviceRemoved(
+    _In_ NTSTATUS Status,
+    _In_z_ PCSTR Call)
+{
+    /* Lost allocation contents mean the driver failed, not the device */
+    RemoveDevice(Status == STATUS_GRAPHICS_ALLOCATION_CONTENT_LOST ? DXGI_ERROR_DRIVER_INTERNAL_ERROR
+                                                                   : DXGI_ERROR_DEVICE_REMOVED,
+                 Status,
+                 Call);
 }
 
 HRESULT
@@ -461,7 +539,17 @@ HRESULT
 STDMETHODCALLTYPE
 RxDevice::GetDeviceRemovedReason(VOID)
 {
-    return S_OK;
+    D3DKMT_DEVICEEXECUTION_STATE State;
+
+    /* The kernel can lose the device without any call failing, so a working device asks it */
+    if (RemovedReason >= 0)
+    {
+        State = QueryExecutionState();
+        if (State != D3DKMT_DEVICEEXECUTION_ACTIVE)
+            RemoveDevice(DXGI_ERROR_DEVICE_REMOVED, State, "D3DKMTGetDeviceState");
+    }
+
+    return RemovedReason;
 }
 
 VOID

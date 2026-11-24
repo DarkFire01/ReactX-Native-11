@@ -56,6 +56,7 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTSetDisplayMode", Kmt.SetDisplayMode);
     RxResolve(Gdi32, "D3DKMTSetVidPnSourceOwner", Kmt.SetVidPnSourceOwner);
     RxResolve(Gdi32, "D3DKMTSetVidPnSourceOwner1", Kmt.SetVidPnSourceOwner1);
+    RxResolve(Gdi32, "D3DKMTCheckVidPnExclusiveOwnership", Kmt.CheckVidPnExclusiveOwnership);
     RxResolve(Gdi32, "D3DKMTQueryVideoMemoryInfo", Kmt.QueryVideoMemoryInfo);
     RxResolve(Gdi32, "D3DKMTChangeVideoMemoryReservation", Kmt.ChangeVideoMemoryReservation);
     RxResolve(Gdi32, "D3DKMTGetSharedResourceAdapterLuid", Kmt.GetSharedResourceAdapterLuid);
@@ -63,6 +64,7 @@ RxLoadKmtThunks(
 
     RxResolve(Gdi32, "D3DKMTCreateDevice", Kmt.CreateDevice);
     RxResolve(Gdi32, "D3DKMTDestroyDevice", Kmt.DestroyDevice);
+    RxResolve(Gdi32, "D3DKMTGetDeviceState", Kmt.GetDeviceState);
     RxResolve(Gdi32, "D3DKMTCreateContext", Kmt.CreateContext);
     RxResolve(Gdi32, "D3DKMTDestroyContext", Kmt.DestroyContext);
     RxResolve(Gdi32, "D3DKMTSetContextSchedulingPriority", Kmt.SetContextSchedulingPriority);

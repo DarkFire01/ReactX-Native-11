@@ -41,11 +41,13 @@ RxAllocateCb(
     _In_ HANDLE hDevice,
     _Inout_ D3DDDICB_ALLOCATE* Args)
 {
+    static LONG Reports;
     RxDevice& Device = RxDeviceFromHandle(hDevice);
     const KmtThunks* Kmt = RxGetKmtThunks();
     RxRuntimeResource* Resource = static_cast<RxRuntimeResource*>(Args->hResource);
     D3DKMT_CREATEALLOCATION Create = {};
     NTSTATUS Status;
+    HRESULT hr;
 
     Create.hDevice = Device.GetKmDevice();
     Create.pPrivateDriverData = Args->pPrivateDriverData;
@@ -83,7 +85,7 @@ RxAllocateCb(
         {
             Status = RxCreateKeyedMutex(Device, *Resource);
             if (!NT_SUCCESS(Status))
-                return RxHresultFromStatus(Status);
+                return RxKernelResult(Device, Status, "D3DKMTCreateKeyedMutex2", nullptr);
         }
     }
 
@@ -92,12 +94,12 @@ RxAllocateCb(
     else
         Status = Kmt->CreateAllocation(&Create);
 
+    hr = RxKernelResult(Device, Status, "D3DKMTCreateAllocation", &Reports);
     if (!NT_SUCCESS(Status))
     {
-        RX_TRACE(L"D3DKMTCreateAllocation failed 0x%08lX", Status);
         if (Resource != nullptr && Create.Flags.CreateResource)
             RxCloseKeyedMutex(*Resource);
-        return RxHresultFromStatus(Status);
+        return hr;
     }
 
     if (Resource != nullptr && Create.Flags.CreateResource)
@@ -139,7 +141,7 @@ RxDeallocateCb(
     if (NT_SUCCESS(Status) && Resource != nullptr)
         Device.ReleaseRuntimeResource(Resource);
 
-    return RxHresultFromStatus(Status);
+    return RxKernelResult(Device, Status, "D3DKMTDestroyAllocation", nullptr);
 }
 
 static
@@ -195,7 +197,7 @@ RxSetDisplayModeCb(
     if (!NT_SUCCESS(Status))
     {
         RX_TRACE(L"D3DKMTSetDisplayMode failed 0x%08lX", Status);
-        return RxHresultFromStatus(Status);
+        return RxKernelResult(Device, Status, "D3DKMTSetDisplayMode", nullptr);
     }
 
     Args->PrivateDriverFormatAttribute = Mode.PrivateDriverFormatAttribute;
@@ -699,8 +701,6 @@ RxDxgiPresentCb(
     D3DKMT_PRESENT Present;
     ULONG Index;
 
-    UNREFERENCED_PARAMETER(hDevice);
-
     if (Context == nullptr || RxGetKmtThunks()->Present == nullptr)
         return E_INVALIDARG;
     if (Args->BroadcastContextCount > D3DDDI_MAX_BROADCAST_CONTEXT)
@@ -725,7 +725,7 @@ RxDxgiPresentCb(
     if (!NT_SUCCESS(Context->KernelStatus))
         RX_TRACE(L"D3DKMTPresent failed 0x%08lX (flags %08X source %u)", Context->KernelStatus, Present.Flags.Value,
                  Present.VidPnSourceId);
-    return RxHresultFromStatus(Context->KernelStatus);
+    return RxKernelResult(RxDeviceFromHandle(hDevice), Context->KernelStatus, "D3DKMTPresent", nullptr);
 }
 
 /* The hardware queue form of a DDA present; the kernel orders the copy after the work on every queue */
@@ -813,7 +813,7 @@ RxDxgiSubmitPresentToHwQueueCb(
     Context->KernelStatus = Status;
 
     /* An occluded window is not an error; the present simply showed nothing */
-    hr = RxHresultFromStatus(Status);
+    hr = RxKernelResult(RxDeviceFromHandle(hDevice), Status, "D3DKMTSubmitPresentToHwQueue", nullptr);
     if (FAILED(hr))
         RX_TRACE(L"D3DKMTSubmitPresentToHwQueue failed 0x%08lX", Status);
     return hr;

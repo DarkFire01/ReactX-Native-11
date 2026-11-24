@@ -76,7 +76,38 @@ public:
     VOID
     RetireKernelResource(
         _In_ HANDLE RuntimeResource) = 0;
+
+    /* A callback saw the kernel report the device lost; Call names the thunk */
+    virtual
+    VOID
+    NoteKernelDeviceRemoved(
+        _In_ NTSTATUS Status,
+        _In_z_ PCSTR Call)
+    {
+        UNREFERENCED_PARAMETER(Status);
+        UNREFERENCED_PARAMETER(Call);
+    }
+
+    /* TRUE once the runtime has latched the device as removed */
+    virtual
+    BOOLEAN
+    IsKernelDeviceRemoved() const
+    {
+        return FALSE;
+    }
 };
+
+/*
+ * What a callback hands the UMD for a thunk status. Failures after removal read as
+ * a lost device, and a lost device is latched on the runtime device. Reports, when
+ * given, counts nonzero statuses so they are traced at a limited rate.
+ */
+HRESULT
+RxKernelResult(
+    _In_ RxKernelDevice& Device,
+    _In_ NTSTATUS Status,
+    _In_z_ PCSTR Call,
+    _Inout_opt_ LONG* Reports);
 
 /* Each runtime module says which of its objects a callback's device handle is */
 RxKernelDevice&
