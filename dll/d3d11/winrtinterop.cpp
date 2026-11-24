@@ -147,9 +147,6 @@ public:
     {
         IUnknown* Found = nullptr;
 
-        if (ppvObject == nullptr)
-            return E_POINTER;
-
         if (riid == __uuidof(IUnknown) || riid == __uuidof(IInspectable) || riid == __uuidof(Face))
             Found = static_cast<Face*>(this);
         else if (riid == __uuidof(IClosable))
