@@ -1909,7 +1909,8 @@ RxWarpDraw::ShadePass(
             FLOAT Sy = (FLOAT)(Y + (INT)(Lane >> 1)) + 0.5f;
             FLOAT W = 1.0f / RxWarpEvaluate(RhwPlane, Sx, Sy);
 
-            Invocation.CoverageIn[Lane] = Samples[Lane] & Pipeline->SampleMask;
+            /* Shading per sample still sees the whole pixel's coverage, as the reference gives it */
+            Invocation.CoverageIn[Lane] = ((Pass != UINT_MAX) ? PixelCoverage[Lane] : Samples[Lane]) & Pipeline->SampleMask;
             Invocation.SampleIndex[Lane] = (Pass != UINT_MAX) ? Pass : 0;
 
             /* Pixels the sample mask or the edges leave partly covered take centroid attributes at their first covered sample */
@@ -1940,9 +1941,22 @@ RxWarpDraw::ShadePass(
                     Input[3] = RxWarpFloatAsBits(W);
                     continue;
                 }
-                if (Name == D3D10_SB_NAME_IS_FRONT_FACE)
+                /* System values packed into one register take their values component by component */
+                if (Name == D3D10_SB_NAME_IS_FRONT_FACE || Name == D3D10_SB_NAME_PRIMITIVE_ID || Name == D3D10_SB_NAME_SAMPLE_INDEX)
                 {
-                    Input[0] = Input[1] = Input[2] = Input[3] = FrontFacing ? UINT_MAX : 0;
+                    for (UINT Component = 0; Component < 4; Component++)
+                    {
+                        UINT Part = PixelShader->InputParts[Register][Component];
+
+                        if (Part == D3D10_SB_NAME_UNDEFINED)
+                            Part = Name;
+                        if (Part == D3D10_SB_NAME_IS_FRONT_FACE)
+                            Input[Component] = FrontFacing ? UINT_MAX : 0;
+                        else if (Part == D3D10_SB_NAME_PRIMITIVE_ID)
+                            Input[Component] = Primitive;
+                        else
+                            Input[Component] = Invocation.SampleIndex[Lane];
+                    }
                     continue;
                 }
                 if (Name == D3D10_SB_NAME_PRIMITIVE_ID)

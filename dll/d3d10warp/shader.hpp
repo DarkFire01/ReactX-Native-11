@@ -140,6 +140,7 @@ public:
     UINT8 InputMode[RxWarpMaxRegisters] = {};   /* D3D10_SB_INTERPOLATION_MODE */
     UINT8 InputMask[RxWarpMaxRegisters] = {};
     UINT8 InputName[RxWarpMaxRegisters] = {};   /* D3D10_SB_NAME */
+    UINT8 InputParts[RxWarpMaxRegisters][4] = {};   /* the name of each component, for system values packed together */
     UINT8 OutputMask[RxWarpMaxRegisters] = {};
     UINT8 OutputName[RxWarpMaxRegisters] = {};
     UINT8 ClipMask[RxWarpMaxRegisters] = {};    /* components holding SV_ClipDistance */

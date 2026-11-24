@@ -318,6 +318,11 @@ RxWarpShader::Decode(
                 if (Opcode != D3D10_SB_OPCODE_DCL_INPUT && Opcode != D3D10_SB_OPCODE_DCL_INPUT_PS && Cursor < End)
                 {
                     InputName[Register] = (UINT8)DECODE_D3D10_SB_NAME(Code[Cursor]);
+                    for (UINT Component = 0; Component < 4; Component++)
+                    {
+                        if (Operand.Mask & (1u << Component))
+                            InputParts[Register][Component] = InputName[Register];
+                    }
                     if (InputName[Register] == D3D10_SB_NAME_POSITION)
                         PositionInput = Register;
                     if (InputName[Register] == D3D10_SB_NAME_SAMPLE_INDEX)

@@ -639,6 +639,7 @@ private:
     std::vector<RX_LOOP> Open;
     BOOLEAN PixelShader = FALSE;
     BOOLEAN NearestHalves = FALSE;
+    UINT SampleRegister = 0;
     BOOLEAN Failed = FALSE;
 
 public:
@@ -844,8 +845,26 @@ RxLowering::Signature(
                                                     ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT) } });
             continue;
         }
+        /* System values without a row: the sample index takes a register past the packed ones */
+        if (Element->GetStartRow() < 0 && Input && Kind == hlsl::Semantic::Kind::SampleIndex)
+        {
+            for (const std::unique_ptr<hlsl::DxilSignatureElement> &Other : Elements.GetElements())
+            {
+                if (Other->GetStartRow() >= 0)
+                    SampleRegister = std::max(SampleRegister, (UINT)(Other->GetStartRow() + Other->GetRows()));
+            }
+            Declare(D3D10_SB_OPCODE_DCL_INPUT_PS_SGV, { RxRegister(D3D10_SB_OPERAND_TYPE_INPUT, RxMaskMode, 1, { SampleRegister }),
+                                                        { ENCODE_D3D10_SB_NAME(D3D10_SB_NAME_SAMPLE_INDEX) } },
+                    ENCODE_D3D10_SB_INPUT_INTERPOLATION_MODE(D3D10_SB_INTERPOLATION_CONSTANT));
+            continue;
+        }
+        if (Element->GetStartRow() < 0 && Input)
+            continue;
         if (Element->GetStartRow() < 0)
+        {
+            OutputDebugStringA("WARP: DXIL signature element without a row not lowered\n");
             return FALSE;
+        }
         for (UINT Row = 0; Row < Element->GetRows(); Row++)
         {
             RxTokens Register = RxRegister(Input ? D3D10_SB_OPERAND_TYPE_INPUT : D3D10_SB_OPERAND_TYPE_OUTPUT, RxMaskMode, Mask,
@@ -2379,6 +2398,18 @@ RxLowering::LowerCall(
         case OpCode::WaveGetLaneCount:
             Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxImmediate(RxWarpWaveLanes) });
             return TRUE;
+        case OpCode::SampleIndex:
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), RxRegister(D3D10_SB_OPERAND_TYPE_INPUT, RxSelectMode, 0, { SampleRegister }) });
+            return TRUE;
+        case OpCode::Coverage:
+        {
+            RxTokens Mask = { ENCODE_D3D10_SB_OPERAND_TYPE(D3D11_SB_OPERAND_TYPE_INPUT_COVERAGE_MASK) |
+                              ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT) };
+
+            Declare(D3D10_SB_OPCODE_DCL_INPUT, { Mask });
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Call), Mask });
+            return TRUE;
+        }
         case OpCode::WaveGetLaneIndex:
         case OpCode::WaveIsFirstLane:
         case OpCode::WaveAnyTrue:
@@ -2397,6 +2428,7 @@ RxLowering::LowerCall(
         case OpCode::WaveMatch:
         case OpCode::WaveMultiPrefixOp:
         case OpCode::WaveMultiPrefixBitCount:
+        case OpCode::IsHelperLane:
             return LowerWave(Call, Code);
         default:
             return LowerResource(Call, Code);
@@ -2448,6 +2480,7 @@ RxLowering::LowerWave(
         case OpCode::WaveMatch: Kind = RxWarpWaveMatch; break;
         case OpCode::WaveMultiPrefixOp: Kind = RxWarpWaveMultiPrefix; break;
         case OpCode::WaveMultiPrefixBitCount: Kind = RxWarpWaveMultiCount; break;
+        case OpCode::IsHelperLane: Kind = RxWarpWaveIsHelper; break;
         default: Kind = RxWarpWaveQuadSwap; break;
     }
 

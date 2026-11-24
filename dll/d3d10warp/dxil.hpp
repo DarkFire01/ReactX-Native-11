@@ -109,6 +109,7 @@ typedef enum _RX_WARP_WAVE_KIND
     RxWarpWaveMatch,
     RxWarpWaveMultiPrefix,      /* lane operand: the partition mask; variant: sum, and, or, xor, product */
     RxWarpWaveMultiCount,
+    RxWarpWaveIsHelper,
 } RX_WARP_WAVE_KIND;
 
 typedef enum _RX_WARP_WAVE_TYPE

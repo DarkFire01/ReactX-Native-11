@@ -2215,12 +2215,12 @@ RxWarpMachine::Wave(
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         Value[Lane] = Words[Lane][0] | (Wide ? ((UINT64)Words[Lane][1] << 32) : 0);
 
-    /* Reads of other lanes see zero from lanes that are not running */
+    /* Reads of other lanes see zero from lanes that are not running; helper lanes run */
     if (Kind == RxWarpWaveReadLane || Kind == RxWarpWaveQuadRead || Kind == RxWarpWaveQuadSwap)
     {
         for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
         {
-            if (!(Active & Invocation->Live & (1u << Lane)))
+            if (!(Active & (1u << Lane)))
                 Value[Lane] = 0;
         }
     }
@@ -2288,6 +2288,9 @@ RxWarpMachine::Wave(
         {
             case RxWarpWaveLaneIndex:
                 Scalar = Lane;
+                break;
+            case RxWarpWaveIsHelper:
+                Scalar = (Invocation->Helper & (1u << Lane)) ? UINT_MAX : 0;
                 break;
             case RxWarpWaveFirstLane:
                 Scalar = (Lane == First) ? UINT_MAX : 0;
