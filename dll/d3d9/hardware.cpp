@@ -2400,3 +2400,82 @@ D9Device::DestroyDriverShader(
     else
         DeviceFunctions.pfnDeleteVertexShaderFunc(DriverDevice, Handle);
 }
+
+/* The most resources one residency check takes */
+static constexpr UINT32 D9ResidencyLimit = 0x100000;
+
+/* Default pool textures and buffers only; the first one without a driver resource answers for the whole list.
+   Surfaces are never taken, and volumes fail outright */
+STDMETHODIMP
+D9Device::CheckResourceResidency(
+    _In_ IDirect3DResource9** ResourceArray,
+    _In_ UINT32 NumResources)
+{
+    D9_DEVICE_LOCK();
+    std::vector<HANDLE> Handles;
+    D3DDDIARG_QUERYRESOURCERESIDENCY Args = {};
+    HRESULT hr;
+
+    if (NotReset || !IsEx || NumResources == 0 || NumResources >= D9ResidencyLimit)
+        return D3DERR_INVALIDCALL;
+
+    Handles.reserve(NumResources);
+    for (UINT32 Index = 0; Index < NumResources; Index++)
+    {
+        IDirect3DResource9* Item = ResourceArray[Index];
+        D9Resource* Backing;
+        D3DPOOL Pool;
+
+        if (Item == nullptr)
+            return D3DERR_INVALIDCALL;
+        switch (Item->GetType())
+        {
+        case D3DRTYPE_SURFACE:
+            return D3DERR_INVALIDCALL;
+        case D3DRTYPE_TEXTURE:
+        case D3DRTYPE_VOLUMETEXTURE:
+        case D3DRTYPE_CUBETEXTURE:
+        {
+            const D9TextureCore* Core = D9CoreOf(static_cast<IDirect3DBaseTexture9*>(Item));
+
+            Pool = Core->PoolOf();
+            Backing = Core->DriverResource();
+            break;
+        }
+        case D3DRTYPE_VERTEXBUFFER:
+        {
+            const D9VertexBuffer* Buffer = static_cast<D9VertexBuffer*>(static_cast<IDirect3DVertexBuffer9*>(Item));
+
+            Pool = Buffer->PoolOf();
+            Backing = Buffer->CurrentResource();
+            break;
+        }
+        case D3DRTYPE_INDEXBUFFER:
+        {
+            const D9IndexBuffer* Buffer = static_cast<D9IndexBuffer*>(static_cast<IDirect3DIndexBuffer9*>(Item));
+
+            Pool = Buffer->PoolOf();
+            Backing = Buffer->CurrentResource();
+            break;
+        }
+        default:
+            return E_FAIL;
+        }
+        if (Pool != D3DPOOL_DEFAULT)
+            return D3DERR_INVALIDCALL;
+        if (Backing == nullptr || Backing->DriverResource == NULL)
+            return S_NOT_RESIDENT;
+        Handles.push_back(Backing->DriverResource);
+    }
+
+    Args.pHandleList = Handles.data();
+    Args.NumResources = static_cast<UINT>(Handles.size());
+    DrainBatch();
+    hr = DeviceFunctions.pfnQueryResourceResidency(DriverDevice, &Args);
+    if (FAILED(hr))
+    {
+        D9_TRACE_ONCE(L"the driver failed a residency check (0x%08lX)", hr);
+        return E_FAIL;
+    }
+    return hr;
+}

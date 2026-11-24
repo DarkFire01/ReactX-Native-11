@@ -933,3 +933,44 @@ D9Device::WaitOnFence(
     DrainBatch();
     DeviceFunctions.pfnAcquireResource(DriverDevice, &Token);
 }
+
+/* The kernel waits on the display the chain shows on; a kernel failure only ever costs the device itself */
+STDMETHODIMP
+D9Device::WaitForVBlank(
+    _In_ UINT Chain)
+{
+    D9_DEVICE_LOCK();
+    D3DKMT_WAITFORVERTICALBLANKEVENT Wait = {};
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    NTSTATUS Status;
+
+    if (NotReset || !IsEx)
+        return D3DERR_INVALIDCALL;
+    if (Chain >= GetNumberOfSwapChains())
+        return D3DERR_INVALIDCALL;
+    if (Lost || Kmt == nullptr || Kmt->WaitForVerticalBlankEvent == nullptr)
+        return S_OK;
+
+    Wait.hAdapter = KernelAdapter();
+    Wait.hDevice = DeviceHandle;
+    Wait.VidPnSourceId = Adapter->SourceId;
+    Status = Kmt->WaitForVerticalBlankEvent(&Wait);
+    if (Status == STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE || Status == STATUS_DEVICE_REMOVED)
+    {
+        D9Trace(L"the device was lost waiting for a vertical blank (0x%08lX)", Status);
+        Lost = TRUE;
+    }
+    return S_OK;
+}
+
+/* Only devices that present through GDI take the mode, and never inside a scene */
+STDMETHODIMP
+D9Device::SetDialogBoxMode(
+    _In_ BOOL EnableDialogs)
+{
+    D9_DEVICE_LOCK();
+
+    if (NotReset || InScene || (BehaviorFlags & D3DCREATE_ADAPTERGROUP_DEVICE) != 0)
+        return D3DERR_INVALIDCALL;
+    return ImplicitChain->SwitchDialogMode(EnableDialogs);
+}

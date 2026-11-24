@@ -1206,6 +1206,10 @@ public:
         return Parameters;
     }
 
+    HRESULT
+    SwitchDialogMode(
+        _In_ BOOL Enable);
+
     HWND
     Window() const
     {
@@ -1328,6 +1332,7 @@ private:
     UINT Index;
     HWND FocusWindow;
     D3DPRESENT_PARAMETERS Parameters = {};
+    BOOLEAN DialogMode = FALSE;
     /* Flip swap chains keep one buffer more than they report, the one on screen */
     D9Surface* BackBuffers[D3DPRESENT_BACK_BUFFERS_MAX_EX + 1] = {};
     UINT BackBufferCount = 0;
@@ -1462,6 +1467,19 @@ public:
     Bytes() const
     {
         return Memory;
+    }
+
+    D3DPOOL
+    PoolOf() const
+    {
+        return Pool;
+    }
+
+    /* The driver resource as it stands, without making a managed copy */
+    D9Resource*
+    CurrentResource() const
+    {
+        return Resource;
     }
 
     /* Bytes per index of an index buffer */

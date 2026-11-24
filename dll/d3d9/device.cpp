@@ -1622,14 +1622,6 @@ D9Device::CreateAdditionalSwapChain(
     return D3DERR_INVALIDCALL;
 }
 
-STDMETHODIMP
-D9Device::SetDialogBoxMode(
-    _In_ BOOL EnableDialogs)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
 STDMETHODIMP_(VOID)
 D9Device::SetGammaRamp(
     _In_ UINT SwapChain,
@@ -2550,19 +2542,3 @@ D9Device::ComposeRects(
     return D3DERR_INVALIDCALL;
 }
 
-STDMETHODIMP
-D9Device::WaitForVBlank(
-    _In_ UINT Chain)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::CheckResourceResidency(
-    _In_ IDirect3DResource9** ResourceArray,
-    _In_ UINT32 NumResources)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}

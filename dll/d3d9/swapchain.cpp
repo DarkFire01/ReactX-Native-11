@@ -1215,3 +1215,19 @@ D9SwapChain::AcquireWriteAccess(
         return;
     }
 }
+
+/* A windowed chain only notes the mode; flip model chains never take it */
+HRESULT
+D9SwapChain::SwitchDialogMode(
+    _In_ BOOL Enable)
+{
+    if (Parameters.SwapEffect == D3DSWAPEFFECT_FLIPEX)
+        return D3DERR_INVALIDCALL;
+    if (!Parameters.Windowed)
+    {
+        D9_TRACE_ONCE(L"dialog box mode on a full screen chain is not implemented");
+        return D3DERR_INVALIDCALL;
+    }
+    DialogMode = Enable != FALSE;
+    return S_OK;
+}
