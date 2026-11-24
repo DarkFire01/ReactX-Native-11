@@ -794,7 +794,10 @@ wmain(
         TcCompareLayouts(System, ReactX);
     if (Only == nullptr || _wcsicmp(Only, L"gdi") == 0)
         TcCompareGdiInterop(System, ReactX);
-    if (Only != nullptr && (_wcsicmp(Only, L"layout") == 0 || _wcsicmp(Only, L"gdi") == 0))
+    if (Only == nullptr || _wcsicmp(Only, L"factory") == 0)
+        TcCompareFactoryExtras(System, ReactX);
+    if (Only != nullptr && (_wcsicmp(Only, L"layout") == 0 || _wcsicmp(Only, L"gdi") == 0 ||
+                            _wcsicmp(Only, L"factory") == 0))
         Only = L"";
     if (Only != nullptr && _wcsicmp(Only, L"collection") == 0)
         Only = L"";

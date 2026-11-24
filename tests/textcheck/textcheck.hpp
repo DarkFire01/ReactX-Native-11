@@ -46,6 +46,12 @@ TcCompareFaceExtras(
     _In_ IDWriteFontFace* Got,
     _In_z_ PCWSTR Name);
 
+/* Containers, number substitution, color runs, EUDC, custom and in memory fonts */
+VOID
+TcCompareFactoryExtras(
+    _In_ TcSide& Want,
+    _In_ TcSide& Got);
+
 VOID
 TcCompareGdiInterop(
     _In_ TcSide& Want,
