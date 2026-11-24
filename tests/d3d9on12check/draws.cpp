@@ -963,6 +963,88 @@ CkDepthStencilFog(
     Depth->Release();
 }
 
+/*
+ * Depth textures: an INTZ texture sampled while it is the depth buffer, which takes depth writes
+ * away from that draw only, and the RESZ point size request copying the depth buffer into the
+ * texture at stage 0.
+ */
+static
+VOID
+CkDepthTextures(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static constexpr D3DFORMAT Intz = static_cast<D3DFORMAT>(MAKEFOURCC('I', 'N', 'T', 'Z'));
+    static constexpr DWORD Resolve = 0x7FA05000;
+    IDirect3DTexture9* Sampled = nullptr;
+    IDirect3DTexture9* Target = nullptr;
+    IDirect3DSurface9* Level = nullptr;
+    IDirect3DSurface9* Depth = nullptr;
+    CkTexVertex Quad[4];
+
+    CkRun(Device->CreateTexture(64, 48, 1, D3DUSAGE_DEPTHSTENCIL, Intz, D3DPOOL_DEFAULT, &Sampled, nullptr), "intz",
+          "CreateTexture");
+    CkRun(Device->CreateTexture(64, 48, 1, D3DUSAGE_DEPTHSTENCIL, Intz, D3DPOOL_DEFAULT, &Target, nullptr), "intz",
+          "CreateTexture resolve target");
+    CkRun(Device->CreateDepthStencilSurface(64, 48, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Depth, nullptr), "intz",
+          "CreateDepthStencilSurface");
+    if (Sampled == nullptr || Target == nullptr || Depth == nullptr || FAILED(Sampled->GetSurfaceLevel(0, &Level)))
+        goto Done;
+
+    Device->SetFVF(CkTexFvf);
+    Device->SetDepthStencilSurface(Level);
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 1.0f, 0), "intz", "Clear");
+    Device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+    Device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+    Device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESS);
+    Device->BeginScene();
+
+    Device->SetTexture(0, Sampled);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    CkQuad(Quad, 8.0f, 8.0f, 40.0f, 40.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "intz", "sampled while bound");
+    Device->SetTexture(0, nullptr);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    CkQuad(Quad, 24.0f, 16.0f, 56.0f, 44.0f, 0.75f, 0xFF00FF00, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "intz", "behind");
+    CkQuad(Quad, 0.0f, 0.0f, 16.0f, 48.0f, 0.25f, 0xFFFF0000, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "intz", "written");
+    CkQuad(Quad, 0.0f, 0.0f, 16.0f, 48.0f, 0.5f, 0xFF0000FF, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "intz", "hidden");
+    Device->EndScene();
+    CkReadRows(Device, Back, "intz");
+
+    Device->SetDepthStencilSurface(Depth);
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xFF000000, 0.25f, 0), "resz", "Clear");
+    Device->SetTexture(0, Target);
+    CkRun(Device->SetRenderState(D3DRS_POINTSIZE, Resolve), "resz", "SetRenderState");
+    Device->SetRenderState(D3DRS_POINTSIZE, CkFloatBits(1.0f));
+    Device->SetDepthStencilSurface(nullptr);
+    Device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    Device->BeginScene();
+    CkQuad(Quad, 0.0f, 0.0f, 64.0f, 48.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "resz", "resolved depth");
+    Device->EndScene();
+    CkReadRows(Device, Back, "resz");
+
+Done:
+    Device->SetTexture(0, nullptr);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    Device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    Device->SetDepthStencilSurface(nullptr);
+    if (Level != nullptr)
+        Level->Release();
+    if (Depth != nullptr)
+        Depth->Release();
+    if (Target != nullptr)
+        Target->Release();
+    if (Sampled != nullptr)
+        Sampled->Release();
+}
+
 /* Large points as sprites, which take the geometry stage */
 static
 VOID
@@ -1133,6 +1215,7 @@ CkDraws(
     CkTextureCopies(Device, Back);
     CkResourceCopies(Device, Back);
     CkDepthStencilFog(Device, Back);
+    CkDepthTextures(Device, Back);
     CkPointSprites(Device, Back);
     CkDrawFlush = nullptr;
     CkFlushState();
