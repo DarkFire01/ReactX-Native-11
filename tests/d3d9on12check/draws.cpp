@@ -128,6 +128,443 @@ CkPretransformed(
         Buffer->Release();
 }
 
+/* Screen space vertices with one texture coordinate */
+struct CkTexVertex
+{
+    FLOAT X;
+    FLOAT Y;
+    FLOAT Z;
+    FLOAT Rhw;
+    DWORD Color;
+    FLOAT U;
+    FLOAT V;
+};
+
+static constexpr DWORD CkTexFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1;
+
+/* A vertex the fixed function pipeline transforms */
+struct CkPlainVertex
+{
+    FLOAT X;
+    FLOAT Y;
+    FLOAT Z;
+    DWORD Color;
+};
+
+static constexpr DWORD CkPlainFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
+
+/* vs_2_0: position through, color scaled by c1 */
+static const DWORD CkScaleVertexCode[] =
+{
+    0xFFFE0200,
+    0x0200001F, 0x80000000, 0x900F0000,
+    0x0200001F, 0x8000000A, 0x900F0001,
+    0x02000001, 0xC00F0000, 0x90E40000,
+    0x03000005, 0xD00F0000, 0x90E40001, 0xA0E40001,
+    0x0000FFFF,
+};
+
+/* ps_2_0: the interpolated color times c0 */
+static const DWORD CkScalePixelCode[] =
+{
+    0xFFFF0200,
+    0x0200001F, 0x80000000, 0x900F0000,
+    0x03000005, 0x800F0000, 0x90E40000, 0xA0E40000,
+    0x02000001, 0x800F0800, 0x80E40000,
+    0x0000FFFF,
+};
+
+/* vs_2_0: position moved by the instance offset in v2, color through */
+static const DWORD CkInstanceVertexCode[] =
+{
+    0xFFFE0200,
+    0x0200001F, 0x80000000, 0x900F0000,
+    0x0200001F, 0x8000000A, 0x900F0001,
+    0x0200001F, 0x80010005, 0x900F0002,
+    0x02000001, 0x800F0000, 0x90E40002,
+    0x03000002, 0xC00F0000, 0x90E40000, 0x80E40000,
+    0x02000001, 0xD00F0000, 0x90E40001,
+    0x0000FFFF,
+};
+
+static
+VOID
+CkRun(
+    _In_ HRESULT hr,
+    _In_z_ PCSTR Label,
+    _In_z_ PCSTR Step)
+{
+    printf("%s %s hr %08lX\n", Label, Step, hr);
+}
+
+static
+VOID
+CkQuad(
+    _Out_writes_(4) CkTexVertex* Quad,
+    _In_ FLOAT Left,
+    _In_ FLOAT Top,
+    _In_ FLOAT Right,
+    _In_ FLOAT Bottom,
+    _In_ FLOAT Z,
+    _In_ DWORD Color,
+    _In_ FLOAT Repeat)
+{
+    const CkTexVertex Corners[4] =
+    {
+        { Left, Top, Z, 1.0f, Color, 0.0f, 0.0f },
+        { Right, Top, Z, 1.0f, Color, Repeat, 0.0f },
+        { Left, Bottom, Z, 1.0f, Color, 0.0f, Repeat },
+        { Right, Bottom, Z, 1.0f, Color, Repeat, Repeat },
+    };
+
+    memcpy(Quad, Corners, sizeof(Corners));
+}
+
+static
+DWORD
+CkFloatBits(
+    _In_ FLOAT Value)
+{
+    DWORD Bits;
+
+    memcpy(&Bits, &Value, sizeof(Bits));
+    return Bits;
+}
+
+/* Application shaders with constants, an index buffer and instancing */
+static
+VOID
+CkShaderDraws(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static const D3DVERTEXELEMENT9 Plain[] =
+    {
+        { 0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
+        D3DDECL_END(),
+    };
+    static const D3DVERTEXELEMENT9 Instanced[] =
+    {
+        { 0, 0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 0 },
+        { 1, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1 },
+        D3DDECL_END(),
+    };
+    static const CkPlainVertex Quad[] =
+    {
+        { -0.9f, 0.9f, 0.5f, 0xFFFF8040 },
+        { 0.1f, 0.9f, 0.5f, 0xFF40FF80 },
+        { -0.9f, -0.1f, 0.5f, 0xFF8040FF },
+        { 0.1f, -0.1f, 0.5f, 0xFFFFFFFF },
+    };
+    static const WORD Indices[] = { 0, 1, 2, 2, 1, 3 };
+    static const FLOAT Offsets[][4] = { { 0.0f, 0.0f, 0.0f, 0.0f }, { 0.8f, -0.8f, 0.0f, 0.0f } };
+    static const FLOAT PixelScale[4] = { 0.5f, 1.0f, 0.75f, 1.0f };
+    static const FLOAT VertexScale[4] = { 1.0f, 0.5f, 1.0f, 1.0f };
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DVertexShader9* Instance = nullptr;
+    IDirect3DPixelShader9* Pixel = nullptr;
+    IDirect3DVertexDeclaration9* Decls[2] = {};
+    IDirect3DVertexBuffer9* Buffers[2] = {};
+    IDirect3DIndexBuffer9* IndexBuffer = nullptr;
+    VOID* Data;
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000040, 1.0f, 0), "shader", "Clear");
+    CkRun(Device->CreateVertexShader(CkScaleVertexCode, &Vertex), "shader", "CreateVertexShader");
+    CkRun(Device->CreateVertexShader(CkInstanceVertexCode, &Instance), "shader", "CreateVertexShader instanced");
+    CkRun(Device->CreatePixelShader(CkScalePixelCode, &Pixel), "shader", "CreatePixelShader");
+    CkRun(Device->CreateVertexDeclaration(Plain, &Decls[0]), "shader", "CreateVertexDeclaration");
+    CkRun(Device->CreateVertexDeclaration(Instanced, &Decls[1]), "shader", "CreateVertexDeclaration instanced");
+    CkRun(Device->CreateVertexBuffer(sizeof(Quad), D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &Buffers[0], nullptr), "shader",
+          "CreateVertexBuffer");
+    CkRun(Device->CreateVertexBuffer(sizeof(Offsets), D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &Buffers[1], nullptr),
+          "shader", "CreateVertexBuffer instances");
+    CkRun(Device->CreateIndexBuffer(sizeof(Indices), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &IndexBuffer,
+                                    nullptr),
+          "shader", "CreateIndexBuffer");
+    if (Vertex == nullptr || Instance == nullptr || Pixel == nullptr || Decls[0] == nullptr || Decls[1] == nullptr ||
+        Buffers[0] == nullptr || Buffers[1] == nullptr || IndexBuffer == nullptr)
+    {
+        goto Done;
+    }
+
+    if (SUCCEEDED(Buffers[0]->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Quad, sizeof(Quad));
+        Buffers[0]->Unlock();
+    }
+    if (SUCCEEDED(Buffers[1]->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Offsets, sizeof(Offsets));
+        Buffers[1]->Unlock();
+    }
+    if (SUCCEEDED(IndexBuffer->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Indices, sizeof(Indices));
+        IndexBuffer->Unlock();
+    }
+
+    Device->BeginScene();
+    Device->SetVertexDeclaration(Decls[0]);
+    Device->SetVertexShader(Vertex);
+    Device->SetPixelShader(Pixel);
+    Device->SetVertexShaderConstantF(1, VertexScale, 1);
+    Device->SetPixelShaderConstantF(0, PixelScale, 1);
+    Device->SetStreamSource(0, Buffers[0], 0, sizeof(Quad[0]));
+    Device->SetIndices(IndexBuffer);
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2), "shader", "DrawIndexedPrimitive");
+
+    Device->SetVertexDeclaration(Decls[1]);
+    Device->SetVertexShader(Instance);
+    Device->SetStreamSource(1, Buffers[1], 0, sizeof(Offsets[0]));
+    Device->SetStreamSourceFreq(0, D3DSTREAMSOURCE_INDEXEDDATA | 2);
+    Device->SetStreamSourceFreq(1, D3DSTREAMSOURCE_INSTANCEDATA | 1);
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2), "shader", "DrawIndexedPrimitive instanced");
+    Device->SetStreamSourceFreq(0, 1);
+    Device->SetStreamSourceFreq(1, 1);
+    Device->EndScene();
+    CkReadRows(Device, Back, "shader");
+
+Done:
+    Device->SetStreamSource(0, nullptr, 0, 0);
+    Device->SetStreamSource(1, nullptr, 0, 0);
+    Device->SetIndices(nullptr);
+    Device->SetVertexShader(nullptr);
+    Device->SetPixelShader(nullptr);
+    Device->SetVertexDeclaration(nullptr);
+    if (IndexBuffer != nullptr)
+        IndexBuffer->Release();
+    for (IDirect3DVertexBuffer9* Buffer : Buffers)
+    {
+        if (Buffer != nullptr)
+            Buffer->Release();
+    }
+    for (IDirect3DVertexDeclaration9* Decl : Decls)
+    {
+        if (Decl != nullptr)
+            Decl->Release();
+    }
+    if (Pixel != nullptr)
+        Pixel->Release();
+    if (Instance != nullptr)
+        Instance->Release();
+    if (Vertex != nullptr)
+        Vertex->Release();
+}
+
+/* The fixed function pipeline as the runtime turns it into shaders: fans, user memory indices, wireframe, lines */
+static
+VOID
+CkFixedFunction(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static const CkPlainVertex Fan[] =
+    {
+        { -0.5f, 0.0f, 0.5f, 0xFFFFFFFF },
+        { -1.0f, 0.8f, 0.5f, 0xFFFF0000 },
+        { 0.0f, 0.8f, 0.5f, 0xFF00FF00 },
+        { 0.2f, 0.0f, 0.5f, 0xFF0000FF },
+        { 0.0f, -0.8f, 0.5f, 0xFFFFFF00 },
+    };
+    static const CkPlainVertex Corner[] =
+    {
+        { 0.3f, -0.2f, 0.5f, 0xFF00FFFF },
+        { 1.0f, -0.2f, 0.5f, 0xFFFF00FF },
+        { 0.3f, -1.0f, 0.5f, 0xFF808080 },
+        { 1.0f, -1.0f, 0.5f, 0xFF000000 },
+    };
+    static const WORD Indices[] = { 0, 1, 2, 2, 1, 3 };
+    static const WORD FanIndices[] = { 0, 1, 2, 3, 4 };
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0), "fixed", "Clear");
+    Device->SetFVF(CkPlainFvf);
+    Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+    Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    Device->BeginScene();
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, 3, Fan, sizeof(Fan[0])), "fixed", "DrawPrimitiveUP fan");
+    CkRun(Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 4, 2, Indices, D3DFMT_INDEX16, Corner, sizeof(Corner[0])),
+          "fixed", "DrawIndexedPrimitiveUP");
+    CkRun(Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLEFAN, 0, 5, 3, FanIndices, D3DFMT_INDEX16, Fan, sizeof(Fan[0])),
+          "fixed", "DrawIndexedPrimitiveUP fan");
+    Device->SetRenderState(D3DRS_FILLMODE, D3DFILL_WIREFRAME);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Corner, sizeof(Corner[0])), "fixed", "DrawPrimitiveUP wireframe");
+    Device->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_LINESTRIP, 3, Corner, sizeof(Corner[0])), "fixed", "DrawPrimitiveUP lines");
+    Device->EndScene();
+    CkReadRows(Device, Back, "fixed");
+    Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+}
+
+/* A checkered texture sampled with point and linear filters, wrapped and clamped, then blended */
+static
+VOID
+CkTextured(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    IDirect3DTexture9* Texture = nullptr;
+    D3DLOCKED_RECT Locked;
+    CkTexVertex Quad[4];
+
+    CkRun(Device->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &Texture, nullptr), "texture",
+          "CreateTexture");
+    if (Texture == nullptr)
+        return;
+    if (SUCCEEDED(Texture->LockRect(0, &Locked, nullptr, 0)))
+    {
+        for (UINT Row = 0; Row < 4; Row += 1)
+        {
+            DWORD* Line = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Locked.pBits) + Row * Locked.Pitch);
+
+            for (UINT Column = 0; Column < 4; Column += 1)
+                Line[Column] = ((Row ^ Column) & 1) ? 0x80FF4000 : 0xFF00C0FF;
+        }
+        Texture->UnlockRect(0);
+    }
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "texture", "Clear");
+    Device->SetFVF(CkTexFvf);
+    Device->SetTexture(0, Texture);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    Device->BeginScene();
+
+    Device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    Device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    CkQuad(Quad, 0.0f, 0.0f, 32.0f, 24.0f, 0.5f, 0xFFFFFFFF, 2.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "texture", "point wrap");
+
+    Device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    Device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    CkQuad(Quad, 32.0f, 0.0f, 64.0f, 24.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "texture", "linear");
+
+    Device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    Device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_MIRROR);
+    CkQuad(Quad, 0.0f, 24.0f, 32.0f, 48.0f, 0.5f, 0xFFFF8080, 2.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "texture", "clamp mirror");
+
+    Device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    Device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    Device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    CkQuad(Quad, 24.0f, 16.0f, 64.0f, 48.0f, 0.5f, 0xC0FFFFFF, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "texture", "blended");
+    Device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+    Device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE);
+    Device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_REVSUBTRACT);
+    CkQuad(Quad, 40.0f, 0.0f, 56.0f, 40.0f, 0.5f, 0xFF404040, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "texture", "subtracted");
+    Device->EndScene();
+    CkReadRows(Device, Back, "texture");
+
+    Device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    Device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    Device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+    Device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ZERO);
+    Device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+    Device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+    Device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    Device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    Device->SetTexture(0, nullptr);
+    Texture->Release();
+}
+
+/* Depth testing, stencil writes and a stencil masked fill, then table fog and alpha testing */
+static
+VOID
+CkDepthStencilFog(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    IDirect3DSurface9* Depth = nullptr;
+    CkTexVertex Quad[4];
+
+    CkRun(Device->CreateDepthStencilSurface(64, 48, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Depth, nullptr),
+          "depth", "CreateDepthStencilSurface");
+    if (Depth == nullptr)
+        return;
+    Device->SetDepthStencilSurface(Depth);
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF000000, 1.0f, 0), "depth",
+          "Clear");
+    Device->SetFVF(CkTexFvf);
+    Device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+    Device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESS);
+    Device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+    Device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+    Device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
+    Device->SetRenderState(D3DRS_STENCILREF, 1);
+    Device->BeginScene();
+
+    CkQuad(Quad, 8.0f, 8.0f, 40.0f, 40.0f, 0.5f, 0xFFFF0000, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "depth", "near");
+    Device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+    CkQuad(Quad, 24.0f, 16.0f, 56.0f, 44.0f, 0.75f, 0xFF00FF00, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "depth", "far");
+
+    Device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    Device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+    Device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+    Device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
+    CkQuad(Quad, 0.0f, 0.0f, 32.0f, 48.0f, 0.5f, 0xFF0000FF, 1.0f);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "depth", "stencil masked");
+    Device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+
+    Device->SetRenderState(D3DRS_FOGENABLE, TRUE);
+    Device->SetRenderState(D3DRS_FOGTABLEMODE, D3DFOG_LINEAR);
+    Device->SetRenderState(D3DRS_FOGCOLOR, 0xFF808000);
+    Device->SetRenderState(D3DRS_FOGSTART, CkFloatBits(0.25f));
+    Device->SetRenderState(D3DRS_FOGEND, CkFloatBits(0.75f));
+    CkQuad(Quad, 40.0f, 0.0f, 64.0f, 24.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+    Quad[1].Z = 0.1f;
+    Quad[3].Z = 0.9f;
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "depth", "fog");
+    Device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+
+    Device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
+    Device->SetRenderState(D3DRS_ALPHAREF, 0x80);
+    Device->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
+    CkQuad(Quad, 40.0f, 24.0f, 64.0f, 48.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+    Quad[0].Color = 0x00FF00FF;
+    Quad[2].Color = 0x00FF00FF;
+    CkRun(Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0])), "depth", "alpha test");
+    Device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    Device->EndScene();
+    CkReadRows(Device, Back, "depth");
+
+    Device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+    Device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+    Device->SetDepthStencilSurface(nullptr);
+    Depth->Release();
+}
+
+/* Large points as sprites, which take the geometry stage */
+static
+VOID
+CkPointSprites(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static const CkTexVertex Points[] =
+    {
+        { 8.0f, 8.0f, 0.5f, 1.0f, 0xFFFF0000, 0.0f, 0.0f },
+        { 32.0f, 24.0f, 0.5f, 1.0f, 0xFF00FF00, 0.0f, 0.0f },
+        { 56.0f, 40.0f, 0.5f, 1.0f, 0xFF0000FF, 0.0f, 0.0f },
+    };
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "points", "Clear");
+    Device->SetFVF(CkTexFvf);
+    Device->BeginScene();
+    CkRun(Device->DrawPrimitiveUP(D3DPT_POINTLIST, 3, Points, sizeof(Points[0])), "points", "small");
+    Device->SetRenderState(D3DRS_POINTSIZE, CkFloatBits(8.0f));
+    Device->SetRenderState(D3DRS_POINTSPRITEENABLE, TRUE);
+    CkRun(Device->DrawPrimitiveUP(D3DPT_POINTLIST, 3, Points, sizeof(Points[0])), "points", "sprites");
+    Device->EndScene();
+    CkReadRows(Device, Back, "points");
+    Device->SetRenderState(D3DRS_POINTSPRITEENABLE, FALSE);
+    Device->SetRenderState(D3DRS_POINTSIZE, CkFloatBits(1.0f));
+}
+
 VOID
 CkDraws(
     _In_ IDirect3DDevice9* Device,
@@ -135,5 +572,10 @@ CkDraws(
 {
     printf("== draws\n");
     CkPretransformed(Device, Back);
+    CkShaderDraws(Device, Back);
+    CkFixedFunction(Device, Back);
+    CkTextured(Device, Back);
+    CkDepthStencilFog(Device, Back);
+    CkPointSprites(Device, Back);
     CkFlushState();
 }

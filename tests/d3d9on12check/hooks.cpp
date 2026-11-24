@@ -691,8 +691,19 @@ CkDescribeDdiResult(
             }
             else
             {
+                /*
+                 * The runtime keeps two buffers each for user memory vertices and indices and takes whichever
+                 * the GPU is done with, so both get one name.
+                 */
+                BOOLEAN UserVertices = Args->Format == D3DDDIFMT_VERTEXDATA && Args->SurfCount == 1 &&
+                                       Args->pSurfList[0].Width == 32768 && Args->Flags.Value == 0x80044;
+                BOOLEAN UserIndices = Args->Format == D3DDDIFMT_INDEX16 && Args->SurfCount == 1 &&
+                                      Args->pSurfList[0].Width == 16384 && Args->Flags.Value == 0x100044;
+
                 AcquireSRWLockExclusive(&CkHooks.Lock);
                 CkHooks.Ids.erase(Args->hResource);
+                if (UserVertices || UserIndices)
+                    CkHooks.Ids[Args->hResource] = UserVertices ? "user-vertices" : "user-indices";
                 ReleaseSRWLockExclusive(&CkHooks.Lock);
                 CkAppend(Text, " -> %s", CkName(Args->hResource).c_str());
             }
