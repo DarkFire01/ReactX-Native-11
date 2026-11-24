@@ -172,27 +172,20 @@ NineStagingCopy(
     return Staging;
 }
 
-/* Reads a GPU subresource row by row into the runtime's system memory copy of the destination */
+/* Reads one subresource of a CPU readable resource row by row into the destination's system memory */
 static
 VOID
-NineCopyToSystemMemory(
-    _In_ const NineCopy* Copy)
+NineReadIntoSystemMemory(
+    _In_ const NineCopy* Copy,
+    _In_ TL::Resource* Readable)
 {
     NineDevice* Device = Copy->Source->Device;
-    TL::unique_comptr<TL::Resource> Staging;
-    TL::Resource* Readable = Copy->Source->Underlying.get();
     const NineSysMemSource& Target = Copy->Dest->SysMem[Copy->DestSub];
     TL::MappedSubresource Mapped = {};
     const BYTE* From;
     BYTE* To;
     UINT64 RowBytes;
     UINT Rows;
-
-    if ((Readable->AppDesc()->CPUAccessFlags() & TL::RESOURCE_CPU_ACCESS_READ) == 0)
-    {
-        Staging = NineStagingCopy(Copy->Source);
-        Readable = Staging.get();
-    }
 
     switch (Readable->AppDesc()->Usage())
     {
@@ -254,6 +247,32 @@ NineCopyToSystemMemory(
         default:
             break;
     }
+}
+
+/* The source itself when the CPU can read it, otherwise a staging copy kept in Staging */
+static
+TL::Resource*
+NineReadableSource(
+    _In_ NineResource* Source,
+    _Inout_ TL::unique_comptr<TL::Resource>& Staging)
+{
+    TL::Resource* Readable = Source->Underlying.get();
+
+    if ((Readable->AppDesc()->CPUAccessFlags() & TL::RESOURCE_CPU_ACCESS_READ) != 0)
+        return Readable;
+    Staging = NineStagingCopy(Source);
+    return Staging.get();
+}
+
+/* Reads a GPU subresource row by row into the runtime's system memory copy of the destination */
+static
+VOID
+NineCopyToSystemMemory(
+    _In_ const NineCopy* Copy)
+{
+    TL::unique_comptr<TL::Resource> Staging;
+
+    NineReadIntoSystemMemory(Copy, NineReadableSource(Copy->Source, Staging));
 }
 
 /* Copies plane by plane, or draws the copy when the formats, sample counts or sizes call for it */
@@ -463,7 +482,90 @@ NineUploadFromSystemMemory(
                                         static_cast<TL::ImmediateContext::UpdateSubresourcesFlags>(Flags));
 }
 
-/* Copies every slice and level a texture blit covers, one subresource at a time */
+/* Keeps a box within a subresource's footprint; the height limit is taken from the left edge as the reference does */
+static
+VOID
+NineLimitBox(
+    _Inout_ D3D12_BOX* Box,
+    _In_ const D3D12_SUBRESOURCE_FOOTPRINT* Footprint)
+{
+    if (Box->right - Box->left > Footprint->Width)
+        Box->right = Box->left + Footprint->Width;
+    if (Box->bottom - Box->top > Footprint->Height)
+        Box->bottom = Box->left + Footprint->Height;
+    if (Box->back - Box->front > Footprint->Depth)
+        Box->back = Box->front + Footprint->Depth;
+}
+
+/* Moves a partial copy to one source and one destination level */
+static
+VOID
+NineCopyAtLevels(
+    _Inout_ NineCopy* Part,
+    _In_ UINT SourceLevel,
+    _In_ UINT DestLevel)
+{
+    const D3D12_SUBRESOURCE_FOOTPRINT& From = Part->Source->Footprints[SourceLevel].Footprint;
+    const D3D12_SUBRESOURCE_FOOTPRINT& To = Part->Dest->Footprints[DestLevel].Footprint;
+    D3D12_BOX* Box = &Part->SourceBox;
+
+    if (Part->Whole)
+        return;
+
+    Part->DestX >>= DestLevel;
+    Part->DestY >>= DestLevel;
+    Part->DestZ >>= DestLevel;
+    if (SourceLevel != 0)
+    {
+        const UINT Round = (1u << SourceLevel) - 1;
+
+        Box->left >>= SourceLevel;
+        Box->top >>= SourceLevel;
+        Box->front >>= SourceLevel;
+        Box->right = (Box->right >> SourceLevel) + ((Box->right & Round) != 0 ? 1 : 0);
+        Box->bottom = (Box->bottom >> SourceLevel) + ((Box->bottom & Round) != 0 ? 1 : 0);
+        Box->back = (Box->back >> SourceLevel) + ((Box->back & Round) != 0 ? 1 : 0);
+
+        NineLimitBox(Box, &From);
+        NineLimitBox(Box, &To);
+        Box->right = std::min(Box->right, From.Width);
+        Box->bottom = std::min(Box->bottom, From.Height);
+        Box->back = std::min(Box->back, From.Depth);
+        if (Box->left >= Box->right)
+            Box->left = Box->right - 1;
+        if (Box->top >= Box->bottom)
+            Box->top = Box->bottom - 1;
+        if (Box->front >= Box->back)
+            Box->front = Box->back - 1;
+        if (Part->DestZ == To.Depth)
+            Part->DestZ = To.Depth - 1;
+    }
+    NineAlignCopy(Part);
+}
+
+/* How many top levels of one texture are larger than the other in both directions */
+static
+UINT
+NineLevelsAbove(
+    _In_ const NineResource* Larger,
+    _In_ const NineResource* Other)
+{
+    const UINT Levels = Larger->AutogenMips ? 1 : Larger->Typed.MipLevels;
+    UINT Skipped = 0;
+
+    while (Skipped < Levels)
+    {
+        if ((Larger->Typed.Width >> Skipped) <= Other->Typed.Width || (Larger->Typed.Height >> Skipped) <= Other->Typed.Height)
+            break;
+        Skipped += 1;
+    }
+    return Skipped;
+}
+
+/*
+ * Copies every slice and every level both textures have, one subresource at a time. Textures with
+ * different level counts line up by size: each skips its levels larger than the other's top level.
+ */
 static
 VOID
 NineCopyEachSubresource(
@@ -475,29 +577,30 @@ NineCopyEachSubresource(
     const UINT Slices = Dest->Typed.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Dest->ArraySize;
     const UINT First = Face == ~0u ? 0 : Face;
     const UINT Last = Face == ~0u ? Slices : Face + 1;
-    const UINT Mips = Dest->Typed.MipLevels;
+    const UINT SourceMips = Source->Typed.MipLevels;
+    const UINT DestMips = Dest->Typed.MipLevels;
+    UINT SourceSkip = 0;
+    UINT DestSkip = 0;
+    UINT Levels = DestMips;
+
+    if (Source->Subresources != Dest->Subresources)
+    {
+        SourceSkip = NineLevelsAbove(Source, Dest);
+        DestSkip = NineLevelsAbove(Dest, Source);
+        Levels = std::min(DestMips - DestSkip, SourceMips - SourceSkip);
+    }
 
     for (UINT Slice = First; Slice < Last; Slice += 1)
     {
-        for (UINT Mip = 0; Mip < Mips; Mip += 1)
+        for (UINT Level = 0; Level < Levels; Level += 1)
         {
             NineCopy Part = *Copy;
-            UINT SourceIndex = Mip + Source->Typed.MipLevels * Slice;
-            UINT DestIndex = Mip + Mips * Slice;
+            const UINT SourceLevel = Level + SourceSkip;
+            const UINT DestLevel = Level + DestSkip;
+            const UINT SourceIndex = SourceLevel + SourceMips * Slice;
+            const UINT DestIndex = DestLevel + DestMips * Slice;
 
-            if (!Part.Whole && Mip != 0)
-            {
-                Part.DestX >>= Mip;
-                Part.DestY >>= Mip;
-                Part.DestZ >>= Mip;
-                Part.SourceBox.left >>= Mip;
-                Part.SourceBox.top >>= Mip;
-                Part.SourceBox.front >>= Mip;
-                Part.SourceBox.right = (Part.SourceBox.right + (1u << Mip) - 1) >> Mip;
-                Part.SourceBox.bottom = (Part.SourceBox.bottom + (1u << Mip) - 1) >> Mip;
-                Part.SourceBox.back = (Part.SourceBox.back + (1u << Mip) - 1) >> Mip;
-            }
-
+            NineCopyAtLevels(&Part, SourceLevel, DestLevel);
             if (Source->SystemMemory)
             {
                 NineUploadFromSystemMemory(Source, SourceIndex, Dest, NineSubresourceOf(Dest, DestIndex, 0, TRUE), &Part);
@@ -509,6 +612,26 @@ NineCopyEachSubresource(
                 NineCopySubresources(&Part);
             }
         }
+    }
+}
+
+/* Reads every subresource into a system memory texture through one staging copy, all with the same area */
+static
+VOID
+NineCopyAllToSystemMemory(
+    _Inout_ NineCopy* Copy)
+{
+    TL::unique_comptr<TL::Resource> Staging;
+    TL::Resource* Readable = NineReadableSource(Copy->Source, Staging);
+    const UINT Count = std::max(Copy->Source->Subresources, Copy->Dest->Subresources);
+
+    for (UINT Index = 0; Index < Count; Index += 1)
+    {
+        NineCopy Part = *Copy;
+
+        Part.SourceSub = Index;
+        Part.DestSub = Index;
+        NineReadIntoSystemMemory(&Part, Readable);
     }
 }
 
@@ -551,11 +674,14 @@ NineTexBlt1(
 
     try
     {
-        if (Source->Subresources != Dest->Subresources)
-            NINE_TRACE_ONCE(L"texture blits between different level counts are not done yet");
-        else if (Dest->SystemMemory)
-            NINE_TRACE_ONCE(L"texture blits into system memory are not done yet");
-        else if (Copy.Whole && !Source->SystemMemory && Source->Format == Dest->Format &&
+        if (Source->Subresources == Dest->Subresources && Dest->SystemMemory)
+        {
+            if (Source->SystemMemory)
+                NINE_TRACE_ONCE(L"texture blits between system memory textures are not done yet");
+            else
+                NineCopyAllToSystemMemory(&Copy);
+        }
+        else if (Source->Subresources == Dest->Subresources && Copy.Whole && !Source->SystemMemory && Source->Format == Dest->Format &&
                  !(Source->Typed.SampleDesc.Count > 1 && Dest->Typed.SampleDesc.Count == 1))
             Dest->Device->Context->ResourceCopy(Dest->Underlying.get(), Source->Underlying.get());
         else
