@@ -6607,6 +6607,9 @@ static const FLOAT TrSoftwareShapes[] = { -0.5f, -0.5f, 0.5f, 0.0f, 1.0f, -0.5f,
                                           0.0f, 0.5f, 0.5f, 0.5f, 0.0f };
 static constexpr UINT TrSoftwareShapeStride = 24;
 
+/* A whole triangle, one crossing the near plane, one behind it and another whole one */
+static const WORD TrSoftwareShapeIndices[] = { 0, 1, 3, 0, 1, 2, 5, 6, 7, 3, 1, 4 };
+
 /* Clipped strips, fans and lists of coordinates and colors, smooth and flat shaded */
 static
 VOID
@@ -6633,6 +6636,9 @@ TrSoftwareShapeWork(
     TrApi("DrawPrimitiveUP list", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 3, List, TrSoftwareShapeStride));
     TrApi("DrawPrimitiveUP band", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, Shapes + 8 * TrSoftwareShapeStride,
                                                           TrSoftwareShapeStride));
+    TrApi("DrawIndexedPrimitiveUP list", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 11, 4,
+                                                                        TrSoftwareShapeIndices, D3DFMT_INDEX16,
+                                                                        Shapes, TrSoftwareShapeStride));
     TrApi("SetRenderState flat", Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT));
     TrApi("DrawPrimitiveUP flat", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 3, Shapes, TrSoftwareShapeStride));
     TrApi("SetRenderState gouraud", Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD));
