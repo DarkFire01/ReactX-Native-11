@@ -179,6 +179,55 @@ RxFontSetData::AddFile(
 }
 
 VOID
+RxFontSetData::GroupEntries(VOID)
+{
+    std::vector<NameIndex> Seen;
+    std::vector<UINT32> Group(Entries.size());
+    std::vector<UINT32> Order(Entries.size());
+    std::vector<RxFontEntry> Sorted;
+    auto Lower = [](const NameIndex& Item, const std::wstring& Name) { return RxCompareNames(Item.Name, Name) < 0; };
+
+    /* Each WWS family keeps the place of its first face */
+    for (UINT32 Index = 0; Index < Entries.size(); Index++)
+    {
+        const std::wstring& Name = RxIdentityName(Entries[Index].Description.WwsFamily);
+        auto Found = std::lower_bound(Seen.begin(), Seen.end(), Name, Lower);
+
+        if (Found == Seen.end() || RxCompareNames(Found->Name, Name) != 0)
+            Found = Seen.insert(Found, { Name, Index });
+        Group[Index] = Found->Family;
+        Order[Index] = Index;
+    }
+
+    std::stable_sort(Order.begin(), Order.end(), [&](UINT32 A, UINT32 B)
+    {
+        const RxFaceDescription& First = Entries[A].Description;
+        const RxFaceDescription& Second = Entries[B].Description;
+
+        if (Group[A] != Group[B])
+            return Group[A] < Group[B];
+        if (First.Weight != Second.Weight)
+            return First.Weight < Second.Weight;
+        if (First.Style != Second.Style)
+            return First.Style < Second.Style;
+        if (First.Stretch != Second.Stretch)
+        {
+            if (First.Stretch == DWRITE_FONT_STRETCH_NORMAL)
+                return true;
+            if (Second.Stretch == DWRITE_FONT_STRETCH_NORMAL)
+                return false;
+            return First.Stretch < Second.Stretch;
+        }
+        return false;
+    });
+
+    Sorted.reserve(Entries.size());
+    for (UINT32 Index : Order)
+        Sorted.push_back(std::move(Entries[Index]));
+    Entries = std::move(Sorted);
+}
+
+VOID
 RxFontSetData::BuildFamilies(
     _In_ DWRITE_FONT_FAMILY_MODEL Model)
 {
@@ -279,6 +328,7 @@ RxFontSetData::CreateSystem(
         File->Release();
     }
 
+    Result->GroupEntries();
     Result->BuildFamilies(DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC);
     Result->BuildFamilies(DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE);
     Result->IsSystem = TRUE;

@@ -91,6 +91,10 @@ private:
     AddFile(
         _In_ IDWriteFontFile* File);
 
+    /* System set order: faces of one WWS family together, by weight, style and stretch */
+    VOID
+    GroupEntries(VOID);
+
     VOID
     BuildFamilies(
         _In_ DWRITE_FONT_FAMILY_MODEL Model);
