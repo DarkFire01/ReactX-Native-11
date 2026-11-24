@@ -2544,6 +2544,87 @@ SceneMultisample(
     return hr;
 }
 
+/* Multisampled draws resolved whole, then rectangles of them reduced by average, minimum and maximum */
+static
+HRESULT
+SceneResolve(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    static const FLOAT Clear[4] = { 0.1f, 0.3f, 0.6f, 1.0f };
+    static const D3D12_RESOLVE_MODE Modes[3] = { D3D12_RESOLVE_MODE_AVERAGE, D3D12_RESOLVE_MODE_MIN, D3D12_RESOLVE_MODE_MAX };
+    SIZE_T LogStart = TcLogMark();
+    TcDrawKit Kit;
+    TcDrawSetup Setup;
+    TcFrame Samples;
+    TcFrame Whole;
+    TcFrame Parts[3];
+    TcQueue Queue;
+    ID3D12GraphicsCommandList1 *List = NULL;
+    ID3D12PipelineState *Plain;
+    ID3D12PipelineState *Coverage;
+    HRESULT hr;
+
+    hr = Queue.Create(Device, D3D12_COMMAND_LIST_TYPE_DIRECT);
+    if (SUCCEEDED(hr))
+        hr = Setup.Create(Device, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Samples.Create(Device, &Queue, Clear, 16, 4, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Whole.Create(Device, &Queue, Clear, 16, 1, &Kit);
+    for (UINT Index = 0; Index < ARRAYSIZE(Parts) && SUCCEEDED(hr); Index++)
+        hr = Parts[Index].Create(Device, &Queue, Clear, 16, 1, &Kit);
+    if (SUCCEEDED(hr))
+        hr = Queue.List->QueryInterface(IID_PPV_ARGS(&List));
+    TcAppend(Result, &hr, sizeof(hr));
+    if (FAILED(hr))
+        return hr;
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC Desc = TcPipelineDesc(Setup.Signature, Setup.Vertex, Setup.Pixel);
+
+        Desc.SampleDesc.Count = 4;
+        Plain = TcPipeline(Device, Desc, &Kit);
+        Desc.BlendState.AlphaToCoverageEnable = TRUE;
+        Coverage = TcPipeline(Device, Desc, &Kit);
+    }
+    if (Plain == NULL || Coverage == NULL)
+    {
+        List->Release();
+        hr = E_OUTOFMEMORY;
+        TcAppend(Result, &hr, sizeof(hr));
+        return hr;
+    }
+    Queue.List->OMSetRenderTargets(1, &Samples.Rtv, FALSE, NULL);
+    Setup.Bind(Queue.List, 16, 64, 0);
+    Queue.List->SetPipelineState(Plain);
+    Queue.List->DrawInstanced(6, 1, 0, 0);
+    Setup.Bind(Queue.List, 16, 64, 3);
+    Queue.List->SetPipelineState(Coverage);
+    Queue.List->DrawInstanced(6, 1, 2, 0);
+
+    TcBarrier(Queue.List, Samples.Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+    TcBarrier(Queue.List, Whole.Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+    Queue.List->ResolveSubresource(Whole.Target, 0, Samples.Target, 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+    TcBarrier(Queue.List, Whole.Target, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (UINT Index = 0; Index < ARRAYSIZE(Parts); Index++)
+    {
+        D3D12_RECT Area = { (LONG)Index, (LONG)(Index * 7), (LONG)(9 + Index), (LONG)(40 + Index * 5) };
+
+        TcBarrier(Queue.List, Parts[Index].Target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+        List->ResolveSubresourceRegion(Parts[Index].Target, 0, 3 + Index, 2 * Index + 1, Samples.Target, 0, &Area,
+                                       DXGI_FORMAT_R8G8B8A8_UNORM, Modes[Index]);
+        List->ResolveSubresourceRegion(Parts[Index].Target, 0, 0, 50, Samples.Target, 0, NULL, DXGI_FORMAT_R8G8B8A8_UNORM, Modes[Index]);
+        TcBarrier(Queue.List, Parts[Index].Target, D3D12_RESOURCE_STATE_RESOLVE_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    TcBarrier(Queue.List, Samples.Target, D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    List->Release();
+    hr = Whole.Finish(Device, &Queue, Result);
+    for (UINT Index = 0; Index < ARRAYSIZE(Parts) && SUCCEEDED(hr); Index++)
+        hr = Parts[Index].Finish(Device, &Queue, Result);
+    TcLogSince(LogStart, Result);
+    return hr;
+}
+
 /* A texture sampled through a descriptor table and a sampler heap, next to the static point sampler */
 static
 HRESULT
@@ -2855,6 +2936,7 @@ static const TcScene Scenes[] =
     { "depth", SceneDepth },
     { "blend", SceneBlend },
     { "msaa", SceneMultisample },
+    { "resolve", SceneResolve },
     { "texture", SceneTexture },
     { "compute", SceneCompute },
     { "opsflow", SceneOpsFlow },
