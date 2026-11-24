@@ -5,9 +5,7 @@
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
-#include <windows.h>
-#include <dwrite_3.h>
-#include <wrl/client.h>
+#include "textcheck.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,16 +13,7 @@
 #include <string>
 #include <vector>
 
-using Microsoft::WRL::ComPtr;
-
 typedef HRESULT (WINAPI *TcCreateFactory)(DWRITE_FACTORY_TYPE, REFIID, IUnknown**);
-
-struct TcSide
-{
-    PCWSTR Name;
-    HMODULE Module;
-    ComPtr<IDWriteFactory> Factory;
-};
 
 struct TcTotals
 {
@@ -43,7 +32,6 @@ static const PCWSTR TcFonts[] =
 
 static const PCWSTR TcSample = L"Hamburgefonstiv 0123 Wg";
 
-static
 VOID
 TcCheck(
     _In_ BOOLEAN Condition,
@@ -194,6 +182,8 @@ TcCompareFace(
     TcCheck(Expected->GetGlyphCount() == Actual->GetGlyphCount(), "%ls glyph count want %u got %u", Name,
             Expected->GetGlyphCount(), Actual->GetGlyphCount());
     TcCheck(Expected->IsSymbolFont() == Actual->IsSymbolFont(), "%ls IsSymbolFont", Name);
+    TcCheck(Expected->GetType() == Actual->GetType(), "%ls GetType want %d got %d", Name, Expected->GetType(),
+            Actual->GetType());
 
     for (UINT32 Code = 0x20; Code < 0x3000; Code++)
         Codes.push_back(Code);
@@ -433,10 +423,9 @@ TcCompareRaster(
     }
 }
 
-static
 std::wstring
 TcName(
-    _In_ IDWriteLocalizedStrings* Names)
+    _In_opt_ IDWriteLocalizedStrings* Names)
 {
     UINT32 Index = 0;
     BOOL Exists = FALSE;
@@ -455,7 +444,6 @@ TcName(
     return Text;
 }
 
-static
 std::wstring
 TcDescribeFont(
     _In_ IDWriteFont* Font)
@@ -804,7 +792,9 @@ wmain(
         TcCompareCollections(System, ReactX);
     if (Only == nullptr || _wcsicmp(Only, L"layout") == 0)
         TcCompareLayouts(System, ReactX);
-    if (Only != nullptr && _wcsicmp(Only, L"layout") == 0)
+    if (Only == nullptr || _wcsicmp(Only, L"gdi") == 0)
+        TcCompareGdiInterop(System, ReactX);
+    if (Only != nullptr && (_wcsicmp(Only, L"layout") == 0 || _wcsicmp(Only, L"gdi") == 0))
         Only = L"";
     if (Only != nullptr && _wcsicmp(Only, L"collection") == 0)
         Only = L"";
