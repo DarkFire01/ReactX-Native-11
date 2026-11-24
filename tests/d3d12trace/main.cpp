@@ -2908,6 +2908,19 @@ TrScenarioHeaps(
         Root.Reset();
     }
 
+    {
+        ComPtr<ID3D12Device1> Device1;
+        ComPtr<ID3D12PipelineLibrary> Library;
+
+        TrPhase("CreatePipelineLibrary empty");
+        if (SUCCEEDED(Device.As(&Device1)))
+            printf("result %08X\n", (UINT)Device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&Library)));
+        if (Library != nullptr)
+            printf("size %llu\n", (ULONGLONG)Library->GetSerializedSize());
+        TrPhase("Release library");
+        Library.Reset();
+    }
+
     TrPhase("Release");
     Signature.Reset();
     Timestamps.Reset();
