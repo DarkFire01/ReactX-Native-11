@@ -9,6 +9,10 @@
 
 extern const WCHAR RxTraceModule[] = L"d3d11";
 
+/* exports.cpp */
+VOID
+RxInitializeLayers(VOID);
+
 struct FeatureLevelMapping
 {
     D3D_FEATURE_LEVEL FeatureLevel;
@@ -329,7 +333,10 @@ DllMain(
     _In_opt_ PVOID Reserved)
 {
     if (Reason == DLL_PROCESS_ATTACH)
+    {
         DisableThreadLibraryCalls(Instance);
+        RxInitializeLayers();
+    }
 
     return TRUE;
 }

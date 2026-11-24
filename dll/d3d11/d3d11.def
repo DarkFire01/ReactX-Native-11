@@ -1,7 +1,53 @@
 LIBRARY d3d11.dll
 EXPORTS
+    D3D11CreateDeviceForD3D12 @1
+    D3DKMTCloseAdapter = RxNullKmtCall @2
+    D3DKMTDestroyAllocation = RxNullKmtCall @3
+    D3DKMTDestroyContext = RxNullKmtCall @4
+    D3DKMTDestroyDevice = RxNullKmtCall @5
+    D3DKMTDestroySynchronizationObject = RxNullKmtCall @6
+    D3DKMTPresent = RxNullKmtCall @7
+    D3DKMTQueryAdapterInfo = RxNullKmtQueryAdapterInfo @8
+    D3DKMTSetDisplayPrivateDriverFormat = RxNullKmtCall @9
+    D3DKMTSignalSynchronizationObject = RxNullKmtCall @10
+    D3DKMTUnlock = RxNullKmtCall @11
+    D3DKMTWaitForSynchronizationObject = RxNullKmtCall @12
+    EnableFeatureLevelUpgrade @13
+    OpenAdapter10 @14
+    OpenAdapter10_2 @15
     CreateDirect3D11DeviceFromDXGIDevice = RxCreateDirect3DDevice @16
     CreateDirect3D11SurfaceFromDXGISurface = RxCreateDirect3DSurface @17
-    D3D11CreateDevice
-    D3D11CreateDeviceAndSwapChain
+    D3D11CoreCreateDevice @18
+    D3D11CoreCreateLayeredDevice @19
+    D3D11CoreGetLayeredDeviceSize @20
+    D3D11CoreRegisterLayers @21
+    D3D11CreateDevice @22
+    D3D11CreateDeviceAndSwapChain @23
     D3D11On12CreateDevice @24
+    D3DKMTCreateAllocation = RxNullKmtCall @25
+    D3DKMTCreateContext = RxNullKmtCall @26
+    D3DKMTCreateDevice = RxNullKmtCall @27
+    D3DKMTCreateSynchronizationObject = RxNullKmtCall @28
+    D3DKMTEscape = RxNullKmtEscape @29
+    D3DKMTGetContextSchedulingPriority = RxNullKmtCall @30
+    D3DKMTGetDeviceState = RxNullKmtGetDeviceState @31
+    D3DKMTGetDisplayModeList = RxNullKmtCall @32
+    D3DKMTGetMultisampleMethodList = RxNullKmtCall @33
+    D3DKMTGetRuntimeData = RxNullKmtCall @34
+    D3DKMTGetSharedPrimaryHandle = RxNullKmtCall @35
+    D3DKMTLock = RxNullKmtCall @36
+    D3DKMTOpenAdapterFromHdc = RxNullKmtOpenAdapterFromHdc @37
+    D3DKMTOpenResource = RxNullKmtRejectResource @38
+    D3DKMTQueryAllocationResidency = RxNullKmtCall @39
+    D3DKMTQueryResourceInfo = RxNullKmtRejectResource @40
+    D3DKMTRender = RxNullKmtCall @41
+    D3DKMTSetAllocationPriority = RxNullKmtCall @42
+    D3DKMTSetContextSchedulingPriority = RxNullKmtCall @43
+    D3DKMTSetDisplayMode = RxNullKmtCall @44
+    D3DKMTSetGammaRamp = RxNullKmtCall @45
+    D3DKMTSetVidPnSourceOwner = RxNullKmtCall @46
+    D3DKMTWaitForVerticalBlankEvent = RxNullKmtCall @47
+    D3DPerformance_BeginEvent @48
+    D3DPerformance_EndEvent @49
+    D3DPerformance_GetStatus @50
+    D3DPerformance_SetMarker @51
