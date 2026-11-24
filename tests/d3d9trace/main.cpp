@@ -203,6 +203,7 @@ struct TrState
     std::map<ULONG_PTR, const BYTE*> Mapped;
     ULONG_PTR FirstStream;
     UINT FirstStride;
+    BOOLEAN Muted;
 };
 
 static TrState Tr;
@@ -364,7 +365,7 @@ static
 BOOLEAN
 TrShouldLog(VOID)
 {
-    if (Tr.DdiOnly && TrCallbackDepth != 0)
+    if (Tr.Muted || (Tr.DdiOnly && TrCallbackDepth != 0))
         return FALSE;
     return Tr.AllThreads || GetCurrentThreadId() == Tr.MainThread;
 }
@@ -8591,6 +8592,147 @@ TrScenarioFixedVertexPlain(
     Plain->Release();
 }
 
+/* Waits for an issued query without printing the polls, whose count depends on the GPU */
+static
+HRESULT
+TrWaitQuery(
+    _In_ IDirect3DQuery9* Query,
+    _Out_writes_bytes_(Size) VOID* Data,
+    _In_ DWORD Size)
+{
+    HRESULT hr = S_FALSE;
+
+    Tr.Muted = TRUE;
+    for (UINT Tries = 0; Tries < 5000 && hr == S_FALSE; Tries++)
+    {
+        hr = Query->GetData(Data, Size, D3DGETDATA_FLUSH);
+        if (hr == S_FALSE)
+            Sleep(1);
+    }
+    Tr.Muted = FALSE;
+    return hr;
+}
+
+/* One query of each supported type: properties, data before an issue, an issue and its result */
+static
+VOID
+TrQueryWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    static const D3DQUERYTYPE Used[] =
+    {
+        D3DQUERYTYPE_EVENT, D3DQUERYTYPE_OCCLUSION, D3DQUERYTYPE_TIMESTAMP, D3DQUERYTYPE_TIMESTAMPDISJOINT,
+        D3DQUERYTYPE_TIMESTAMPFREQ, D3DQUERYTYPE_MEMORYPRESSURE, D3DQUERYTYPE_VCACHE
+    };
+    CHAR Name[64];
+
+    for (UINT Type = 0; Type <= 20; Type++)
+    {
+        sprintf_s(Name, "CreateQuery check %u", Type);
+        TrApi(Name, Device->CreateQuery(static_cast<D3DQUERYTYPE>(Type), nullptr));
+    }
+    for (D3DQUERYTYPE Type : Used)
+    {
+        IDirect3DQuery9* Query = nullptr;
+        IDirect3DDevice9* Owner = nullptr;
+        IUnknown* Other = nullptr;
+        BYTE Data[32];
+        std::string Text;
+        HRESULT hr;
+        DWORD Size;
+
+        sprintf_s(Name, "CreateQuery %u", Type);
+        TrPhase(Name);
+        TrApi(Name, Device->CreateQuery(Type, &Query));
+        if (Query == nullptr)
+            continue;
+        Size = Query->GetDataSize();
+        TrCloseLine();
+        printf("api GetType = %u size %lu\n", Query->GetType(), Size);
+        TrApi("GetDevice", Query->GetDevice(&Owner));
+        printf("api GetDevice same %u\n", Owner == Device);
+        TrRelease(Owner);
+        TrApi("QueryInterface unknown", Query->QueryInterface(__uuidof(IUnknown), reinterpret_cast<VOID**>(&Other)));
+        TrRelease(Other);
+        Other = nullptr;
+        TrApi("QueryInterface device", Query->QueryInterface(__uuidof(IDirect3DDevice9),
+                                                             reinterpret_cast<VOID**>(&Other)));
+        printf("api QueryInterface device null %u\n", Other == nullptr);
+
+        memset(Data, 0x11, sizeof(Data));
+        TrApi("GetData before issue", Query->GetData(Data, 2, 0));
+        TrAppendBytes(&Text, Data, 4);
+        printf("api data %s\n", Text.c_str());
+        TrApi("GetData empty", Query->GetData(nullptr, 0, D3DGETDATA_FLUSH));
+        TrApi("GetData full", Query->GetData(Data, Size, 0));
+        Text.clear();
+        TrAppendBytes(&Text, Data, Size);
+        printf("api data %s\n", Text.c_str());
+
+        if (Type == D3DQUERYTYPE_OCCLUSION || Type == D3DQUERYTYPE_TIMESTAMPDISJOINT ||
+            Type == D3DQUERYTYPE_MEMORYPRESSURE)
+        {
+            TrApi("Issue begin", Query->Issue(D3DISSUE_BEGIN));
+            TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF204060, 1.0f, 0));
+        }
+        TrApi("Issue end", Query->Issue(D3DISSUE_END));
+        hr = TrWaitQuery(Query, Data, Size);
+        TrApi("GetData wait", hr);
+        TrApi("GetData done", Query->GetData(Data, Size, D3DGETDATA_FLUSH));
+        if (Type == D3DQUERYTYPE_EVENT || Type == D3DQUERYTYPE_OCCLUSION || Type == D3DQUERYTYPE_TIMESTAMPFREQ)
+        {
+            Text.clear();
+            TrAppendBytes(&Text, Data, Size);
+            printf("api data %s\n", Text.c_str());
+        }
+
+        TrApi("Issue end again", Query->Issue(D3DISSUE_END));
+        TrApi("GetData wait again", TrWaitQuery(Query, Data, Size));
+        TrRelease(Query);
+    }
+}
+
+/* Queries on a plain and an extended hardware device */
+static
+VOID
+TrScenarioQueries(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("queries plain");
+    Made = Parameters;
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made,
+                                              &Device));
+    if (Device != nullptr)
+    {
+        TrQueryWork(Device);
+        TrPhase("queries plain release");
+        TrRelease(Device);
+    }
+    TrPhase("queries extended");
+    Made = Parameters;
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Made, nullptr, &DeviceEx));
+    if (DeviceEx != nullptr)
+    {
+        TrQueryWork(DeviceEx);
+        TrPhase("queries extended release");
+        TrRelease(DeviceEx);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -8636,6 +8778,7 @@ static const TrScenario TrScenarios[] =
     { "draws_mixed_switch", TrScenarioDrawsMixedSwitch },
     { "draws_mixed_release", TrScenarioDrawsMixedRelease },
     { "draws_software", TrScenarioDrawsSoftware },
+    { "queries", TrScenarioQueries },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
