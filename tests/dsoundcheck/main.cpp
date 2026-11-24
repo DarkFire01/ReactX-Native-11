@@ -2570,7 +2570,7 @@ struct DC_MUSIC_DESC
     IStream* Stream;
 };
 
-static_assert(sizeof(DC_MUSIC_DESC) == 856, "descriptor size");
+static_assert(sizeof(DC_MUSIC_DESC) == (sizeof(void*) == 8 ? 856 : 848), "descriptor size");
 
 struct DcMusicObject : public IUnknown
 {

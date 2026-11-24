@@ -434,7 +434,7 @@ struct RxLayerEntry
     RXLAYERCREATE Create;
 };
 
-static_assert(sizeof(RxLayerEntry) == 32);
+static_assert(sizeof(RxLayerEntry) == (sizeof(VOID*) == 8 ? 32 : 20));
 
 /* The layered device arguments are a 56 byte block; these are the two list cursors in it */
 struct RxLayerArgs
@@ -445,7 +445,7 @@ struct RxLayerArgs
     BYTE Tail[24];
 };
 
-static_assert(sizeof(RxLayerArgs) == 56);
+static_assert(sizeof(VOID*) != 8 || sizeof(RxLayerArgs) == 56);
 
 static CRITICAL_SECTION RxLayerLock;
 static std::vector<RxLayerEntry>* RxLayers;

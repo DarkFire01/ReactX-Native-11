@@ -129,7 +129,7 @@ struct NineScArgs
     std::vector<UINT> Extra;
 };
 
-static_assert(sizeof(NineScArgs) == 208, "arguments keep the converter's layout");
+static_assert(sizeof(VOID*) != 8 || sizeof(NineScArgs) == 208, "arguments keep the converter's layout");
 
 /* The vertex shader for pretransformed vertices: built from the vertex declaration alone */
 struct NineScTlArgs
@@ -146,7 +146,7 @@ struct NineScTlArgs
     UINT Patched;
 };
 
-static_assert(sizeof(NineScTlArgs) == 64, "arguments keep the converter's layout");
+static_assert(sizeof(VOID*) != 8 || sizeof(NineScTlArgs) == 64, "arguments keep the converter's layout");
 
 /* The geometry shader for point sprites, point fill, flat shading and texture wrapping */
 struct NineScGsArgs
@@ -160,7 +160,7 @@ struct NineScGsArgs
     SIZE_T TokenSize;
 };
 
-static_assert(sizeof(NineScGsArgs) == 48, "arguments keep the converter's layout");
+static_assert(sizeof(VOID*) != 8 || sizeof(NineScGsArgs) == 48, "arguments keep the converter's layout");
 
 class NineScTranslator;
 

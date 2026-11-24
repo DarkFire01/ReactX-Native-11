@@ -58,7 +58,7 @@ struct DsMusicDesc
     IStream* Stream;
 };
 
-static_assert(sizeof(DsMusicDesc) == 856, "the descriptor layout is fixed");
+static_assert(sizeof(DsMusicDesc) == (sizeof(VOID*) == 8 ? 856 : 848), "the descriptor layout is fixed");
 
 struct DECLSPEC_NOVTABLE DsMusicObject : public IUnknown
 {

@@ -9,7 +9,7 @@
 
 using TL::COMMAND_LIST_TYPE;
 
-static_assert(sizeof(D3DDDICB_PRESENT) == 584, "the runtime takes a 584 byte present callback argument");
+static_assert(sizeof(VOID*) != 8 || sizeof(D3DDDICB_PRESENT) == 584, "the runtime takes a 584 byte present callback argument");
 
 /* A handle of 1 is how the runtime names no resource */
 static
