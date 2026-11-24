@@ -65,8 +65,13 @@ RxLanguageTag(
     if (LCIDToLocaleName(Language, Buffer, _countof(Buffer), 0) == 0)
         return FALSE;
 
+    /* Lowercased; an underscore stays as LCIDToLocaleName wrote it */
     Tag = Buffer;
-    RxLowerAscii(Tag);
+    for (auto& Char : Tag)
+    {
+        if (Char >= L'A' && Char <= L'Z')
+            Char = static_cast<WCHAR>(Char - L'A' + L'a');
+    }
     return TRUE;
 }
 
