@@ -128,6 +128,9 @@ RxDevice::CreateTexture2D1(
     _In_reads_opt_(_Inexpressible_(pDesc1->MipLevels* pDesc1->ArraySize)) const D3D11_SUBRESOURCE_DATA* pInitialData,
     _COM_Outptr_opt_ ID3D11Texture2D1** ppTexture2D)
 {
+    if (ppTexture2D != nullptr)
+        *ppTexture2D = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -139,6 +142,9 @@ RxDevice::CreateTexture3D1(
     _In_reads_opt_(_Inexpressible_(pDesc1->MipLevels)) const D3D11_SUBRESOURCE_DATA* pInitialData,
     _COM_Outptr_opt_ ID3D11Texture3D1** ppTexture3D)
 {
+    if (ppTexture3D != nullptr)
+        *ppTexture3D = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -149,6 +155,9 @@ RxDevice::CreateRasterizerState2(
     _In_ const D3D11_RASTERIZER_DESC2* pRasterizerDesc,
     _COM_Outptr_opt_ ID3D11RasterizerState2** ppRasterizerState)
 {
+    if (ppRasterizerState != nullptr)
+        *ppRasterizerState = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -160,6 +169,9 @@ RxDevice::CreateShaderResourceView1(
     _In_opt_ const D3D11_SHADER_RESOURCE_VIEW_DESC1* pDesc1,
     _COM_Outptr_opt_ ID3D11ShaderResourceView1** ppSRView1)
 {
+    if (ppSRView1 != nullptr)
+        *ppSRView1 = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -171,6 +183,9 @@ RxDevice::CreateUnorderedAccessView1(
     _In_opt_ const D3D11_UNORDERED_ACCESS_VIEW_DESC1* pDesc1,
     _COM_Outptr_opt_ ID3D11UnorderedAccessView1** ppUAView1)
 {
+    if (ppUAView1 != nullptr)
+        *ppUAView1 = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -182,6 +197,9 @@ RxDevice::CreateRenderTargetView1(
     _In_opt_ const D3D11_RENDER_TARGET_VIEW_DESC1* pDesc1,
     _COM_Outptr_opt_ ID3D11RenderTargetView1** ppRTView1)
 {
+    if (ppRTView1 != nullptr)
+        *ppRTView1 = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -192,6 +210,9 @@ RxDevice::CreateQuery1(
     _In_ const D3D11_QUERY_DESC1* pQueryDesc1,
     _COM_Outptr_opt_ ID3D11Query1** ppQuery1)
 {
+    if (ppQuery1 != nullptr)
+        *ppQuery1 = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -202,6 +223,9 @@ RxDevice::CreateDeferredContext3(
     UINT ContextFlags,
     _COM_Outptr_opt_ ID3D11DeviceContext3** ppDeferredContext)
 {
+    if (ppDeferredContext != nullptr)
+        *ppDeferredContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
