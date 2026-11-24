@@ -686,8 +686,9 @@ CkDescribeDdiCall(
         {
             const D3DDDIARG_RENAME* Args = reinterpret_cast<const D3DDDIARG_RENAME*>(A[1]);
 
+            /* A cookie can take the address of a freed one, so it prints only whether it is there */
             CkAppend(Text, " resource %s sub %u cookie %s", CkName(Args->hResource).c_str(), Args->SubResourceIndex,
-                     CkName(Args->hCookie).c_str());
+                     Args->hCookie != nullptr ? "set" : "none");
             break;
         }
         default:
