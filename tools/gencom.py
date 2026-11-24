@@ -120,12 +120,34 @@ def signature(method, prefix, indent, terminator):
     return lines
 
 
-def stub_body(result):
-    if result == "void":
-        return ["{", "    RX_UNIMPLEMENTED();", "}"]
+def clear_outputs(params):
+    # Callers may read an out pointer even after a failure, so stubs leave nothing behind
+    lines = []
+    for param in params:
+        match = re.match(r"(_COM_Outptr\w*|_Outptr\w*|_Out_|_Out_opt_)\s+(.*?)\s*(\w+)$", param)
+        if match is None:
+            continue
+        annotation, kind, name = match.groups()
+        if not kind.endswith("*") or re.match(r"(const\s+)?void\s*\*$", kind):
+            continue
+        lines.append("    if (%s != nullptr)" % name)
+        if annotation.startswith("_COM_Outptr") or annotation.startswith("_Outptr"):
+            lines.append("        *%s = nullptr;" % name)
+        else:
+            lines.append("        memset(%s, 0, sizeof(*%s));" % (name, name))
+    if lines:
+        lines.append("")
+    return lines
+
+
+def stub_body(method):
+    result, _, params, _ = method
+    lines = ["{"] + clear_outputs(params) + ["    RX_UNIMPLEMENTED();"]
     if result == "HRESULT":
-        return ["{", "    RX_UNIMPLEMENTED();", "    return E_NOTIMPL;", "}"]
-    return ["{", "    RX_UNIMPLEMENTED();", "    return {};", "}"]
+        lines.append("    return E_NOTIMPL;")
+    elif result != "void":
+        lines.append("    return {};")
+    return lines + ["}"]
 
 
 def main():
@@ -170,7 +192,7 @@ def main():
         if method[1] in implemented:
             continue
         stubs.extend(signature(method, args.class_name + "::", "", ""))
-        stubs.extend(stub_body(method[0]))
+        stubs.extend(stub_body(method))
         stubs.append("")
 
     with open(args.decl, "w", encoding="utf-8", newline="\n") as handle:
