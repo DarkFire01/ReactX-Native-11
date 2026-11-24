@@ -2926,6 +2926,26 @@ TcCheckPipelines(
     Changed.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_INCR;
     TcReportGraphics(Check, Device.Get(), "depth_stencil", Changed);
 
+    /* Linkage rules, checked once every part of the pipeline is made */
+    for (UINT Topology : { 0u, 2u, 3u, 4u, 5u })
+    {
+        CHAR Key[32];
+
+        Changed = Graphics;
+        Changed.PrimitiveTopologyType = (D3D12_PRIMITIVE_TOPOLOGY_TYPE)Topology;
+        sprintf_s(Key, "topology_%u", Topology);
+        TcReportGraphics(Check, Device.Get(), Key, Changed);
+    }
+    for (UINT Cut : { 1u, 2u, 3u })
+    {
+        CHAR Key[32];
+
+        Changed = Graphics;
+        Changed.IBStripCutValue = (D3D12_INDEX_BUFFER_STRIP_CUT_VALUE)Cut;
+        sprintf_s(Key, "strip_cut_%u", Cut);
+        TcReportGraphics(Check, Device.Get(), Key, Changed);
+    }
+
     Compute.pRootSignature = Root.Get();
     Compute.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
     TcReportCompute(Check, Device.Get(), "compute", Compute);
