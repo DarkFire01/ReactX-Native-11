@@ -176,18 +176,6 @@ RxDevice12::GetResourceTiling(
 
 HRESULT
 STDMETHODCALLTYPE
-RxDevice12::CreatePipelineLibrary(
-    _In_reads_(BlobLength) const void* pLibraryBlob,
-    SIZE_T BlobLength,
-    REFIID riid,
-    _COM_Outptr_ void** ppPipelineLibrary)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxDevice12::SetEventOnMultipleFenceCompletion(
     _In_reads_(NumFences) ID3D12Fence* const* ppFences,
     _In_reads_(NumFences) const UINT64* pFenceValues,

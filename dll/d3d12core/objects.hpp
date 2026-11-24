@@ -771,6 +771,79 @@ private:
     BOOLEAN IsDriverSignatureCreated = FALSE;
 };
 
+/* Named pipeline states an application keeps between runs */
+class RxPipelineLibrary final : public RxDeviceChild12<ID3D12PipelineLibrary1>
+{
+public:
+    static constexpr GUID PrivateId = {0x3e8d5a17, 0xc640, 0x4f2b, {0x9d, 0x71, 0x08, 0xb3, 0x5e, 0xa6, 0xc4, 0x19}};
+
+    /* An empty library */
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _Outptr_ RxPipelineLibrary** Library);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    StorePipeline(
+        _In_opt_ LPCWSTR pName,
+        _In_ ID3D12PipelineState* pPipeline) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    LoadGraphicsPipeline(
+        _In_ LPCWSTR pName,
+        _In_ const D3D12_GRAPHICS_PIPELINE_STATE_DESC* pDesc,
+        REFIID riid,
+        _COM_Outptr_ void** ppPipelineState) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    LoadComputePipeline(
+        _In_ LPCWSTR pName,
+        _In_ const D3D12_COMPUTE_PIPELINE_STATE_DESC* pDesc,
+        REFIID riid,
+        _COM_Outptr_ void** ppPipelineState) override;
+
+    SIZE_T
+    STDMETHODCALLTYPE
+    GetSerializedSize(VOID) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    Serialize(
+        _Out_writes_(DataSizeInBytes) void* pData,
+        SIZE_T DataSizeInBytes) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    LoadPipeline(
+        _In_ LPCWSTR pName,
+        _In_ const D3D12_PIPELINE_STATE_STREAM_DESC* pDesc,
+        REFIID riid,
+        _COM_Outptr_ void** ppPipelineState) override;
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxPipelineLibrary() override;
+
+    HRESULT
+    Initialize();
+
+    RxDriverMemory12 Memory;
+    D3D12DDI_HPIPELINELIBRARY DriverLibrary = {};
+    BOOLEAN IsDriverLibraryCreated = FALSE;
+    SRWLOCK Lock = SRWLOCK_INIT;
+    SIZE_T SerializedSize = 0;
+};
+
 /* A root signature as the driver holds it; one per RTS0 part and node mask */
 class RxRootSignature final : public RxDeviceChild12<ID3D12RootSignature>
 {
