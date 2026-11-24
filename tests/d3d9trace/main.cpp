@@ -6544,6 +6544,98 @@ static const DWORD TrSoftwareColors[] = { 0xFF0000FF, 0xFF00FF00, 0xFFFF0000, 0x
 static constexpr DWORD TrSoftwareFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
 static constexpr UINT TrSoftwareStride = 16;
 
+/* vs_3_0 writing a position, two coordinates and a color from c0 */
+static const DWORD TrSoftwareModelThree[] = { 0xFFFE0300, 0x0200001F, 0x80000000, 0x900F0000, 0x0200001F, 0x80000005,
+                                              0x900F0001, 0x0200001F, 0x80000000, 0xE00F0000, 0x0200001F, 0x80000005,
+                                              0xE0030001, 0x0200001F, 0x8000000A, 0xE00F0002, 0x02000001, 0xE00F0000,
+                                              0x90E40000, 0x02000001, 0xE0030001, 0x90E40001, 0x02000001, 0xE00F0002,
+                                              0xA0E40000, 0x0000FFFF };
+
+/* vs_1_1 writing a position, a specular color from c0, fog from z, a point size from c1 and only the second
+   coordinate set */
+static const DWORD TrSoftwareOutputCode[] = { 0xFFFE0101, 0x0000001F, 0x80000000, 0x900F0000, 0x0000001F, 0x80000005,
+                                              0x900F0001, 0x00000001, 0xC00F0000, 0x90E40000, 0x00000001, 0xD00F0001,
+                                              0xA0E40000, 0x00000001, 0xC00F0001, 0x90AA0000, 0x00000001, 0xC00F0002,
+                                              0xA0000001, 0x00000001, 0xE0070001, 0x90E40001, 0x0000FFFF };
+
+/* Shaders whose outputs make other transformed formats, and the fixed function pipeline lit with specular */
+static
+VOID
+TrSoftwareOutputWork(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DVertexBuffer9* Buffer,
+    _In_ IDirect3DIndexBuffer9* IndexBuffer)
+{
+    static const FLOAT Constants[] = { 0.25f, 0.5f, 0.75f, 1.0f, 2.0f, 0.0f, 0.0f, 0.0f };
+    IDirect3DVertexShader9* Outputs = nullptr;
+    IDirect3DVertexShader9* Three = nullptr;
+
+    TrApi("CreateVertexShader outputs", Device->CreateVertexShader(TrSoftwareOutputCode, &Outputs));
+    TrApi("CreateVertexShader model three", Device->CreateVertexShader(TrSoftwareModelThree, &Three));
+    TrApi("SetVertexShaderConstantF", Device->SetVertexShaderConstantF(0, Constants, 2));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("SetIndices", Device->SetIndices(IndexBuffer));
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("SetVertexShader outputs", Device->SetVertexShader(Outputs));
+    TrApi("DrawPrimitive outputs", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("DrawPrimitive outputs points", Device->DrawPrimitive(D3DPT_POINTLIST, 0, 4));
+    TrApi("SetVertexShader model three", Device->SetVertexShader(Three));
+    TrApi("DrawPrimitive model three", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("DrawIndexedPrimitive model three", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZW | D3DFVF_TEX1));
+    TrApi("SetRenderState lighting", Device->SetRenderState(D3DRS_LIGHTING, TRUE));
+    TrApi("SetRenderState specular", Device->SetRenderState(D3DRS_SPECULARENABLE, TRUE));
+    TrApi("SetRenderState ambient", Device->SetRenderState(D3DRS_AMBIENT, 0xFF406080));
+    TrApi("DrawPrimitive lit", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("SetRenderState lighting off", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+    TrApi("SetRenderState specular off", Device->SetRenderState(D3DRS_SPECULARENABLE, FALSE));
+    TrApi("EndScene", Device->EndScene());
+    TrRelease(Outputs);
+    TrRelease(Three);
+}
+
+/* Fixed function draws partly and wholly outside the frustum, with clipping on and off, and one too large
+   for the transformed vertex buffer */
+static
+VOID
+TrSoftwareClipWork(
+    _In_ IDirect3DDevice9* Device,
+    _In_reads_bytes_(7 * TrSoftwareStride) const BYTE* Memory)
+{
+    static const FLOAT Outside[] = { -0.5f, -0.5f, -0.5f, 0.5f, -0.5f, -0.25f, 0.0f, 0.5f, -0.75f };
+    static const FLOAT Across[] = { -0.5f, -0.5f, -0.5f, 0.5f, -0.5f, 0.5f, 0.0f, 0.5f, 0.5f };
+    BYTE Vertices[3 * TrSoftwareStride];
+    std::vector<BYTE> Many(3000 * TrSoftwareStride);
+
+    for (UINT Index = 0; Index < 3000; Index++)
+    {
+        CopyMemory(&Many[Index * TrSoftwareStride], Memory + (Index % 7) * TrSoftwareStride, TrSoftwareStride);
+        reinterpret_cast<FLOAT*>(&Many[Index * TrSoftwareStride])[0] += (Index / 7) * 0.001f;
+    }
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetFVF", Device->SetFVF(TrSoftwareFvf));
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    for (UINT Index = 0; Index < 3; Index++)
+    {
+        CopyMemory(Vertices + Index * TrSoftwareStride, &Outside[Index * 3], 12);
+        CopyMemory(Vertices + Index * TrSoftwareStride + 12, &TrSoftwareColors[Index], 4);
+    }
+    TrApi("DrawPrimitiveUP outside", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, Vertices, TrSoftwareStride));
+    TrApi("SetRenderState clipping off", Device->SetRenderState(D3DRS_CLIPPING, FALSE));
+    TrApi("DrawPrimitiveUP outside unclipped", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, Vertices,
+                                                                        TrSoftwareStride));
+    TrApi("SetRenderState clipping on", Device->SetRenderState(D3DRS_CLIPPING, TRUE));
+    for (UINT Index = 0; Index < 3; Index++)
+        CopyMemory(Vertices + Index * TrSoftwareStride, &Across[Index * 3], 12);
+    TrApi("DrawPrimitiveUP across", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, Vertices, TrSoftwareStride));
+    TrApi("DrawPrimitiveUP large", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1000, Many.data(), TrSoftwareStride));
+    TrApi("DrawPrimitiveUP after large", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Memory, TrSoftwareStride));
+    TrApi("EndScene", Device->EndScene());
+}
+
 /* Draws from buffers and memory through the runtime's vertex pipeline, fixed function and with a vs_1_1 shader */
 static
 VOID
@@ -6659,6 +6751,16 @@ TrSoftwareDrawWork(
     TrApi("EndScene", Device->EndScene());
     TrSettle(Device);
     TrReadTarget(Device, Target, "software shader");
+    TrSettle(Device);
+
+    TrPhase("software outputs");
+    TrSoftwareOutputWork(Device, Buffer, IndexBuffer);
+    TrReadTarget(Device, Target, "software outputs");
+    TrSettle(Device);
+
+    TrPhase("software clipped");
+    TrSoftwareClipWork(Device, Memory);
+    TrReadTarget(Device, Target, "software clipped");
     TrSettle(Device);
 
     TrPhase("software release");
