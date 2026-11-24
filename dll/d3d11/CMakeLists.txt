@@ -49,9 +49,10 @@ nt_add_usermode_dll(d3d11
         videoprocessorenumerator_stubs.cpp
         videoprocessorinputview_stubs.cpp
         videoprocessoroutputview_stubs.cpp
-        views.cpp)
+        views.cpp
+        winrtinterop.cpp)
 
-target_link_libraries(d3d11 PRIVATE rxcommon user32 gdi32 ole32 dxguid version d3d11on12 delayimp)
+target_link_libraries(d3d11 PRIVATE rxcommon user32 gdi32 ole32 dxguid version runtimeobject d3d11on12 delayimp)
 
 # The D3D11 on 12 layer loads by name the first time a device needs it, as in Windows
 target_link_options(d3d11 PRIVATE /DELAYLOAD:d3d11on12.dll)

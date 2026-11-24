@@ -1,5 +1,7 @@
 LIBRARY d3d11.dll
 EXPORTS
+    CreateDirect3D11DeviceFromDXGIDevice = RxCreateDirect3DDevice @16
+    CreateDirect3D11SurfaceFromDXGISurface = RxCreateDirect3DSurface @17
     D3D11CreateDevice
     D3D11CreateDeviceAndSwapChain
     D3D11On12CreateDevice @24
