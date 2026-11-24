@@ -605,6 +605,13 @@ public:
         return Desc;
     }
 
+    /* Where a placed resource starts in its heap; committed resources start at 0 */
+    UINT64
+    GetPlacementOffset() const
+    {
+        return PlacementOffset;
+    }
+
 private:
     using RxDeviceChild12::RxDeviceChild12;
     ~RxResource() override;

@@ -11,16 +11,6 @@
 
 VOID
 STDMETHODCALLTYPE
-RxDevice12::CreateShaderResourceView(
-    _In_opt_ ID3D12Resource* pResource,
-    _In_opt_ const D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
 RxDevice12::CreateUnorderedAccessView(
     _In_opt_ ID3D12Resource* pResource,
     _In_opt_ ID3D12Resource* pCounterResource,

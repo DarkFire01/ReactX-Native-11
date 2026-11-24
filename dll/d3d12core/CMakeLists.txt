@@ -32,7 +32,8 @@ nt_add_usermode_dll(d3d12core
         pipeline.cpp
         rootsignature.cpp
         rootsigobject.cpp
-        schedulinggroup.cpp)
+        schedulinggroup.cpp
+        views.cpp)
 target_link_libraries(d3d12core PRIVATE rxcommon ole32 advapi32 dxguid)
 target_include_directories(d3d12core PRIVATE "${RX_INTERNAL_SHADERS_DIR}")
 add_dependencies(d3d12core internalshaders_header)
