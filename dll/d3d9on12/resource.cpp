@@ -1318,6 +1318,7 @@ NineLockSubresource(
     if (MapType != TL::MAP_TYPE_READ)
     {
         Resource->GpuWrites = 0;
+        Resource->FanValid = FALSE;
         Resource->CpuDirty = TRUE;
     }
     Lock->Count += 1;
@@ -1610,6 +1611,8 @@ NineRename(
     {
         Device->Context->Rename(Resource->Underlying.get(), Cookie);
         Device->Context->DeleteRenameCookie(Cookie);
+        Resource->FanStart = 0;
+        Resource->FanValid = FALSE;
     }
     catch (_com_error& Error)
     {

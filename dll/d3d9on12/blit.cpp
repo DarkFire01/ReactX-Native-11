@@ -150,7 +150,6 @@ NineFitRects(
 }
 
 /* A copy of a resource the CPU cannot read, in a staging resource it can */
-static
 TL::unique_comptr<TL::Resource>
 NineStagingCopy(
     _In_ NineResource* Resource)
@@ -417,4 +416,160 @@ NineBlt(
         hr = E_OUTOFMEMORY;
     }
     return NineDxgiResult(hr);
+}
+
+/* Uploads one subresource of a system memory resource into a GPU one */
+static
+VOID
+NineUploadFromSystemMemory(
+    _In_ NineResource* Source,
+    _In_ UINT SourceSub,
+    _Inout_ NineResource* Dest,
+    _In_ UINT DestSub,
+    _In_ const NineCopy* Copy)
+{
+    NineDevice* Device = Dest->Device;
+    const NineSysMemSource& From = Source->SysMem[SourceSub];
+    const BOOLEAN Blocks = CD3D11FormatHelper::IsBlockCompressFormat(Source->DxgiFormat);
+    UINT Bits = Source->DxgiFormat != DXGI_FORMAT_UNKNOWN ? CD3D11FormatHelper::GetBitsPerUnit(Source->DxgiFormat) : 8;
+    TL::Resource* Target = Dest->Underlying.get();
+    const UINT Mips = Target->AppDesc()->MipLevels();
+    const UINT Slices = Target->AppDesc()->ArraySize();
+    D3D11_SUBRESOURCE_DATA Data;
+    D3D12_BOX Box;
+    UINT Flags = 0;
+    const BYTE* Bytes = From.Data;
+
+    if (!Copy->Whole)
+    {
+        const D3D12_BOX& Area = Copy->SourceBox;
+
+        Bytes += static_cast<SIZE_T>(Blocks ? Area.left / 4 : Area.left) * (Bits / 8) +
+                 From.RowPitch * (Blocks ? Area.top / 4 : Area.top) + From.SlicePitch * Area.front;
+        Box = { Copy->DestX, Copy->DestY, Copy->DestZ, Copy->DestX + (Area.right - Area.left),
+                Copy->DestY + (Area.bottom - Area.top), Copy->DestZ + (Area.back - Area.front) };
+    }
+    Data.pSysMem = Bytes;
+    Data.SysMemPitch = static_cast<UINT>(From.RowPitch);
+    Data.SysMemSlicePitch = static_cast<UINT>(From.SlicePitch);
+
+    if ((Source->Format == D3DDDIFMT_A2R10G10B10) != (Dest->Format == D3DDDIFMT_A2R10G10B10))
+        Flags = static_cast<UINT>(TL::ImmediateContext::UpdateSubresourcesFlags::ChannelSwapR10G10B10A2);
+
+    TL::CSubresourceSubset Subset(1, 1, static_cast<UINT8>(Target->AppDesc()->NonOpaquePlaneCount()),
+                                  static_cast<UINT8>(DestSub % Mips), static_cast<UINT16>((DestSub / Mips) % Slices),
+                                  static_cast<UINT8>(DestSub / (Mips * Slices)));
+    Device->Context->UpdateSubresources(Target, Subset, &Data, Copy->Whole ? nullptr : &Box,
+                                        static_cast<TL::ImmediateContext::UpdateSubresourcesFlags>(Flags));
+}
+
+/* Copies every slice and level a texture blit covers, one subresource at a time */
+static
+VOID
+NineCopyEachSubresource(
+    _Inout_ NineCopy* Copy,
+    _In_ UINT Face)
+{
+    NineResource* Source = Copy->Source;
+    NineResource* Dest = Copy->Dest;
+    const UINT Slices = Dest->Typed.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Dest->ArraySize;
+    const UINT First = Face == ~0u ? 0 : Face;
+    const UINT Last = Face == ~0u ? Slices : Face + 1;
+    const UINT Mips = Dest->Typed.MipLevels;
+
+    for (UINT Slice = First; Slice < Last; Slice += 1)
+    {
+        for (UINT Mip = 0; Mip < Mips; Mip += 1)
+        {
+            NineCopy Part = *Copy;
+            UINT SourceIndex = Mip + Source->Typed.MipLevels * Slice;
+            UINT DestIndex = Mip + Mips * Slice;
+
+            if (!Part.Whole && Mip != 0)
+            {
+                Part.DestX >>= Mip;
+                Part.DestY >>= Mip;
+                Part.DestZ >>= Mip;
+                Part.SourceBox.left >>= Mip;
+                Part.SourceBox.top >>= Mip;
+                Part.SourceBox.front >>= Mip;
+                Part.SourceBox.right = (Part.SourceBox.right + (1u << Mip) - 1) >> Mip;
+                Part.SourceBox.bottom = (Part.SourceBox.bottom + (1u << Mip) - 1) >> Mip;
+                Part.SourceBox.back = (Part.SourceBox.back + (1u << Mip) - 1) >> Mip;
+            }
+
+            if (Source->SystemMemory)
+            {
+                NineUploadFromSystemMemory(Source, SourceIndex, Dest, NineSubresourceOf(Dest, DestIndex, 0, TRUE), &Part);
+            }
+            else
+            {
+                Part.SourceSub = SourceIndex;
+                Part.DestSub = DestIndex;
+                NineCopySubresources(&Part);
+            }
+        }
+    }
+}
+
+HRESULT
+APIENTRY
+NineTexBlt1(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_TEXBLT1* Args)
+{
+    NineResource* Source;
+    NineResource* Dest;
+    NineCopy Copy = {};
+    HRESULT Result;
+
+    if (hDevice == NULL || Args == nullptr)
+        return E_INVALIDARG;
+    Source = NineBltResource(Args->hSrcResource);
+    Dest = NineBltResource(Args->hDstResource);
+    if (Source == nullptr || Dest == nullptr)
+        return E_INVALIDARG;
+
+    /* The reference reports a copy onto itself as not done but makes it anyway */
+    Result = Source == Dest ? E_NOTIMPL : S_OK;
+
+    Copy.Source = Source;
+    Copy.Dest = Dest;
+    Copy.DestX = Args->DstPoint.x;
+    Copy.DestY = Args->DstPoint.y;
+    Copy.SourceBox = { static_cast<UINT>(Args->SrcRect.left), static_cast<UINT>(Args->SrcRect.top), 0,
+                       static_cast<UINT>(Args->SrcRect.right), static_cast<UINT>(Args->SrcRect.bottom), 1 };
+    if (static_cast<UINT64>(Args->SrcRect.right - Args->SrcRect.left) == Dest->Typed.Width &&
+        static_cast<UINT>(Args->SrcRect.bottom - Args->SrcRect.top) == Dest->Typed.Height)
+    {
+        Copy.Whole = TRUE;
+    }
+    else
+    {
+        NineAlignCopy(&Copy);
+    }
+
+    try
+    {
+        if (Source->Subresources != Dest->Subresources)
+            NINE_TRACE_ONCE(L"texture blits between different level counts are not done yet");
+        else if (Dest->SystemMemory)
+            NINE_TRACE_ONCE(L"texture blits into system memory are not done yet");
+        else if (Copy.Whole && !Source->SystemMemory && Source->Format == Dest->Format &&
+                 !(Source->Typed.SampleDesc.Count > 1 && Dest->Typed.SampleDesc.Count == 1))
+            Dest->Device->Context->ResourceCopy(Dest->Underlying.get(), Source->Underlying.get());
+        else
+            NineCopyEachSubresource(&Copy, Args->CubeMapFace);
+        Dest->FanStart = 0;
+        Dest->FanValid = FALSE;
+    }
+    catch (_com_error& Error)
+    {
+        Result = Error.Error();
+    }
+    catch (std::bad_alloc&)
+    {
+        Result = E_OUTOFMEMORY;
+    }
+    return NineDxgiResult(Result);
 }

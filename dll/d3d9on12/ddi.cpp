@@ -217,7 +217,7 @@ NineFillDeviceFuncs(
     Functions->pfnResolveSharedResource = NineFixedAnswer<NotDone>;
     NINE_MISSING(pfnVolBlt1, 121);
     NINE_MISSING(pfnBufBlt1, 122);
-    NINE_MISSING(pfnTexBlt1, 123);
+    Functions->pfnTexBlt1 = NineTexBlt1;
     Functions->pfnDiscard = NineFixedAnswer<NotDone>;
     Functions->pfnOfferResources = NineFixedAnswer<NotDone>;
     Functions->pfnReclaimResources = NineFixedAnswer<NotDone>;

@@ -334,6 +334,7 @@ struct NineDevice
     NineUploadRing UserRing;
     NineUploadRing FanRing;
     UINT FanCapacity;
+    TL::unique_comptr<TL::Resource> UserFanList;
 
     /* Discarded ranges of each buffer locked since it was created */
     std::mutex LockRangesLock;
@@ -458,6 +459,11 @@ struct NineResource
     std::vector<UINT> StreamSlots;
     BOOLEAN BoundAsIndices;
 
+    /* The list indices last made from this index buffer for a triangle fan, and where they started */
+    TL::unique_comptr<TL::Resource> FanList;
+    UINT FanStart;
+    BOOLEAN FanValid;
+
     /* The renamed allocation an asynchronous discard lock handed out */
     TL::D3D12ResourceSuballocation Renamed;
 };
@@ -561,7 +567,17 @@ NineBlt(
     _In_ HANDLE hDevice,
     _In_ const D3DDDIARG_BLT* Args);
 
-/* Takes a resource out of every render target and depth slot it is bound to */
+HRESULT
+APIENTRY
+NineTexBlt1(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_TEXBLT1* Args);
+
+/* A copy of a resource the CPU cannot read, in a staging resource it can */
+TL::unique_comptr<TL::Resource>
+NineStagingCopy(
+    _In_ NineResource* Resource);
+
 /* input.cpp */
 HRESULT
 APIENTRY

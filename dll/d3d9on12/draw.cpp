@@ -178,6 +178,7 @@ NineFreeDrawState(
     Device->PixelBump.Ring.Buffer.reset();
     Device->UserRing.Buffer.reset();
     Device->FanRing.Buffer.reset();
+    Device->UserFanList.reset();
 }
 
 /* The 36 bytes of pipeline state the converter keys its output on */
@@ -1377,6 +1378,9 @@ struct NineDrawSource
     NineOffsetKind IndexKind;
     UINT IndexValue;
     UINT IndexCount;
+
+    /* The indices are a list the device made, bound by the draw itself */
+    BOOLEAN MadeIndices;
 };
 
 /* Copies user memory streams into the upload buffer for this draw's vertices */
@@ -1532,7 +1536,8 @@ NinePrepareDraw(
     hr = NineBindStreams(Device, Source);
     if (FAILED(hr))
         return hr;
-    NineBindIndexBuffer(Device, Source);
+    if (!Source->MadeIndices)
+        NineBindIndexBuffer(Device, Source);
     NineApplyViewport(Device);
     NineApplyPointSize(Device);
     NineApplyScissor(Device);
@@ -1717,6 +1722,7 @@ NineDrawFan(
     }
 
     Source.VertexCount = Primitives + 2;
+    Source.MadeIndices = TRUE;
     Source.IndexKind = NineOffsetElement;
     Source.IndexValue = 0;
     Source.IndexCount = 3 * Primitives;
@@ -1785,7 +1791,86 @@ NineDrawPrimitive2(
     }));
 }
 
-/* An indexed fan becomes a list whose indices are read from the application's on the CPU */
+/* A mapped buffer of list indices {k + 1, k + 2, 0} picked out of fan indices */
+static
+TL::unique_comptr<TL::Resource>
+NineMakeFanList(
+    _Inout_ NineDevice* Device,
+    _In_ const BYTE* Fan,
+    _In_ UINT IndexSize,
+    _In_ UINT Primitives)
+{
+    NineUploadRing Ring = {};
+    NineUploadSlice Slice;
+    UINT* List;
+
+    Ring.Owner = Device;
+    Ring.Alignment = NineSlotAlignment;
+    Ring.Capacity = 4 * ((3 * Primitives) & 0x3FFFFFFF);
+    Ring.Cursor = Ring.Capacity;
+    Slice = NineAllocateUpload(&Ring, Ring.Capacity);
+    List = reinterpret_cast<UINT*>(Slice.Cpu);
+    for (UINT Index = 0; Index < Primitives; Index += 1)
+    {
+        UINT Picks[3] = { Index + 1, Index + 2, 0 };
+
+        for (UINT Corner = 0; Corner < 3; Corner += 1)
+        {
+            List[3 * Index + Corner] = IndexSize == 2 ? reinterpret_cast<const USHORT*>(Fan)[Picks[Corner]]
+                                                      : reinterpret_cast<const UINT*>(Fan)[Picks[Corner]];
+        }
+    }
+    return std::move(Ring.Buffer);
+}
+
+/* The fan indices of an index buffer as a list, kept with the buffer until it is written or the start moves */
+static
+TL::Resource*
+NineBufferFanList(
+    _Inout_ NineDevice* Device,
+    _Inout_ NineResource* Buffer,
+    _In_ UINT Start,
+    _In_ UINT Primitives)
+{
+    TL::unique_comptr<TL::Resource> Staging;
+    TL::Resource* Readable = Buffer->Underlying.get();
+    TL::MappedSubresource Mapped = {};
+
+    if (Buffer->FanValid && Buffer->FanStart == Start)
+        return Buffer->FanList.get();
+
+    if ((Readable->AppDesc()->CPUAccessFlags() & TL::RESOURCE_CPU_ACCESS_READ) == 0)
+    {
+        Staging = NineStagingCopy(Buffer);
+        Readable = Staging.get();
+    }
+    switch (Readable->AppDesc()->Usage())
+    {
+        case TL::RESOURCE_USAGE_DEFAULT:
+            Device->Context->MapDefault(Readable, 0, TL::MAP_TYPE_READ, false, nullptr, &Mapped);
+            break;
+        case TL::RESOURCE_USAGE_DYNAMIC:
+            if (Readable->Parent()->m_heapDesc.Properties.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
+            {
+                Device->Context->MapDynamicTexture(Readable, 0, TL::MAP_TYPE_READ, false, nullptr, &Mapped);
+                break;
+            }
+            Device->Context->MapUnderlyingSynchronize(Readable, 0, TL::MAP_TYPE_READ, false, nullptr, &Mapped);
+            break;
+        default:
+            Device->Context->MapUnderlyingSynchronize(Readable, 0, TL::MAP_TYPE_READ, false, nullptr, &Mapped);
+            break;
+    }
+
+    Buffer->FanList = NineMakeFanList(Device, static_cast<const BYTE*>(Mapped.pData) + Start, Device->State.IndexStride,
+                                      Primitives);
+    Buffer->FanStart = Start;
+    Buffer->FanValid = TRUE;
+    Device->Context->Unmap(Readable, 0, TL::MAP_TYPE_READ, nullptr);
+    return Buffer->FanList.get();
+}
+
+/* An indexed fan drawn as a list through indices made from the fan's own */
 static
 HRESULT
 NineDrawIndexedFan(
@@ -1796,36 +1881,30 @@ NineDrawIndexedFan(
 {
     NineDeviceState* State = &Device->State;
     NineDrawSource Source = *Vertices;
-    const BYTE* Data = State->UserIndices;
-    std::vector<UINT> List(3 * Primitives);
-    NineUploadSlice Slice;
+    TL::Resource* List;
     BOOLEAN Skip;
     HRESULT hr;
 
-    if (Data == nullptr)
+    if (State->UserIndices != nullptr)
     {
-        NINE_TRACE_ONCE(L"indexed triangle fans from index buffers are not drawn yet");
-        return S_OK;
+        Device->UserFanList = NineMakeFanList(Device, State->UserIndices + Start, State->IndexStride, Primitives);
+        List = Device->UserFanList.get();
     }
-    Data += Start;
-    for (UINT Index = 0; Index < Primitives; Index += 1)
+    else if (State->IndexBuffer != nullptr)
     {
-        UINT Picks[3] = { Index + 1, Index + 2, 0 };
-
-        for (UINT Corner = 0; Corner < 3; Corner += 1)
-        {
-            List[3 * Index + Corner] = State->IndexStride == 2 ? reinterpret_cast<const USHORT*>(Data)[Picks[Corner]]
-                                                              : reinterpret_cast<const UINT*>(Data)[Picks[Corner]];
-        }
+        List = NineBufferFanList(Device, State->IndexBuffer, Start, Primitives);
+    }
+    else
+    {
+        return S_OK;
     }
 
     Source.IndexCount = 3 * Primitives;
+    Source.MadeIndices = TRUE;
     hr = NinePrepareDraw(Device, D3DPT_TRIANGLEFAN, &Source, &Skip);
     if (FAILED(hr) || Skip)
         return hr;
-    Slice = NineAllocateUpload(&Device->UserRing, static_cast<UINT>(List.size() * sizeof(UINT)));
-    memcpy(Slice.Cpu, List.data(), List.size() * sizeof(UINT));
-    Device->Context->IaSetIndexBuffer(Slice.Buffer, DXGI_FORMAT_R32_UINT, Slice.Offset);
+    Device->Context->IaSetIndexBuffer(List, DXGI_FORMAT_R32_UINT, Source.IndexKind == NineOffsetBytes ? Source.IndexValue : 0);
     Device->Context->DrawIndexedInstanced(3 * Primitives, NineInstanceCount(State), 0,
                                           Vertices->VertexKind == NineOffsetVertex ? Vertices->VertexValue : 0, 0);
     return S_OK;
