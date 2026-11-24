@@ -992,6 +992,48 @@ CkCreateDevice(
     CkFlushState();
 }
 
+/* A pure device only for what the runtime filters on other devices */
+static
+VOID
+CkCreatePureDevice(
+    _In_ IDirect3D9* D3D,
+    _In_ HWND Window)
+{
+    D3DPRESENT_PARAMETERS Parameters = {};
+    IDirect3DDevice9* Device = nullptr;
+    IDirect3DSurface9* Back = nullptr;
+    IDirect3DSurface9* Flush = nullptr;
+    HRESULT hr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.BackBufferFormat = D3DFMT_X8R8G8B8;
+    Parameters.BackBufferWidth = 64;
+    Parameters.BackBufferHeight = 48;
+    Parameters.hDeviceWindow = Window;
+    Parameters.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+
+    hr = D3D->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_PUREDEVICE,
+                           &Parameters, &Device);
+    printf("IDirect3D9::CreateDevice pure hr %08lX\n", hr);
+    if (Device == nullptr)
+        return;
+
+    hr = Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Back);
+    printf("pure GetBackBuffer hr %08lX\n", hr);
+    hr = Device->CreateOffscreenPlainSurface(4, 4, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &Flush, nullptr);
+    printf("pure flush CreateOffscreenPlainSurface hr %08lX\n", hr);
+    if (Back != nullptr)
+    {
+        CkPureDefines(Device, Back, Flush);
+        Back->Release();
+    }
+    if (Flush != nullptr)
+        Flush->Release();
+    printf("  device released %lu\n", Device->Release());
+    CkFlushState();
+}
+
 static
 std::wstring
 CkDriverPath(
@@ -1075,6 +1117,7 @@ wmain(
         CkQueryAdapter(D3D);
         CkCreateDevice(D3D, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING);
         CkCreateDevice(D3D, Window, D3DCREATE_SOFTWARE_VERTEXPROCESSING);
+        CkCreatePureDevice(D3D, Window);
         printf("released %lu\n", D3D->Release());
     }
 

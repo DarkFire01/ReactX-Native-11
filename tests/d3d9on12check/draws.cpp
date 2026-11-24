@@ -28,6 +28,23 @@ static constexpr DWORD CkTlFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
 /* Filled and locked before each readback so the runtime batch drains at a fixed point */
 static IDirect3DSurface9* CkDrawFlush;
 
+/* Set while the runtime drains on its own thread, where a print can land among the drained calls */
+static BOOLEAN CkDrawQuiet;
+
+/* Empties the runtime batch without printing */
+static
+VOID
+CkDrainQuietly(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Flush)
+{
+    D3DLOCKED_RECT Locked;
+
+    Device->ColorFill(Flush, nullptr, 0);
+    if (SUCCEEDED(Flush->LockRect(&Locked, nullptr, D3DLOCK_READONLY)))
+        Flush->UnlockRect();
+}
+
 /* Prints every row of the target as a fingerprint so a difference shows where it is */
 static
 VOID
@@ -41,7 +58,9 @@ CkReadRows(
     D3DSURFACE_DESC Desc = {};
     HRESULT hr;
 
-    if (CkDrawFlush != nullptr)
+    if (CkDrawFlush != nullptr && CkDrawQuiet)
+        CkDrainQuietly(Device, CkDrawFlush);
+    else if (CkDrawFlush != nullptr)
         CkFlushBatch(Device, CkDrawFlush, Label);
 
     Target->GetDesc(&Desc);
@@ -179,6 +198,23 @@ static const DWORD CkScalePixelCode[] =
     0x0200001F, 0x80000000, 0x900F0000,
     0x03000005, 0x800F0000, 0x90E40000, 0xA0E40000,
     0x02000001, 0x800F0800, 0x80E40000,
+    0x0000FFFF,
+};
+
+/* ps_2_0: c1 as the shader defines it */
+static const DWORD CkDefinedPixelCode[] =
+{
+    0xFFFF0200,
+    0x05000051, 0xA00F0001, 0x3E800000, 0x3F000000, 0x3F400000, 0x3F800000,
+    0x02000001, 0x800F0800, 0xA0E40001,
+    0x0000FFFF,
+};
+
+/* ps_2_0: c1 as the constants hold it */
+static const DWORD CkReaderPixelCode[] =
+{
+    0xFFFF0200,
+    0x02000001, 0x800F0800, 0xA0E40001,
     0x0000FFFF,
 };
 
@@ -575,6 +611,133 @@ CkPointSprites(
     Device->SetRenderState(D3DRS_POINTSIZE, CkFloatBits(1.0f));
 }
 
+/*
+ * The defined value of a register is copied into the constants only when something the shader is
+ * keyed on changed. The shader reads it as a literal, so a second shader that reads the register
+ * shows which value the constants hold: each column draws the defining shader, changes one thing,
+ * sets the register, draws it again and then draws the reader over the column.
+ */
+static
+VOID
+CkPixelDefines(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    IDirect3DPixelShader9* Defined = nullptr;
+    IDirect3DPixelShader9* Reader = nullptr;
+    CkTexVertex Quad[4];
+    PCSTR Steps[16] = {};
+    HRESULT Results[16] = {};
+    HRESULT Cleared;
+    UINT Column = 0;
+
+    CkRun(Device->CreatePixelShader(CkDefinedPixelCode, &Defined), "defines", "CreatePixelShader");
+    CkRun(Device->CreatePixelShader(CkReaderPixelCode, &Reader), "defines", "CreatePixelShader reader");
+    if (Defined == nullptr || Reader == nullptr)
+        goto Done;
+    /* A pure device drains its batch on another thread, so nothing prints until it is drained */
+    Cleared = Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0);
+    Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+    Device->SetFVF(CkTexFvf);
+    if (CkDrawFlush != nullptr)
+        CkDrainQuietly(Device, CkDrawFlush);
+    Device->BeginScene();
+
+    {
+        auto Begin = [&]()
+        {
+            FLOAT Left = static_cast<FLOAT>((Column % 8) * 8);
+            FLOAT Top = static_cast<FLOAT>((Column / 8) * 24);
+
+            CkQuad(Quad, Left, Top, Left + 8.0f, Top + 24.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+            Device->SetPixelShader(Defined);
+            Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0]));
+        };
+        auto Finish = [&](PCSTR Step)
+        {
+            FLOAT Own[4] = { static_cast<FLOAT>(Column + 1) / 16.0f, 0.0f, 1.0f, 1.0f };
+
+            /* A new value each time, since the runtime drops a set that repeats the last one */
+            Device->SetPixelShaderConstantF(1, Own, 1);
+            Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0]));
+            Device->SetPixelShader(Reader);
+            Results[Column] = Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0]));
+            Steps[Column] = Step;
+            Column += 1;
+        };
+
+        Begin();
+        Finish("nothing changed");
+        Begin();
+        Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT);
+        Finish("shade mode");
+        Begin();
+        Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD);
+        Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT);
+        Finish("shade mode there and back");
+        Begin();
+        Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT);
+        Finish("same shade mode");
+        Begin();
+        Device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+        Finish("blend state");
+        Begin();
+        Device->SetPixelShader(Defined);
+        Finish("same shader");
+        Begin();
+        Device->SetRenderState(D3DRS_WRAP0, D3DWRAP_U);
+        Finish("wrap");
+        Begin();
+        Device->SetRenderState(D3DRS_ALPHATESTENABLE, TRUE);
+        Device->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_ALWAYS);
+        Finish("alpha test");
+
+        Begin();
+        Device->SetRenderState(D3DRS_ADAPTIVETESS_Y, static_cast<DWORD>(MAKEFOURCC('A', 'T', 'O', 'C')));
+        Finish("alpha to coverage");
+        Begin();
+        Device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+        Finish("blend state with coverage");
+        Begin();
+        Device->SetRenderState(D3DRS_ADAPTIVETESS_Y, 0);
+        Finish("coverage off");
+        Begin();
+        Device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+        Finish("blend state after coverage");
+        Begin();
+        Device->SetRenderState(D3DRS_POINTSIZE, static_cast<DWORD>(MAKEFOURCC('A', '2', 'M', '1')));
+        Finish("point size coverage");
+        Begin();
+        Device->SetRenderState(D3DRS_POINTSIZE, static_cast<DWORD>(MAKEFOURCC('A', '2', 'M', '0')));
+        Device->SetRenderState(D3DRS_POINTSIZE, CkFloatBits(1.0f));
+        Finish("point size coverage off");
+        Begin();
+        Device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        Finish("alpha test off");
+        Begin();
+        Device->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
+        Finish("alpha function with the test off");
+    }
+    Device->EndScene();
+    if (CkDrawFlush != nullptr)
+        CkDrainQuietly(Device, CkDrawFlush);
+    CkRun(Cleared, "defines", "Clear");
+    for (UINT Index = 0; Index < Column; Index += 1)
+        CkRun(Results[Index], "defines", Steps[Index]);
+    CkReadRows(Device, Back, "defines");
+
+    Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD);
+    Device->SetRenderState(D3DRS_WRAP0, 0);
+    Device->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_ALWAYS);
+    Device->SetPixelShader(nullptr);
+
+Done:
+    if (Reader != nullptr)
+        Reader->Release();
+    if (Defined != nullptr)
+        Defined->Release();
+}
+
 VOID
 CkDraws(
     _In_ IDirect3DDevice9* Device,
@@ -589,6 +752,21 @@ CkDraws(
     CkTextured(Device, Back);
     CkDepthStencilFog(Device, Back);
     CkPointSprites(Device, Back);
+    CkDrawFlush = nullptr;
+    CkFlushState();
+}
+
+VOID
+CkPureDefines(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back,
+    _In_opt_ IDirect3DSurface9* Flush)
+{
+    printf("== pure device defines\n");
+    CkDrawFlush = Flush;
+    CkDrawQuiet = TRUE;
+    CkPixelDefines(Device, Back);
+    CkDrawQuiet = FALSE;
     CkDrawFlush = nullptr;
     CkFlushState();
 }
