@@ -8,6 +8,7 @@
 #pragma once
 
 #include "facetables.hpp"
+#include "variations.hpp"
 #include "gpos.hpp"
 
 class RxGlyphRasterizer;
@@ -21,6 +22,8 @@ public:
         _In_ IDWriteFontFile* File,
         _In_ UINT32 FaceIndex,
         _In_ DWRITE_FONT_SIMULATIONS Simulations,
+        _In_reads_opt_(ValueCount) const RxAxisValue* Values,
+        _In_ UINT32 ValueCount,
         _Outptr_ RxFontFace** Face);
 
     RX_DECLARE_IUNKNOWN
@@ -36,6 +39,13 @@ public:
     /* Created on first use; NULL when out of memory */
     RxGlyphRasterizer*
     Rasterizer(VOID);
+
+    /* Axis values the face is instanced at; empty without fvar */
+    const std::vector<RxAxisValue>&
+    Coordinates(VOID) const
+    {
+        return AxisValues;
+    }
 
     /* Latin kern feature pairs, read on first use */
     const RxKerning&
@@ -58,6 +68,7 @@ private:
     LONG RefCount;
     RxFaceTables* Data;
     DWRITE_FONT_SIMULATIONS Simulations;
+    std::vector<RxAxisValue> AxisValues;
     DWRITE_FONT_METRICS1 Metrics;
     RxGlyphRasterizer* GlyphRasterizer;
     INIT_ONCE RasterizerOnce;

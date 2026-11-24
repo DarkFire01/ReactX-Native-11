@@ -8,6 +8,7 @@
 #pragma once
 
 #include "facetables.hpp"
+#include "variations.hpp"
 
 #include <string>
 
@@ -41,6 +42,8 @@ struct RxFaceDescription
     BYTE Stretch;
     BYTE Style;
     BYTE Win32Style;
+    /* Names came from STAT, so the informational strings report them too */
+    BOOLEAN FromStyleTable;
 };
 
 /* Reads every record of a name ID, one per language */
@@ -50,11 +53,48 @@ RxReadNames(
     _In_ USHORT NameId,
     _Inout_ RxNameList& Names);
 
-/* Naming and style values the way a font set stores them for the WWS family model */
+/* Naming and style values the way a font set stores them; Coordinates are the instance axis values */
 VOID
 RxDescribeFace(
     _In_ const RxFaceTables* Face,
+    _In_ const std::vector<RxAxisValue>& Coordinates,
     _Out_ RxFaceDescription* Description);
+
+/* The STAT path of RxDescribeFace */
+VOID
+RxDescribeStyledFace(
+    _In_ const RxFaceTables* Face,
+    _In_ const std::vector<RxAxisValue>& Coordinates,
+    _Out_ RxFaceDescription* Description);
+
+/* OS/2 and head values */
+USHORT
+RxFaceWeight(
+    _In_ const RxFaceHeader& Header);
+
+BYTE
+RxFaceStyle(
+    _In_ const RxFaceHeader& Header);
+
+BYTE
+RxFaceStretch(
+    _In_ const RxFaceHeader& Header);
+
+/* Values from wght, wdth, ital and slnt; the OS/2 values for an axis that is missing */
+USHORT
+RxAxisWeight(
+    _In_ const RxFaceHeader& Header,
+    _In_ const std::vector<RxAxisValue>& Values);
+
+BYTE
+RxAxisStretch(
+    _In_ const RxFaceHeader& Header,
+    _In_ const std::vector<RxAxisValue>& Values);
+
+BYTE
+RxAxisStyle(
+    _In_ const RxFaceHeader& Header,
+    _In_ const std::vector<RxAxisValue>& Values);
 
 /* Face name of a face with simulations applied */
 std::wstring

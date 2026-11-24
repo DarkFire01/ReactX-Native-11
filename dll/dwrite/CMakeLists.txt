@@ -28,8 +28,10 @@ nt_add_usermode_dll(dwrite
         params_stubs.cpp
         scan.cpp
         sfnt.cpp
+        stylenames.cpp
         textformat.cpp
-        textlayout.cpp)
+        textlayout.cpp
+        variations.cpp)
 
 target_link_libraries(dwrite PRIVATE rxcommon user32 advapi32 dxguid)
 

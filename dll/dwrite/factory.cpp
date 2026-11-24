@@ -405,7 +405,7 @@ RxWriteFactory::CreateFontFace(
     if (faceIndex >= FaceCount)
         return E_INVALIDARG;
 
-    hr = RxFontFace::Create(fontFiles[0], faceIndex, fontFaceSimulationFlags, &Face);
+    hr = RxFontFace::Create(fontFiles[0], faceIndex, fontFaceSimulationFlags, nullptr, 0, &Face);
     if (FAILED(hr))
         return hr;
 

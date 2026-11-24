@@ -258,7 +258,6 @@ RxCanonicalNames(
 
 /* OS/2 and head values */
 
-static
 USHORT
 RxFaceWeight(
     _In_ const RxFaceHeader& Header)
@@ -280,7 +279,6 @@ RxFaceWeight(
     return static_cast<USHORT>(Weight);
 }
 
-static
 BYTE
 RxFaceStyle(
     _In_ const RxFaceHeader& Header)
@@ -294,7 +292,6 @@ RxFaceStyle(
     return DWRITE_FONT_STYLE_NORMAL;
 }
 
-static
 BYTE
 RxFaceStretch(
     _In_ const RxFaceHeader& Header)
@@ -835,6 +832,7 @@ RxNameIn(
 VOID
 RxDescribeFace(
     _In_ const RxFaceTables* Face,
+    _In_ const std::vector<RxAxisValue>& Coordinates,
     _Out_ RxFaceDescription* Description)
 {
     const RxFaceHeader& Header = Face->Header();
@@ -844,6 +842,13 @@ RxDescribeFace(
     std::wstring CanonicalFace;
     std::wstring Locale;
     BOOLEAN HaveCanonical;
+
+    Description->FromStyleTable = FALSE;
+    if (Face->Sfnt().HasTable(RxTag('S', 'T', 'A', 'T')))
+    {
+        RxDescribeStyledFace(Face, Coordinates, Description);
+        return;
+    }
 
     RxReadNames(Face, RxNameFamily, Description->Win32Family);
     RxReadNames(Face, RxNameSubfamily, Description->Win32Face);

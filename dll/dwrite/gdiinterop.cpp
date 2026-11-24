@@ -295,7 +295,7 @@ RxGdiInterop::ConvertFontFaceToLOGFONT(
     if (Face == nullptr)
         return E_INVALIDARG;
 
-    RxDescribeFace(Face->Tables(), &Description);
+    RxDescribeFace(Face->Tables(), Face->Coordinates(), &Description);
     FillLogFont(Description, Face->GetSimulations(), Face->IsSymbolFont() != FALSE, logFont);
     return S_OK;
 }

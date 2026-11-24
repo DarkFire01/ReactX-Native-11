@@ -155,26 +155,39 @@ RxFontSetData::AddFile(
     for (UINT32 Index = 0; Index < std::min<UINT32>(Faces, 65535); Index++)
     {
         RxFaceTables* Tables;
-        RxFontEntry Entry;
+        USHORT Instances;
+        std::vector<RxVariationAxis> Axes;
 
         if (FAILED(RxFaceTables::Create(File, Index, &Tables)))
             continue;
 
-        Entry.File = RxComPtr<IDWriteFontFile>(File);
-        Entry.FaceIndex = Index;
-        Entry.FaceType = Tables->Sfnt().IsCff() ? DWRITE_FONT_FACE_TYPE_CFF : DWRITE_FONT_FACE_TYPE_TRUETYPE;
-        Entry.IsSymbol = Tables->IsSymbolFont() || (Tables->Header().HasOs2 && Tables->Header().Panose[0] == 5);
-        RxDescribeFace(Tables, &Entry.Description);
-        memset(&Entry.Signature, 0, sizeof(Entry.Signature));
-        if (Tables->Header().HasOs2)
+        Instances = RxNamedInstanceCount(Tables->Sfnt());
+        RxReadVariationAxes(Tables->Sfnt(), Axes);
+
+        /* A variable face is listed once per named instance */
+        for (USHORT Instance = 0; Instance < Instances; Instance++)
         {
-            memcpy(Entry.Signature.fsUsb, Tables->Header().UnicodeRange, sizeof(Entry.Signature.fsUsb));
-            memcpy(Entry.Signature.fsCsb, Tables->Header().CodePageRange, sizeof(Entry.Signature.fsCsb));
+            RxFontEntry Entry;
+
+            Entry.File = RxComPtr<IDWriteFontFile>(File);
+            Entry.FaceIndex = Index;
+            Entry.Instance = Instance;
+            Entry.Axes = Axes;
+            RxNamedInstanceValues(Tables->Sfnt(), Instance, Entry.Coordinates);
+            Entry.FaceType = Tables->Sfnt().IsCff() ? DWRITE_FONT_FACE_TYPE_CFF : DWRITE_FONT_FACE_TYPE_TRUETYPE;
+            Entry.IsSymbol = Tables->IsSymbolFont() || (Tables->Header().HasOs2 && Tables->Header().Panose[0] == 5);
+            RxDescribeFace(Tables, Entry.Coordinates, &Entry.Description);
+            memset(&Entry.Signature, 0, sizeof(Entry.Signature));
+            if (Tables->Header().HasOs2)
+            {
+                memcpy(Entry.Signature.fsUsb, Tables->Header().UnicodeRange, sizeof(Entry.Signature.fsUsb));
+                memcpy(Entry.Signature.fsCsb, Tables->Header().CodePageRange, sizeof(Entry.Signature.fsCsb));
+            }
+
+            if (!Entry.Description.WwsFamily.empty())
+                Entries.push_back(std::move(Entry));
         }
         Tables->Release();
-
-        if (!Entry.Description.WwsFamily.empty())
-            Entries.push_back(std::move(Entry));
     }
 }
 
@@ -727,6 +740,29 @@ RxAddCompletenessSimulations(
         Items.push_back(Extra.Item);
 }
 
+/* Whether an entry is the instance a face of ours is at */
+static
+BOOLEAN
+RxSameCoordinates(
+    _In_ const RxFontEntry& Entry,
+    _In_opt_ RxFontFace* Face)
+{
+    const std::vector<RxAxisValue>* Values;
+
+    if (Face == nullptr)
+        return Entry.Instance == 0;
+    Values = &Face->Coordinates();
+    if (Values->size() != Entry.Coordinates.size())
+        return FALSE;
+    for (SIZE_T Index = 0; Index < Values->size(); Index++)
+    {
+        if ((*Values)[Index].Tag != Entry.Coordinates[Index].Tag ||
+            (*Values)[Index].Value != Entry.Coordinates[Index].Value)
+            return FALSE;
+    }
+    return TRUE;
+}
+
 /* RxFontCollection */
 
 HRESULT
@@ -852,23 +888,29 @@ RxFontCollection::GetFontFromFontFace(
     if (FAILED(hr))
         return hr;
 
-    for (UINT32 Family = 0; Family < FamilyList().size(); Family++)
+    /* The instance at the face coordinates wins; any instance of the face does otherwise */
+    for (UINT32 Pass = 0; Pass < 2; Pass++)
     {
-        for (const auto& Item : FamilyList()[Family].Items)
+        for (UINT32 Family = 0; Family < FamilyList().size(); Family++)
         {
-            const RxFontEntry& Entry = SetData->Entries[Item.Entry];
-            RxFontFile* Ours = static_cast<RxFontFile*>(Entry.File.Get());
-            RxFontItem Wanted = { Item.Entry, fontFace->GetSimulations() };
-            RxFont* Result;
+            for (const auto& Item : FamilyList()[Family].Items)
+            {
+                const RxFontEntry& Entry = SetData->Entries[Item.Entry];
+                RxFontFile* Ours = static_cast<RxFontFile*>(Entry.File.Get());
+                RxFontItem Wanted = { Item.Entry, fontFace->GetSimulations() };
+                RxFont* Result;
 
-            if (Entry.FaceIndex != fontFace->GetIndex() || !Ours->Matches(File.Get()))
-                continue;
+                if (Entry.FaceIndex != fontFace->GetIndex() || !Ours->Matches(File.Get()))
+                    continue;
+                if (Pass == 0 && !RxSameCoordinates(Entry, RxFontFace::FromInterface(fontFace)))
+                    continue;
 
-            hr = RxFont::Create(this, Family, Wanted, &Result);
-            if (FAILED(hr))
-                return hr;
-            *font = Result;
-            return S_OK;
+                hr = RxFont::Create(this, Family, Wanted, &Result);
+                if (FAILED(hr))
+                    return hr;
+                *font = Result;
+                return S_OK;
+            }
         }
     }
     return DWRITE_E_NOFONT;
@@ -1117,7 +1159,8 @@ RxFont::Face(
 
     if (!CachedFace.Get())
     {
-        hr = RxFontFace::Create(Entry().File.Get(), Entry().FaceIndex, Item.Simulations, &Result);
+        hr = RxFontFace::Create(Entry().File.Get(), Entry().FaceIndex, Item.Simulations, Entry().Coordinates.data(),
+                                static_cast<UINT32>(Entry().Coordinates.size()), &Result);
         if (FAILED(hr))
             return hr;
         CachedFace.Attach(Result);
@@ -1230,6 +1273,15 @@ RxFont::GetInformationalStrings(
         Names = Entry().Description.FullName;
     else if (informationalStringID == DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME)
         Names = Entry().Description.PostscriptName;
+    else if (Entry().Description.FromStyleTable &&
+             informationalStringID == DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_FAMILY_NAMES)
+        Names = Entry().Description.TypographicFamily;
+    else if (Entry().Description.FromStyleTable &&
+             informationalStringID == DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_SUBFAMILY_NAMES)
+        Names = Entry().Description.TypographicFace;
+    else if (Entry().Description.FromStyleTable &&
+             informationalStringID == DWRITE_INFORMATIONAL_STRING_WEIGHT_STRETCH_STYLE_FAMILY_NAME)
+        Names = Entry().Description.WwsFamily;
     else
     {
         hr = RxFaceTables::Create(Entry().File.Get(), Entry().FaceIndex, &Tables);

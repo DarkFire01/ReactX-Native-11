@@ -562,7 +562,7 @@ RxFontFace::GetFamilyNames(
     if (names == nullptr)
         return E_INVALIDARG;
     *names = nullptr;
-    RxDescribeFace(Data, &Description);
+    RxDescribeFace(Data, AxisValues, &Description);
     return RxLocalizedStrings::Create(Description.WwsFamily, names);
 }
 
@@ -577,7 +577,7 @@ RxFontFace::GetFaceNames(
     if (names == nullptr)
         return E_INVALIDARG;
     *names = nullptr;
-    RxDescribeFace(Data, &Description);
+    RxDescribeFace(Data, AxisValues, &Description);
 
     if (Simulations != DWRITE_FONT_SIMULATIONS_NONE && !Description.WwsFace.empty())
     {
@@ -615,7 +615,7 @@ RxFontFace::GetInformationalStrings(
     if (static_cast<UINT32>(informationalStringID) >= _countof(NameIds) || NameIds[informationalStringID] < 0)
         return S_OK;
 
-    RxDescribeFace(Data, &Description);
+    RxDescribeFace(Data, AxisValues, &Description);
     if (informationalStringID == DWRITE_INFORMATIONAL_STRING_WIN32_FAMILY_NAMES)
         Names = Description.Win32Family;
     else if (informationalStringID == DWRITE_INFORMATIONAL_STRING_WIN32_SUBFAMILY_NAMES)

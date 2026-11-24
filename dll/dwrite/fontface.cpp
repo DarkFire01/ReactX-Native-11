@@ -40,6 +40,8 @@ RxFontFace::Create(
     _In_ IDWriteFontFile* File,
     _In_ UINT32 FaceIndex,
     _In_ DWRITE_FONT_SIMULATIONS Simulations,
+    _In_reads_opt_(ValueCount) const RxAxisValue* Values,
+    _In_ UINT32 ValueCount,
     _Outptr_ RxFontFace** Face)
 {
     RxFontFace* Result;
@@ -59,6 +61,15 @@ RxFontFace::Create(
     }
 
     Result->Simulations = Simulations;
+    RxNamedInstanceValues(Result->Data->Sfnt(), 0xFFFF, Result->AxisValues);
+    for (UINT32 Index = 0; Values != nullptr && Index < ValueCount; Index++)
+    {
+        for (auto& Value : Result->AxisValues)
+        {
+            if (Value.Tag == Values[Index].Tag)
+                Value.Value = Values[Index].Value;
+        }
+    }
     Result->ComputeMetrics();
     *Face = Result;
     return S_OK;

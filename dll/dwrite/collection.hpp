@@ -15,6 +15,11 @@ struct RxFontEntry
 {
     RxComPtr<IDWriteFontFile> File;
     UINT32 FaceIndex;
+    /* Named instance the entry stands for, zero for a face without one */
+    USHORT Instance;
+    /* fvar axes and the instance values on them; both empty without fvar */
+    std::vector<RxVariationAxis> Axes;
+    std::vector<RxAxisValue> Coordinates;
     DWRITE_FONT_FACE_TYPE FaceType;
     BOOLEAN IsSymbol;
     /* OS/2 Unicode and code page ranges, as GetFontSignature reports them */
