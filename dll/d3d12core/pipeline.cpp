@@ -1527,15 +1527,9 @@ RxPipelineState::AcquireElementLayout(
     RxLayoutBuild Build;
     HRESULT hr;
 
-    /* Without a layout the vertex shader may only read the system generated ids */
+    /* Without a layout there is nothing to make; linkage checks what the shader reads */
     if (Desc.InputLayout.NumElements == 0)
-    {
-        D3D12_INPUT_LAYOUT_DESC None = {};
-
-        return Desc.Shaders[RxStageVertex].pShaderBytecode != nullptr
-                   ? RxCheckLayout(Device, None, Desc.Shaders[RxStageVertex])
-                   : S_OK;
-    }
+        return S_OK;
 
     if ((Root->GetLayout().Flags & D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT) == 0)
         return E_INVALIDARG;
@@ -1623,6 +1617,16 @@ RxPipelineState::Initialize(
                                      sizeof(Raster), RxBuildRasterizer, &Raster, &RasterizerState);
         if (FAILED(hr))
             return hr;
+
+        /* Linkage, once every part is made: without a layout the vertex shader may only read generated ids */
+        if (Desc.InputLayout.NumElements == 0 && Desc.Shaders[RxStageVertex].pShaderBytecode != nullptr)
+        {
+            D3D12_INPUT_LAYOUT_DESC None = {};
+
+            hr = RxCheckLayout(Device, None, Desc.Shaders[RxStageVertex]);
+            if (FAILED(hr))
+                return hr;
+        }
 
         if (Shaders[RxStageVertex] != nullptr)
             Args.hVertexShader.pDrvPrivate = Shaders[RxStageVertex]->GetDriverHandle();
