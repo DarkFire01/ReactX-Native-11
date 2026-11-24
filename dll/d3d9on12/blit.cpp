@@ -635,6 +635,59 @@ NineCopyAllToSystemMemory(
     }
 }
 
+/* One texture, volume or buffer copy as the three blit entries share it */
+static
+HRESULT
+NineCopyResource(
+    _Inout_ NineCopy* Copy,
+    _In_ UINT Face)
+{
+    NineResource* Source = Copy->Source;
+    NineResource* Dest = Copy->Dest;
+    const BOOLEAN Buffers = Source->Typed.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+                            Dest->Typed.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+
+    try
+    {
+        if (Source->Subresources != Dest->Subresources)
+        {
+            NineCopyEachSubresource(Copy, Face);
+        }
+        else if (Dest->SystemMemory)
+        {
+            if (Source->SystemMemory)
+                NINE_TRACE_ONCE(L"copies between system memory resources are not done yet");
+            else
+                NineCopyAllToSystemMemory(Copy);
+        }
+        else if (Copy->Whole && !Source->SystemMemory && Source->Format == Dest->Format &&
+                 !(Source->Typed.SampleDesc.Count > 1 && Dest->Typed.SampleDesc.Count == 1))
+        {
+            Dest->Device->Context->ResourceCopy(Dest->Underlying.get(), Source->Underlying.get());
+        }
+        else if (Buffers && !Source->SystemMemory)
+        {
+            Dest->Device->Context->ResourceCopyRegion(Dest->Underlying.get(), 0, Copy->DestX, 0, 0,
+                                                      Source->Underlying.get(), 0, &Copy->SourceBox);
+        }
+        else
+        {
+            NineCopyEachSubresource(Copy, Face);
+        }
+        Dest->FanStart = 0;
+        Dest->FanValid = FALSE;
+    }
+    catch (_com_error& Error)
+    {
+        return Error.Error();
+    }
+    catch (std::bad_alloc&)
+    {
+        return E_OUTOFMEMORY;
+    }
+    return S_OK;
+}
+
 HRESULT
 APIENTRY
 NineTexBlt1(
@@ -645,6 +698,7 @@ NineTexBlt1(
     NineResource* Dest;
     NineCopy Copy = {};
     HRESULT Result;
+    HRESULT hr;
 
     if (hDevice == NULL || Args == nullptr)
         return E_INVALIDARG;
@@ -672,30 +726,66 @@ NineTexBlt1(
         NineAlignCopy(&Copy);
     }
 
-    try
+    hr = NineCopyResource(&Copy, Args->CubeMapFace);
+    return NineDxgiResult(FAILED(hr) ? hr : Result);
+}
+
+HRESULT
+APIENTRY
+NineVolBlt1(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_VOLUMEBLT1* Args)
+{
+    NineCopy Copy = {};
+
+    if (hDevice == NULL || Args == nullptr)
+        return E_INVALIDARG;
+    Copy.Source = NineBltResource(Args->hSrcResource);
+    Copy.Dest = NineBltResource(Args->hDstResource);
+    if (Copy.Source == nullptr || Copy.Dest == nullptr)
+        return E_INVALIDARG;
+
+    Copy.DestX = Args->DstX;
+    Copy.DestY = Args->DstY;
+    Copy.DestZ = Args->DstZ;
+    Copy.SourceBox = { Args->SrcBox.Left, Args->SrcBox.Top, Args->SrcBox.Front, Args->SrcBox.Right,
+                       Args->SrcBox.Bottom, Args->SrcBox.Back };
+    if (static_cast<UINT64>(Copy.SourceBox.right - Copy.SourceBox.left) == Copy.Dest->Typed.Width &&
+        Copy.SourceBox.bottom - Copy.SourceBox.top == Copy.Dest->Typed.Height &&
+        Copy.SourceBox.back - Copy.SourceBox.front == Copy.Dest->Typed.DepthOrArraySize)
     {
-        if (Source->Subresources == Dest->Subresources && Dest->SystemMemory)
-        {
-            if (Source->SystemMemory)
-                NINE_TRACE_ONCE(L"texture blits between system memory textures are not done yet");
-            else
-                NineCopyAllToSystemMemory(&Copy);
-        }
-        else if (Source->Subresources == Dest->Subresources && Copy.Whole && !Source->SystemMemory && Source->Format == Dest->Format &&
-                 !(Source->Typed.SampleDesc.Count > 1 && Dest->Typed.SampleDesc.Count == 1))
-            Dest->Device->Context->ResourceCopy(Dest->Underlying.get(), Source->Underlying.get());
-        else
-            NineCopyEachSubresource(&Copy, Args->CubeMapFace);
-        Dest->FanStart = 0;
-        Dest->FanValid = FALSE;
+        Copy.Whole = TRUE;
     }
-    catch (_com_error& Error)
+    else
     {
-        Result = Error.Error();
+        NineAlignCopy(&Copy);
     }
-    catch (std::bad_alloc&)
-    {
-        Result = E_OUTOFMEMORY;
-    }
-    return NineDxgiResult(Result);
+
+    /* The reference answers success whatever the copy met */
+    NineCopyResource(&Copy, 0);
+    return S_OK;
+}
+
+HRESULT
+APIENTRY
+NineBufBlt1(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_BUFFERBLT1* Args)
+{
+    NineCopy Copy = {};
+
+    if (hDevice == NULL || Args == nullptr)
+        return E_INVALIDARG;
+    Copy.Source = NineBltResource(Args->hSrcResource);
+    Copy.Dest = NineBltResource(Args->hDstResource);
+    if (Copy.Source == nullptr || Copy.Dest == nullptr)
+        return E_INVALIDARG;
+
+    Copy.DestX = Args->Offset;
+    Copy.SourceBox = { Args->SrcRange.Offset, 0, 0, Args->SrcRange.Offset + Args->SrcRange.Size, 1, 1 };
+    Copy.Whole = Copy.Source->Typed.Width == Copy.Dest->Typed.Width && Copy.Dest->Typed.Width == Args->SrcRange.Size;
+
+    /* The reference answers success whatever the copy met */
+    NineCopyResource(&Copy, 0);
+    return NineDxgiResult(S_OK);
 }

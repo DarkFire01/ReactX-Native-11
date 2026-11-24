@@ -215,8 +215,8 @@ NineFillDeviceFuncs(
     Functions->pfnGetEncryptionBltKey = NineFixedAnswer<NotDone>;
     Functions->pfnDecryptionBlt = NineFixedAnswer<NotDone>;
     Functions->pfnResolveSharedResource = NineFixedAnswer<NotDone>;
-    NINE_MISSING(pfnVolBlt1, 121);
-    NINE_MISSING(pfnBufBlt1, 122);
+    Functions->pfnVolBlt1 = NineVolBlt1;
+    Functions->pfnBufBlt1 = NineBufBlt1;
     Functions->pfnTexBlt1 = NineTexBlt1;
     Functions->pfnDiscard = NineFixedAnswer<NotDone>;
     Functions->pfnOfferResources = NineFixedAnswer<NotDone>;

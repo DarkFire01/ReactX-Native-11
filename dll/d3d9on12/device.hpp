@@ -580,6 +580,18 @@ NineTexBlt1(
     _In_ HANDLE hDevice,
     _In_ const D3DDDIARG_TEXBLT1* Args);
 
+HRESULT
+APIENTRY
+NineVolBlt1(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_VOLUMEBLT1* Args);
+
+HRESULT
+APIENTRY
+NineBufBlt1(
+    _In_ HANDLE hDevice,
+    _In_ const D3DDDIARG_BUFFERBLT1* Args);
+
 /* A copy of a resource the CPU cannot read, in a staging resource it can */
 TL::unique_comptr<TL::Resource>
 NineStagingCopy(
