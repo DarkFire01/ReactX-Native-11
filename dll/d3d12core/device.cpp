@@ -568,6 +568,8 @@ RxDevice12::CreateCommandQueue1(
     hr = RxCommandQueue::Validate(*pDesc);
     if (FAILED(hr))
         return hr;
+    if (!TakesListType(pDesc->Type))
+        return E_INVALIDARG;
 
     if (pDesc->Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
     {
@@ -587,6 +589,20 @@ RxDevice12::CreateCommandQueue1(
     return RxHandOut12(Queue, riid, ppCommandQueue);
 }
 
+BOOLEAN
+RxDevice12::TakesListType(
+    _In_ D3D12_COMMAND_LIST_TYPE Type) const
+{
+    if (RxQueueFlagsOf(Type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE)
+        return FALSE;
+    if (Type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || Type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
+        Type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
+    {
+        return VideoVersion != 0;
+    }
+    return TRUE;
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDevice12::CreateCommandAllocator(
@@ -599,7 +615,7 @@ RxDevice12::CreateCommandAllocator(
 
     if (ppCommandAllocator != nullptr)
         *ppCommandAllocator = nullptr;
-    if (RxQueueFlagsOf(type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE)
+    if (!TakesListType(type))
         return E_INVALIDARG;
     if (ppCommandAllocator == nullptr)
         return E_UNEXPECTED;
@@ -627,8 +643,7 @@ RxDevice12::CreateCommandList(
 
     if (ppCommandList != nullptr)
         *ppCommandList = nullptr;
-    if (Allocator == nullptr || nodeMask > 1 || RxQueueFlagsOf(type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE ||
-        Allocator->GetType() != type)
+    if (Allocator == nullptr || nodeMask > 1 || !TakesListType(type) || Allocator->GetType() != type)
     {
         return E_INVALIDARG;
     }
@@ -663,7 +678,7 @@ RxDevice12::CreateCommandList1(
 
     if (ppCommandList != nullptr)
         *ppCommandList = nullptr;
-    if (nodeMask > 1 || RxQueueFlagsOf(type) == D3D12DDI_COMMAND_QUEUE_FLAG_NONE)
+    if (nodeMask > 1 || !TakesListType(type))
         return E_INVALIDARG;
     if (type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
         type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)

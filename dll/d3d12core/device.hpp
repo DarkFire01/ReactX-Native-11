@@ -390,6 +390,11 @@ public:
         return ShaderCaps;
     }
 
+    /* Video lists and queues need a driver with video support */
+    BOOLEAN
+    TakesListType(
+        _In_ D3D12_COMMAND_LIST_TYPE Type) const;
+
     D3D12DDI_EXECUTE_INDIRECT_TIER
     GetExecuteIndirectTier() const
     {
