@@ -6596,6 +6596,49 @@ TrSoftwareOutputWork(
     TrRelease(Three);
 }
 
+/* Positions and coordinates of the clipped shapes: a strip and a fan with a vertex behind the viewer, a list
+   with a whole triangle behind it, and a triangle reaching past the guard band */
+static const FLOAT TrSoftwareShapes[] = { -0.5f, -0.5f, 0.5f, 0.0f, 1.0f, -0.5f, 0.5f, 0.5f, 0.0f, 0.0f,
+                                          0.5f, -0.5f, -0.5f, 1.0f, 1.0f, 0.5f, 0.5f, 0.5f, 1.0f, 0.0f,
+                                          0.75f, 0.0f, 0.25f, 0.5f, 0.5f,
+                                          -0.5f, -0.5f, -0.5f, 0.0f, 1.0f, 0.5f, -0.5f, -0.25f, 1.0f, 1.0f,
+                                          0.0f, 0.5f, -0.75f, 0.5f, 0.0f,
+                                          -0.5f, -0.5f, 0.5f, 0.0f, 1.0f, 100000.0f, -0.5f, 0.5f, 1.0f, 1.0f,
+                                          0.0f, 0.5f, 0.5f, 0.5f, 0.0f };
+static constexpr UINT TrSoftwareShapeStride = 24;
+
+/* Clipped strips, fans and lists of coordinates and colors, smooth and flat shaded */
+static
+VOID
+TrSoftwareShapeWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    BYTE Shapes[11 * TrSoftwareShapeStride];
+    BYTE List[9 * TrSoftwareShapeStride];
+
+    for (UINT Index = 0; Index < 11; Index++)
+    {
+        CopyMemory(Shapes + Index * TrSoftwareShapeStride, &TrSoftwareShapes[Index * 5], 12);
+        CopyMemory(Shapes + Index * TrSoftwareShapeStride + 12, &TrSoftwareColors[Index % 7], 4);
+        CopyMemory(Shapes + Index * TrSoftwareShapeStride + 16, &TrSoftwareShapes[Index * 5 + 3], 8);
+    }
+    CopyMemory(List, Shapes, 3 * TrSoftwareShapeStride);
+    CopyMemory(List + 3 * TrSoftwareShapeStride, Shapes + 5 * TrSoftwareShapeStride, 3 * TrSoftwareShapeStride);
+    CopyMemory(List + 6 * TrSoftwareShapeStride, Shapes + 1 * TrSoftwareShapeStride, 3 * TrSoftwareShapeStride);
+    TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1));
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitiveUP strip", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 3, Shapes, TrSoftwareShapeStride));
+    TrApi("DrawPrimitiveUP fan", Device->DrawPrimitiveUP(D3DPT_TRIANGLEFAN, 3, Shapes, TrSoftwareShapeStride));
+    TrApi("DrawPrimitiveUP list", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 3, List, TrSoftwareShapeStride));
+    TrApi("DrawPrimitiveUP band", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, Shapes + 8 * TrSoftwareShapeStride,
+                                                          TrSoftwareShapeStride));
+    TrApi("SetRenderState flat", Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT));
+    TrApi("DrawPrimitiveUP flat", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 3, Shapes, TrSoftwareShapeStride));
+    TrApi("SetRenderState gouraud", Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD));
+    TrApi("EndScene", Device->EndScene());
+}
+
 /* Fixed function draws partly and wholly outside the frustum, with clipping on and off, and one too large
    for the transformed vertex buffer */
 static
@@ -6761,6 +6804,11 @@ TrSoftwareDrawWork(
     TrPhase("software clipped");
     TrSoftwareClipWork(Device, Memory);
     TrReadTarget(Device, Target, "software clipped");
+    TrSettle(Device);
+
+    TrPhase("software clipped shapes");
+    TrSoftwareShapeWork(Device);
+    TrReadTarget(Device, Target, "software clipped shapes");
     TrSettle(Device);
 
     TrPhase("software release");
