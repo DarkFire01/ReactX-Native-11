@@ -11,15 +11,6 @@
 
 VOID
 STDMETHODCALLTYPE
-RxDevice12::CreateConstantBufferView(
-    _In_opt_ const D3D12_CONSTANT_BUFFER_VIEW_DESC* pDesc,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
 RxDevice12::CreateShaderResourceView(
     _In_opt_ ID3D12Resource* pResource,
     _In_opt_ const D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc,
@@ -45,40 +36,6 @@ RxDevice12::CreateDepthStencilView(
     _In_opt_ ID3D12Resource* pResource,
     _In_opt_ const D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc,
     _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxDevice12::CreateSampler(
-    _In_ const D3D12_SAMPLER_DESC* pDesc,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxDevice12::CopyDescriptors(
-    _In_ UINT NumDestDescriptorRanges,
-    _In_reads_(NumDestDescriptorRanges) const D3D12_CPU_DESCRIPTOR_HANDLE* pDestDescriptorRangeStarts,
-    _In_reads_opt_(NumDestDescriptorRanges) const UINT* pDestDescriptorRangeSizes,
-    _In_ UINT NumSrcDescriptorRanges,
-    _In_reads_(NumSrcDescriptorRanges) const D3D12_CPU_DESCRIPTOR_HANDLE* pSrcDescriptorRangeStarts,
-    _In_reads_opt_(NumSrcDescriptorRanges) const UINT* pSrcDescriptorRangeSizes,
-    _In_ D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapsType)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxDevice12::CopyDescriptorsSimple(
-    _In_ UINT NumDescriptors,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptorRangeStart,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE SrcDescriptorRangeStart,
-    _In_ D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeapsType)
 {
     RX_UNIMPLEMENTED();
 }
@@ -469,15 +426,6 @@ RxDevice12::CreateReservedResource2(
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
-}
-
-VOID
-STDMETHODCALLTYPE
-RxDevice12::CreateSampler2(
-    _In_ const D3D12_SAMPLER_DESC2* pDesc,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
-{
-    RX_UNIMPLEMENTED();
 }
 
 D3D12_RESOURCE_ALLOCATION_INFO

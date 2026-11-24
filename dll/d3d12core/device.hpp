@@ -354,6 +354,10 @@ public:
     MarkRemoved(
         _In_ HRESULT Reason);
 
+    /* A view or sampler failed its checks; the device is lost, as the system runtime does */
+    VOID
+    RemoveOnBadView(VOID);
+
     /* Makes a new pageable resident through the driver, as creation does on Windows */
     HRESULT
     MakePageableResident(

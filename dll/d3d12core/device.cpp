@@ -306,6 +306,13 @@ RxDevice12::MarkRemoved(
     InterlockedCompareExchange(&RemovedReason, Reason, S_OK);
 }
 
+VOID
+RxDevice12::RemoveOnBadView(VOID)
+{
+    RX_TRACE(L"invalid view description, removing the device");
+    MarkRemoved(DXGI_ERROR_INVALID_CALL);
+}
+
 HRESULT
 RxDevice12::MakePageableResident(
     _In_ VOID* DriverHandle,
