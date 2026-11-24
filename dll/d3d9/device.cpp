@@ -2567,15 +2567,6 @@ D9Device::DeletePatch(
 }
 
 STDMETHODIMP
-D9Device::CreateQuery(
-    _In_ D3DQUERYTYPE Type,
-    _Out_ IDirect3DQuery9** Query)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::SetConvolutionMonoKernel(
     _In_ UINT Width,
     _In_ UINT Height,

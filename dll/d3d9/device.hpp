@@ -210,6 +210,7 @@ enum class D9BatchCall : UINT
     TexBlt,
     VolBlt,
     GenerateMips,
+    IssueQuery,
 };
 
 /* The vertices a primitive count of a type reads */
@@ -1901,6 +1902,63 @@ D9BlockValues(
     return Entry + 1;
 }
 
+/* Where a query is between its issues: begun, waiting on the driver, or holding its result */
+enum class D9QueryState : UINT
+{
+    Building,
+    Issued,
+    Signaled,
+};
+
+/* The most bytes any query type returns */
+static constexpr UINT D9QueryDataLimit = 352;
+
+class D9Query final : public IDirect3DQuery9, public D9Child
+{
+public:
+    D9Query(
+        _In_ D9Device* Owner,
+        _In_ D3DQUERYTYPE Type);
+
+    D9Query(const D9Query&) = delete;
+    D9Query& operator=(const D9Query&) = delete;
+
+    /* The result size of a type; zero for types no query has */
+    static
+    DWORD
+    ResultSize(
+        _In_ D3DQUERYTYPE Type);
+
+    STDMETHOD(QueryInterface)(
+        _In_ REFIID Iid,
+        _COM_Outptr_ VOID** Object) override;
+
+    STDMETHOD_(ULONG, AddRef)() override;
+
+    STDMETHOD_(ULONG, Release)() override;
+
+    STDMETHOD(GetDevice)(
+        _Out_ IDirect3DDevice9** Result) override;
+
+    STDMETHOD_(D3DQUERYTYPE, GetType)() override;
+
+    STDMETHOD_(DWORD, GetDataSize)() override;
+
+    STDMETHOD(Issue)(
+        _In_ DWORD Flags) override;
+
+    STDMETHOD(GetData)(
+        _Out_writes_bytes_opt_(Size) VOID* Data,
+        _In_ DWORD Size,
+        _In_ DWORD Flags) override;
+
+    D3DQUERYTYPE Kind;
+    DWORD DataSize;
+    D9QueryState State = D9QueryState::Signaled;
+    HANDLE DriverQuery = NULL;
+    alignas(8) BYTE Stored[D9QueryDataLimit];
+};
+
 DWORD
 D9DriverStageValue(
     _In_ UINT Type,
@@ -2046,6 +2104,34 @@ public:
     HRESULT
     CaptureBlock(
         _In_ D9StateBlock* Block);
+
+    /* A device that lost its display refuses most calls until it is reset */
+    BOOLEAN
+    AwaitsReset() const
+    {
+        return NotReset;
+    }
+
+    /* What a query object asks of its device */
+    HRESULT
+    CreateDriverQuery(
+        _Inout_ D9Query* Query);
+
+    VOID
+    DestroyDriverQuery(
+        _In_ D9Query* Query);
+
+    HRESULT
+    IssueQuery(
+        _Inout_ D9Query* Query,
+        _In_ DWORD Flags);
+
+    HRESULT
+    ReadQuery(
+        _Inout_ D9Query* Query,
+        _Out_writes_bytes_opt_(Size) VOID* Data,
+        _In_ DWORD Size,
+        _In_ DWORD Flags);
 
     /* What the swap chain and surfaces need from their device */
     const D9Adapter*
@@ -3298,6 +3384,10 @@ private:
     VOID
     DdiWInfo(
         _In_ const D3DDDIARG_WINFO* Args);
+
+    VOID
+    DdiIssueQuery(
+        _In_ const D3DDDIARG_ISSUEQUERY* Args);
 
     VOID
     DdiRenderTarget(

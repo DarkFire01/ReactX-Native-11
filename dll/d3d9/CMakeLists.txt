@@ -23,6 +23,7 @@ nt_add_usermode_dll(d3d9
         present.cpp
         process.cpp
         psgp.cpp
+        query.cpp
         reference.cpp
         shader.cpp
         shadercheck.cpp

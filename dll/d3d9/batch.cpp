@@ -777,6 +777,9 @@ D9Batch::Run(
         case D9BatchCall::VolBlt:
             D9RunVolBlt(Funcs, Driver, reinterpret_cast<D3DDDIARG_VOLUMEBLT1*>(Args));
             break;
+        case D9BatchCall::IssueQuery:
+            Funcs->pfnIssueQuery(Driver, reinterpret_cast<D3DDDIARG_ISSUEQUERY*>(Args));
+            break;
         case D9BatchCall::GenerateMips:
             Funcs->pfnGenerateMipSubLevels(Driver, reinterpret_cast<D3DDDIARG_GENERATEMIPSUBLEVELS*>(Args));
             break;

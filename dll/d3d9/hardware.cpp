@@ -2224,6 +2224,17 @@ D9Device::DdiWInfo(
         DeviceFunctions.pfnUpdateWInfo(DriverDevice, Args);
 }
 
+/* The query joins the calls the batch holds, so reading or destroying it waits for them */
+VOID
+D9Device::DdiIssueQuery(
+    _In_ const D3DDDIARG_ISSUEQUERY* Args)
+{
+    if (D9RecordCall(Batch, D9BatchCall::IssueQuery, Args, sizeof(*Args)))
+        Batch->Reference(Args->hQuery);
+    else
+        DeviceFunctions.pfnIssueQuery(DriverDevice, Args);
+}
+
 VOID
 D9Device::DdiRenderTarget(
     _In_ const D3DDDIARG_SETRENDERTARGET* Args)
