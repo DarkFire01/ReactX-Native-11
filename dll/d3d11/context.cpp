@@ -45,6 +45,14 @@ RxImmediateContext::QueryInterface(
         return S_OK;
     }
 
+    if (RxIsTraceEnabled())
+    {
+        WCHAR Text[40];
+
+        StringFromGUID2(riid, Text, _countof(Text));
+        RxTrace(L"context QueryInterface %s not supported", Text);
+    }
+
     *ppvObject = nullptr;
     return E_NOINTERFACE;
 }
