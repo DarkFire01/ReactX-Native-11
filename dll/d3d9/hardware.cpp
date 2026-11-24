@@ -2080,6 +2080,11 @@ VOID
 D9Device::DdiStreamSource(
     _In_ const D3DDDIARG_SETSTREAMSOURCE* Args)
 {
+    if (Args->Stream == 0)
+    {
+        DriverStreamZero = Args->hVertexBuffer;
+        DriverStrideZero = Args->Stride;
+    }
     if (Batch != nullptr)
         Batch->NoteBound(D9BoundStreams + Args->Stream, Args->hVertexBuffer);
     if (!D9RecordCall(Batch, D9BatchCall::StreamSource, Args, sizeof(*Args)))
@@ -2137,6 +2142,37 @@ D9Device::DdiDrawIndexedPrimitive(
     hr = DeviceFunctions.pfnDrawIndexedPrimitive(DriverDevice, Args);
     if (FAILED(hr))
         D9_TRACE_ONCE(L"the driver failed an indexed draw (0x%08lX)", hr);
+    return hr;
+}
+
+/* Draws from the transformed vertex buffer; the batch records the plain draw and hands one with indices
+   from memory to the driver at once, after what it holds */
+HRESULT
+D9Device::DdiDrawPrimitive2(
+    _In_ const D3DDDIARG_DRAWPRIMITIVE2* Args)
+{
+    HRESULT hr;
+
+    if (D9RecordCall(Batch, D9BatchCall::DrawPrimitive2, Args, sizeof(*Args)))
+        return S_OK;
+    hr = DeviceFunctions.pfnDrawPrimitive2(DriverDevice, Args);
+    if (FAILED(hr))
+        D9_TRACE_ONCE(L"the driver failed a transformed draw (0x%08lX)", hr);
+    return hr;
+}
+
+HRESULT
+D9Device::DdiDrawIndexedPrimitive2(
+    _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE2* Args,
+    _In_ UINT IndexSize,
+    _In_ const VOID* IndexData)
+{
+    HRESULT hr;
+
+    DrainBatch();
+    hr = DeviceFunctions.pfnDrawIndexedPrimitive2(DriverDevice, Args, IndexSize, IndexData, nullptr);
+    if (FAILED(hr))
+        D9_TRACE_ONCE(L"the driver failed a transformed indexed draw (0x%08lX)", hr);
     return hr;
 }
 

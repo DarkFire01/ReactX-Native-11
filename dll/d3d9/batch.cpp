@@ -431,7 +431,6 @@ D9Batch::Drain(VOID)
 }
 
 /* The vertices a primitive count of a type reads; an unknown type reads none */
-static
 UINT
 D9PrimitiveVertices(
     _In_ D3DPRIMITIVETYPE Type,
@@ -749,6 +748,9 @@ D9Batch::Run(
             break;
         case D9BatchCall::DrawIndexedPrimitive:
             Funcs->pfnDrawIndexedPrimitive(Driver, reinterpret_cast<D3DDDIARG_DRAWINDEXEDPRIMITIVE*>(Args));
+            break;
+        case D9BatchCall::DrawPrimitive2:
+            Funcs->pfnDrawPrimitive2(Driver, reinterpret_cast<D3DDDIARG_DRAWPRIMITIVE2*>(Args));
             break;
         case D9BatchCall::StreamSourceUm:
         {

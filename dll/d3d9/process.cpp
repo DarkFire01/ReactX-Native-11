@@ -14,6 +14,9 @@ static constexpr UINT D9PvIntRegisters = 2048;
 /* The reciprocal of w the screen transform takes when w is zero */
 static constexpr DWORD D9PvZeroWReciprocal = 0x4A000000;
 
+/* The left, right, top and bottom outcodes, which a guard band lets the rasterizer clip */
+static constexpr DWORD D9PvSidePlanes = 0xF;
+
 /* D3DPV_DONOTCOPYDATA */
 static constexpr DWORD D9PvKeepData = 0x1;
 
@@ -32,6 +35,7 @@ struct D9PvLayout
     UINT PointSize;
     UINT Diffuse;
     UINT Specular;
+    UINT Fog;
     UINT Coordinates[8];
     UINT CoordinateSizes[8];
     UINT CoordinateCount;
@@ -46,6 +50,34 @@ struct D9PvTarget
     BYTE Type;
     BYTE Usage;
     BYTE Index;
+};
+
+/* One pass of the pipeline over a range of vertices: the program, where its inputs come from and how its
+   outputs are laid out */
+struct D9PvRun
+{
+    D9VmProgram* Program;
+    D9VertexMachine* Vm;
+    D9PvLayout Layout;
+    const D9PvTarget* Targets;
+    UINT TargetCount;
+    DWORD Parts;
+    DWORD Position;
+    UINT Stride;
+    BOOLEAN Keep;
+    BOOLEAN Clipping;
+    BOOLEAN Drawing;
+    FLOAT Scale[3];
+    FLOAT Offset[3];
+    const BYTE* Streams[D9StreamCount];
+    UINT Strides[D9StreamCount];
+    FLOAT Planes[8][4];
+    UINT PlaneCount;
+    BOOLEAN GuardBand;
+    FLOAT BandScale[2];
+    FLOAT BandOffset[2];
+    DWORD ClipUnion;
+    DWORD ClipIntersection;
 };
 
 static
@@ -73,6 +105,9 @@ D9PvMakeLayout(
         Offset += 4;
     Layout->Specular = Offset;
     if ((Fvf & D3DFVF_SPECULAR) != 0)
+        Offset += 4;
+    Layout->Fog = Offset;
+    if ((Fvf & D9VmFogFormat) != 0)
         Offset += 4;
     Layout->CoordinateCount = (Fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
     if (Layout->CoordinateCount > 8)
@@ -352,6 +387,289 @@ D9PvReciprocal(
     return Large;
 }
 
+/* The frustum outcodes of a position in the half space form, from the sign bits of the six tests like the
+   system takes them, then a bit for each enabled user clip plane the position is behind */
+static
+DWORD
+D9PvClipCode(
+    _In_ const D9PvRun* Run,
+    _In_ FLOAT X,
+    _In_ FLOAT Y,
+    _In_ FLOAT Z,
+    _In_ FLOAT W)
+{
+    const FLOAT Tests[] = { X, W - X, W - Y, Y, Z, W - Z };
+    DWORD Code = 0;
+
+    for (UINT Index = 0; Index < _countof(Tests); Index++)
+    {
+        DWORD Bits;
+
+        CopyMemory(&Bits, &Tests[Index], sizeof(Bits));
+        Code |= (Bits >> 31) << Index;
+    }
+    for (UINT Plane = 0; Plane < Run->PlaneCount; Plane++)
+    {
+        const FLOAT* Given = Run->Planes[Plane];
+
+        if ((((Given[0] * X) + (Given[1] * Y)) + (Given[2] * Z)) + (Given[3] * W) < 0.0f)
+            Code |= D3DCS_PLANE0 << Plane;
+    }
+    return Code;
+}
+
+/* The guard band outcodes of a position the frustum test put outside, by sign bits like the frustum's */
+static
+DWORD
+D9PvBandCode(
+    _In_ const D9PvRun* Run,
+    _In_ FLOAT X,
+    _In_ FLOAT Y,
+    _In_ FLOAT W)
+{
+    const FLOAT Across = (Run->BandOffset[0] * W) + (Run->BandScale[0] * X);
+    const FLOAT Down = (Run->BandOffset[1] * W) + (Run->BandScale[1] * Y);
+    const FLOAT Tests[] = { Across, W - Across, W - Down, Down };
+    DWORD Code = 0;
+
+    for (UINT Index = 0; Index < _countof(Tests); Index++)
+    {
+        DWORD Bits;
+
+        CopyMemory(&Bits, &Tests[Index], sizeof(Bits));
+        Code |= (Bits >> 31) << (12 + Index);
+    }
+    return Code;
+}
+
+/* Runs the shader over vertices of the bound streams and writes what it outputs where the run's layout or
+   declaration puts it; a draw keeps clipped positions in clip space and collects their outcodes */
+static
+HRESULT
+D9PvRunVertices(
+    _Inout_ D9PvRun* Run,
+    _In_opt_ const D9Declaration* Input,
+    _In_ UINT First,
+    _In_ UINT Count,
+    _Out_writes_bytes_(Count * Run->Stride) BYTE* Vertex,
+    _Out_writes_opt_(Count) WORD* Codes)
+{
+    D9VmProgram* Program = Run->Program;
+    const D9PvLayout* Layout = &Run->Layout;
+    D9VmRegisters* Registers = &Run->Vm->Registers;
+
+    for (UINT Number = 0; Number < Count; Number++, Vertex += Run->Stride)
+    {
+        for (UINT Index = 0; Index < Program->InputCount; Index++)
+        {
+            const D9VmDeclared* Declared = &Program->Inputs[Index];
+            const D3DVERTEXELEMENT9* Element = nullptr;
+            const BYTE* Data;
+
+            if (Input != nullptr)
+                Element = D9PvFindElement(Input, Declared->Usage, Declared->Index);
+            if (Element == nullptr)
+            {
+                if (Program->Version >= D3DVS_VERSION(2, 0))
+                    continue;
+                D9Trace(L"shader input usage %u index %u is not in the declaration", Declared->Usage,
+                        Declared->Index);
+                return D3DERR_INVALIDCALL;
+            }
+            if (Run->Streams[Element->Stream] == nullptr || Declared->Register >= D9VmInputCount)
+                continue;
+            Data = Run->Streams[Element->Stream] + static_cast<SIZE_T>(Run->Strides[Element->Stream]) *
+                                                   (First + Number) + Element->Offset;
+            D9PvFetch(Data, Element->Type, Declared->Mask, Registers->Inputs[Declared->Register]);
+        }
+        Run->Vm->Run(Program);
+
+        if (Program->Version >= D3DVS_VERSION(3, 0))
+        {
+            UINT Outputs = Run->Targets != nullptr ? Run->TargetCount : Program->OutputCount;
+
+            for (UINT Index = 0; Index < Outputs; Index++)
+            {
+                const D9PvTarget* Target = Run->Targets != nullptr ? &Run->Targets[Index] : nullptr;
+                UINT Register = Target != nullptr ? Target->Register : Program->Outputs[Index].Register;
+                UINT Usage = Target != nullptr ? Target->Usage : Program->Outputs[Index].Usage;
+                UINT UsageIndex = Target != nullptr ? Target->Index : Program->Outputs[Index].Index;
+                const D9VmValue* Raw = Registers->Outputs[Register < D9VmOutputCount ? Register : 0];
+                D9VmValue Values[4];
+                BOOLEAN IsPosition = Target != nullptr ? (Usage == D3DDECLUSAGE_POSITIONT && UsageIndex == 0) :
+                                                         (Usage == D3DDECLUSAGE_POSITION && UsageIndex == 0);
+
+                CopyMemory(Values, Raw, sizeof(Values));
+                if (IsPosition)
+                {
+                    FLOAT W = Raw[3].Float;
+                    FLOAT HalfX = (W + Raw[0].Float) * 0.5f;
+                    FLOAT HalfY = (W + Raw[1].Float) * 0.5f;
+                    FLOAT Reciprocal = D9PvReciprocal(W);
+
+                    Values[0].Float = ((Reciprocal * HalfX) * Run->Scale[0]) + Run->Offset[0];
+                    Values[1].Float = ((Reciprocal * HalfY) * Run->Scale[1]) + Run->Offset[1];
+                    Values[2].Float = ((Raw[2].Float * Reciprocal) * Run->Scale[2]) + Run->Offset[2];
+                    Values[3].Float = Reciprocal;
+                }
+
+                if (Target != nullptr)
+                {
+                    BYTE* Field = Vertex + Target->Offset;
+
+                    if (Target->Type == D3DDECLTYPE_D3DCOLOR)
+                    {
+                        DWORD Packed = D9PvPackColor(Values);
+
+                        CopyMemory(Field, &Packed, sizeof(Packed));
+                        continue;
+                    }
+                    for (UINT Part = 0; Part < 4; Part++)
+                    {
+                        if ((Target->Mask & (1 << Part)) == 0)
+                            continue;
+                        CopyMemory(Field, &Values[Part], sizeof(Values[Part]));
+                        Field += sizeof(Values[Part]);
+                    }
+                    continue;
+                }
+
+                switch (Usage)
+                {
+                case D3DDECLUSAGE_PSIZE:
+                    CopyMemory(Vertex + Layout->PointSize, &Raw[0], sizeof(Raw[0]));
+                    break;
+                case D3DDECLUSAGE_TEXCOORD:
+                    if (UsageIndex < Layout->CoordinateCount)
+                        CopyMemory(Vertex + Layout->Coordinates[UsageIndex], Raw, Layout->CoordinateSizes[UsageIndex]);
+                    break;
+                case D3DDECLUSAGE_POSITION:
+                    if (UsageIndex != 0)
+                        break;
+                    if (Run->Position == D3DFVF_XYZRHW)
+                        CopyMemory(Vertex, Values, 4 * sizeof(*Values));
+                    else if (Run->Position == D3DFVF_XYZ)
+                        CopyMemory(Vertex, Raw, 3 * sizeof(*Raw));
+                    else if (Run->Position == D3DFVF_XYZW)
+                        CopyMemory(Vertex, Raw, 4 * sizeof(*Raw));
+                    break;
+                case D3DDECLUSAGE_COLOR:
+                {
+                    DWORD Packed = D9PvPackColor(Raw);
+
+                    CopyMemory(Vertex + (UsageIndex != 0 ? Layout->Specular : Layout->Diffuse), &Packed,
+                               sizeof(Packed));
+                    break;
+                }
+                case D3DDECLUSAGE_FOG:
+                    Vertex[Layout->Specular + 3] = static_cast<BYTE>(D9PvChannel(Raw[0].Float));
+                    break;
+                default:
+                    break;
+                }
+            }
+            continue;
+        }
+
+        /* Version 1 and 2 shaders: the rasterizer, color and coordinate outputs by the destination format */
+        {
+            const D9VmValue* Raw = Registers->Position;
+            DWORD Written = Program->Written;
+            DWORD Parts = Run->Parts;
+            BOOLEAN Specular;
+            BOOLEAN OwnFog = (Parts & D9VmFogFormat) != 0 && (Written & D9VmWritesFog) != 0;
+
+            if (Run->Position == D3DFVF_XYZ || Run->Position == D3DFVF_XYZW)
+            {
+                CopyMemory(Vertex, Raw, (Run->Position == D3DFVF_XYZW ? 4 : 3) * sizeof(*Raw));
+            }
+            else
+            {
+                FLOAT W = Raw[3].Float;
+                FLOAT Z = Raw[2].Float;
+                FLOAT SumX = Raw[0].Float + W;
+                FLOAT SumY = Raw[1].Float + W;
+                FLOAT Reciprocal;
+                FLOAT Screen[4];
+                BOOLEAN InClipSpace = FALSE;
+
+                if (Run->Drawing)
+                {
+                    /* A draw tests every vertex unless clipping is off; one the clipper takes stays in clip space */
+                    if (!Run->Clipping)
+                    {
+                        Reciprocal = D9PvReciprocal(W);
+                    }
+                    else
+                    {
+                        DWORD Code = D9PvClipCode(Run, SumX * 0.5f, SumY * 0.5f, Z, W);
+
+                        /* Inside the guard band only the side planes failing, the rasterizer clips it */
+                        if (Code != 0 && Run->GuardBand)
+                            Code |= D9PvBandCode(Run, SumX * 0.5f, SumY * 0.5f, W);
+                        Codes[Number] = static_cast<WORD>(Code);
+                        Run->ClipIntersection &= Code;
+                        Run->ClipUnion |= Code;
+                        InClipSpace = Run->GuardBand ? (Code & ~D9PvSidePlanes) != 0 : Code != 0;
+                        Reciprocal = 1.0f / W;
+                    }
+                }
+                else if (Run->Clipping && !D9PvOutside(SumX * 0.5f, SumY * 0.5f, Z, W))
+                {
+                    /* Inside the frustum the system divides without looking at w */
+                    Reciprocal = 1.0f / W;
+                }
+                else
+                {
+                    Reciprocal = D9PvReciprocal(W);
+                }
+                if (InClipSpace)
+                {
+                    Screen[0] = SumX * 0.5f;
+                    Screen[1] = SumY * 0.5f;
+                    Screen[2] = Z;
+                    Screen[3] = W;
+                }
+                else
+                {
+                    Screen[0] = (((SumX * 0.5f) * Reciprocal) * Run->Scale[0]) + Run->Offset[0];
+                    Screen[1] = (((SumY * 0.5f) * Reciprocal) * Run->Scale[1]) + Run->Offset[1];
+                    Screen[2] = ((Run->Scale[2] * Z) * Reciprocal) + Run->Offset[2];
+                    Screen[3] = Reciprocal;
+                }
+                CopyMemory(Vertex, Screen, sizeof(Screen));
+            }
+            if ((Written & D9VmWritesPointSize) != 0 && (Parts & D3DFVF_PSIZE) != 0)
+                CopyMemory(Vertex + Layout->PointSize, &Registers->PointSize[0], sizeof(Registers->PointSize[0]));
+            if ((Parts & D3DFVF_DIFFUSE) != 0)
+            {
+                DWORD Packed = 0xFFFFFFFF;
+
+                if ((Written & D9VmWritesDiffuse) != 0)
+                    Packed = D9PvPackColor(Registers->Colors[0]);
+                if ((Written & D9VmWritesDiffuse) != 0 || !Run->Keep)
+                    CopyMemory(Vertex + Layout->Diffuse, &Packed, sizeof(Packed));
+            }
+            Specular = (Written & (D9VmWritesSpecular | D9VmWritesFog)) != 0;
+            if ((Parts & D3DFVF_SPECULAR) != 0 && (Specular || !Run->Keep))
+            {
+                DWORD Packed = 0;
+
+                if ((Written & D9VmWritesSpecular) != 0)
+                    Packed = D9PvPackColor(Registers->Colors[1]);
+                if ((Written & D9VmWritesFog) != 0 && !OwnFog)
+                    Packed = (Packed & 0x00FFFFFF) | (D9PvChannel(Registers->Fog[0].Float) << 24);
+                CopyMemory(Vertex + Layout->Specular, &Packed, sizeof(Packed));
+            }
+            if (OwnFog)
+                CopyMemory(Vertex + Layout->Fog, &Registers->Fog[0], sizeof(Registers->Fog[0]));
+            for (UINT Set = 0; Set < Layout->CoordinateCount; Set++)
+                CopyMemory(Vertex + Layout->Coordinates[Set], Registers->Outputs[Set], Layout->CoordinateSizes[Set]);
+        }
+    }
+    return S_OK;
+}
+
 HRESULT
 D9Device::PrepareFixedProcessing(
     _Outptr_ D9VmProgram** Program,
@@ -489,6 +807,7 @@ D9Device::ProcessVertices(
     FLOAT Offset[3];
     DWORD Position;
     BOOLEAN Clipping = RenderStates[D3DRS_CLIPPING] != FALSE;
+    D9PvRun Run = {};
     HRESULT hr;
 
     if (Dest == nullptr)
@@ -720,186 +1039,298 @@ D9Device::ProcessVertices(
     if (Output == nullptr)
         ProcessedStride = Stride;
     Vertex = Base + static_cast<SIZE_T>(SoftwareVertices ? Stride : ProcessedStride) * DestIndex;
-    hr = S_OK;
 
-    for (UINT Number = 0; Number < VertexCount; Number++, Vertex += Stride)
+    Run.Program = Program;
+    Run.Vm = Vm;
+    Run.Layout = Layout;
+    Run.Targets = Output != nullptr ? Targets : nullptr;
+    Run.TargetCount = TargetCount;
+    Run.Parts = Parts;
+    Run.Position = Position;
+    Run.Stride = Stride;
+    Run.Keep = Keep;
+    Run.Clipping = Clipping;
+    CopyMemory(Run.Scale, Scale, sizeof(Scale));
+    CopyMemory(Run.Offset, Offset, sizeof(Offset));
+    for (UINT Index = 0; Index < D9StreamCount; Index++)
     {
-        D9VmRegisters* Registers = &Vm->Registers;
+        D9VertexBuffer* Source = static_cast<D9VertexBuffer*>(Streams[Index].Buffer);
 
-        for (UINT Index = 0; Index < Program->InputCount; Index++)
-        {
-            const D9VmDeclared* Declared = &Program->Inputs[Index];
-            const D3DVERTEXELEMENT9* Element = nullptr;
-            const D9Stream* Stream;
-            D9VertexBuffer* Source;
-            const BYTE* Data;
-
-            if (Declaration != nullptr)
-                Element = D9PvFindElement(Declaration, Declared->Usage, Declared->Index);
-            if (Element == nullptr)
-            {
-                if (Program->Version >= D3DVS_VERSION(2, 0))
-                    continue;
-                D9Trace(L"ProcessVertices: shader input usage %u index %u is not in the declaration", Declared->Usage,
-                        Declared->Index);
-                hr = D3DERR_INVALIDCALL;
-                break;
-            }
-            Stream = &Streams[Element->Stream];
-            Source = static_cast<D9VertexBuffer*>(Stream->Buffer);
-            if (Source == nullptr || Source->Bytes() == nullptr || Declared->Register >= D9VmInputCount)
-                continue;
-            Data = Source->Bytes() + Stream->Offset + static_cast<SIZE_T>(Stream->Stride) * (SrcStartIndex + Number) +
-                   Element->Offset;
-            D9PvFetch(Data, Element->Type, Declared->Mask, Registers->Inputs[Declared->Register]);
-        }
-        if (FAILED(hr))
-            break;
-        Vm->Run(Program);
-
-        if (Program->Version >= D3DVS_VERSION(3, 0))
-        {
-            UINT Count = Output != nullptr ? TargetCount : Program->OutputCount;
-
-            for (UINT Index = 0; Index < Count; Index++)
-            {
-                UINT Register = Output != nullptr ? Targets[Index].Register : Program->Outputs[Index].Register;
-                UINT Usage = Output != nullptr ? Targets[Index].Usage : Program->Outputs[Index].Usage;
-                UINT UsageIndex = Output != nullptr ? Targets[Index].Index : Program->Outputs[Index].Index;
-                const D9VmValue* Raw = Registers->Outputs[Register < D9VmOutputCount ? Register : 0];
-                D9VmValue Values[4];
-                BOOLEAN IsPosition = Output != nullptr ? (Usage == D3DDECLUSAGE_POSITIONT && UsageIndex == 0) :
-                                                         (Usage == D3DDECLUSAGE_POSITION && UsageIndex == 0);
-
-                CopyMemory(Values, Raw, sizeof(Values));
-                if (IsPosition)
-                {
-                    FLOAT W = Raw[3].Float;
-                    FLOAT HalfX = (W + Raw[0].Float) * 0.5f;
-                    FLOAT HalfY = (W + Raw[1].Float) * 0.5f;
-                    FLOAT Reciprocal = D9PvReciprocal(W);
-
-                    Values[0].Float = ((Reciprocal * HalfX) * Scale[0]) + Offset[0];
-                    Values[1].Float = ((Reciprocal * HalfY) * Scale[1]) + Offset[1];
-                    Values[2].Float = ((Raw[2].Float * Reciprocal) * Scale[2]) + Offset[2];
-                    Values[3].Float = Reciprocal;
-                }
-
-                if (Output != nullptr)
-                {
-                    BYTE* Field = Vertex + Targets[Index].Offset;
-
-                    if (Targets[Index].Type == D3DDECLTYPE_D3DCOLOR)
-                    {
-                        DWORD Packed = D9PvPackColor(Values);
-
-                        CopyMemory(Field, &Packed, sizeof(Packed));
-                        continue;
-                    }
-                    for (UINT Part = 0; Part < 4; Part++)
-                    {
-                        if ((Targets[Index].Mask & (1 << Part)) == 0)
-                            continue;
-                        CopyMemory(Field, &Values[Part], sizeof(Values[Part]));
-                        Field += sizeof(Values[Part]);
-                    }
-                    continue;
-                }
-
-                switch (Usage)
-                {
-                case D3DDECLUSAGE_PSIZE:
-                    CopyMemory(Vertex + Layout.PointSize, &Raw[0], sizeof(Raw[0]));
-                    break;
-                case D3DDECLUSAGE_TEXCOORD:
-                    if (UsageIndex < Layout.CoordinateCount)
-                        CopyMemory(Vertex + Layout.Coordinates[UsageIndex], Raw, Layout.CoordinateSizes[UsageIndex]);
-                    break;
-                case D3DDECLUSAGE_POSITION:
-                    if (UsageIndex != 0)
-                        break;
-                    if (Position == D3DFVF_XYZRHW)
-                        CopyMemory(Vertex, Values, 4 * sizeof(*Values));
-                    else if (Position == D3DFVF_XYZ)
-                        CopyMemory(Vertex, Raw, 3 * sizeof(*Raw));
-                    else if (Position == D3DFVF_XYZW)
-                        CopyMemory(Vertex, Raw, 4 * sizeof(*Raw));
-                    break;
-                case D3DDECLUSAGE_COLOR:
-                {
-                    DWORD Packed = D9PvPackColor(Raw);
-
-                    CopyMemory(Vertex + (UsageIndex != 0 ? Layout.Specular : Layout.Diffuse), &Packed, sizeof(Packed));
-                    break;
-                }
-                case D3DDECLUSAGE_FOG:
-                    Vertex[Layout.Specular + 3] = static_cast<BYTE>(D9PvChannel(Raw[0].Float));
-                    break;
-                default:
-                    break;
-                }
-            }
-            continue;
-        }
-
-        /* Version 1 and 2 shaders: the rasterizer, color and coordinate outputs by the destination format */
-        {
-            const D9VmValue* Raw = Registers->Position;
-            DWORD Written = Program->Written;
-            BOOLEAN Specular;
-
-            if (Position == D3DFVF_XYZ || Position == D3DFVF_XYZW)
-            {
-                CopyMemory(Vertex, Raw, (Position == D3DFVF_XYZW ? 4 : 3) * sizeof(*Raw));
-            }
-            else
-            {
-                FLOAT W = Raw[3].Float;
-                FLOAT Z = Raw[2].Float;
-                FLOAT SumX = Raw[0].Float + W;
-                FLOAT SumY = Raw[1].Float + W;
-                FLOAT Reciprocal;
-                FLOAT Screen[4];
-
-                /* Inside the frustum the system divides without looking at w */
-                if (Clipping && !D9PvOutside(SumX * 0.5f, SumY * 0.5f, Z, W))
-                    Reciprocal = 1.0f / W;
-                else
-                    Reciprocal = D9PvReciprocal(W);
-                Screen[0] = (((SumX * 0.5f) * Reciprocal) * Scale[0]) + Offset[0];
-                Screen[1] = (((SumY * 0.5f) * Reciprocal) * Scale[1]) + Offset[1];
-                Screen[2] = ((Scale[2] * Z) * Reciprocal) + Offset[2];
-                Screen[3] = Reciprocal;
-                CopyMemory(Vertex, Screen, sizeof(Screen));
-            }
-            if ((Written & D9VmWritesPointSize) != 0 && (Parts & D3DFVF_PSIZE) != 0)
-                CopyMemory(Vertex + Layout.PointSize, &Registers->PointSize[0], sizeof(Registers->PointSize[0]));
-            if ((Parts & D3DFVF_DIFFUSE) != 0)
-            {
-                DWORD Packed = 0xFFFFFFFF;
-
-                if ((Written & D9VmWritesDiffuse) != 0)
-                    Packed = D9PvPackColor(Registers->Colors[0]);
-                if ((Written & D9VmWritesDiffuse) != 0 || !Keep)
-                    CopyMemory(Vertex + Layout.Diffuse, &Packed, sizeof(Packed));
-            }
-            Specular = (Written & (D9VmWritesSpecular | D9VmWritesFog)) != 0;
-            if ((Parts & D3DFVF_SPECULAR) != 0 && (Specular || !Keep))
-            {
-                DWORD Packed = 0;
-
-                if ((Written & D9VmWritesSpecular) != 0)
-                    Packed = D9PvPackColor(Registers->Colors[1]);
-                if ((Written & D9VmWritesFog) != 0)
-                    Packed = (Packed & 0x00FFFFFF) | (D9PvChannel(Registers->Fog[0].Float) << 24);
-                CopyMemory(Vertex + Layout.Specular, &Packed, sizeof(Packed));
-            }
-            for (UINT Set = 0; Set < Layout.CoordinateCount; Set++)
-                CopyMemory(Vertex + Layout.Coordinates[Set], Registers->Outputs[Set], Layout.CoordinateSizes[Set]);
-        }
+        if (Source != nullptr && Source->Bytes() != nullptr)
+            Run.Streams[Index] = Source->Bytes() + Streams[Index].Offset;
+        Run.Strides[Index] = Streams[Index].Stride;
     }
+    hr = D9PvRunVertices(&Run, Declaration, SrcStartIndex, VertexCount, Vertex, nullptr);
 
     Dest->Unlock();
     delete Fixed;
+    return hr;
+}
+
+/* The interpreter of the bound shader, or of the fixed function one the converter makes, with the constants
+   the shader reads loaded */
+HRESULT
+D9Device::PrepareSoftwareProgram(
+    _Outptr_ D9VmProgram** Program,
+    _Outptr_result_maybenull_ D9VmProgram** Owned,
+    _Outptr_ D9VertexMachine** Vm)
+{
+    D9VertexMachine** Slot = VertexShader == nullptr ? &FixedMachine : &Machine;
+    D9VmProgram* Running;
+    DWORD Outputs;
+    HRESULT hr;
+
+    *Program = nullptr;
+    *Owned = nullptr;
+    *Vm = nullptr;
+    if (*Slot == nullptr)
+    {
+        *Slot = new (std::nothrow) D9VertexMachine();
+        if (*Slot == nullptr)
+            return E_OUTOFMEMORY;
+        hr = (*Slot)->Initialize(D9PvFloatRegisters, D9PvIntRegisters, D9PvIntRegisters);
+        if (FAILED(hr))
+        {
+            delete *Slot;
+            *Slot = nullptr;
+            return hr;
+        }
+    }
+
+    if (VertexShader == nullptr)
+    {
+        hr = PrepareFixedProcessing(&Running, &Outputs);
+        if (FAILED(hr))
+            return hr;
+        *Owned = Running;
+    }
+    else
+    {
+        Running = VertexShader->Program;
+        if (Running == nullptr)
+        {
+            Running = new (std::nothrow) D9VmProgram();
+            if (Running == nullptr)
+                return E_OUTOFMEMORY;
+            hr = Running->Compile(VertexShader->Tokens(), VertexShader->Shape()->Size / sizeof(DWORD));
+            if (FAILED(hr))
+            {
+                D9Trace(L"the interpreter cannot run a vertex shader, %08lX", hr);
+                delete Running;
+                return hr;
+            }
+            VertexShader->Program = Running;
+        }
+
+        /* The software bank holds the application's constants, then what the shader defines */
+        ZeroMemory((*Slot)->FloatConstants, D9PvFloatRegisters * sizeof(*(*Slot)->FloatConstants));
+        ZeroMemory((*Slot)->IntConstants, D9PvIntRegisters * sizeof(*(*Slot)->IntConstants));
+        ZeroMemory((*Slot)->BoolConstants, D9PvIntRegisters * sizeof(*(*Slot)->BoolConstants));
+        CopyMemory((*Slot)->FloatConstants, VertexFloats, Limits.VertexFloats * sizeof(*VertexFloats));
+        CopyMemory((*Slot)->IntConstants, VertexInts, Limits.VertexInts * sizeof(*VertexInts));
+        CopyMemory((*Slot)->BoolConstants, VertexBools, Limits.VertexBools * sizeof(*VertexBools));
+    }
+    for (UINT Index = 0; Index < Running->DefinitionCount; Index++)
+    {
+        const DWORD* Tokens = &Running->Code[Running->Definitions[Index]];
+        UINT Register = Tokens[1] & 0x7FF;
+
+        if (LOWORD(Tokens[0]) == D3DSIO_DEF && Register < D9PvFloatRegisters)
+            CopyMemory((*Slot)->FloatConstants[Register], &Tokens[2], 4 * sizeof(DWORD));
+        else if (LOWORD(Tokens[0]) == D3DSIO_DEFI && Register < D9PvIntRegisters)
+            CopyMemory((*Slot)->IntConstants[Register], &Tokens[2], 4 * sizeof(DWORD));
+        else if (LOWORD(Tokens[0]) == D3DSIO_DEFB && Register < D9PvIntRegisters)
+            (*Slot)->BoolConstants[Register].Bits = Tokens[2];
+    }
+    *Program = Running;
+    *Vm = *Slot;
+    return S_OK;
+}
+
+/* Room for a draw's vertices in the transformed vertex buffer: after the last draw's without overwriting
+   them while they fit, from the start of a discarded buffer otherwise */
+HRESULT
+D9Device::LockTransformed(
+    _In_ UINT Size,
+    _Outptr_ BYTE** Data)
+{
+    D9Resource* Buffer = &StagingBuffers[0];
+    DWORD Flags = D3DLOCK_NOOVERWRITE | D3DLOCK_NOSYSLOCK;
+    VOID* Mapped = nullptr;
+    HRESULT hr;
+
+    *Data = nullptr;
+    if (Size > D9TransformedBufferSize - TransformedUsed || TransformedUsed == 0)
+    {
+        Flags = D3DLOCK_DISCARD | D3DLOCK_NOSYSLOCK;
+        TransformedUsed = 0;
+    }
+    TransformedAsync = TRUE;
+    hr = LockDriverBuffer(Buffer, 0, D9TransformedBufferSize, TRUE, Flags, 0, &TransformedAsync, &Mapped);
+    if (FAILED(hr))
+    {
+        D9Trace(L"the transformed vertex buffer cannot be locked, %08lX", hr);
+        return hr;
+    }
+    TransformedStart = TransformedUsed;
+    *Data = static_cast<BYTE*>(Mapped) + TransformedUsed;
+    return S_OK;
+}
+
+/* Stream 0 reads the transformed vertex buffer unless the driver has it there already; the application's
+   stream goes back at the next draw the hardware processes */
+VOID
+D9Device::BindTransformed(VOID)
+{
+    D3DDDIARG_SETSTREAMSOURCE Args = {};
+
+    if (DriverStreamZero == StagingBuffers[0].DriverResource && DriverStrideZero == TransformedStride)
+        return;
+    Args.Stream = 0;
+    Args.hVertexBuffer = StagingBuffers[0].DriverResource;
+    Args.Stride = TransformedStride;
+    DdiStreamSource(&Args);
+    StreamDirty |= 1;
+    DrawDirty |= D9DrawStreams;
+}
+
+HRESULT
+D9Device::DrawSoftware(
+    _In_ D3DPRIMITIVETYPE Type,
+    _In_ UINT PrimitiveCount,
+    _In_ UINT First,
+    _In_ UINT VertexCount,
+    _In_ UINT MinIndex,
+    _In_opt_ const VOID* IndexData,
+    _In_ UINT IndexSize)
+{
+    D9VmProgram* Program;
+    D9VmProgram* Owned;
+    D9VertexMachine* Vm;
+    D9Declaration* Output;
+    D9PvRun Run = {};
+    DWORD Format;
+    WORD* Codes = nullptr;
+    BYTE* Data;
+    HRESULT hr;
+
+    hr = PrepareSoftwareProgram(&Program, &Owned, &Vm);
+    if (FAILED(hr))
+        return hr;
+    Format = Program->OutputFormat();
+    if (Format == 0)
+    {
+        D9_TRACE_ONCE(L"a vertex shader without a position drew under software vertex processing");
+        delete Owned;
+        return D3DERR_INVALIDCALL;
+    }
+
+    /* The declaration of the transformed vertices reaches the driver when it changes */
+    hr = KeepFvfDeclaration(Format, &Output);
+    if (SUCCEEDED(hr) && Output->DriverHandle == NULL)
+        hr = DriverDeclaration(Output, &Output->DriverHandle);
+    if (FAILED(hr))
+    {
+        delete Owned;
+        return hr;
+    }
+    if (Switch.InputDeclaration != Output->DriverHandle)
+        SwitchDeclaration(Output);
+
+    D9PvMakeLayout(Format, &Run.Layout);
+    Run.Program = Program;
+    Run.Vm = Vm;
+    Run.Parts = Format;
+    Run.Position = D3DFVF_XYZRHW;
+    Run.Stride = Run.Layout.Stride;
+    Run.Clipping = RenderStates[D3DRS_CLIPPING] != FALSE;
+    Run.Drawing = TRUE;
+    Run.ClipIntersection = 0xFFFFFFFF;
+    Run.Scale[0] = static_cast<FLOAT>(CurrentViewport.Width);
+    Run.Scale[1] = -static_cast<FLOAT>(CurrentViewport.Height);
+    Run.Scale[2] = CurrentViewport.MaxZ - CurrentViewport.MinZ;
+    Run.Offset[0] = static_cast<FLOAT>(CurrentViewport.X) + 0.000001f;
+    Run.Offset[1] = (static_cast<FLOAT>(CurrentViewport.Y) + static_cast<FLOAT>(CurrentViewport.Height)) + 0.000001f;
+    Run.Offset[2] = CurrentViewport.MinZ;
+
+    /* The guard band the driver offers, as a scale and offset of the half space position */
+    Run.GuardBand = Caps.GuardBandLeft != 0.0f || Caps.GuardBandRight != 0.0f || Caps.GuardBandTop != 0.0f ||
+                    Caps.GuardBandBottom != 0.0f;
+    if (Run.GuardBand)
+    {
+        FLOAT X = static_cast<FLOAT>(CurrentViewport.X);
+        FLOAT Y = static_cast<FLOAT>(CurrentViewport.Y);
+        FLOAT Width = static_cast<FLOAT>(CurrentViewport.Width);
+        FLOAT Height = static_cast<FLOAT>(CurrentViewport.Height);
+        FLOAT Left = 1.0f - ((Caps.GuardBandLeft - X) * (2.0f / Width));
+        FLOAT Right = ((Caps.GuardBandRight - X) * (2.0f / Width)) - 1.0f;
+        FLOAT Bottom = ((Caps.GuardBandBottom - Y) * (2.0f / Height)) - 1.0f;
+        FLOAT Top = 1.0f - ((Caps.GuardBandTop - Y) * (2.0f / Height));
+
+        Run.BandScale[0] = 2.0f / (Right + Left);
+        Run.BandOffset[0] = ((Left - 1.0f) * Run.BandScale[0]) * 0.5f;
+        Run.BandScale[1] = 2.0f / (Top + Bottom);
+        Run.BandOffset[1] = ((Bottom - 1.0f) * Run.BandScale[1]) * 0.5f;
+    }
+    for (UINT Index = 0; Index < D9StreamCount; Index++)
+    {
+        D9VertexBuffer* Source = static_cast<D9VertexBuffer*>(Streams[Index].Buffer);
+
+        if (Source != nullptr && Source->Bytes() != nullptr)
+            Run.Streams[Index] = Source->Bytes() + Streams[Index].Offset;
+        Run.Strides[Index] = Streams[Index].Stride;
+    }
+    if (MemoryVertices != nullptr)
+        Run.Streams[0] = static_cast<const BYTE*>(MemoryVertices);
+
+    if (Run.Clipping)
+    {
+        Codes = new (std::nothrow) WORD[VertexCount];
+        if (Codes == nullptr)
+        {
+            delete Owned;
+            return E_OUTOFMEMORY;
+        }
+    }
+    TransformedStride = Run.Stride;
+    hr = LockTransformed(VertexCount * Run.Stride, &Data);
+    if (SUCCEEDED(hr))
+    {
+        hr = D9PvRunVertices(&Run, Declaration, First, VertexCount, Data, Codes);
+
+        /* A primitive wholly outside one plane draws nothing */
+        if (SUCCEEDED(hr) && (Run.ClipIntersection == 0 || !Run.Clipping))
+        {
+            if ((DrawDirty & D9DrawTextures) != 0)
+                FlushTextures();
+            BindTransformed();
+            SendTargets();
+            SettleSwitch(Type, IndexData != nullptr);
+            if (IndexData == nullptr)
+            {
+                D3DDDIARG_DRAWPRIMITIVE2 Draw = {};
+
+                Draw.PrimitiveType = Type;
+                Draw.FirstVertexOffset = TransformedStart;
+                Draw.PrimitiveCount = PrimitiveCount;
+                DdiDrawPrimitive2(&Draw);
+            }
+            else
+            {
+                D3DDDIARG_DRAWINDEXEDPRIMITIVE2 Draw = {};
+
+                Draw.PrimitiveType = Type;
+                Draw.BaseVertexOffset = static_cast<INT>(TransformedStart) - static_cast<INT>(MinIndex * Run.Stride);
+                Draw.MinIndex = MinIndex;
+                Draw.NumVertices = VertexCount;
+                Draw.PrimitiveCount = PrimitiveCount;
+                DdiDrawIndexedPrimitive2(&Draw, IndexSize, IndexData);
+            }
+            TransformedUsed = TransformedStart + VertexCount * Run.Stride;
+        }
+        UnlockDriverBuffer(&StagingBuffers[0], TransformedAsync);
+    }
+    delete[] Codes;
+    delete Owned;
     return hr;
 }

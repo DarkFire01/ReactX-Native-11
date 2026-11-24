@@ -68,8 +68,12 @@ struct D9VmDeclared
 /* Rasterizer and color outputs a version 1 or 2 shader writes */
 static constexpr DWORD D9VmWritesSpecular = 0x1;
 static constexpr DWORD D9VmWritesDiffuse = 0x2;
+static constexpr DWORD D9VmWritesPosition = 0x4;
 static constexpr DWORD D9VmWritesPointSize = 0x8;
 static constexpr DWORD D9VmWritesFog = 0x10;
+
+/* The vertex format bit the software pipeline marks a separate fog value with */
+static constexpr DWORD D9VmFogFormat = 0x2000;
 
 /* Declarations and definitions one program can hold */
 static constexpr UINT D9VmDeclaredLimit = 32;
@@ -113,6 +117,12 @@ public:
     UINT Definitions[D9VmDefinitionLimit] = {};
     UINT DefinitionCount = 0;
     DWORD Written = 0;
+
+    /* Components of each texture coordinate output a version 1 or 2 shader writes */
+    BYTE CoordinateMasks[8] = {};
+
+    DWORD
+    OutputFormat(VOID) const;
 
 private:
     VOID

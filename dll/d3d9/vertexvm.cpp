@@ -305,7 +305,9 @@ D9VmProgram::Note(
         return;
     if (D9VmRegisterType(Target) == D9VmRasterizer)
     {
-        if ((Target & 0x7FF) == 1)
+        if ((Target & 0x7FF) == 0)
+            Written |= D9VmWritesPosition;
+        else if ((Target & 0x7FF) == 1)
             Written |= D9VmWritesFog;
         else if ((Target & 0x7FF) == 2)
             Written |= D9VmWritesPointSize;
@@ -314,6 +316,45 @@ D9VmProgram::Note(
     {
         Written |= (Target & 0x7FF) == 0 ? D9VmWritesDiffuse : D9VmWritesSpecular;
     }
+    else if (D9VmRegisterType(Target) == D9VmOutput && Version < D9VmModel3 && (Target & 0x7FF) < 8)
+    {
+        CoordinateMasks[Target & 0x7FF] |= static_cast<BYTE>((Target >> 16) & 0xF);
+    }
+}
+
+/* The transformed vertex format the outputs of a version 1 or 2 shader make: each coordinate set as wide as
+   its highest written component, sets up to the last written one, and nothing without a position */
+DWORD
+D9VmProgram::OutputFormat(VOID) const
+{
+    /* The format's size codes for one to four components */
+    static const BYTE SizeCodes[4] = { 3, 0, 1, 2 };
+    DWORD Format = 0;
+    UINT Sets = 0;
+
+    if ((Written & D9VmWritesPosition) == 0)
+        return 0;
+    for (UINT Set = 0; Set < _countof(CoordinateMasks); Set++)
+    {
+        BYTE Mask = CoordinateMasks[Set];
+        UINT Width;
+
+        if (Mask == 0)
+            continue;
+        Width = (Mask & 8) != 0 ? 4 : (Mask & 4) != 0 ? 3 : (Mask & 2) != 0 ? 2 : 1;
+        Format |= static_cast<DWORD>(SizeCodes[Width - 1]) << (16 + Set * 2);
+        Sets = Set + 1;
+    }
+    Format |= Sets << D3DFVF_TEXCOUNT_SHIFT;
+    if ((Written & D9VmWritesDiffuse) != 0)
+        Format |= D3DFVF_DIFFUSE;
+    if ((Written & D9VmWritesSpecular) != 0)
+        Format |= D3DFVF_SPECULAR;
+    if ((Written & D9VmWritesFog) != 0)
+        Format |= D9VmFogFormat;
+    if ((Written & D9VmWritesPointSize) != 0)
+        Format |= D3DFVF_PSIZE;
+    return Format | D3DFVF_XYZRHW;
 }
 
 /* Copies the tokens and links every branch to where it lands; definitions, declarations and comments drop out */

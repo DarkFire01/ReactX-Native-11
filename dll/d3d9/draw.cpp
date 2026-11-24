@@ -923,6 +923,15 @@ D9Device::RestoreShaderDefs(
     }
 }
 
+/* Untransformed vertices go through the runtime's vertex pipeline while it processes in software */
+BOOLEAN
+D9Device::ProcessesInSoftware(VOID) const
+{
+    if (!SoftwareVertices || Declaration == nullptr || Declaration->Transformed)
+        return FALSE;
+    return VertexShader == nullptr || VertexShader->Tokens()[0] < D3DVS_VERSION(3, 0);
+}
+
 STDMETHODIMP
 D9Device::DrawPrimitive(
     _In_ D3DPRIMITIVETYPE PrimitiveType,
@@ -934,6 +943,15 @@ D9Device::DrawPrimitive(
 
     if (FAILED(CheckFirstDraw(FALSE, FALSE)))
         return D3DERR_INVALIDCALL;
+    if (ProcessesInSoftware())
+    {
+        if (FAILED(DrawSoftware(PrimitiveType, PrimitiveCount, StartVertex,
+                                D9PrimitiveVertices(PrimitiveType, PrimitiveCount), 0, nullptr, 0)))
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return S_OK;
+    }
     if ((DrawDirty & D9DrawVertexInput) != 0 && FAILED(FlushVertexInput()))
         return D3DERR_INVALIDCALL;
     if ((DrawDirty & D9DrawTextures) != 0)
@@ -964,6 +982,19 @@ D9Device::DrawIndexedPrimitive(
 
     if (FAILED(CheckFirstDraw(TRUE, FALSE)))
         return D3DERR_INVALIDCALL;
+    if (ProcessesInSoftware())
+    {
+        D9IndexBuffer* Bound = static_cast<D9IndexBuffer*>(Indices);
+
+        if (Bound == nullptr || Bound->Bytes() == nullptr ||
+            FAILED(DrawSoftware(PrimitiveType, PrimCount, BaseVertexIndex + MinVertexIndex, NumVertices,
+                                MinVertexIndex, Bound->Bytes() + StartIndex * Bound->IndexSize(),
+                                Bound->IndexSize())))
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return S_OK;
+    }
     if ((DrawDirty & D9DrawVertexInput) != 0 && FAILED(FlushVertexInput()))
         return D3DERR_INVALIDCALL;
     if ((DrawDirty & D9DrawTextures) != 0)
@@ -997,6 +1028,7 @@ D9Device::DrawPrimitiveUP(
     IDirect3DVertexBuffer9* Held = Zero->Buffer;
     D3DDDIARG_SETSTREAMSOURCEUM Memory = {};
     D3DDDIARG_DRAWPRIMITIVE Args = {};
+    HRESULT hr;
 
     if (VertexStreamZeroStride == 0)
     {
@@ -1010,6 +1042,15 @@ D9Device::DrawPrimitiveUP(
     Zero->Offset = 0;
     Zero->Stride = VertexStreamZeroStride;
 
+    if (SUCCEEDED(CheckFirstDraw(FALSE, TRUE)) && ProcessesInSoftware())
+    {
+        MemoryVertices = VertexStreamZeroData;
+        hr = DrawSoftware(PrimitiveType, PrimitiveCount, 0, D9PrimitiveVertices(PrimitiveType, PrimitiveCount), 0,
+                          nullptr, 0);
+        MemoryVertices = nullptr;
+        Zero->Stride = 0;
+        return FAILED(hr) ? D3DERR_INVALIDCALL : S_OK;
+    }
     if (FAILED(CheckFirstDraw(FALSE, TRUE)) ||
         ((DrawDirty & D9DrawVertexInput) != 0 && FAILED(FlushVertexInput())))
     {
@@ -1054,6 +1095,7 @@ D9Device::DrawIndexedPrimitiveUP(
     IDirect3DIndexBuffer9* HeldIndices = Indices;
     D3DDDIARG_SETSTREAMSOURCEUM Memory = {};
     D3DDDIARG_DRAWINDEXEDPRIMITIVE Args = {};
+    HRESULT hr;
 
     if (VertexStreamZeroStride == 0)
     {
@@ -1074,6 +1116,16 @@ D9Device::DrawIndexedPrimitiveUP(
     else if (IndexDataFormat == D3DFMT_INDEX32)
         IndexStride = 4;
 
+    if (SUCCEEDED(CheckFirstDraw(TRUE, TRUE)) && ProcessesInSoftware())
+    {
+        MemoryVertices = VertexStreamZeroData;
+        hr = DrawSoftware(PrimitiveType, PrimitiveCount, MinVertexIndex, NumVertices, MinVertexIndex, IndexData,
+                          IndexStride);
+        MemoryVertices = nullptr;
+        Zero->Stride = 0;
+        IndexStride = 0;
+        return FAILED(hr) ? D3DERR_INVALIDCALL : S_OK;
+    }
     if (FAILED(CheckFirstDraw(TRUE, TRUE)) ||
         ((DrawDirty & D9DrawVertexInput) != 0 && FAILED(FlushVertexInput())))
     {

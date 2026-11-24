@@ -578,44 +578,56 @@ D9Device::GetVertexDeclaration(
     return S_OK;
 }
 
-/* A format binds the declaration the device keeps for it, made the first time the format is set */
+/* The declaration the device keeps for a format, made the first time the format comes up */
+HRESULT
+D9Device::KeepFvfDeclaration(
+    _In_ DWORD Fvf,
+    _Outptr_ D9Declaration** Kept)
+{
+    D3DVERTEXELEMENT9 Elements[MAXD3DDECLLENGTH + 1];
+    D9Declaration* Found;
+    UINT Count;
+    HRESULT hr;
+
+    for (Found = FvfDeclarations; Found != nullptr; Found = Found->NextKept)
+    {
+        if (Found->Fvf == Fvf)
+        {
+            *Kept = Found;
+            return S_OK;
+        }
+    }
+    Found = new (std::nothrow) D9Declaration(this);
+    if (Found == nullptr)
+        return E_OUTOFMEMORY;
+    Count = D9ElementsFromFvf(Fvf, Elements);
+    hr = Found->Initialize(Elements, Count, Fvf);
+    if (FAILED(hr))
+    {
+        delete Found;
+        return hr;
+    }
+    Found->Bind();
+    Found->ForFormat = TRUE;
+    Found->Orphaned = TRUE;
+    Found->NextKept = FvfDeclarations;
+    FvfDeclarations = Found;
+    *Kept = Found;
+    return S_OK;
+}
+
+/* A format binds the declaration the device keeps for it */
 HRESULT
 D9Device::BindFvfDeclaration(
     _In_ DWORD Fvf)
 {
-    D3DVERTEXELEMENT9 Elements[MAXD3DDECLLENGTH + 1];
     D9Declaration* Found = nullptr;
     D9Declaration* Previous = Declaration;
-    UINT Count;
     HRESULT hr;
 
-    for (D9Declaration* Kept = FvfDeclarations; Kept != nullptr; Kept = Kept->NextKept)
-    {
-        if (Kept->Fvf == Fvf)
-        {
-            Found = Kept;
-            break;
-        }
-    }
-    if (Found == nullptr)
-    {
-        Found = new (std::nothrow) D9Declaration(this);
-        if (Found == nullptr)
-            return E_OUTOFMEMORY;
-        Count = D9ElementsFromFvf(Fvf, Elements);
-        hr = Found->Initialize(Elements, Count, Fvf);
-        if (FAILED(hr))
-        {
-            delete Found;
-            return hr;
-        }
-        Found->Bind();
-        Found->ForFormat = TRUE;
-        Found->Orphaned = TRUE;
-        Found->NextKept = FvfDeclarations;
-        FvfDeclarations = Found;
-    }
-
+    hr = KeepFvfDeclaration(Fvf, &Found);
+    if (FAILED(hr))
+        return hr;
     if (Found == Previous)
         return S_OK;
     Found->Bind();

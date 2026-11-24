@@ -51,6 +51,9 @@ static constexpr UINT D9TransformCount = 2 + 8 + 256;
 /* Vertex streams a device binds */
 static constexpr UINT D9StreamCount = 16;
 
+/* Bytes of the buffer software processed draws write their transformed vertices to */
+static constexpr UINT D9TransformedBufferSize = 0x10000;
+
 /* A light the application set, and whether it is on */
 struct D9Light
 {
@@ -199,11 +202,18 @@ enum class D9BatchCall : UINT
     IndicesUm,
     DrawFill,
     DrawIndexedFill,
+    DrawPrimitive2,
     BufBlt,
     TexBlt,
     VolBlt,
     GenerateMips,
 };
+
+/* The vertices a primitive count of a type reads */
+UINT
+D9PrimitiveVertices(
+    _In_ D3DPRIMITIVETYPE Type,
+    _In_ UINT Count);
 
 /* The copies a batch records, made through the newer driver call where the driver has it */
 HRESULT
@@ -3227,6 +3237,11 @@ private:
         _Out_ HANDLE* Handle);
 
     HRESULT
+    KeepFvfDeclaration(
+        _In_ DWORD Fvf,
+        _Outptr_ D9Declaration** Kept);
+
+    HRESULT
     BindFvfDeclaration(
         _In_ DWORD Fvf);
 
@@ -3452,6 +3467,43 @@ private:
         _Inout_ DWORD* Parts,
         _Inout_ UINT* CoordinateCount);
 
+    /**
+     * @brief The interpreter and program that process the bound vertices, with their constants loaded.
+     * @param Owned Receives a program the caller deletes, or nullptr.
+     */
+    HRESULT
+    PrepareSoftwareProgram(
+        _Outptr_ D9VmProgram** Program,
+        _Outptr_result_maybenull_ D9VmProgram** Owned,
+        _Outptr_ D9VertexMachine** Vm);
+
+    /**
+     * @brief Runs a draw through the software vertex pipeline into the transformed vertex buffer and draws
+     *        from there.
+     * @param First The first vertex the draw reads from the streams.
+     * @param IndexData The draw's indices, or nullptr when it draws vertices in order.
+     */
+    HRESULT
+    DrawSoftware(
+        _In_ D3DPRIMITIVETYPE Type,
+        _In_ UINT PrimitiveCount,
+        _In_ UINT First,
+        _In_ UINT VertexCount,
+        _In_ UINT MinIndex,
+        _In_opt_ const VOID* IndexData,
+        _In_ UINT IndexSize);
+
+    BOOLEAN
+    ProcessesInSoftware(VOID) const;
+
+    HRESULT
+    LockTransformed(
+        _In_ UINT Size,
+        _Outptr_ BYTE** Data);
+
+    VOID
+    BindTransformed(VOID);
+
     VOID
     StartVertexConverter(VOID);
 
@@ -3545,6 +3597,16 @@ private:
     HRESULT
     DdiDrawIndexedPrimitive(
         _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Args);
+
+    HRESULT
+    DdiDrawPrimitive2(
+        _In_ const D3DDDIARG_DRAWPRIMITIVE2* Args);
+
+    HRESULT
+    DdiDrawIndexedPrimitive2(
+        _In_ const D3DDDIARG_DRAWINDEXEDPRIMITIVE2* Args,
+        _In_ UINT IndexSize,
+        _In_ const VOID* IndexData);
 
     HRESULT
     ResetCommon(
@@ -3759,6 +3821,20 @@ private:
 
     /* The interpreter the fixed function shaders of ProcessVertices run on */
     D9VertexMachine* FixedMachine = nullptr;
+
+    /* The buffer software processed draws write their vertices to: where the free space starts, where the
+       last draw's vertices start, their size and how the buffer is locked */
+    UINT TransformedUsed = 0;
+    UINT TransformedStart = 0;
+    UINT TransformedStride = 0;
+    BOOLEAN TransformedAsync = FALSE;
+
+    /* Application memory a draw reads stream 0 from while it runs through the software pipeline */
+    const VOID* MemoryVertices = nullptr;
+
+    /* What the driver reads on stream 0, as the last stream binding handed it */
+    HANDLE DriverStreamZero = NULL;
+    UINT DriverStrideZero = 0;
 
     /* The vertex shaders standing in for the fixed function vertex pipeline, and whether vertex fog is on */
     D9VertexConverter VertexShaders;
