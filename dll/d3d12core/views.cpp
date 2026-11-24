@@ -1648,3 +1648,324 @@ RxDevice12::CreateUnorderedAccessView(
     Destination.ptr = DestDescriptor.ptr;
     Ddi().pfnCreateUnorderedAccessView(DriverDevice, &Args, Destination);
 }
+
+/* Depth stencil views */
+
+static
+D3D12_RESOURCE_DIMENSION
+RxDsvResourceKind(
+    _In_ D3D12_DSV_DIMENSION Dimension)
+{
+    switch (Dimension)
+    {
+        case D3D12_DSV_DIMENSION_TEXTURE1D:
+        case D3D12_DSV_DIMENSION_TEXTURE1DARRAY:
+            return D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+        case D3D12_DSV_DIMENSION_TEXTURE2D:
+        case D3D12_DSV_DIMENSION_TEXTURE2DARRAY:
+        case D3D12_DSV_DIMENSION_TEXTURE2DMS:
+        case D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY:
+            return D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        default:
+            return D3D12_RESOURCE_DIMENSION_UNKNOWN;
+    }
+}
+
+static
+UINT
+RxCheckTextureDsv(
+    _In_ D3D_FEATURE_LEVEL Level,
+    _In_ BOOLEAN HasResource,
+    _In_ const RxViewTarget& Target,
+    _In_ const D3D12_DEPTH_STENCIL_VIEW_DESC& Desc,
+    _Inout_ DXGI_FORMAT* ViewFormat)
+{
+    UINT Problems = 0;
+
+    if (!RxViewFormatFits(Target.Format, ViewFormat))
+        Problems += 1;
+
+    if (Target.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
+    {
+        if (RxCapMissing(Level, *ViewFormat, RxCapTexture1D))
+            Problems += 1;
+        if (!HasResource)
+            return Problems;
+
+        if (Desc.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE1DARRAY)
+        {
+            if (Desc.Texture1DArray.MipSlice >= Target.MipLevels ||
+                !RxWindowFits(Desc.Texture1DArray.FirstArraySlice, Desc.Texture1DArray.ArraySize, Target.ArraySize))
+            {
+                Problems += 1;
+            }
+        }
+        else if (Desc.Texture1D.MipSlice >= Target.MipLevels)
+        {
+            Problems += 1;
+        }
+        return Problems;
+    }
+
+    if (RxCapMissing(Level, *ViewFormat, RxCapTexture2D))
+        Problems += 1;
+
+    if (HasResource)
+    {
+        switch (Desc.ViewDimension)
+        {
+            case D3D12_DSV_DIMENSION_TEXTURE2DARRAY:
+                if (Desc.Texture2DArray.MipSlice >= Target.MipLevels ||
+                    !RxWindowFits(Desc.Texture2DArray.FirstArraySlice, Desc.Texture2DArray.ArraySize, Target.ArraySize))
+                {
+                    Problems += 1;
+                }
+                break;
+            case D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY:
+                if (!RxWindowFits(Desc.Texture2DMSArray.FirstArraySlice, Desc.Texture2DMSArray.ArraySize,
+                                  Target.ArraySize))
+                {
+                    Problems += 1;
+                }
+                break;
+            case D3D12_DSV_DIMENSION_TEXTURE2D:
+                if (Desc.Texture2D.MipSlice >= Target.MipLevels)
+                    Problems += 1;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (Target.SampleCount > 1 && (Desc.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2D ||
+                                   Desc.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DARRAY))
+    {
+        Problems += 1;
+    }
+    return Problems;
+}
+
+static
+BOOLEAN
+RxDepthStencilViewValid(
+    _In_ RxDevice12& Device,
+    _In_opt_ RxResource* Resource,
+    _In_opt_ const D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc)
+{
+    const D3D_FEATURE_LEVEL Level = Device.GetFeatureLevel();
+    RxViewTarget Target = {};
+    DXGI_FORMAT ViewFormat;
+    RxFormatRule12 Rule;
+    UINT Problems = 0;
+
+    if (Level < D3D_FEATURE_LEVEL_9_1)
+        Problems += 1;
+
+    if (pDesc != nullptr && !RxViewFormatKnown(pDesc->Format))
+        return FALSE;
+
+    if (Resource != nullptr)
+    {
+        RxDescribeTarget(Resource, &Target);
+    }
+    else
+    {
+        if (pDesc == nullptr)
+            return FALSE;
+
+        Target.Dimension = RxDsvResourceKind(pDesc->ViewDimension);
+        if (Target.Dimension == D3D12_RESOURCE_DIMENSION_UNKNOWN)
+            return FALSE;
+        Target.ArraySize = 1;
+        Target.MipLevels = 1;
+        Target.Format = pDesc->Format;
+        Target.SampleCount = (pDesc->ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DMS ||
+                              pDesc->ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY) ? 2 : 1;
+        Target.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    }
+
+    ViewFormat = pDesc != nullptr ? pDesc->Format : DXGI_FORMAT_UNKNOWN;
+    if (pDesc != nullptr && RxDsvResourceKind(pDesc->ViewDimension) != Target.Dimension)
+        Problems += 1;
+
+    if (Target.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D || Target.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+    {
+        if (pDesc != nullptr)
+        {
+            Problems += RxCheckTextureDsv(Level, Resource != nullptr, Target, *pDesc, &ViewFormat);
+        }
+        else
+        {
+            if (RxFormatIsTypeless(Target.Format))
+                Problems += 1;
+            ViewFormat = Target.Format;
+        }
+    }
+    else
+    {
+        Problems += 1;
+    }
+
+    Rule = RxFormatCapRule12(Level, ViewFormat, RxCapDepthStencil);
+    if (ViewFormat == DXGI_FORMAT_UNKNOWN || (Rule != RxRuleRequired && Rule != RxRuleDriver))
+        Problems += 1;
+
+    if ((Target.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0)
+        Problems += 1;
+
+    if (pDesc != nullptr && pDesc->Flags != D3D12_DSV_FLAG_NONE)
+    {
+        const BOOLEAN Stencil = ViewFormat == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+                                ViewFormat == DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        const BOOLEAN Depth = Stencil || ViewFormat == DXGI_FORMAT_D32_FLOAT || ViewFormat == DXGI_FORMAT_D16_UNORM;
+
+        if ((pDesc->Flags & ~(D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL)) != 0)
+            return FALSE;
+        if (Level < D3D_FEATURE_LEVEL_11_0)
+            return FALSE;
+        if ((pDesc->Flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH) != 0 && !Depth)
+            Problems += 1;
+        if ((pDesc->Flags & D3D12_DSV_FLAG_READ_ONLY_STENCIL) != 0 && !Stencil)
+            Problems += 1;
+    }
+
+    return Problems == 0;
+}
+
+static
+VOID
+RxDefaultDsvDesc(
+    _In_opt_ RxResource* Resource,
+    _Out_ D3D12_DEPTH_STENCIL_VIEW_DESC* View)
+{
+    ZeroMemory(View, sizeof(*View));
+    if (Resource == nullptr)
+        return;
+
+    const D3D12_RESOURCE_DESC1& Desc = Resource->GetApiDesc();
+
+    View->Format = Desc.Format;
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
+    {
+        View->ViewDimension = Desc.DepthOrArraySize > 1 ? D3D12_DSV_DIMENSION_TEXTURE1DARRAY
+                                                        : D3D12_DSV_DIMENSION_TEXTURE1D;
+        if (Desc.DepthOrArraySize > 1)
+            View->Texture1DArray.ArraySize = Desc.DepthOrArraySize;
+    }
+    else if (Desc.SampleDesc.Count > 1)
+    {
+        View->ViewDimension = Desc.DepthOrArraySize > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY
+                                                        : D3D12_DSV_DIMENSION_TEXTURE2DMS;
+        if (Desc.DepthOrArraySize > 1)
+            View->Texture2DMSArray.ArraySize = Desc.DepthOrArraySize;
+    }
+    else
+    {
+        View->ViewDimension = Desc.DepthOrArraySize > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DARRAY
+                                                        : D3D12_DSV_DIMENSION_TEXTURE2D;
+        if (Desc.DepthOrArraySize > 1)
+            View->Texture2DArray.ArraySize = Desc.DepthOrArraySize;
+    }
+}
+
+static
+VOID
+RxResolveDsvDesc(
+    _In_opt_ RxResource* Resource,
+    _Inout_ D3D12_DEPTH_STENCIL_VIEW_DESC* View)
+{
+    if (Resource == nullptr)
+        return;
+
+    const D3D12_RESOURCE_DESC1& Desc = Resource->GetApiDesc();
+    const UINT Slices = Desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : Desc.DepthOrArraySize;
+
+    if (View->ViewDimension == D3D12_DSV_DIMENSION_TEXTURE1DARRAY ||
+        View->ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DARRAY)
+    {
+        if (View->Texture2DArray.ArraySize == (UINT)-1)
+            View->Texture2DArray.ArraySize = Slices - View->Texture2DArray.FirstArraySlice;
+    }
+    else if (View->ViewDimension == D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY)
+    {
+        if (View->Texture2DMSArray.ArraySize == (UINT)-1)
+            View->Texture2DMSArray.ArraySize = Slices - View->Texture2DMSArray.FirstArraySlice;
+    }
+
+    if (View->Format == DXGI_FORMAT_UNKNOWN)
+        View->Format = Desc.Format;
+}
+
+static
+VOID
+RxBuildDdiDsv(
+    _In_opt_ RxResource* Resource,
+    _In_ const D3D12_DEPTH_STENCIL_VIEW_DESC& View,
+    _Out_ D3D12DDIARG_CREATE_DEPTH_STENCIL_VIEW* Args)
+{
+    ZeroMemory(Args, sizeof(*Args));
+    Args->hDrvResource = Resource != nullptr ? Resource->GetDriverHandle() : D3D12DDI_HRESOURCE{};
+    Args->Format = View.Format;
+    Args->Flags = (D3D12DDI_CREATE_DEPTH_STENCIL_VIEW_FLAGS)View.Flags;
+    Args->ResourceDimension = D3D12DDI_RD_TEXTURE2D;
+
+    /* The one dimensional and plain two dimensional shapes share their layout */
+    switch (View.ViewDimension)
+    {
+        case D3D12_DSV_DIMENSION_TEXTURE1D:
+        case D3D12_DSV_DIMENSION_TEXTURE2D:
+            if (View.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE1D)
+                Args->ResourceDimension = D3D12DDI_RD_TEXTURE1D;
+            Args->Tex2D.MipSlice = View.Texture2D.MipSlice;
+            Args->Tex2D.ArraySize = 1;
+            break;
+        case D3D12_DSV_DIMENSION_TEXTURE1DARRAY:
+        case D3D12_DSV_DIMENSION_TEXTURE2DARRAY:
+            if (View.ViewDimension == D3D12_DSV_DIMENSION_TEXTURE1DARRAY)
+                Args->ResourceDimension = D3D12DDI_RD_TEXTURE1D;
+            Args->Tex2D.MipSlice = View.Texture2DArray.MipSlice;
+            Args->Tex2D.FirstArraySlice = View.Texture2DArray.FirstArraySlice;
+            Args->Tex2D.ArraySize = View.Texture2DArray.ArraySize;
+            break;
+        case D3D12_DSV_DIMENSION_TEXTURE2DMS:
+            Args->Tex2D.ArraySize = 1;
+            break;
+        default:
+            Args->Tex2D.FirstArraySlice = View.Texture2DMSArray.FirstArraySlice;
+            Args->Tex2D.ArraySize = View.Texture2DMSArray.ArraySize;
+            break;
+    }
+}
+
+VOID
+STDMETHODCALLTYPE
+RxDevice12::CreateDepthStencilView(
+    _In_opt_ ID3D12Resource* pResource,
+    _In_opt_ const D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc,
+    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+    RxResource* Resource = RxUnwrap12<RxResource>(pResource);
+    D3D12_DEPTH_STENCIL_VIEW_DESC View;
+    D3D12DDIARG_CREATE_DEPTH_STENCIL_VIEW Args;
+    D3D12DDI_CPU_DESCRIPTOR_HANDLE Destination;
+
+    if (pDesc != nullptr)
+    {
+        View = *pDesc;
+        RxResolveDsvDesc(Resource, &View);
+    }
+    else
+    {
+        RxDefaultDsvDesc(Resource, &View);
+    }
+
+    if (!RxDepthStencilViewValid(*this, Resource, pDesc))
+    {
+        RemoveOnBadView();
+        return;
+    }
+
+    RxBuildDdiDsv(Resource, View, &Args);
+    Destination.ptr = DestDescriptor.ptr;
+    Ddi().pfnCreateDepthStencilView(DriverDevice, &Args, Destination);
+}

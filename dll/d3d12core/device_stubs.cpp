@@ -9,16 +9,6 @@
 
 #include "device.hpp"
 
-VOID
-STDMETHODCALLTYPE
-RxDevice12::CreateDepthStencilView(
-    _In_opt_ ID3D12Resource* pResource,
-    _In_opt_ const D3D12_DEPTH_STENCIL_VIEW_DESC* pDesc,
-    _In_ D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
-{
-    RX_UNIMPLEMENTED();
-}
-
 HRESULT
 STDMETHODCALLTYPE
 RxDevice12::CreateReservedResource(
