@@ -11,68 +11,6 @@
 
 HRESULT
 STDMETHODCALLTYPE
-RxFontFace::GetGlyphRunOutline(
-    FLOAT emSize,
-    _In_reads_(glyphCount) UINT16 const* glyphIndices,
-    _In_reads_opt_(glyphCount) FLOAT const* glyphAdvances,
-    _In_reads_opt_(glyphCount) DWRITE_GLYPH_OFFSET const* glyphOffsets,
-    UINT32 glyphCount,
-    BOOL isSideways,
-    BOOL isRightToLeft,
-    _In_ IDWriteGeometrySink* geometrySink)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetGdiCompatibleMetrics(
-    FLOAT emSize,
-    FLOAT pixelsPerDip,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    _Out_ DWRITE_FONT_METRICS* fontFaceMetrics)
-{
-    if (fontFaceMetrics != nullptr)
-        memset(fontFaceMetrics, 0, sizeof(*fontFaceMetrics));
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetGdiCompatibleGlyphMetrics(
-    FLOAT emSize,
-    FLOAT pixelsPerDip,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    BOOL useGdiNatural,
-    _In_reads_(glyphCount) UINT16 const* glyphIndices,
-    UINT32 glyphCount,
-    _Out_writes_(glyphCount) DWRITE_GLYPH_METRICS* glyphMetrics,
-    BOOL isSideways)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetGdiCompatibleMetrics(
-    FLOAT emSize,
-    FLOAT pixelsPerDip,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    _Out_ DWRITE_FONT_METRICS1* fontMetrics)
-{
-    if (fontMetrics != nullptr)
-        memset(fontMetrics, 0, sizeof(*fontMetrics));
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxFontFace::GetUnicodeRanges(
     UINT32 maxRangeCount,
     _Out_writes_to_opt_(maxRangeCount,*actualRangeCount) DWRITE_UNICODE_RANGE* unicodeRanges,
@@ -81,22 +19,6 @@ RxFontFace::GetUnicodeRanges(
     if (actualRangeCount != nullptr)
         memset(actualRangeCount, 0, sizeof(*actualRangeCount));
 
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetGdiCompatibleGlyphAdvances(
-    FLOAT emSize,
-    FLOAT pixelsPerDip,
-    _In_opt_ DWRITE_MATRIX const* transform,
-    BOOL useGdiNatural,
-    BOOL isSideways,
-    UINT32 glyphCount,
-    _In_reads_(glyphCount) UINT16 const* glyphIndices,
-    _Out_writes_(glyphCount) INT32* glyphAdvances)
-{
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -139,46 +61,6 @@ RxFontFace::GetFontFaceReference(
 {
     if (fontFaceReference != nullptr)
         *fontFaceReference = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetFamilyNames(
-    _COM_Outptr_ IDWriteLocalizedStrings** names)
-{
-    if (names != nullptr)
-        *names = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetFaceNames(
-    _COM_Outptr_ IDWriteLocalizedStrings** names)
-{
-    if (names != nullptr)
-        *names = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetInformationalStrings(
-    DWRITE_INFORMATIONAL_STRING_ID informationalStringID,
-    _COM_Outptr_result_maybenull_ IDWriteLocalizedStrings** informationalStrings,
-    _Out_ BOOL* exists)
-{
-    if (informationalStrings != nullptr)
-        *informationalStrings = nullptr;
-    if (exists != nullptr)
-        memset(exists, 0, sizeof(*exists));
 
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
