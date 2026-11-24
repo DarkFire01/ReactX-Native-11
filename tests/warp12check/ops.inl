@@ -770,10 +770,45 @@ static const char TcOpsWavePartSource[] =
     "    Out.Store4(Base + 16, uint4(QuadReadAcrossX(Flat), QuadReadAcrossDiagonal(t.y), WaveReadLaneFirst(t.x), WaveActiveCountBits(t.y == 1)));\n"
     "}\n";
 
+/*
+ * Lane reads past the wave and from lanes that do not run, matches and partitioned prefixes,
+ * and wave operations on 16 bit values
+ */
+static const char TcOpsWaveMoreSource[] =
+    "[numthreads(64, 1, 1)] void more(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 128;\n"
+    "    float f = t * 1.37 - 20.0;\n"
+    "    uint Key = (t * 7) % 3;\n"
+    "    Out.Store4(Base, uint4(WaveReadLaneAt(t, t % 61), WaveReadLaneAt(t * 3, 7 - (t & 7)), WaveReadLaneAt(t, (t * 13) % 64), QuadReadLaneAt(t * 9, (t * 11) % 5)));\n"
+    "    Out.Store4(Base + 16, WaveMatch(Key));\n"
+    "    Out.Store4(Base + 32, WaveMatch(f > 0.0 ? 1.0 : -0.0));\n"
+    "    uint4 Group = WaveMatch(t & 2);\n"
+    "    Out.Store4(Base + 48, uint4(WaveMultiPrefixSum(t + 1, Group), WaveMultiPrefixProduct(t + 2, Group),\n"
+    "                                WaveMultiPrefixCountBits(t % 3 != 1, Group), WaveMultiPrefixBitOr(1u << t % 32, Group)));\n"
+    "    Out.Store4(Base + 64, uint4(asuint(WaveMultiPrefixSum(f, Group)), WaveMultiPrefixBitAnd(t | 0xF0, Group), WaveMultiPrefixBitXor(t * 5, Group),\n"
+    "                                asuint(WaveMultiPrefixProduct(f, WaveMatch(Key)))));\n"
+    "    if (t % 4 != 1)\n"
+    "    {\n"
+    "        Out.Store4(Base + 80, uint4(WaveReadLaneAt(t + 100, 1), QuadReadAcrossX(t + 200), QuadReadLaneAt(t + 300, 1), WaveReadLaneAt(f, (t + 1) % 61)));\n"
+    "        Out.Store4(Base + 96, uint4(QuadReadAcrossDiagonal(t + 400), WaveMatch(t / 2).x, WaveMultiPrefixSum(t, uint4(0xF, 0, 0, 0)), QuadReadAcrossY(f)));\n"
+    "    }\n"
+    "    float16_t h = (float16_t)(t * 0.731 - 9.0);\n"
+    "    int16_t s = (int16_t)(t * 3001 - 30000);\n"
+    "    uint16_t u = (uint16_t)(t * 5003 + 7);\n"
+    "    Out.Store4(Base + 112, uint4(asuint((float)WaveActiveSum(h)) ^ asuint((float)WavePrefixProduct(h)), (uint)(int)WaveActiveMin(s) + ((uint)(int)WaveActiveMax(s) << 16),\n"
+    "                                 (uint)WaveActiveSum(u) | ((uint)WavePrefixSum(s) << 16), (uint)WaveReadLaneAt(u, 2) | ((uint)QuadReadAcrossX(s) << 16) ^ (uint)WaveActiveMax(u)));\n"
+    "}\n";
+
 static const TcOpsBuild TcOpsWaveBuilds[] =
 {
     { NULL, L"cs_6_0", NULL },
     { NULL, L"cs_6_6", NULL },
+};
+
+static const TcOpsBuild TcOpsWaveMoreBuilds[] =
+{
+    { NULL, L"cs_6_5", L"-enable-16bit-types" },
 };
 
 static
@@ -786,6 +821,8 @@ SceneOpsWave(
 
     if (SUCCEEDED(hr))
         hr = TcOpsRun(Device, Result, TcOpsWavePartSource, "parts", TcOpsWaveBuilds, ARRAYSIZE(TcOpsWaveBuilds), 3);
+    if (SUCCEEDED(hr))
+        hr = TcOpsRun(Device, Result, TcOpsWaveMoreSource, "more", TcOpsWaveMoreBuilds, ARRAYSIZE(TcOpsWaveMoreBuilds), 2);
     return hr;
 }
 
