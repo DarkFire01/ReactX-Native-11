@@ -413,7 +413,8 @@ $Classes = @(
             'CreateCustomFontCollection', 'GetEudcFontCollection', 'CreateInMemoryFontFileLoader',
             'CreateMonitorRenderingParams', 'CreateCustomRenderingParams', 'CreateGlyphRunAnalysis',
             'GetSystemFontCollection', 'CreateTextFormat',
-            'CreateTextLayout', 'CreateGdiCompatibleTextLayout', 'CreateEllipsisTrimmingSign', 'CreateTypography'
+            'CreateTextLayout', 'CreateGdiCompatibleTextLayout', 'CreateEllipsisTrimmingSign', 'CreateTypography',
+            'GetSystemFontFallback', 'CreateFontFallbackBuilder', 'CreateFontResource'
         )
     },
     @{
@@ -433,7 +434,8 @@ $Classes = @(
             'GetPanose', 'IsCharacterLocal', 'HasCharacter', 'GetGlyphImageFormats', 'IsGlyphLocal', 'AreGlyphsLocal',
             'AreCharactersLocal', 'GetFontAxisValueCount', 'HasVariations', 'Equals', 'GetRecommendedRenderingMode',
             'GetGlyphRunOutline', 'GetGdiCompatibleMetrics', 'GetGdiCompatibleGlyphMetrics', 'GetGdiCompatibleGlyphAdvances',
-            'GetFamilyNames', 'GetFaceNames', 'GetInformationalStrings'
+            'GetFamilyNames', 'GetFaceNames', 'GetInformationalStrings', 'GetUnicodeRanges', 'GetPaletteEntries',
+            'GetFontAxisValues', 'GetFontResource'
         )
     },
     @{
@@ -482,7 +484,7 @@ $Classes = @(
         Purpose     = 'IDWriteFont methods'
         Implemented = @('GetFontFamily', 'GetWeight', 'GetStretch', 'GetStyle', 'IsSymbolFont', 'GetFaceNames',
                         'GetInformationalStrings', 'GetSimulations', 'GetMetrics', 'HasCharacter', 'CreateFontFace',
-                        'GetPanose', 'IsMonospacedFont', 'IsColorFont', 'Equals', 'GetLocality')
+                        'GetPanose', 'IsMonospacedFont', 'IsColorFont', 'Equals', 'GetLocality', 'GetUnicodeRanges')
     },
     @{
         Class       = 'RxTextFormat'

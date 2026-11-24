@@ -594,6 +594,73 @@ RxFontFace::GetPaletteEntryCount(VOID)
     return Data->Sfnt().Table(RxTag('C', 'P', 'A', 'L')).U16(2);
 }
 
+HRESULT
+STDMETHODCALLTYPE
+RxFontFace::GetPaletteEntries(
+    UINT32 colorPaletteIndex,
+    UINT32 firstEntryIndex,
+    UINT32 entryCount,
+    _Out_writes_(entryCount) DWRITE_COLOR_F* paletteEntries)
+{
+    RxSpan Cpal = Data->Sfnt().Table(RxTag('C', 'P', 'A', 'L'));
+    UINT32 Entries = Cpal.U16(2);
+    UINT32 Records = Cpal.U32(8);
+    UINT32 First;
+
+    if (!IsColorFont() || colorPaletteIndex >= Cpal.U16(4))
+        return DWRITE_E_NOCOLOR;
+    if (static_cast<UINT64>(firstEntryIndex) + entryCount > Entries)
+        return E_INVALIDARG;
+    if (entryCount != 0 && paletteEntries == nullptr)
+        return E_INVALIDARG;
+
+    /* Color records are BGRA bytes, one run of them per palette */
+    First = Cpal.U16(12 + colorPaletteIndex * 2) + firstEntryIndex;
+    for (UINT32 Index = 0; Index < entryCount; Index++)
+    {
+        UINT32 Record = Records + (First + Index) * 4;
+
+        paletteEntries[Index].b = Cpal.U8(Record) / 255.0f;
+        paletteEntries[Index].g = Cpal.U8(Record + 1) / 255.0f;
+        paletteEntries[Index].r = Cpal.U8(Record + 2) / 255.0f;
+        paletteEntries[Index].a = Cpal.U8(Record + 3) / 255.0f;
+    }
+    return S_OK;
+}
+
+/* Shared by IDWriteFont1 and IDWriteFontFace1 */
+HRESULT
+RxCopyUnicodeRanges(
+    _In_ const RxFaceTables* Tables,
+    _In_ UINT32 MaxCount,
+    _Out_writes_to_opt_(MaxCount, *Count) DWRITE_UNICODE_RANGE* Ranges,
+    _Out_ UINT32* Count)
+{
+    std::vector<DWRITE_UNICODE_RANGE> Found;
+
+    if (Count == nullptr)
+        return E_INVALIDARG;
+    *Count = 0;
+    if (MaxCount != 0 && Ranges == nullptr)
+        return E_INVALIDARG;
+
+    Tables->UnicodeRanges(Found);
+    *Count = static_cast<UINT32>(Found.size());
+    if (MaxCount != 0 && !Found.empty())
+        memcpy(Ranges, Found.data(), std::min<SIZE_T>(MaxCount, Found.size()) * sizeof(*Ranges));
+    return MaxCount < Found.size() ? E_NOT_SUFFICIENT_BUFFER : S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxFontFace::GetUnicodeRanges(
+    UINT32 maxRangeCount,
+    _Out_writes_to_opt_(maxRangeCount,*actualRangeCount) DWRITE_UNICODE_RANGE* unicodeRanges,
+    _Out_ UINT32* actualRangeCount)
+{
+    return RxCopyUnicodeRanges(Data, maxRangeCount, unicodeRanges, actualRangeCount);
+}
+
 VOID
 STDMETHODCALLTYPE
 RxFontFace::GetPanose(

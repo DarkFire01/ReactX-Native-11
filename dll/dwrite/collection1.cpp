@@ -103,6 +103,26 @@ RxFont::IsColorFont(VOID)
 
 HRESULT
 STDMETHODCALLTYPE
+RxFont::GetUnicodeRanges(
+    UINT32 maxRangeCount,
+    _Out_writes_to_opt_(maxRangeCount,*actualRangeCount) DWRITE_UNICODE_RANGE* unicodeRanges,
+    _Out_ UINT32* actualRangeCount)
+{
+    RxFontFace* Result;
+    HRESULT hr;
+
+    if (actualRangeCount == nullptr)
+        return E_INVALIDARG;
+    *actualRangeCount = 0;
+
+    hr = Face(&Result);
+    if (FAILED(hr))
+        return hr;
+    return RxCopyUnicodeRanges(Result->Tables(), maxRangeCount, unicodeRanges, actualRangeCount);
+}
+
+HRESULT
+STDMETHODCALLTYPE
 RxFont::CreateFontFace(
     _COM_Outptr_ IDWriteFontFace3** fontFace)
 {

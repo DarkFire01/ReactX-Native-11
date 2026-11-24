@@ -23,30 +23,6 @@ RxWriteFactory::CreateTextAnalyzer(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::GetSystemFontFallback(
-    _COM_Outptr_ IDWriteFontFallback** fontFallback)
-{
-    if (fontFallback != nullptr)
-        *fontFallback = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateFontFallbackBuilder(
-    _COM_Outptr_ IDWriteFontFallbackBuilder** fontFallbackBuilder)
-{
-    if (fontFallbackBuilder != nullptr)
-        *fontFallbackBuilder = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateFontFaceReference(
     _In_z_ WCHAR const* filePath,
     _In_opt_ FILETIME const* lastWriteTime,

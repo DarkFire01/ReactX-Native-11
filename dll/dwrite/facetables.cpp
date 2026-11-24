@@ -390,6 +390,72 @@ RxFaceTables::GlyphIndex(
     return Glyph < Fields.GlyphCount ? Glyph : 0;
 }
 
+static
+VOID
+RxAddRange(
+    _Inout_ std::vector<DWRITE_UNICODE_RANGE>& Ranges,
+    _In_ UINT32 First,
+    _In_ UINT32 Last)
+{
+    if (!Ranges.empty() && Ranges.back().last + 1 == First)
+        Ranges.back().last = Last;
+    else
+        Ranges.push_back({ First, Last });
+}
+
+VOID
+RxFaceTables::UnicodeRanges(
+    _Out_ std::vector<DWRITE_UNICODE_RANGE>& Ranges) const
+{
+    Ranges.clear();
+    if (Cmap.IsEmpty())
+        return;
+
+    switch (CmapFormat)
+    {
+        case 0:
+            RxAddRange(Ranges, 0, 255);
+            break;
+
+        case 4:
+        {
+            UINT32 SegmentCount = Cmap.U16(6) / 2;
+            UINT32 StartCodes = 14 + SegmentCount * 2 + 2;
+
+            /* The closing 0xFFFF segment is not reported */
+            for (UINT32 Segment = 0; Segment < SegmentCount && Cmap.Has(StartCodes + Segment * 2, 2); Segment++)
+            {
+                USHORT End = Cmap.U16(14 + Segment * 2);
+
+                if (End == 0xFFFF)
+                    break;
+                RxAddRange(Ranges, Cmap.U16(StartCodes + Segment * 2), End);
+            }
+            break;
+        }
+
+        case 6:
+            if (Cmap.U16(8) != 0)
+                RxAddRange(Ranges, Cmap.U16(6), Cmap.U16(6) + Cmap.U16(8) - 1);
+            break;
+
+        case 10:
+            if (Cmap.U32(16) != 0)
+                RxAddRange(Ranges, Cmap.U32(12), Cmap.U32(12) + Cmap.U32(16) - 1);
+            break;
+
+        case 12:
+        case 13:
+        {
+            UINT32 Count = Cmap.U32(12);
+
+            for (UINT32 Group = 0; Group < Count && Cmap.Has(16 + Group * 12, 12); Group++)
+                RxAddRange(Ranges, Cmap.U32(16 + Group * 12), Cmap.U32(20 + Group * 12));
+            break;
+        }
+    }
+}
+
 /* Metrics */
 
 VOID

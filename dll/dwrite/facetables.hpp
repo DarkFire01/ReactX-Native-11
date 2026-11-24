@@ -193,6 +193,11 @@ public:
     GlyphIndex(
         _In_ UINT32 CodePoint) const;
 
+    /* Segments of the chosen cmap in table order, adjacent ones merged */
+    VOID
+    UnicodeRanges(
+        _Out_ std::vector<DWRITE_UNICODE_RANGE>& Ranges) const;
+
     BOOLEAN
     IsSymbolFont(VOID) const
     {

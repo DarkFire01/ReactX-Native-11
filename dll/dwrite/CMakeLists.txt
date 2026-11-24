@@ -3,6 +3,7 @@ nt_add_usermode_dll(dwrite
     SOURCES
         dwmain.cpp
         facetables.cpp
+        fallback.cpp
         factory.cpp
         factorymisc.cpp
         family_stubs.cpp

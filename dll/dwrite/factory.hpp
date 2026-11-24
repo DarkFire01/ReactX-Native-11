@@ -12,6 +12,8 @@
 #include "textlayout.hpp"
 #include "gdiinterop.hpp"
 
+class RxFontFallback;
+
 class RxWriteFactory final : public IDWriteFactory7
 {
 public:
@@ -61,4 +63,6 @@ private:
     std::vector<RxComPtr<IDWriteFontCollectionLoader>> CollectionLoaders;
     RxFontCollection* System[2];
     RxGdiInterop* Interop;
+    /* Mappings and font cache every system fallback shares, built on first use */
+    RxFontFallback* Fallback;
 };

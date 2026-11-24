@@ -78,6 +78,14 @@ private:
     INIT_ONCE PairsOnce = INIT_ONCE_STATIC_INIT;
 };
 
+/* GetUnicodeRanges of a font or face over its tables */
+HRESULT
+RxCopyUnicodeRanges(
+    _In_ const RxFaceTables* Tables,
+    _In_ UINT32 MaxCount,
+    _Out_writes_to_opt_(MaxCount, *Count) DWRITE_UNICODE_RANGE* Ranges,
+    _Out_ UINT32* Count);
+
 /* Glyph box in font units from the glyf header; FALSE for a glyph without outline */
 BOOLEAN
 RxGlyphBox(

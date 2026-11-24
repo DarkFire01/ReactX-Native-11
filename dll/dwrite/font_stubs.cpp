@@ -11,20 +11,6 @@
 
 HRESULT
 STDMETHODCALLTYPE
-RxFont::GetUnicodeRanges(
-    UINT32 maxRangeCount,
-    _Out_writes_to_opt_(maxRangeCount,*actualRangeCount) DWRITE_UNICODE_RANGE* unicodeRanges,
-    _Out_ UINT32* actualRangeCount)
-{
-    if (actualRangeCount != nullptr)
-        memset(actualRangeCount, 0, sizeof(*actualRangeCount));
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxFont::GetFontFaceReference(
     _COM_Outptr_ IDWriteFontFaceReference** fontFaceReference)
 {

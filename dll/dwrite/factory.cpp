@@ -7,6 +7,7 @@
 
 #include "precomp.hpp"
 #include "factory.hpp"
+#include "fallback.hpp"
 
 HRESULT
 RxWriteFactory::Create(
@@ -18,7 +19,7 @@ RxWriteFactory::Create(
 }
 
 RxWriteFactory::RxWriteFactory(
-    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System{}, Interop(nullptr)
+    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System{}, Interop(nullptr), Fallback(nullptr)
 {
     InitializeSRWLock(&Lock);
 }
@@ -31,6 +32,8 @@ RxWriteFactory::~RxWriteFactory()
             Collection->Release();
     }
     delete Interop;
+    if (Fallback != nullptr)
+        Fallback->Release();
 }
 
 HRESULT

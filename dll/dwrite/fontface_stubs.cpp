@@ -11,20 +11,6 @@
 
 HRESULT
 STDMETHODCALLTYPE
-RxFontFace::GetUnicodeRanges(
-    UINT32 maxRangeCount,
-    _Out_writes_to_opt_(maxRangeCount,*actualRangeCount) DWRITE_UNICODE_RANGE* unicodeRanges,
-    _Out_ UINT32* actualRangeCount)
-{
-    if (actualRangeCount != nullptr)
-        memset(actualRangeCount, 0, sizeof(*actualRangeCount));
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxFontFace::GetVerticalGlyphVariants(
     UINT32 glyphCount,
     _In_reads_(glyphCount) UINT16 const* nominalGlyphIndices,
@@ -40,18 +26,6 @@ RxFontFace::HasVerticalGlyphVariants(VOID)
 {
     RX_UNIMPLEMENTED();
     return {};
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetPaletteEntries(
-    UINT32 colorPaletteIndex,
-    UINT32 firstEntryIndex,
-    UINT32 entryCount,
-    _Out_writes_(entryCount) DWRITE_COLOR_F* paletteEntries)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
 }
 
 HRESULT
@@ -91,4 +65,3 @@ RxFontFace::ReleaseGlyphImageData(
 {
     RX_UNIMPLEMENTED();
 }
-
