@@ -6622,6 +6622,8 @@ TrSoftwareShapeWork(
 {
     BYTE Shapes[11 * TrSoftwareShapeStride];
     BYTE List[9 * TrSoftwareShapeStride];
+    D3DCLIPSTATUS9 Status = { 0, 0xFFFFFFFF };
+    HRESULT hr;
 
     for (UINT Index = 0; Index < 11; Index++)
     {
@@ -6632,6 +6634,7 @@ TrSoftwareShapeWork(
     CopyMemory(List, Shapes, 3 * TrSoftwareShapeStride);
     CopyMemory(List + 3 * TrSoftwareShapeStride, Shapes + 5 * TrSoftwareShapeStride, 3 * TrSoftwareShapeStride);
     CopyMemory(List + 6 * TrSoftwareShapeStride, Shapes + 1 * TrSoftwareShapeStride, 3 * TrSoftwareShapeStride);
+    TrApi("SetClipStatus", Device->SetClipStatus(&Status));
     TrApi("SetFVF", Device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1));
     TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
     TrApi("BeginScene", Device->BeginScene());
@@ -6653,6 +6656,9 @@ TrSoftwareShapeWork(
     TrApi("DrawPrimitiveUP flat", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 3, Shapes, TrSoftwareShapeStride));
     TrApi("SetRenderState gouraud", Device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_GOURAUD));
     TrApi("EndScene", Device->EndScene());
+    hr = Device->GetClipStatus(&Status);
+    TrCloseLine();
+    printf("api GetClipStatus = %08lX %08lX %08lX\n", hr, Status.ClipUnion, Status.ClipIntersection);
 }
 
 /* Fixed function draws partly and wholly outside the frustum, with clipping on and off, and one too large
