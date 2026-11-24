@@ -627,13 +627,15 @@ RxAddCompletenessSimulations(
         }
     }
 
-    for (SIZE_T Index = 0; Index < Records.size(); Index++)
+    /* Obliques added by this pass do not count, so duplicate faces each get one */
+    Original = Records.size();
+    for (SIZE_T Index = 0; Index < Original; Index++)
     {
         BOOLEAN HasOblique = FALSE;
 
         if (Records[Index].Style != DWRITE_FONT_STYLE_NORMAL)
             continue;
-        for (SIZE_T Other = Index; Other < Records.size(); Other++)
+        for (SIZE_T Other = Index; Other < Original; Other++)
         {
             if (Records[Other].Stretch == Records[Index].Stretch && Records[Other].Weight == Records[Index].Weight &&
                 Records[Other].Style == DWRITE_FONT_STYLE_OBLIQUE)
