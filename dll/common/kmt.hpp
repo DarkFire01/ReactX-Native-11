@@ -111,6 +111,9 @@ struct KmtThunks
 
     /* Kernel feature switches, absent before WDDM 3.2 */
     PFND3DKMT_ISFEATUREENABLED IsFeatureEnabled;
+
+    /* Video memory statistics */
+    PFND3DKMT_QUERYSTATISTICS QueryStatistics;
 };
 
 _Ret_maybenull_
