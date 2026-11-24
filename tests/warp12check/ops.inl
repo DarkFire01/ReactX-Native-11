@@ -15,6 +15,7 @@ TcDxcCompile(
     _In_z_ PCWSTR Entry,
     _In_z_ PCWSTR Profile,
     _In_opt_z_ PCWSTR Extra,
+    _In_opt_z_ PCWSTR Define,
     _Out_ ID3DBlob **Blob)
 {
     static HMODULE Module;
@@ -48,6 +49,11 @@ TcDxcCompile(
     }
     if (Extra != NULL)
         Arguments[ArgumentCount++] = Extra;
+    if (Define != NULL)
+    {
+        Arguments[ArgumentCount++] = L"-D";
+        Arguments[ArgumentCount++] = Define;
+    }
 
     hr = Create(CLSID_DxcCompiler, IID_PPV_ARGS(&Compiler));
     if (SUCCEEDED(hr))
@@ -83,6 +89,7 @@ struct TcOpsBuild
     PCSTR FxcProfile;
     PCWSTR DxcProfile;
     PCWSTR DxcExtra;
+    PCWSTR DxcDefine;
 };
 
 static const TcOpsBuild TcOpsBuilds[] =
@@ -116,7 +123,7 @@ TcOpsCompile(
     }
     std::wstring Wide(Entry, Entry + strlen(Entry));
 
-    return TcDxcCompile(Source, Wide.c_str(), Build.DxcProfile, Build.DxcExtra, Blob);
+    return TcDxcCompile(Source, Wide.c_str(), Build.DxcProfile, Build.DxcExtra, Build.DxcDefine, Blob);
 }
 
 /*
@@ -406,7 +413,11 @@ struct TcOpsKit
 };
 
 static const char TcOpsCommon[] =
+    "#ifdef SHORT_KNOBS\n"
+    "cbuffer Knobs : register(b0) { uint16_t2 KnobShorts; float16_t2 KnobHalves; int16_t4 KnobSigned; };\n"
+    "#else\n"
     "cbuffer Knobs : register(b0) { uint4 Knob; };\n"
+    "#endif\n"
     "RWByteAddressBuffer Out : register(u0);\n"
     "RWStructuredBuffer<uint> Counted : register(u1);\n"
     "RWTexture2D<uint> Grid : register(u2);\n"
@@ -894,13 +905,52 @@ static const TcOpsBuild TcOpsHalfBuilds[] =
     { NULL, L"cs_6_2", L"-enable-16bit-types" },
 };
 
+/* Native 16 bit constants, raw loads and stores at two byte steps, group shared and local 16 bit arrays */
+static const char TcOpsShortSource[] =
+    "groupshared float16_t Pool[66];\n"
+    "groupshared uint16_t Counts[7];\n"
+    "[numthreads(64, 1, 1)] void shorts(uint t : SV_DispatchThreadID, uint g : SV_GroupIndex)\n"
+    "{\n"
+    "    uint Base = t * 64;\n"
+    "    float16_t h = (float16_t)(t * 0.731 - 9.0) * KnobHalves.y;\n"
+    "    Out.Store4(Base, uint4(KnobShorts.x + KnobShorts.y * 65536u, asuint((float)KnobHalves.x), asuint((float)h), (uint)(int)(KnobSigned.w + KnobSigned.z)));\n"
+    "    float16_t2 Pair = Raw.Load<float16_t2>((t * 6) % 250);\n"
+    "    uint16_t4 Four = Raw.Load<uint16_t4>((t * 2) % 248);\n"
+    "    int16_t Last = Raw.Load<int16_t>(254 - (t % 3) * 2);\n"
+    "    Out.Store4(Base + 16, uint4(asuint((float)Pair.x), asuint((float)Pair.y), Four.x | ((uint)Four.w << 16), (uint)(int)Last));\n"
+    "    Out.Store4(Base + 32, uint4(Four.y, Four.z, 0, 0));\n"
+    "    Out.Store<float16_t>(Base + 32 + (t & 3) * 2, h);\n"
+    "    Out.Store<uint16_t2>(Base + 42, uint16_t2(t * 977, Four.z + 1));\n"
+    "    Pool[g] = h;\n"
+    "    if (g < 2)\n"
+    "        Pool[64 + g] = (float16_t)g;\n"
+    "    if (g < 7)\n"
+    "        Counts[g] = 0;\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    float16_t Row[5];\n"
+    "    [loop] for (uint i = 0; i < 5; i++)\n"
+    "        Row[i] = h * (float16_t)i;\n"
+    "    Row[t % 5] += (float16_t)1.5;\n"
+    "    Out.Store4(Base + 48, uint4(asuint((float)Pool[(g * 7 + 3) % 66]), asuint((float)Row[(t * 3) % 5]), asuint((float)Pool[65 - (g & 1)]), Counts[g % 7]));\n"
+    "}\n";
+
+static const TcOpsBuild TcOpsShortBuilds[] =
+{
+    { NULL, L"cs_6_2", L"-enable-16bit-types", L"SHORT_KNOBS" },
+    { NULL, L"cs_6_6", L"-enable-16bit-types", L"SHORT_KNOBS" },
+};
+
 static
 HRESULT
 SceneOpsHalf(
     _In_ ID3D12Device *Device,
     _Inout_ TcResult *Result)
 {
-    return TcOpsRun(Device, Result, TcOpsHalfSource, "halves", TcOpsHalfBuilds, ARRAYSIZE(TcOpsHalfBuilds), 1);
+    HRESULT hr = TcOpsRun(Device, Result, TcOpsHalfSource, "halves", TcOpsHalfBuilds, ARRAYSIZE(TcOpsHalfBuilds), 1);
+
+    if (SUCCEEDED(hr))
+        hr = TcOpsRun(Device, Result, TcOpsShortSource, "shorts", TcOpsShortBuilds, ARRAYSIZE(TcOpsShortBuilds), 1);
+    return hr;
 }
 
 /* Doubles and 64 bit integers: arithmetic, conversions, memory, and wave operations on them */
