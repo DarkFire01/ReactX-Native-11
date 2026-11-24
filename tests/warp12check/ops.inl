@@ -865,3 +865,83 @@ SceneOpsHalf(
 {
     return TcOpsRun(Device, Result, TcOpsHalfSource, "halves", TcOpsHalfBuilds, ARRAYSIZE(TcOpsHalfBuilds), 1);
 }
+
+/* Doubles and 64 bit integers: arithmetic, conversions, memory, and wave operations on them */
+static const char TcOpsWideSource[] =
+    "groupshared double Shared[64];\n"
+    "groupshared uint64_t Longs[16];\n"
+    "[numthreads(64, 1, 1)] void wides(uint t : SV_DispatchThreadID, uint g : SV_GroupIndex)\n"
+    "{\n"
+    "    uint Base = t * 256;\n"
+    "    double a = (double)t * 0.37 + 0.1;\n"
+    "    double b = asdouble(Knob.y, Knob.w) / (double)(t + 3);\n"
+    "    double c = fma(a, b, (double)1.0 / 3.0);\n"
+    "    double d = a * b + c - (double)Knob.x;\n"
+    "    double e = mad(a, -b, c);\n"
+    "    uint lo, hi;\n"
+    "    asuint(c, lo, hi);\n"
+    "    Out.Store<double>(Base, a);\n"
+    "    Out.Store4(Base + 8, uint4(lo, hi, asuint((float)d), (uint)(int)(d * 1000.0)));\n"
+    "    Out.Store4(Base + 24, uint4((uint)(c * 7.0), (a < b) | ((a >= c) << 1) | ((d == d) << 2) | ((a != b) << 3) | ((c > d) << 4) | ((b <= e) << 5),\n"
+    "                                asuint((float)min(a, b)), asuint((float)max(c, d))));\n"
+    "    Out.Store4(Base + 40, uint4(asuint((float)abs(-d)), asuint((float)saturate(c - 1.0)), asuint((float)rcp(a)), asuint((float)(a / c))));\n"
+    "    Out.Store<double>(Base + 56, e);\n"
+    "    uint64_t u = (uint64_t)t * 0x9E3779B97F4A7C15ull + Knob.y;\n"
+    "    int64_t s = (int64_t)(int)(t * 911) - 20000;\n"
+    "    uint64_t v = (u >> (t % 61)) ^ (u << 7) | ((uint64_t)Knob.z << 40);\n"
+    "    int64_t r = (s * 3) >> 2;\n"
+    "    Out.Store4(Base + 64, uint4((uint)u, (uint)(u >> 32), (uint)v, (uint)(v >> 32)));\n"
+    "    Out.Store4(Base + 80, uint4((uint)r, (uint)(r >> 32), (uint)(u / (t % 9)), (uint)((u % ((uint64_t)(t % 5) << 33)) >> 3)));\n"
+    "    Out.Store4(Base + 96, uint4((u < v) | ((s < r) << 1) | ((u == v) << 2) | ((s >= r) << 3) | ((u > v) << 4), (uint)max(s, r),\n"
+    "                                (uint)min(u, v), countbits(u) + firstbithigh(v) * 64 + firstbitlow(u) * 4096));\n"
+    "    Out.Store4(Base + 112, uint4(asuint((float)u), asuint((float)s), (uint)(int64_t)(d * 1e9), (uint)((uint64_t)(a * 1e12) >> 20)));\n"
+    "    Out.Store<double>(Base + 128, (double)s * a);\n"
+    "    Out.Store<double>(Base + 136, (double)u);\n"
+    "    Out.Store<int64_t>(Base + 144, (s * 3) / (int64_t)((int)(t % 16) - 7) + (s % (int64_t)((int)(t % 6) - 2)) * 977);\n"
+    "    Out.Store<int64_t>(Base + 152, (int64_t)((float)a * -1e10f) + (int64_t)(uint64_t)((float)u));\n"
+    "    uint64_t w = Raw.Load<uint64_t>((t * 8) % 240);\n"
+    "    double x = Raw.Load<double>((t * 8) % 232 + 8);\n"
+    "    Out.Store<uint64_t>(Base + 160, w + (uint64_t)asuint((float)x));\n"
+    "    double Table[6];\n"
+    "    [loop] for (uint i = 0; i < 6; i++)\n"
+    "        Table[i] = a * i + b;\n"
+    "    Table[(t * 5) % 6] += c;\n"
+    "    Shared[g] = d;\n"
+    "    if (g < 16)\n"
+    "        Longs[g] = u;\n"
+    "    GroupMemoryBarrierWithGroupSync();\n"
+    "    Out.Store<double>(Base + 168, Table[t % 6] + Shared[63 - g]);\n"
+    "    Out.Store<uint64_t>(Base + 176, Longs[(g * 3) % 16] ^ v);\n"
+    "    Out.Store<double>(Base + 184, WaveActiveSum(a));\n"
+    "    Out.Store<double>(Base + 192, WavePrefixProduct(b));\n"
+    "    Out.Store<double>(Base + 200, WaveActiveMin(d) + WaveActiveMax(c));\n"
+    "    Out.Store<uint64_t>(Base + 208, WaveActiveSum(u) ^ WavePrefixSum(v));\n"
+    "    Out.Store<int64_t>(Base + 216, WaveActiveMin(s) + WaveActiveMax(r) * 3);\n"
+    "    Out.Store<uint64_t>(Base + 224, WaveActiveBitXor(u) | (WaveActiveMax(v) & 0xFF));\n"
+    "    Out.Store<uint64_t>(Base + 232, WaveReadLaneAt(u, t % 3) + QuadReadAcrossX(v) + WaveReadLaneFirst(u >> 3));\n"
+    "    Out.Store2(Base + 240, uint2(WaveActiveAllEqual(u >> 2) | (WaveActiveAllEqual(a > 2.0 ? 1.0 : 0.0) << 1), (uint)(QuadReadAcrossDiagonal(c) * 100.0)));\n"
+    "    if (t % 3 != 0)\n"
+    "    {\n"
+    "        Out.Store<double>(Base + 248, WaveActiveSum(c) + WavePrefixSum(d));\n"
+    "        uint64_t First = WaveReadLaneFirst(u);\n"
+    "        asuint(WaveReadLaneFirst(a), lo, hi);\n"
+    "        Counted[t] = (uint)First;\n"
+    "        Typed[t] = (uint)(First >> 32);\n"
+    "        Grid[uint2(t % 8, t / 8)] = lo ^ hi;\n"
+    "    }\n"
+    "}\n";
+
+static const TcOpsBuild TcOpsWideBuilds[] =
+{
+    { NULL, L"cs_6_0", NULL },
+    { NULL, L"cs_6_6", NULL },
+};
+
+static
+HRESULT
+SceneOpsWide(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsWideSource, "wides", TcOpsWideBuilds, ARRAYSIZE(TcOpsWideBuilds), 1);
+}
