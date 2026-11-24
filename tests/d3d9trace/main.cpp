@@ -169,6 +169,8 @@ enum TrKernelCall
     TrKmtOpenResource,
     TrKmtOpenResource2,
     TrKmtQueryResourceInfo,
+    TrKmtWaitForVerticalBlankEvent = 42,
+    TrKmtQueryStatistics = 62,
 };
 
 static constexpr UINT TrSlotLimit = 160;
@@ -958,6 +960,14 @@ TrDeviceInputs(
     case TR_DEVICE_SLOT(pfnGetQueryData):
         TrAppend(Text, " %s", TrDriver(static_cast<const D3DDDIARG_GETQUERYDATA*>(Args)->hQuery).c_str());
         break;
+    case TR_DEVICE_SLOT(pfnQueryResourceResidency):
+    {
+        const D3DDDIARG_QUERYRESOURCERESIDENCY* Query = static_cast<const D3DDDIARG_QUERYRESOURCERESIDENCY*>(Args);
+        TrAppend(Text, " %u", Query->NumResources);
+        for (UINT Index = 0; Index < Query->NumResources && Index < 8; Index++)
+            TrAppend(Text, " %s", TrDriver(Query->pHandleList[Index]).c_str());
+        break;
+    }
     case TR_DEVICE_SLOT(pfnSetRenderTarget):
     {
         const D3DDDIARG_SETRENDERTARGET* Target = static_cast<const D3DDDIARG_SETRENDERTARGET*>(Args);
@@ -1391,6 +1401,19 @@ TrKernelInputs(
     case TrKmtDestroyDevice:
         TrAppend(Text, " %s", TrKernel(static_cast<const D3DKMT_DESTROYDEVICE*>(Args)->hDevice).c_str());
         break;
+    case TrKmtWaitForVerticalBlankEvent:
+    {
+        const D3DKMT_WAITFORVERTICALBLANKEVENT* Wait = static_cast<const D3DKMT_WAITFORVERTICALBLANKEVENT*>(Args);
+        TrAppend(Text, " adapter %s dev %s source %u", TrKernel(Wait->hAdapter).c_str(),
+                 TrKernel(Wait->hDevice).c_str(), Wait->VidPnSourceId);
+        break;
+    }
+    case TrKmtQueryStatistics:
+    {
+        const D3DKMT_QUERYSTATISTICS* Stats = static_cast<const D3DKMT_QUERYSTATISTICS*>(Args);
+        TrAppend(Text, " type %u process %p", Stats->Type, Stats->hProcess);
+        break;
+    }
     case TrKmtCreateContext:
     {
         const D3DKMT_CREATECONTEXT* Create = static_cast<const D3DKMT_CREATECONTEXT*>(Args);
@@ -8733,6 +8756,242 @@ TrScenarioQueries(
     Plain->Release();
 }
 
+/* Texture palettes: entries, the current palette and state blocks that hold it */
+static
+VOID
+TrPaletteWork(
+    _In_ IDirect3DDevice9* Device)
+{
+    PALETTEENTRY Opaque[256];
+    PALETTEENTRY Clear[256];
+    PALETTEENTRY Read[256];
+    IDirect3DStateBlock9* Block = nullptr;
+    UINT Current = 77;
+
+    for (UINT Index = 0; Index < 256; Index++)
+    {
+        Opaque[Index] = { static_cast<BYTE>(Index), static_cast<BYTE>(Index * 3), static_cast<BYTE>(Index * 7), 0xFF };
+        Clear[Index] = Opaque[Index];
+    }
+    Clear[9].peFlags = 0x80;
+
+    TrPhase("palettes");
+    TrApi("GetCurrentTexturePalette", Device->GetCurrentTexturePalette(&Current));
+    printf("api current %u\n", Current);
+    TrApi("SetPaletteEntries 0", Device->SetPaletteEntries(0, Opaque));
+    TrApi("SetPaletteEntries 3", Device->SetPaletteEntries(3, Clear));
+    TrApi("SetPaletteEntries 1 alpha", Device->SetPaletteEntries(1, Clear));
+    Clear[9].peFlags = 0xFF;
+    TrApi("SetPaletteEntries 3 again", Device->SetPaletteEntries(3, Clear));
+    memset(Read, 0x5A, sizeof(Read));
+    TrApi("GetPaletteEntries 0", Device->GetPaletteEntries(0, Read));
+    printf("api palette 0 %08X\n", TrHash(Read, sizeof(Read)));
+    TrApi("GetPaletteEntries 3", Device->GetPaletteEntries(3, Read));
+    printf("api palette 3 %08X\n", TrHash(Read, sizeof(Read)));
+    TrApi("SetCurrentTexturePalette 3", Device->SetCurrentTexturePalette(3));
+    TrApi("GetCurrentTexturePalette", Device->GetCurrentTexturePalette(&Current));
+    printf("api current %u\n", Current);
+
+    TrApi("BeginStateBlock", Device->BeginStateBlock());
+    TrApi("SetCurrentTexturePalette 0", Device->SetCurrentTexturePalette(0));
+    TrApi("EndStateBlock", Device->EndStateBlock(&Block));
+    TrApi("GetCurrentTexturePalette", Device->GetCurrentTexturePalette(&Current));
+    printf("api current %u\n", Current);
+    if (Block != nullptr)
+    {
+        TrApi("Apply", Block->Apply());
+        TrApi("GetCurrentTexturePalette", Device->GetCurrentTexturePalette(&Current));
+        printf("api current %u\n", Current);
+        TrRelease(Block);
+        Block = nullptr;
+    }
+
+    TrApi("SetCurrentTexturePalette 3", Device->SetCurrentTexturePalette(3));
+    TrApi("CreateStateBlock all", Device->CreateStateBlock(D3DSBT_ALL, &Block));
+    TrApi("SetCurrentTexturePalette 5", Device->SetCurrentTexturePalette(5));
+    if (Block != nullptr)
+    {
+        TrApi("Apply", Block->Apply());
+        TrApi("GetCurrentTexturePalette", Device->GetCurrentTexturePalette(&Current));
+        printf("api current %u\n", Current);
+        TrApi("SetCurrentTexturePalette 0", Device->SetCurrentTexturePalette(0));
+        TrApi("Capture", Block->Capture());
+        TrApi("SetCurrentTexturePalette 3", Device->SetCurrentTexturePalette(3));
+        TrApi("Apply", Block->Apply());
+        TrApi("GetCurrentTexturePalette", Device->GetCurrentTexturePalette(&Current));
+        printf("api current %u\n", Current);
+        TrRelease(Block);
+    }
+}
+
+/* Calls only extended devices take, each tried on both kinds of device */
+static
+VOID
+TrExtendedCallsWork(
+    _In_ IDirect3DDevice9Ex* Device)
+{
+    IDirect3DTexture9* Texture = nullptr;
+    IDirect3DTexture9* SystemTexture = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Plain = nullptr;
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DIndexBuffer9* Indices = nullptr;
+    IDirect3DVolumeTexture9* Volume = nullptr;
+    IDirect3DVolume9* Level = nullptr;
+    IDirect3DResource9* List[4] = {};
+    FLOAT Weights[4] = {};
+
+    TrPhase("vblank");
+    TrApi("WaitForVBlank 0", Device->WaitForVBlank(0));
+    TrApi("WaitForVBlank 1", Device->WaitForVBlank(1));
+
+    TrPhase("residency");
+    Device->CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Texture, nullptr);
+    Device->CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &SystemTexture, nullptr);
+    Device->CreateRenderTarget(16, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &Target, nullptr);
+    Device->CreateOffscreenPlainSurface(16, 16, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Plain, nullptr);
+    Device->CreateVertexBuffer(256, 0, 0, D3DPOOL_DEFAULT, &Vertices, nullptr);
+    Device->CreateIndexBuffer(256, 0, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &Indices, nullptr);
+    Device->CreateVolumeTexture(8, 8, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Volume, nullptr);
+    if (Volume != nullptr)
+        Volume->GetVolumeLevel(0, &Level);
+    TrApi("CheckResourceResidency none", Device->CheckResourceResidency(List, 0));
+    List[0] = Texture;
+    TrApi("CheckResourceResidency texture", Device->CheckResourceResidency(List, 1));
+    List[0] = Target;
+    TrApi("CheckResourceResidency target", Device->CheckResourceResidency(List, 1));
+    {
+        IDirect3DSurface9* Surface = nullptr;
+
+        Device->CreateOffscreenPlainSurface(16, 16, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Surface, nullptr);
+        List[0] = Surface;
+        TrApi("CheckResourceResidency plain surface", Device->CheckResourceResidency(List, 1));
+        TrRelease(Surface);
+        Surface = nullptr;
+        Device->CreateDepthStencilSurface(16, 16, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &Surface, nullptr);
+        List[0] = Surface;
+        TrApi("CheckResourceResidency depth surface", Device->CheckResourceResidency(List, 1));
+        TrRelease(Surface);
+        Surface = nullptr;
+        Device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &Surface);
+        List[0] = Surface;
+        TrApi("CheckResourceResidency back buffer", Device->CheckResourceResidency(List, 1));
+        TrRelease(Surface);
+        Surface = nullptr;
+        if (Texture != nullptr)
+            Texture->GetSurfaceLevel(0, &Surface);
+        List[0] = Surface;
+        TrApi("CheckResourceResidency texture level", Device->CheckResourceResidency(List, 1));
+        TrRelease(Surface);
+    }
+    List[0] = Vertices;
+    TrApi("CheckResourceResidency vertices", Device->CheckResourceResidency(List, 1));
+    List[0] = Indices;
+    TrApi("CheckResourceResidency indices", Device->CheckResourceResidency(List, 1));
+    List[0] = Texture;
+    List[1] = Target;
+    List[2] = Volume;
+    TrApi("CheckResourceResidency three", Device->CheckResourceResidency(List, 3));
+    List[0] = SystemTexture;
+    TrApi("CheckResourceResidency system texture", Device->CheckResourceResidency(List, 1));
+    List[0] = Plain;
+    TrApi("CheckResourceResidency system surface", Device->CheckResourceResidency(List, 1));
+    List[0] = Volume;
+    TrApi("CheckResourceResidency volume texture", Device->CheckResourceResidency(List, 1));
+    List[0] = reinterpret_cast<IDirect3DResource9*>(Level);
+    if (Level != nullptr)
+        TrApi("CheckResourceResidency volume", Device->CheckResourceResidency(List, 1));
+    List[0] = nullptr;
+    TrApi("CheckResourceResidency null", Device->CheckResourceResidency(List, 1));
+    TrRelease(Level);
+    TrRelease(Volume);
+    TrRelease(Indices);
+    TrRelease(Vertices);
+    TrRelease(Plain);
+    TrRelease(Target);
+    TrRelease(SystemTexture);
+    TrRelease(Texture);
+
+    TrPhase("convolution");
+    TrApi("SetConvolutionMonoKernel 1x1", Device->SetConvolutionMonoKernel(1, 1, nullptr, nullptr));
+    TrApi("SetConvolutionMonoKernel 7x7", Device->SetConvolutionMonoKernel(7, 7, nullptr, nullptr));
+    TrApi("SetConvolutionMonoKernel 8x1", Device->SetConvolutionMonoKernel(8, 1, nullptr, nullptr));
+    TrApi("SetConvolutionMonoKernel 0x1", Device->SetConvolutionMonoKernel(0, 1, nullptr, nullptr));
+    TrApi("SetConvolutionMonoKernel weights", Device->SetConvolutionMonoKernel(2, 2, Weights, Weights));
+
+    TrPhase("dialog box mode");
+    TrApi("SetDialogBoxMode on", Device->SetDialogBoxMode(TRUE));
+    TrApi("SetDialogBoxMode off", Device->SetDialogBoxMode(FALSE));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("SetDialogBoxMode in scene", Device->SetDialogBoxMode(TRUE));
+    TrApi("EndScene", Device->EndScene());
+}
+
+/* Palettes and the extended only calls on a plain and an extended device, then on a lockable chain */
+static
+VOID
+TrScenarioDeviceCalls(
+    _In_ TrContext* Context)
+{
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+    IDirect3DDevice9Ex* DeviceEx = nullptr;
+    IDirect3DDevice9Ex* AsEx = nullptr;
+    IDirect3DDevice9* Device = nullptr;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    Parameters.hDeviceWindow = Window;
+
+    TrPhase("calls plain");
+    Made = Parameters;
+    TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &Made,
+                                              &Device));
+    if (Device != nullptr)
+    {
+        TrPaletteWork(Device);
+        TrApi("QueryInterface ex", Device->QueryInterface(__uuidof(IDirect3DDevice9Ex),
+                                                          reinterpret_cast<VOID**>(&AsEx)));
+        if (AsEx != nullptr)
+        {
+            TrExtendedCallsWork(AsEx);
+            TrRelease(AsEx);
+        }
+        TrPhase("calls plain release");
+        TrRelease(Device);
+    }
+    TrPhase("calls extended");
+    Made = Parameters;
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Made, nullptr, &DeviceEx));
+    if (DeviceEx != nullptr)
+    {
+        TrPaletteWork(DeviceEx);
+        TrExtendedCallsWork(DeviceEx);
+        TrPhase("calls extended release");
+        TrRelease(DeviceEx);
+    }
+    TrPhase("calls lockable");
+    Made = Parameters;
+    Made.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
+    DeviceEx = nullptr;
+    TrApi("CreateDeviceEx", Context->Ex->CreateDeviceEx(0, D3DDEVTYPE_HAL, Window, D3DCREATE_HARDWARE_VERTEXPROCESSING,
+                                                        &Made, nullptr, &DeviceEx));
+    if (DeviceEx != nullptr)
+    {
+        TrPhase("dialog box mode lockable");
+        TrApi("SetDialogBoxMode on", DeviceEx->SetDialogBoxMode(TRUE));
+        TrApi("Present", DeviceEx->Present(nullptr, nullptr, nullptr, nullptr));
+        TrApi("SetDialogBoxMode off", DeviceEx->SetDialogBoxMode(FALSE));
+        TrPhase("calls lockable release");
+        TrRelease(DeviceEx);
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -8779,6 +9038,7 @@ static const TrScenario TrScenarios[] =
     { "draws_mixed_release", TrScenarioDrawsMixedRelease },
     { "draws_software", TrScenarioDrawsSoftware },
     { "queries", TrScenarioQueries },
+    { "device_calls", TrScenarioDeviceCalls },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
