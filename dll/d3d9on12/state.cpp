@@ -88,6 +88,39 @@ NineStateFloat(
     return Float;
 }
 
+/*
+ * The depth resolve request copies the bound depth buffer into the texture at stage 0 when the
+ * two were made with the same format, resolving it when the depth buffer is multisampled.
+ */
+static
+VOID
+NineResolveDepthToTexture(
+    _Inout_ NineDevice* Device)
+{
+    NineResource* Texture = Device->State.Textures[0].Texture;
+    NineResource* Depth = Device->State.DepthStencil;
+
+    if (Texture == nullptr || Depth == nullptr || Texture->Desc.Format != Depth->Desc.Format)
+        return;
+    try
+    {
+        if (Depth->Desc.SampleDesc.Count <= 1)
+        {
+            Device->Context->ResourceCopyRegion(Texture->Underlying.get(), 0, 0, 0, 0, Depth->Underlying.get(), 0,
+                                                nullptr);
+        }
+        else
+        {
+            Device->Context->ResourceResolveSubresource(Texture->Underlying.get(), 0, Depth->Underlying.get(), 0,
+                                                        Texture->Desc.Format);
+        }
+    }
+    catch (_com_error& Error)
+    {
+        NineTrace(L"depth resolve failed (0x%08lX)", Error.Error());
+    }
+}
+
 /* A point size, its minimum or its maximum marks the extension constants only when the value changes */
 static
 VOID
@@ -121,7 +154,8 @@ NineNoteRenderState(
             /* The depth resolve request is not a size */
             if (Value == NineResolveDepthCode)
             {
-                NINE_TRACE_ONCE(L"the depth resolve render state is not handled yet");
+                Draw->RenderStates[State] = Value;
+                NineResolveDepthToTexture(Device);
                 return;
             }
 
@@ -165,6 +199,9 @@ NineNoteRenderState(
         case D3DDDIRS_CLIPPLANEENABLE:
             if (((Previous ^ Value) & 0x3F) != 0)
                 Draw->VertexKeyDirty = TRUE;
+            break;
+        case D3DDDIRS_ZWRITEENABLE:
+            Draw->DepthWriteHeld = FALSE;
             break;
         case D3DDDIRS_FOGCOLOR:
         case D3DDDIRS_FOGTABLEMODE:

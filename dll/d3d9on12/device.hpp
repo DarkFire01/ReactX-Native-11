@@ -235,6 +235,9 @@ struct NineDeviceState
     /* The pixel shader is converted again only when marked, and the blend marking can mark it */
     BOOLEAN PixelDirty;
     BOOLEAN BlendDirty;
+
+    /* Depth writes turned off for one draw that samples the bound INTZ depth texture */
+    BOOLEAN DepthWriteHeld;
     BOOLEAN AlphaToCoverage;
     UINT SwappedTargets;
     UINT PixelAlpha;

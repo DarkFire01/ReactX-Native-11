@@ -37,6 +37,9 @@ static constexpr UINT NineRasterAlphaFunc = 0x1E00000;
 static constexpr UINT NineRasterAlphaTest = 0x20000000;
 static constexpr UINT NineRasterClipPlanes = 0x3F00;
 
+/* The depth format the reference lets a draw sample while it is the bound depth buffer */
+static constexpr D3DDDIFORMAT NineIntzFormat = static_cast<D3DDDIFORMAT>(0x5A544E49);
+
 /* Vertex output usages the pixel stage treats on its own */
 static constexpr UINT NineOutputClip = 16;
 static constexpr UINT NineOutputPointSize = 0x100000;
@@ -1217,6 +1220,14 @@ NineApplyTextures(
         if (Stage == 16)
             continue;
 
+        /* A depth texture also written as the depth buffer is left out, but INTZ stops the writes instead */
+        if (Texture != nullptr && Texture->BoundAsDepth && (State->RenderStates[D3DDDIRS_ZWRITEENABLE] & 1) != 0 &&
+            Texture->Format == NineIntzFormat)
+        {
+            State->RenderStates[D3DDDIRS_ZWRITEENABLE] = 0;
+            State->DepthWriteHeld = TRUE;
+        }
+
         if (Texture != nullptr && Texture->TargetSlots.empty() &&
             !(Texture->BoundAsDepth && (State->RenderStates[D3DDDIRS_ZWRITEENABLE] & 1) != 0))
         {
@@ -1541,6 +1552,13 @@ NinePrepareDraw(
         return S_OK;
     }
     *Skip = FALSE;
+
+    /* The draw before took depth writes away only for itself */
+    if (State->DepthWriteHeld)
+    {
+        State->RenderStates[D3DDDIRS_ZWRITEENABLE] = 1;
+        State->DepthWriteHeld = FALSE;
+    }
 
     if (State->Primitive != Primitive || State->Desc.PrimitiveTopologyType == 0)
         Device->Context->IaSetTopology(NineTopology(Primitive));
