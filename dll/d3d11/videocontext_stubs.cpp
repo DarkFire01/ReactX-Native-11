@@ -9,16 +9,6 @@
 
 #include "device.hpp"
 
-APP_DEPRECATED_HRESULT
-STDMETHODCALLTYPE
-RxVideoContext::DecoderExtension(
-    _In_ ID3D11VideoDecoder* pDecoder,
-    _In_ const D3D11_VIDEO_DECODER_EXTENSION* pExtensionData)
-{
-    RX_UNIMPLEMENTED();
-    return {};
-}
-
 HRESULT
 STDMETHODCALLTYPE
 RxVideoContext::NegotiateCryptoSessionKeyExchange(

@@ -103,7 +103,7 @@ $Classes = @(
         Implemented = @(
             'GetDevice', 'GetPrivateData', 'SetPrivateData', 'SetPrivateDataInterface',
             'GetDecoderBuffer', 'ReleaseDecoderBuffer', 'DecoderBeginFrame', 'DecoderEndFrame',
-            'SubmitDecoderBuffers',
+            'SubmitDecoderBuffers', 'DecoderExtension',
             'VideoProcessorSetOutputTargetRect', 'VideoProcessorSetOutputBackgroundColor',
             'VideoProcessorSetOutputColorSpace', 'VideoProcessorSetOutputAlphaFillMode',
             'VideoProcessorSetOutputConstriction', 'VideoProcessorSetOutputStereoMode',

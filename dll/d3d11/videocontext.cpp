@@ -161,6 +161,53 @@ RxVideoContext::DecoderEndFrame(
     return RxApiResult(Device.TakeDriverError());
 }
 
+/* Hands the driver a private call on a decoder; drivers also use it as their own escape */
+APP_DEPRECATED_HRESULT
+STDMETHODCALLTYPE
+RxVideoContext::DecoderExtension(
+    _In_ ID3D11VideoDecoder* pDecoder,
+    _In_ const D3D11_VIDEO_DECODER_EXTENSION* pExtensionData)
+{
+    D3D11_1DDIARG_VIDEODECODEREXTENSION Args = {};
+    std::vector<D3D10DDI_HRESOURCE> Resources;
+    DdiResource* Backing;
+    UINT Index;
+    HRESULT hr;
+
+    if (pDecoder == nullptr || pExtensionData == nullptr)
+        return E_INVALIDARG;
+
+    /* A count goes with a list and no count with none */
+    if ((pExtensionData->ResourceCount != 0) != (pExtensionData->ppResourceList != nullptr))
+        return E_INVALIDARG;
+
+    Resources.resize(pExtensionData->ResourceCount);
+    for (Index = 0; Index < pExtensionData->ResourceCount; Index++)
+    {
+        Backing = RxGetDdiResource(pExtensionData->ppResourceList[Index]);
+        if (Backing == nullptr)
+            return E_INVALIDARG;
+        Resources[Index] = Backing->GetHandle();
+    }
+
+    Args.Function = pExtensionData->Function;
+    Args.pPrivateInputData = pExtensionData->pPrivateInputData;
+    Args.PrivateInputDataSize = pExtensionData->PrivateInputDataSize;
+    Args.pPrivateOutputData = pExtensionData->pPrivateOutputData;
+    Args.PrivateOutputDataSize = pExtensionData->PrivateOutputDataSize;
+    Args.ResourceCount = pExtensionData->ResourceCount;
+    Args.pResourceList = Resources.empty() ? nullptr : Resources.data();
+
+    hr = Device.GetVideoFuncs().pfnVideoDecoderExtension(Device.GetDriverDevice(),
+                                                         RxDecoderFrom(pDecoder)->GetHandle(),
+                                                         &Args);
+    if (SUCCEEDED(hr))
+        hr = Device.TakeDriverError();
+    if (FAILED(hr))
+        RX_TRACE(L"DecoderExtension function 0x%X failed 0x%08lX", pExtensionData->Function, hr);
+    return RxApiResult(hr);
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxVideoContext::SubmitDecoderBuffers(
