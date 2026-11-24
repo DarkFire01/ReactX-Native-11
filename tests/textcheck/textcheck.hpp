@@ -39,6 +39,13 @@ std::wstring
 TcDescribeFont(
     _In_ IDWriteFont* Font);
 
+/* GDI compatible metrics, outlines and names of one face */
+VOID
+TcCompareFaceExtras(
+    _In_ IDWriteFontFace* Want,
+    _In_ IDWriteFontFace* Got,
+    _In_z_ PCWSTR Name);
+
 VOID
 TcCompareGdiInterop(
     _In_ TcSide& Want,

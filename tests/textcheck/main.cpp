@@ -817,6 +817,7 @@ wmain(
             continue;
 
         TcCompareFace(WantFace.Get(), GotFace.Get(), Font);
+        TcCompareFaceExtras(WantFace.Get(), GotFace.Get(), Font);
         TcCompareRaster(System, ReactX, WantFace.Get(), GotFace.Get(), Font);
     }
 
