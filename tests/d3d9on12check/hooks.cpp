@@ -441,6 +441,8 @@ CkDescribeDeviceCall(
     }
 }
 
+static constexpr UINT CkDeviceCreateCommandAllocator = 9;
+
 /* The object a Direct3D 12 device method made, read from its out pointer */
 static
 UINT_PTR
@@ -861,6 +863,21 @@ CkDispatch(
 
     if (Family == CkFamilyPrivate)
         CkDescribePrivateResult(&Text, Slot, A, Result);
+
+    /*
+     * The translation layer makes another allocator only when the ones it has are still in flight,
+     * which depends on GPU timing, so allocators share one name and their creation does not print.
+     */
+    if (Family == CkFamilyDevice && Slot == CkDeviceCreateCommandAllocator)
+    {
+        if (SUCCEEDED(static_cast<HRESULT>(Result)) && A[3] != 0 && *reinterpret_cast<VOID**>(A[3]) != nullptr)
+        {
+            AcquireSRWLockExclusive(&CkHooks.Lock);
+            CkHooks.Ids[*reinterpret_cast<VOID**>(A[3])] = "allocator";
+            ReleaseSRWLockExclusive(&CkHooks.Lock);
+        }
+        return Result;
+    }
 
     if (Family == CkFamilyDevice)
     {
