@@ -241,7 +241,9 @@ $Classes = @(
             'CreateCommittedResource1', 'GetResourceAllocationInfo1', 'CreateCommittedResource2',
             'GetResourceAllocationInfo2', 'GetCopyableFootprints1', 'CreateGraphicsPipelineState',
             'CreateComputePipelineState', 'CreateRootSignature', 'CreateHeap', 'CreatePlacedResource', 'CreateQueryHeap',
-            'CreateCommandSignature', 'CreatePipelineLibrary', 'CreateHeap1', 'CreatePlacedResource1', 'CreateCommandQueue1'
+            'CreateCommandSignature', 'CreatePipelineLibrary', 'CreateHeap1', 'CreatePlacedResource1', 'CreateCommandQueue1',
+            'CreateConstantBufferView', 'CreateShaderResourceView', 'CreateUnorderedAccessView', 'CreateDepthStencilView',
+            'CreateSampler', 'CopyDescriptors', 'CopyDescriptorsSimple', 'CreateSampler2'
         )
     },
     @{
