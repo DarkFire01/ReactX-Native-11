@@ -1124,6 +1124,18 @@ RxFont::Create(
     (*Result)->Collection = RxComPtr<RxFontCollection>(Collection);
     (*Result)->FamilyIndex = Family;
     (*Result)->Item = Item;
+
+    /* A font an axis match placed elsewhere on its axes describes itself from there */
+    if (!Item.AxisValues.empty())
+    {
+        RxFontFace* Face;
+
+        if (SUCCEEDED((*Result)->Face(&Face)))
+        {
+            RxDescribeFace(Face->Tables(), Face->Coordinates(), &(*Result)->Custom);
+            (*Result)->HasCustom = TRUE;
+        }
+    }
     return S_OK;
 }
 
@@ -1159,8 +1171,10 @@ RxFont::Face(
 
     if (!CachedFace.Get())
     {
-        hr = RxFontFace::Create(Entry().File.Get(), Entry().FaceIndex, Item.Simulations, Entry().Coordinates.data(),
-                                static_cast<UINT32>(Entry().Coordinates.size()), &Result);
+        const std::vector<RxAxisValue>& Values = Item.AxisValues.empty() ? Entry().Coordinates : Item.AxisValues;
+
+        hr = RxFontFace::Create(Entry().File.Get(), Entry().FaceIndex, Item.Simulations, Values.data(),
+                                static_cast<UINT32>(Values.size()), &Result);
         if (FAILED(hr))
             return hr;
         CachedFace.Attach(Result);
@@ -1192,21 +1206,26 @@ DWRITE_FONT_WEIGHT
 STDMETHODCALLTYPE
 RxFont::GetWeight(VOID)
 {
-    return static_cast<DWRITE_FONT_WEIGHT>(RxEffectiveWeight(Entry(), Item.Simulations));
+    /* Bold simulation reads as bold whatever the face weighs */
+    if (Item.Simulations & DWRITE_FONT_SIMULATIONS_BOLD)
+        return DWRITE_FONT_WEIGHT_BOLD;
+    return static_cast<DWRITE_FONT_WEIGHT>(Described().Weight);
 }
 
 DWRITE_FONT_STRETCH
 STDMETHODCALLTYPE
 RxFont::GetStretch(VOID)
 {
-    return static_cast<DWRITE_FONT_STRETCH>(Entry().Description.Stretch);
+    return static_cast<DWRITE_FONT_STRETCH>(Described().Stretch);
 }
 
 DWRITE_FONT_STYLE
 STDMETHODCALLTYPE
 RxFont::GetStyle(VOID)
 {
-    return static_cast<DWRITE_FONT_STYLE>(RxEffectiveStyle(Entry(), Item.Simulations));
+    if (Item.Simulations & DWRITE_FONT_SIMULATIONS_OBLIQUE)
+        return DWRITE_FONT_STYLE_OBLIQUE;
+    return static_cast<DWRITE_FONT_STYLE>(Described().Style);
 }
 
 BOOL
@@ -1221,7 +1240,7 @@ STDMETHODCALLTYPE
 RxFont::GetFaceNames(
     _COM_Outptr_ IDWriteLocalizedStrings** names)
 {
-    const RxFaceDescription& Description = Entry().Description;
+    const RxFaceDescription& Description = Described();
     const RxNameList& Faces = (Collection->Model() == DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC &&
                                !Description.TypographicFace.empty()) ? Description.TypographicFace : Description.WwsFace;
 
@@ -1266,22 +1285,22 @@ RxFont::GetInformationalStrings(
         return S_OK;
 
     if (informationalStringID == DWRITE_INFORMATIONAL_STRING_WIN32_FAMILY_NAMES)
-        Names = Entry().Description.Win32Family;
+        Names = Described().Win32Family;
     else if (informationalStringID == DWRITE_INFORMATIONAL_STRING_WIN32_SUBFAMILY_NAMES)
-        Names = Entry().Description.Win32Face;
+        Names = Described().Win32Face;
     else if (informationalStringID == DWRITE_INFORMATIONAL_STRING_FULL_NAME)
-        Names = Entry().Description.FullName;
+        Names = Described().FullName;
     else if (informationalStringID == DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME)
-        Names = Entry().Description.PostscriptName;
-    else if (Entry().Description.FromStyleTable &&
+        Names = Described().PostscriptName;
+    else if (Described().FromStyleTable &&
              informationalStringID == DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_FAMILY_NAMES)
-        Names = Entry().Description.TypographicFamily;
-    else if (Entry().Description.FromStyleTable &&
+        Names = Described().TypographicFamily;
+    else if (Described().FromStyleTable &&
              informationalStringID == DWRITE_INFORMATIONAL_STRING_TYPOGRAPHIC_SUBFAMILY_NAMES)
-        Names = Entry().Description.TypographicFace;
-    else if (Entry().Description.FromStyleTable &&
+        Names = Described().TypographicFace;
+    else if (Described().FromStyleTable &&
              informationalStringID == DWRITE_INFORMATIONAL_STRING_WEIGHT_STRETCH_STYLE_FAMILY_NAME)
-        Names = Entry().Description.WwsFamily;
+        Names = Described().WwsFamily;
     else
     {
         hr = RxFaceTables::Create(Entry().File.Get(), Entry().FaceIndex, &Tables);

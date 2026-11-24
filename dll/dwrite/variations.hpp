@@ -23,6 +23,14 @@ struct RxAxisValue
     INT32 Value;
 };
 
+/* The range a face can be instanced over on one axis */
+struct RxAxisRange
+{
+    DWRITE_FONT_AXIS_TAG Tag;
+    INT32 Minimum;
+    INT32 Maximum;
+};
+
 /* One fvar axis */
 struct RxVariationAxis
 {

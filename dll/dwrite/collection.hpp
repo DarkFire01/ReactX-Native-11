@@ -32,6 +32,8 @@ struct RxFontItem
 {
     UINT32 Entry;
     DWRITE_FONT_SIMULATIONS Simulations;
+    /* Axis values an axis match settled on; empty for the entry's own instance */
+    std::vector<RxAxisValue> AxisValues;
 };
 
 struct RxFamilyData
@@ -264,8 +266,15 @@ public:
         return Collection.Get();
     }
 
+    /* The entry's description, or the one at the axis values an axis match settled on */
+    const RxFaceDescription&
+    Described(VOID) const
+    {
+        return HasCustom ? Custom : Entry().Description;
+    }
+
 private:
-    RxFont() : RefCount(1), FamilyIndex(0), Item{} {}
+    RxFont() : RefCount(1), FamilyIndex(0), Item{}, HasCustom(FALSE) {}
 
     HRESULT
     Face(
@@ -276,4 +285,6 @@ private:
     UINT32 FamilyIndex;
     RxFontItem Item;
     RxComPtr<IDWriteFontFace> CachedFace;
+    RxFaceDescription Custom;
+    BOOLEAN HasCustom;
 };

@@ -415,6 +415,17 @@ RxCanonicalValues(
 }
 
 static
+VOID
+RxStyleRanges(
+    _In_ const RxStyleTable& Table,
+    _Out_ std::vector<RxAxisRange>& Ranges)
+{
+    Ranges.clear();
+    for (const auto& Axis : Table.Axes)
+        Ranges.push_back({ Axis.Tag, Axis.Minimum, Axis.Maximum });
+}
+
+static
 const RxAxisValue*
 RxFindValue(
     _In_ const std::vector<RxAxisValue>& Values,
@@ -615,12 +626,14 @@ RxFaceAxisValues(
     _In_ USHORT Weight,
     _In_ BYTE Stretch,
     _In_ BYTE Style,
-    _Out_ std::vector<RxAxisValue>& Values)
+    _Out_ std::vector<RxAxisValue>& Values,
+    _Out_ std::vector<RxAxisRange>& Ranges)
 {
     RxStyleTable Table;
 
     RxBuildStyleTable(Face, Weight, Stretch, Style, Table);
     RxCanonicalValues(Table, Coordinates, Values);
+    RxStyleRanges(Table, Ranges);
 }
 
 VOID
@@ -737,6 +750,7 @@ RxDescribeStyledFace(
                       Table);
     RxCanonicalValues(Table, Coordinates, Canonical);
     Description->AxisValues = Canonical;
+    RxStyleRanges(Table, Description->AxisRanges);
     RxMatchStyleRecords(Table, Canonical, Matched);
 
     Description->Weight = RxAxisWeight(Face->Header(), Canonical);

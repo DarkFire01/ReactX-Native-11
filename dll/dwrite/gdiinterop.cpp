@@ -273,7 +273,7 @@ RxGdiInterop::ConvertFontToLOGFONT(
     if (Ours == nullptr)
         return E_INVALIDARG;
 
-    FillLogFont(Ours->Entry().Description, Ours->GetSimulations(), Ours->Entry().IsSymbol, logFont);
+    FillLogFont(Ours->Described(), Ours->GetSimulations(), Ours->Entry().IsSymbol, logFont);
     *isSystemFont = Ours->Owner()->Data()->IsSystem;
     return S_OK;
 }
