@@ -613,6 +613,125 @@ CkTextured(
     Texture->Release();
 }
 
+/* Fills every level of a system memory texture with one color per level, or one rect of the top level */
+static
+VOID
+CkFillLevels(
+    _In_ IDirect3DTexture9* Texture,
+    _In_reads_(Count) const DWORD* Colors,
+    _In_ UINT Count,
+    _In_opt_ const RECT* Area)
+{
+    for (UINT Level = 0; Level < Count && Level < Texture->GetLevelCount(); Level += 1)
+    {
+        D3DSURFACE_DESC Desc;
+        D3DLOCKED_RECT Locked;
+        UINT Width;
+        UINT Height;
+
+        Texture->GetLevelDesc(Level, &Desc);
+        if (FAILED(Texture->LockRect(Level, &Locked, Area, 0)))
+            continue;
+        Width = Area != nullptr ? static_cast<UINT>(Area->right - Area->left) : Desc.Width;
+        Height = Area != nullptr ? static_cast<UINT>(Area->bottom - Area->top) : Desc.Height;
+        for (UINT Row = 0; Row < Height; Row += 1)
+        {
+            DWORD* Line = reinterpret_cast<DWORD*>(static_cast<BYTE*>(Locked.pBits) + Row * Locked.Pitch);
+
+            for (UINT Column = 0; Column < Width; Column += 1)
+                Line[Column] = Colors[Level];
+        }
+        Texture->UnlockRect(Level);
+        if (Area != nullptr)
+            break;
+    }
+}
+
+/* Draws each level of a texture as a quad in one row of the target */
+static
+VOID
+CkShowLevels(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DTexture9* Texture,
+    _In_ FLOAT Top)
+{
+    CkTexVertex Quad[4];
+
+    Device->SetTexture(0, Texture);
+    for (UINT Level = 0; Level < 4; Level += 1)
+    {
+        FLOAT Left = static_cast<FLOAT>(Level * 16);
+
+        Device->SetSamplerState(0, D3DSAMP_MAXMIPLEVEL, Level);
+        CkQuad(Quad, Left, Top, Left + 16.0f, Top + 16.0f, 0.5f, 0xFFFFFFFF, 1.0f);
+        Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Quad, sizeof(Quad[0]));
+    }
+    Device->SetSamplerState(0, D3DSAMP_MAXMIPLEVEL, 0);
+    Device->SetTexture(0, nullptr);
+}
+
+/*
+ * Texture copies the runtime makes from UpdateTexture: a source with more levels than the
+ * destination, then only a dirty rect of the top level with each level's share of it. A dirty
+ * rect with more source levels is left out: the reference fills the lower levels with memory it
+ * never wrote, different in every run.
+ */
+static
+VOID
+CkTextureCopies(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static const DWORD Colors[] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFFFF, 0xFFFFFF00 };
+    static const DWORD Later[] = { 0xFF00FFFF, 0xFFFF00FF, 0xFF808080, 0xFF404040 };
+    static const RECT Small = { 2, 2, 6, 6 };
+    IDirect3DTexture9* Large = nullptr;
+    IDirect3DTexture9* Same = nullptr;
+    IDirect3DTexture9* Dest = nullptr;
+
+    CkRun(Device->CreateTexture(16, 16, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Large, nullptr), "copies",
+          "CreateTexture larger");
+    CkRun(Device->CreateTexture(8, 8, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &Same, nullptr), "copies",
+          "CreateTexture same");
+    CkRun(Device->CreateTexture(8, 8, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &Dest, nullptr), "copies",
+          "CreateTexture destination");
+    if (Large == nullptr || Same == nullptr || Dest == nullptr)
+        goto Done;
+
+    CkFillLevels(Large, Colors, _countof(Colors), nullptr);
+    CkFillLevels(Same, Later, _countof(Later), nullptr);
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "copies", "Clear");
+    Device->SetFVF(CkTexFvf);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    Device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_POINT);
+    Device->BeginScene();
+
+    CkRun(Device->UpdateTexture(Large, Dest), "copies", "UpdateTexture more levels");
+    CkShowLevels(Device, Dest, 0.0f);
+
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, "copies");
+    CkFillLevels(Same, Colors, 1, &Small);
+    CkRun(Device->UpdateTexture(Same, Dest), "copies", "UpdateTexture dirty rect same levels");
+    CkShowLevels(Device, Dest, 16.0f);
+    Device->EndScene();
+    CkReadRows(Device, Back, "copies");
+
+    Device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    Device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    Device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+
+Done:
+    if (Dest != nullptr)
+        Dest->Release();
+    if (Same != nullptr)
+        Same->Release();
+    if (Large != nullptr)
+        Large->Release();
+}
+
 /* Depth testing, stencil writes and a stencil masked fill, then table fog and alpha testing */
 static
 VOID
@@ -848,6 +967,7 @@ CkDraws(
     CkFixedFunction(Device, Back);
     CkIndexedFans(Device, Back);
     CkTextured(Device, Back);
+    CkTextureCopies(Device, Back);
     CkDepthStencilFog(Device, Back);
     CkPointSprites(Device, Back);
     CkDrawFlush = nullptr;
