@@ -210,6 +210,7 @@ D9Device::D9Device(
 D9Device::~D9Device()
 {
     delete Recording;
+    FreePalettes();
     if (VertexShader != nullptr)
         VertexShader->Unbind();
     if (PixelShader != nullptr)
@@ -829,6 +830,7 @@ D9Device::Initialize(
     BindRenderTargets();
     SetDefaultState(Parameters);
     SendInitialState();
+    SendInitialKernel();
     StartPixelConverter();
     StartVertexConverter();
     return S_OK;
@@ -1267,6 +1269,7 @@ D9Device::ResetCommon(
     StartShaderSwitch();
     SetDefaultState(Parameters);
     SendInitialState();
+    SendInitialKernel();
     StartPixelConverter();
     StartVertexConverter();
     return S_OK;
@@ -2505,40 +2508,6 @@ D9Device::ValidateDevice(
 }
 
 STDMETHODIMP
-D9Device::SetPaletteEntries(
-    _In_ UINT PaletteNumber,
-    _In_opt_ const PALETTEENTRY* Entries)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetPaletteEntries(
-    _In_ UINT PaletteNumber,
-    _Out_ PALETTEENTRY* Entries)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetCurrentTexturePalette(
-    _In_ UINT PaletteNumber)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::GetCurrentTexturePalette(
-    _Out_ UINT* PaletteNumber)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
 D9Device::DrawRectPatch(
     _In_ UINT Handle,
     _In_opt_ const float* NumSegs,
@@ -2561,17 +2530,6 @@ D9Device::DrawTriPatch(
 STDMETHODIMP
 D9Device::DeletePatch(
     _In_ UINT Handle)
-{
-    RX_UNIMPLEMENTED();
-    return D3DERR_INVALIDCALL;
-}
-
-STDMETHODIMP
-D9Device::SetConvolutionMonoKernel(
-    _In_ UINT Width,
-    _In_ UINT Height,
-    _In_opt_ float* Rows,
-    _In_opt_ float* Columns)
 {
     RX_UNIMPLEMENTED();
     return D3DERR_INVALIDCALL;

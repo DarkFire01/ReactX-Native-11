@@ -1118,3 +1118,51 @@ D9Device::UnbindStreams(VOID)
     if (Bound != nullptr)
         static_cast<D9IndexBuffer*>(Bound)->Unbind();
 }
+
+/* Devices whose one bit textures filter with a kernel start with a single tap one */
+VOID
+D9Device::SendInitialKernel(VOID)
+{
+    D3DDDIARG_SETCONVOLUTIONKERNELMONO Args = {};
+    D3DDISPLAYMODE Mode = {};
+
+    Enum->GetAdapterDisplayMode(Adapter->Ordinal, &Mode);
+    if (FAILED(Enum->CheckDeviceFormat(Adapter->Ordinal, DeviceType, Mode.Format, 0, D3DRTYPE_TEXTURE, D3DFMT_A1)) ||
+        (Caps.TextureFilterCaps & D3DPTFILTERCAPS_CONVOLUTIONMONO) == 0)
+    {
+        return;
+    }
+    ConvolutionMono = TRUE;
+    KernelWidth = 1;
+    KernelHeight = 1;
+    Args.Width = KernelWidth;
+    Args.Height = KernelHeight;
+    DdiConvolutionKernel(&Args);
+}
+
+/* Only extended devices that filter with a kernel take one, up to seven taps a side and without weights */
+STDMETHODIMP
+D9Device::SetConvolutionMonoKernel(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_opt_ float* Rows,
+    _In_opt_ float* Columns)
+{
+    D9_DEVICE_LOCK();
+    D3DDDIARG_SETCONVOLUTIONKERNELMONO Args = {};
+    UINT Kernel[2] = { Width, Height };
+
+    if (NotReset || !IsEx || !ConvolutionMono)
+        return D3DERR_INVALIDCALL;
+    if (Width > 7 || Height > 7 || Width == 0 || Height == 0 || Rows != nullptr || Columns != nullptr)
+        return D3DERR_INVALIDCALL;
+
+    if (Recording != nullptr)
+        return Recording->Add(D9BlockOp::ConvolutionKernel, 0, 0, Kernel, sizeof(Kernel));
+    KernelWidth = Width;
+    KernelHeight = Height;
+    Args.Width = Width;
+    Args.Height = Height;
+    DdiConvolutionKernel(&Args);
+    return S_OK;
+}

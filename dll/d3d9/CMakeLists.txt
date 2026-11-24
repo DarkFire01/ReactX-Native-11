@@ -19,6 +19,7 @@ nt_add_usermode_dll(d3d9
         identity.cpp
         main.cpp
         modes.cpp
+        palette.cpp
         perf.cpp
         present.cpp
         process.cpp

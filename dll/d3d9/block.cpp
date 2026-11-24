@@ -355,6 +355,12 @@ D9Device::ApplyBlock(
         case D9BlockOp::Declaration:
             SetVertexDeclaration(*static_cast<IDirect3DVertexDeclaration9**>(Values));
             break;
+        case D9BlockOp::TexturePalette:
+            SetCurrentTexturePalette(Value);
+            break;
+        case D9BlockOp::ConvolutionKernel:
+            SetConvolutionMonoKernel(static_cast<UINT*>(Values)[0], static_cast<UINT*>(Values)[1], nullptr, nullptr);
+            break;
         }
     }
     return S_OK;
@@ -489,6 +495,13 @@ D9Device::CaptureBlock(
             D9StateBlock::Hold(Entry, FALSE);
             *static_cast<D9Declaration**>(Values) = Declaration;
             D9StateBlock::Hold(Entry, TRUE);
+            break;
+        case D9BlockOp::TexturePalette:
+            *Value = CurrentPalette;
+            break;
+        case D9BlockOp::ConvolutionKernel:
+            Value[0] = KernelWidth;
+            Value[1] = KernelHeight;
             break;
         }
     }
@@ -644,6 +657,12 @@ D9Device::FillBlock(
         return hr;
     }
 
+    if (ConvolutionMono && SUCCEEDED(hr))
+    {
+        UINT Kernel[2] = { KernelWidth, KernelHeight };
+
+        hr = Block->Add(D9BlockOp::ConvolutionKernel, 0, 0, Kernel, sizeof(Kernel));
+    }
     for (UINT Index = 0; Index < SamplerCount && SUCCEEDED(hr); Index++)
     {
         IDirect3DBaseTexture9* Texture = nullptr;
@@ -653,6 +672,8 @@ D9Device::FillBlock(
         if (Texture != nullptr)
             Texture->Release();
     }
+    if (SUCCEEDED(hr))
+        hr = Block->Add(D9BlockOp::TexturePalette, 0, 0, &CurrentPalette, sizeof(CurrentPalette));
     for (UINT Stream = 0; Stream < StreamCount && SUCCEEDED(hr); Stream++)
     {
         D9BlockStream Bound = {};

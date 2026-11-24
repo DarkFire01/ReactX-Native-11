@@ -2224,6 +2224,20 @@ D9Device::DdiWInfo(
         DeviceFunctions.pfnUpdateWInfo(DriverDevice, Args);
 }
 
+/* Weightless kernels join the batch; weights would have to outlive it, so those go straight to the driver */
+VOID
+D9Device::DdiConvolutionKernel(
+    _In_ const D3DDDIARG_SETCONVOLUTIONKERNELMONO* Args)
+{
+    if (Args->pKernelRow == nullptr && Args->pKernelCol == nullptr &&
+        D9RecordCall(Batch, D9BatchCall::ConvolutionKernel, Args, sizeof(*Args)))
+    {
+        return;
+    }
+    DrainBatch();
+    DeviceFunctions.pfnSetConvolutionKernelMono(DriverDevice, Args);
+}
+
 /* The query joins the calls the batch holds, so reading or destroying it waits for them */
 VOID
 D9Device::DdiIssueQuery(

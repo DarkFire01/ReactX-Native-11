@@ -211,6 +211,7 @@ enum class D9BatchCall : UINT
     VolBlt,
     GenerateMips,
     IssueQuery,
+    ConvolutionKernel,
 };
 
 /* The vertices a primitive count of a type reads */
@@ -1816,6 +1817,8 @@ enum class D9BlockOp : UINT
     VertexShader,
     PixelShader,
     Declaration,
+    TexturePalette,
+    ConvolutionKernel,
 };
 
 /* An entry's header; the values it sets follow, padded to eight bytes */
@@ -1901,6 +1904,12 @@ D9BlockValues(
 {
     return Entry + 1;
 }
+
+/* One texture palette as the application set it */
+struct D9Palette
+{
+    PALETTEENTRY Entries[256];
+};
 
 /* Where a query is between its issues: begun, waiting on the driver, or holding its result */
 enum class D9QueryState : UINT
@@ -3390,6 +3399,20 @@ private:
         _In_ const D3DDDIARG_ISSUEQUERY* Args);
 
     VOID
+    DdiConvolutionKernel(
+        _In_ const D3DDDIARG_SETCONVOLUTIONKERNELMONO* Args);
+
+    VOID
+    SendInitialKernel(VOID);
+
+    HRESULT
+    ReservePalette(
+        _In_ UINT Number);
+
+    VOID
+    FreePalettes(VOID);
+
+    VOID
     DdiRenderTarget(
         _In_ const D3DDDIARG_SETRENDERTARGET* Args);
 
@@ -3913,6 +3936,16 @@ private:
 
     /* Between BeginScene and EndScene */
     BOOLEAN InScene = FALSE;
+
+    /* Texture palettes by number, in a table that grows eight at a time, and the one textures use */
+    D9Palette** Palettes = nullptr;
+    UINT PaletteCapacity = 0;
+    UINT CurrentPalette = 0xFFFF;
+
+    /* Text filtering: whether one bit textures filter with a mono kernel, and the kernel's size */
+    BOOLEAN ConvolutionMono = FALSE;
+    UINT KernelWidth = 1;
+    UINT KernelHeight = 1;
 
     /* Shader constants as the application set them; vertex ones a mixed or software device keeps until a draw
        on the hardware pipeline needs them */
