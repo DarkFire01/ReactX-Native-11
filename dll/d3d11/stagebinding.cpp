@@ -15,6 +15,7 @@ RxImmediateContext::VSGetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     GetConstantBuffers(RxStage::Vertex, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -25,6 +26,7 @@ RxImmediateContext::VSGetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _Out_writes_opt_(NumViews) ID3D11ShaderResourceView** ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     GetShaderResources(RxStage::Vertex, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -35,6 +37,7 @@ RxImmediateContext::VSGetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _Out_writes_opt_(NumSamplers) ID3D11SamplerState** ppSamplers)
 {
+    RxContextGuard Guard(Device);
     GetSamplers(RxStage::Vertex, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -45,6 +48,7 @@ RxImmediateContext::HSSetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     SetConstantBuffers(RxStage::Hull, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -55,6 +59,7 @@ RxImmediateContext::HSSetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _In_reads_opt_(NumViews) ID3D11ShaderResourceView* const* ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     SetShaderResources(RxStage::Hull, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -65,6 +70,7 @@ RxImmediateContext::HSSetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _In_reads_opt_(NumSamplers) ID3D11SamplerState* const* ppSamplers)
 {
+    RxContextGuard Guard(Device);
     SetSamplers(RxStage::Hull, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -75,6 +81,7 @@ RxImmediateContext::HSGetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     GetConstantBuffers(RxStage::Hull, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -85,6 +92,7 @@ RxImmediateContext::HSGetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _Out_writes_opt_(NumViews) ID3D11ShaderResourceView** ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     GetShaderResources(RxStage::Hull, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -95,6 +103,7 @@ RxImmediateContext::HSGetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _Out_writes_opt_(NumSamplers) ID3D11SamplerState** ppSamplers)
 {
+    RxContextGuard Guard(Device);
     GetSamplers(RxStage::Hull, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -105,6 +114,7 @@ RxImmediateContext::DSSetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     SetConstantBuffers(RxStage::Domain, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -115,6 +125,7 @@ RxImmediateContext::DSSetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _In_reads_opt_(NumViews) ID3D11ShaderResourceView* const* ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     SetShaderResources(RxStage::Domain, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -125,6 +136,7 @@ RxImmediateContext::DSSetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _In_reads_opt_(NumSamplers) ID3D11SamplerState* const* ppSamplers)
 {
+    RxContextGuard Guard(Device);
     SetSamplers(RxStage::Domain, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -135,6 +147,7 @@ RxImmediateContext::DSGetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     GetConstantBuffers(RxStage::Domain, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -145,6 +158,7 @@ RxImmediateContext::DSGetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _Out_writes_opt_(NumViews) ID3D11ShaderResourceView** ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     GetShaderResources(RxStage::Domain, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -155,6 +169,7 @@ RxImmediateContext::DSGetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _Out_writes_opt_(NumSamplers) ID3D11SamplerState** ppSamplers)
 {
+    RxContextGuard Guard(Device);
     GetSamplers(RxStage::Domain, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -165,6 +180,7 @@ RxImmediateContext::GSSetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     SetConstantBuffers(RxStage::Geometry, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -175,6 +191,7 @@ RxImmediateContext::GSSetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _In_reads_opt_(NumViews) ID3D11ShaderResourceView* const* ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     SetShaderResources(RxStage::Geometry, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -185,6 +202,7 @@ RxImmediateContext::GSSetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _In_reads_opt_(NumSamplers) ID3D11SamplerState* const* ppSamplers)
 {
+    RxContextGuard Guard(Device);
     SetSamplers(RxStage::Geometry, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -195,6 +213,7 @@ RxImmediateContext::GSGetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     GetConstantBuffers(RxStage::Geometry, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -205,6 +224,7 @@ RxImmediateContext::GSGetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _Out_writes_opt_(NumViews) ID3D11ShaderResourceView** ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     GetShaderResources(RxStage::Geometry, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -215,6 +235,7 @@ RxImmediateContext::GSGetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _Out_writes_opt_(NumSamplers) ID3D11SamplerState** ppSamplers)
 {
+    RxContextGuard Guard(Device);
     GetSamplers(RxStage::Geometry, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -225,6 +246,7 @@ RxImmediateContext::PSGetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     GetConstantBuffers(RxStage::Pixel, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -235,6 +257,7 @@ RxImmediateContext::PSGetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _Out_writes_opt_(NumViews) ID3D11ShaderResourceView** ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     GetShaderResources(RxStage::Pixel, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -245,6 +268,7 @@ RxImmediateContext::PSGetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _Out_writes_opt_(NumSamplers) ID3D11SamplerState** ppSamplers)
 {
+    RxContextGuard Guard(Device);
     GetSamplers(RxStage::Pixel, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -255,6 +279,7 @@ RxImmediateContext::CSSetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     SetConstantBuffers(RxStage::Compute, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -265,6 +290,7 @@ RxImmediateContext::CSSetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _In_reads_opt_(NumViews) ID3D11ShaderResourceView* const* ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     SetShaderResources(RxStage::Compute, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -275,6 +301,7 @@ RxImmediateContext::CSSetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _In_reads_opt_(NumSamplers) ID3D11SamplerState* const* ppSamplers)
 {
+    RxContextGuard Guard(Device);
     SetSamplers(RxStage::Compute, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -285,6 +312,7 @@ RxImmediateContext::CSGetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     GetConstantBuffers(RxStage::Compute, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -295,6 +323,7 @@ RxImmediateContext::CSGetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _Out_writes_opt_(NumViews) ID3D11ShaderResourceView** ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     GetShaderResources(RxStage::Compute, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -305,6 +334,7 @@ RxImmediateContext::CSGetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _Out_writes_opt_(NumSamplers) ID3D11SamplerState** ppSamplers)
 {
+    RxContextGuard Guard(Device);
     GetSamplers(RxStage::Compute, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -315,6 +345,7 @@ RxImmediateContext::VSGetShader(
     _Out_writes_opt_(*pNumClassInstances) ID3D11ClassInstance** ppClassInstances,
     _Inout_opt_ UINT* pNumClassInstances)
 {
+    RxContextGuard Guard(Device);
     GetShader(RxStage::Vertex, __uuidof(ID3D11VertexShader), reinterpret_cast<VOID**>(ppVertexShader), pNumClassInstances);
 }
 
@@ -325,6 +356,7 @@ RxImmediateContext::HSGetShader(
     _Out_writes_opt_(*pNumClassInstances) ID3D11ClassInstance** ppClassInstances,
     _Inout_opt_ UINT* pNumClassInstances)
 {
+    RxContextGuard Guard(Device);
     GetShader(RxStage::Hull, __uuidof(ID3D11HullShader), reinterpret_cast<VOID**>(ppHullShader), pNumClassInstances);
 }
 
@@ -335,6 +367,7 @@ RxImmediateContext::DSGetShader(
     _Out_writes_opt_(*pNumClassInstances) ID3D11ClassInstance** ppClassInstances,
     _Inout_opt_ UINT* pNumClassInstances)
 {
+    RxContextGuard Guard(Device);
     GetShader(RxStage::Domain, __uuidof(ID3D11DomainShader), reinterpret_cast<VOID**>(ppDomainShader), pNumClassInstances);
 }
 
@@ -345,6 +378,7 @@ RxImmediateContext::GSGetShader(
     _Out_writes_opt_(*pNumClassInstances) ID3D11ClassInstance** ppClassInstances,
     _Inout_opt_ UINT* pNumClassInstances)
 {
+    RxContextGuard Guard(Device);
     GetShader(RxStage::Geometry, __uuidof(ID3D11GeometryShader), reinterpret_cast<VOID**>(ppGeometryShader), pNumClassInstances);
 }
 
@@ -355,6 +389,7 @@ RxImmediateContext::PSGetShader(
     _Out_writes_opt_(*pNumClassInstances) ID3D11ClassInstance** ppClassInstances,
     _Inout_opt_ UINT* pNumClassInstances)
 {
+    RxContextGuard Guard(Device);
     GetShader(RxStage::Pixel, __uuidof(ID3D11PixelShader), reinterpret_cast<VOID**>(ppPixelShader), pNumClassInstances);
 }
 
@@ -365,6 +400,7 @@ RxImmediateContext::CSGetShader(
     _Out_writes_opt_(*pNumClassInstances) ID3D11ClassInstance** ppClassInstances,
     _Inout_opt_ UINT* pNumClassInstances)
 {
+    RxContextGuard Guard(Device);
     GetShader(RxStage::Compute, __uuidof(ID3D11ComputeShader), reinterpret_cast<VOID**>(ppComputeShader), pNumClassInstances);
 }
 
@@ -375,6 +411,7 @@ RxImmediateContext::HSSetShader(
     _In_reads_opt_(NumClassInstances) ID3D11ClassInstance* const* ppClassInstances,
     _In_ UINT NumClassInstances)
 {
+    RxContextGuard Guard(Device);
     RxHullShader* Shader = RxUnwrap<RxHullShader>(pHullShader);
 
     UNREFERENCED_PARAMETER(ppClassInstances);
@@ -390,6 +427,7 @@ RxImmediateContext::DSSetShader(
     _In_reads_opt_(NumClassInstances) ID3D11ClassInstance* const* ppClassInstances,
     _In_ UINT NumClassInstances)
 {
+    RxContextGuard Guard(Device);
     RxDomainShader* Shader = RxUnwrap<RxDomainShader>(pDomainShader);
 
     UNREFERENCED_PARAMETER(ppClassInstances);
@@ -405,6 +443,7 @@ RxImmediateContext::GSSetShader(
     _In_reads_opt_(NumClassInstances) ID3D11ClassInstance* const* ppClassInstances,
     _In_ UINT NumClassInstances)
 {
+    RxContextGuard Guard(Device);
     RxGeometryShader* Shader = RxUnwrap<RxGeometryShader>(pShader);
 
     UNREFERENCED_PARAMETER(ppClassInstances);
@@ -420,6 +459,7 @@ RxImmediateContext::CSSetShader(
     _In_reads_opt_(NumClassInstances) ID3D11ClassInstance* const* ppClassInstances,
     _In_ UINT NumClassInstances)
 {
+    RxContextGuard Guard(Device);
     RxComputeShader* Shader = RxUnwrap<RxComputeShader>(pComputeShader);
 
     UNREFERENCED_PARAMETER(ppClassInstances);

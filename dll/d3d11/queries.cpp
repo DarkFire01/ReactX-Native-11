@@ -232,6 +232,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::Begin(
     _In_ ID3D11Asynchronous* pAsync)
 {
+    RxContextGuard Guard(Device);
     RxQuery* Query = RxUnwrap<RxQuery>(pAsync);
 
     /* Events and timestamps only mark a point, so they have no beginning */
@@ -250,6 +251,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::End(
     _In_ ID3D11Asynchronous* pAsync)
 {
+    RxContextGuard Guard(Device);
     RxQuery* Query = RxUnwrap<RxQuery>(pAsync);
     D3D11_QUERY Kind;
 
@@ -274,6 +276,7 @@ RxImmediateContext::GetData(
     _In_ UINT DataSize,
     _In_ UINT GetDataFlags)
 {
+    RxContextGuard Guard(Device);
     RxQuery* Query = RxUnwrap<RxQuery>(pAsync);
     HRESULT hr;
 
@@ -306,6 +309,7 @@ RxImmediateContext::SetPredication(
     _In_opt_ ID3D11Predicate* pPredicate,
     _In_ BOOL PredicateValue)
 {
+    RxContextGuard Guard(Device);
     RxQuery* Query = RxUnwrap<RxQuery>(pPredicate);
     D3D10DDI_HQUERY Handle = {};
 
@@ -323,6 +327,7 @@ RxImmediateContext::GetPredication(
     _Outptr_opt_result_maybenull_ ID3D11Predicate** ppPredicate,
     _Out_opt_ BOOL* pPredicateValue)
 {
+    RxContextGuard Guard(Device);
     if (ppPredicate != nullptr)
         *ppPredicate = RxHandBack<ID3D11Predicate>(Pipeline.Predicate);
     if (pPredicateValue != nullptr)
@@ -334,6 +339,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::GenerateMips(
     _In_ ID3D11ShaderResourceView* pShaderResourceView)
 {
+    RxContextGuard Guard(Device);
     RxShaderResourceView* View = RxUnwrap<RxShaderResourceView>(pShaderResourceView);
     D3D11_RESOURCE_MISC_FLAG Needed = D3D11_RESOURCE_MISC_GENERATE_MIPS;
     RxResourceInfo Info;
@@ -359,6 +365,7 @@ RxImmediateContext::SetResourceMinLOD(
     _In_ ID3D11Resource* pResource,
     FLOAT MinLOD)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Resource = RxGetDdiResource(pResource);
 
     if (Resource == nullptr)
@@ -373,6 +380,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::GetResourceMinLOD(
     _In_ ID3D11Resource* pResource)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Resource = RxGetDdiResource(pResource);
 
     return (Resource != nullptr) ? Resource->MinLod : 0.0f;

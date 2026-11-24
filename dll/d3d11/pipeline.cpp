@@ -77,6 +77,7 @@ VOID
 RxImmediateContext::SendShader(
     _In_ RxStage Stage)
 {
+    RxContextGuard Guard(Device);
     const RxFuncs& Funcs = Device.GetDeviceFuncs();
 
     (Funcs.*StageEntries[(UINT)Stage].SetShader)(Device.GetDriverDevice(), Pipeline.Stages[(UINT)Stage].ShaderHandle);
@@ -88,6 +89,7 @@ RxImmediateContext::SendConstantBuffers(
     _In_ UINT Start,
     _In_ UINT Count)
 {
+    RxContextGuard Guard(Device);
     const RxFuncs& Funcs = Device.GetDeviceFuncs();
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
 
@@ -114,6 +116,7 @@ RxImmediateContext::SendShaderResources(
     _In_ UINT Start,
     _In_ UINT Count)
 {
+    RxContextGuard Guard(Device);
     const RxFuncs& Funcs = Device.GetDeviceFuncs();
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
 
@@ -131,6 +134,7 @@ RxImmediateContext::SendSamplers(
     _In_ UINT Start,
     _In_ UINT Count)
 {
+    RxContextGuard Guard(Device);
     const RxFuncs& Funcs = Device.GetDeviceFuncs();
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
 
@@ -144,6 +148,7 @@ RxImmediateContext::SendSamplers(
 VOID
 RxImmediateContext::SendInputLayout()
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnIaSetInputLayout(Device.GetDriverDevice(), Pipeline.InputLayoutHandle);
 }
 
@@ -152,6 +157,7 @@ RxImmediateContext::SendVertexBuffers(
     _In_ UINT Start,
     _In_ UINT Count)
 {
+    RxContextGuard Guard(Device);
     Count = RxResendCount(Start, Count, Pipeline.VertexBufferCount, (UINT)Pipeline.VertexBufferHandles.size());
     if (Count == 0)
         return;
@@ -164,6 +170,7 @@ RxImmediateContext::SendVertexBuffers(
 VOID
 RxImmediateContext::SendIndexBuffer()
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnIaSetIndexBuffer(Device.GetDriverDevice(), Pipeline.IndexBufferHandle,
                                                 Pipeline.IndexFormat, Pipeline.IndexOffset);
 }
@@ -171,6 +178,7 @@ RxImmediateContext::SendIndexBuffer()
 VOID
 RxImmediateContext::SendTopology()
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnIaSetTopology(Device.GetDriverDevice(), (D3D10_DDI_PRIMITIVE_TOPOLOGY)Pipeline.Topology);
 }
 
@@ -178,6 +186,7 @@ VOID
 RxImmediateContext::SendRenderTargets(
     _In_ UINT ClearSlots)
 {
+    RxContextGuard Guard(Device);
     SendOutputs(ClearSlots, Pipeline.OutputUavStart, Pipeline.OutputUavEnd - Pipeline.OutputUavStart, nullptr);
 }
 
@@ -188,6 +197,7 @@ RxImmediateContext::SendOutputs(
     _In_ UINT UavRangeSize,
     _In_reads_opt_(RxUavSlotCount) const UINT* Counts)
 {
+    RxContextGuard Guard(Device);
     UINT UavStart = Pipeline.OutputUavStart;
     UINT UavCount = Pipeline.OutputUavEnd - UavStart;
 
@@ -202,6 +212,7 @@ RxImmediateContext::SendOutputs(
 VOID
 RxImmediateContext::SendBlendState()
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnSetBlendState(Device.GetDriverDevice(), Pipeline.BlendHandle,
                                              Pipeline.BlendFactor.data(), Pipeline.SampleMask);
 }
@@ -209,6 +220,7 @@ RxImmediateContext::SendBlendState()
 VOID
 RxImmediateContext::SendDepthStencilState()
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnSetDepthStencilState(Device.GetDriverDevice(), Pipeline.DepthStencilHandle,
                                                     Pipeline.StencilRef);
 }
@@ -216,6 +228,7 @@ RxImmediateContext::SendDepthStencilState()
 VOID
 RxImmediateContext::SendRasterizerState()
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnSetRasterizerState(Device.GetDriverDevice(), Pipeline.RasterizerHandle);
 }
 
@@ -223,6 +236,7 @@ VOID
 RxImmediateContext::SendViewports(
     _In_ UINT ClearViewports)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnSetViewports(Device.GetDriverDevice(), Pipeline.ViewportCount, ClearViewports,
                                             Pipeline.Viewports.data());
 }
@@ -231,6 +245,7 @@ VOID
 RxImmediateContext::SendScissorRects(
     _In_ UINT ClearRects)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnSetScissorRects(Device.GetDriverDevice(), Pipeline.ScissorCount, ClearRects,
                                                Pipeline.Scissors.data());
 }
@@ -240,6 +255,7 @@ RxImmediateContext::SendScissorRects(
 VOID
 RxImmediateContext::LoadPipelineDefaults()
 {
+    RxContextGuard Guard(Device);
     ID3D11SamplerState* NoSamplers[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
     UINT Stage;
 
@@ -253,6 +269,7 @@ RxImmediateContext::LoadPipelineDefaults()
 VOID
 RxImmediateContext::EmptyDriverStates()
 {
+    RxContextGuard Guard(Device);
     static const FLOAT DefaultFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     const D3DWDDM1_3DDI_DEVICEFUNCS& Funcs = Device.GetDeviceFuncs();
     D3D10DDI_HDEVICE Driver = Device.GetDriverDevice();
@@ -265,6 +282,7 @@ RxImmediateContext::EmptyDriverStates()
 VOID
 RxImmediateContext::ReleaseBindings()
 {
+    RxContextGuard Guard(Device);
     Pipeline = {};
     ReleaseContextState();
 }
@@ -275,6 +293,7 @@ BOOLEAN
 RxImmediateContext::IsBoundForOutput(
     _In_ const DdiResource* Resource) const
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     for (Index = 0; Index < Pipeline.RenderTargetCount; Index++)
@@ -309,6 +328,7 @@ RxImmediateContext::NoteOutput(
     _In_ DdiResource* Resource,
     _In_ RxOutput Kind)
 {
+    RxContextGuard Guard(Device);
     UnbindInputsOf(Resource);
 
     /* The newer output wins over the others */
@@ -329,6 +349,7 @@ VOID
 RxImmediateContext::ReleaseMergerOutputsOf(
     _In_ const DdiResource* Resource)
 {
+    RxContextGuard Guard(Device);
     BOOLEAN Changed = FALSE;
     UINT Index;
 
@@ -362,6 +383,7 @@ RxImmediateContext::ReleaseComputeUavsOf(
     _In_ UINT KeepStart,
     _In_ UINT KeepCount)
 {
+    RxContextGuard Guard(Device);
     UINT First = UINT_MAX;
     UINT Last = 0;
     UINT Index;
@@ -387,6 +409,7 @@ VOID
 RxImmediateContext::ReleaseStreamTargetsOf(
     _In_ const DdiResource* Resource)
 {
+    RxContextGuard Guard(Device);
     BOOLEAN Changed = FALSE;
     UINT Index;
 
@@ -407,6 +430,7 @@ RxImmediateContext::ReleaseStreamTargetsOf(
 UINT
 RxImmediateContext::GetUavSlotCount() const
 {
+    RxContextGuard Guard(Device);
     return (Device.GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1) ? D3D11_1_UAV_SLOT_COUNT
                                                                 : D3D11_PS_CS_UAV_REGISTER_COUNT;
 }
@@ -415,6 +439,7 @@ VOID
 RxImmediateContext::UnbindInputsOf(
     _In_ const DdiResource* Resource)
 {
+    RxContextGuard Guard(Device);
     UINT Stage;
     UINT Slot;
 
@@ -462,6 +487,7 @@ RxImmediateContext::SetShader(
     _In_opt_ ID3D11DeviceChild* Object,
     _In_ D3D10DDI_HSHADER Handle)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
 
     State.Shader = RxBound<RxChildLifetime>(Shader);
@@ -480,6 +506,7 @@ RxImmediateContext::SetConstantBuffers(
     _In_ UINT Count,
     _In_reads_opt_(Count) ID3D11Buffer* const* Buffers)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     RxBuffer* Buffer;
     UINT Index;
@@ -509,6 +536,7 @@ RxImmediateContext::SetShaderResources(
     _In_ UINT Count,
     _In_reads_opt_(Count) ID3D11ShaderResourceView* const* Views)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     RxShaderResourceView* View;
     UINT Index;
@@ -541,6 +569,7 @@ RxImmediateContext::SetSamplers(
     _In_ UINT Count,
     _In_reads_opt_(Count) ID3D11SamplerState* const* Samplers)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     RxSamplerState* Sampler;
     UINT Index;
@@ -570,6 +599,7 @@ RxImmediateContext::VSSetShader(
     _In_reads_opt_(NumClassInstances) ID3D11ClassInstance* const* ppClassInstances,
     _In_ UINT NumClassInstances)
 {
+    RxContextGuard Guard(Device);
     RxVertexShader* Shader = RxUnwrap<RxVertexShader>(pVertexShader);
 
     UNREFERENCED_PARAMETER(ppClassInstances);
@@ -585,6 +615,7 @@ RxImmediateContext::PSSetShader(
     _In_reads_opt_(NumClassInstances) ID3D11ClassInstance* const* ppClassInstances,
     _In_ UINT NumClassInstances)
 {
+    RxContextGuard Guard(Device);
     RxPixelShader* Shader = RxUnwrap<RxPixelShader>(pPixelShader);
 
     UNREFERENCED_PARAMETER(ppClassInstances);
@@ -600,6 +631,7 @@ RxImmediateContext::VSSetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     SetConstantBuffers(RxStage::Vertex, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -610,6 +642,7 @@ RxImmediateContext::PSSetConstantBuffers(
     _In_range_(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - StartSlot) UINT NumBuffers,
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppConstantBuffers)
 {
+    RxContextGuard Guard(Device);
     SetConstantBuffers(RxStage::Pixel, StartSlot, NumBuffers, ppConstantBuffers);
 }
 
@@ -620,6 +653,7 @@ RxImmediateContext::VSSetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _In_reads_opt_(NumViews) ID3D11ShaderResourceView* const* ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     SetShaderResources(RxStage::Vertex, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -630,6 +664,7 @@ RxImmediateContext::PSSetShaderResources(
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - StartSlot) UINT NumViews,
     _In_reads_opt_(NumViews) ID3D11ShaderResourceView* const* ppShaderResourceViews)
 {
+    RxContextGuard Guard(Device);
     SetShaderResources(RxStage::Pixel, StartSlot, NumViews, ppShaderResourceViews);
 }
 
@@ -640,6 +675,7 @@ RxImmediateContext::VSSetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _In_reads_opt_(NumSamplers) ID3D11SamplerState* const* ppSamplers)
 {
+    RxContextGuard Guard(Device);
     SetSamplers(RxStage::Vertex, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -650,6 +686,7 @@ RxImmediateContext::PSSetSamplers(
     _In_range_(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT - StartSlot) UINT NumSamplers,
     _In_reads_opt_(NumSamplers) ID3D11SamplerState* const* ppSamplers)
 {
+    RxContextGuard Guard(Device);
     SetSamplers(RxStage::Pixel, StartSlot, NumSamplers, ppSamplers);
 }
 
@@ -660,6 +697,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::IASetInputLayout(
     _In_opt_ ID3D11InputLayout* pInputLayout)
 {
+    RxContextGuard Guard(Device);
     RxInputLayout* Layout = RxUnwrap<RxInputLayout>(pInputLayout);
     D3D10DDI_HELEMENTLAYOUT Handle = Layout ? Layout->GetHandle() : D3D10DDI_HELEMENTLAYOUT{};
 
@@ -680,6 +718,7 @@ RxImmediateContext::IASetVertexBuffers(
     _In_reads_opt_(NumBuffers) const UINT* pStrides,
     _In_reads_opt_(NumBuffers) const UINT* pOffsets)
 {
+    RxContextGuard Guard(Device);
     RxBuffer* Buffer;
     UINT Index;
 
@@ -710,6 +749,7 @@ RxImmediateContext::IASetIndexBuffer(
     _In_ DXGI_FORMAT Format,
     _In_ UINT Offset)
 {
+    RxContextGuard Guard(Device);
     RxBuffer* Buffer = RxUnwrap<RxBuffer>(pIndexBuffer);
     D3D10DDI_HRESOURCE Handle;
 
@@ -735,6 +775,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::IASetPrimitiveTopology(
     _In_ D3D11_PRIMITIVE_TOPOLOGY Topology)
 {
+    RxContextGuard Guard(Device);
     if (Topology == Pipeline.Topology)
         return;
 
@@ -749,6 +790,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::RSSetState(
     _In_opt_ ID3D11RasterizerState* pRasterizerState)
 {
+    RxContextGuard Guard(Device);
     RxRasterizerState* State = RxUnwrap<RxRasterizerState>(pRasterizerState);
     D3D10DDI_HRASTERIZERSTATE Handle = State ? State->GetHandle() : Device.GetDefaults().Rasterizer->GetHandle();
 
@@ -766,6 +808,7 @@ RxImmediateContext::RSSetViewports(
     _In_range_(0, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) UINT NumViewports,
     _In_reads_opt_(NumViewports) const D3D11_VIEWPORT* pViewports)
 {
+    RxContextGuard Guard(Device);
     constexpr FLOAT Bound = (FLOAT)D3D11_VIEWPORT_BOUNDS_MAX;
     UINT Previous = Pipeline.ViewportCount;
     UINT Index;
@@ -808,6 +851,7 @@ RxImmediateContext::RSSetScissorRects(
     _In_range_(0, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) UINT NumRects,
     _In_reads_opt_(NumRects) const D3D11_RECT* pRects)
 {
+    RxContextGuard Guard(Device);
     UINT Previous = Pipeline.ScissorCount;
     UINT Index;
 
@@ -837,6 +881,7 @@ RxImmediateContext::SetOutputs(
     _In_reads_opt_(UavCount) ID3D11UnorderedAccessView* const* Uavs,
     _In_reads_opt_(UavCount) const UINT* UavCounts)
 {
+    RxContextGuard Guard(Device);
     UINT PreviousTargets = Pipeline.RenderTargetCount;
     UINT PreviousLow = Pipeline.OutputUavStart;
     UINT PreviousHigh = Pipeline.OutputUavEnd;
@@ -921,6 +966,7 @@ RxImmediateContext::OMSetRenderTargets(
     _In_reads_opt_(NumViews) ID3D11RenderTargetView* const* ppRenderTargetViews,
     _In_opt_ ID3D11DepthStencilView* pDepthStencilView)
 {
+    RxContextGuard Guard(Device);
     if (NumViews > Pipeline.RenderTargets.size())
         return;
 
@@ -940,6 +986,7 @@ RxImmediateContext::OMSetRenderTargetsAndUnorderedAccessViews(
     _In_reads_opt_(NumUAVs) ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
     _In_reads_opt_(NumUAVs) const UINT* pUAVInitialCounts)
 {
+    RxContextGuard Guard(Device);
     BOOLEAN KeepTargets = (NumRTVs == D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL);
     BOOLEAN KeepUavs = (NumUAVs == D3D11_KEEP_UNORDERED_ACCESS_VIEWS);
     UINT Targets = KeepTargets ? Pipeline.RenderTargetCount : NumRTVs;
@@ -969,6 +1016,7 @@ RxImmediateContext::OMSetBlendState(
     _In_opt_ const FLOAT BlendFactor[4],
     _In_ UINT SampleMask)
 {
+    RxContextGuard Guard(Device);
     static const FLOAT DefaultFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     RxBlendState* State = RxUnwrap<RxBlendState>(pBlendState);
     D3D10DDI_HBLENDSTATE Handle = State ? State->GetHandle() : Device.GetDefaults().Blend->GetHandle();
@@ -993,6 +1041,7 @@ RxImmediateContext::OMSetDepthStencilState(
     _In_opt_ ID3D11DepthStencilState* pDepthStencilState,
     _In_ UINT StencilRef)
 {
+    RxContextGuard Guard(Device);
     RxDepthStencilState* State = RxUnwrap<RxDepthStencilState>(pDepthStencilState);
     D3D10DDI_HDEPTHSTENCILSTATE Handle = State ? State->GetHandle() : Device.GetDefaults().DepthStencil->GetHandle();
 
@@ -1015,6 +1064,7 @@ RxImmediateContext::Draw(
     _In_ UINT VertexCount,
     _In_ UINT StartVertexLocation)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnDraw(Device.GetDriverDevice(), VertexCount, StartVertexLocation);
 }
 
@@ -1025,6 +1075,7 @@ RxImmediateContext::DrawIndexed(
     _In_ UINT StartIndexLocation,
     _In_ INT BaseVertexLocation)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnDrawIndexed(Device.GetDriverDevice(), IndexCount, StartIndexLocation, BaseVertexLocation);
 }
 
@@ -1038,6 +1089,7 @@ RxImmediateContext::UpdateSubresource(
     _In_ UINT SrcRowPitch,
     _In_ UINT SrcDepthPitch)
 {
+    RxContextGuard Guard(Device);
     UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, 0);
 }
 
@@ -1052,6 +1104,7 @@ RxImmediateContext::UpdateSubresource1(
     _In_ UINT SrcDepthPitch,
     _In_ UINT CopyFlags)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Resource = RxGetDdiResource(pDstResource);
     ID3D11Buffer* Buffer;
     D3D11_BUFFER_DESC BufferDesc = {};
@@ -1091,6 +1144,7 @@ RxImmediateContext::ClearDepthStencilView(
     _In_ FLOAT Depth,
     _In_ UINT8 Stencil)
 {
+    RxContextGuard Guard(Device);
     RxDepthStencilView* View = RxUnwrap<RxDepthStencilView>(pDepthStencilView);
 
     if (View == nullptr || (ClearFlags & (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL)) == 0)
@@ -1104,6 +1158,7 @@ VOID
 STDMETHODCALLTYPE
 RxImmediateContext::ClearState(VOID)
 {
+    RxContextGuard Guard(Device);
     ID3D11ShaderResourceView* NoViews[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
     ID3D11Buffer* NoBuffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
     ID3D11SamplerState* NoSamplers[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
@@ -1156,6 +1211,7 @@ RxImmediateContext::ResolveSubresource(
     _In_ UINT SrcSubresource,
     _In_ DXGI_FORMAT Format)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Destination = RxGetDdiResource(pDstResource);
     DdiResource* Source = RxGetDdiResource(pSrcResource);
 

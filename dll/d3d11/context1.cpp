@@ -19,6 +19,7 @@ RxImmediateContext::SetConstantBufferRanges(
     _In_reads_opt_(Count) const UINT* FirstConstants,
     _In_reads_opt_(Count) const UINT* NumConstants)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     UINT Index;
 
@@ -60,6 +61,7 @@ RxImmediateContext::GetConstantBufferRanges(
     _Out_writes_opt_(Count) UINT* FirstConstants,
     _Out_writes_opt_(Count) UINT* NumConstants)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     UINT Index;
     UINT Slot;
@@ -90,6 +92,7 @@ RxImmediateContext::VSSetConstantBuffers1(
     _In_reads_opt_(NumBuffers) const UINT* pFirstConstant,
     _In_reads_opt_(NumBuffers) const UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     SetConstantBufferRanges(RxStage::Vertex, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -102,6 +105,7 @@ RxImmediateContext::VSGetConstantBuffers1(
     _Out_writes_opt_(NumBuffers) UINT* pFirstConstant,
     _Out_writes_opt_(NumBuffers) UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     GetConstantBufferRanges(RxStage::Vertex, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -114,6 +118,7 @@ RxImmediateContext::HSSetConstantBuffers1(
     _In_reads_opt_(NumBuffers) const UINT* pFirstConstant,
     _In_reads_opt_(NumBuffers) const UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     SetConstantBufferRanges(RxStage::Hull, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -126,6 +131,7 @@ RxImmediateContext::HSGetConstantBuffers1(
     _Out_writes_opt_(NumBuffers) UINT* pFirstConstant,
     _Out_writes_opt_(NumBuffers) UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     GetConstantBufferRanges(RxStage::Hull, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -138,6 +144,7 @@ RxImmediateContext::DSSetConstantBuffers1(
     _In_reads_opt_(NumBuffers) const UINT* pFirstConstant,
     _In_reads_opt_(NumBuffers) const UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     SetConstantBufferRanges(RxStage::Domain, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -150,6 +157,7 @@ RxImmediateContext::DSGetConstantBuffers1(
     _Out_writes_opt_(NumBuffers) UINT* pFirstConstant,
     _Out_writes_opt_(NumBuffers) UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     GetConstantBufferRanges(RxStage::Domain, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -162,6 +170,7 @@ RxImmediateContext::GSSetConstantBuffers1(
     _In_reads_opt_(NumBuffers) const UINT* pFirstConstant,
     _In_reads_opt_(NumBuffers) const UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     SetConstantBufferRanges(RxStage::Geometry, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -174,6 +183,7 @@ RxImmediateContext::GSGetConstantBuffers1(
     _Out_writes_opt_(NumBuffers) UINT* pFirstConstant,
     _Out_writes_opt_(NumBuffers) UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     GetConstantBufferRanges(RxStage::Geometry, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -186,6 +196,7 @@ RxImmediateContext::PSSetConstantBuffers1(
     _In_reads_opt_(NumBuffers) const UINT* pFirstConstant,
     _In_reads_opt_(NumBuffers) const UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     SetConstantBufferRanges(RxStage::Pixel, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -198,6 +209,7 @@ RxImmediateContext::PSGetConstantBuffers1(
     _Out_writes_opt_(NumBuffers) UINT* pFirstConstant,
     _Out_writes_opt_(NumBuffers) UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     GetConstantBufferRanges(RxStage::Pixel, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -210,6 +222,7 @@ RxImmediateContext::CSSetConstantBuffers1(
     _In_reads_opt_(NumBuffers) const UINT* pFirstConstant,
     _In_reads_opt_(NumBuffers) const UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     SetConstantBufferRanges(RxStage::Compute, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -222,6 +235,7 @@ RxImmediateContext::CSGetConstantBuffers1(
     _Out_writes_opt_(NumBuffers) UINT* pFirstConstant,
     _Out_writes_opt_(NumBuffers) UINT* pNumConstants)
 {
+    RxContextGuard Guard(Device);
     GetConstantBufferRanges(RxStage::Compute, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
 
@@ -283,6 +297,7 @@ RxImmediateContext::Discard(
     _In_reads_opt_(NumRects) const D3D11_RECT* Rects,
     _In_ UINT NumRects)
 {
+    RxContextGuard Guard(Device);
     static_assert(sizeof(D3D11_RECT) == sizeof(D3D10_DDI_RECT));
 
     Device.GetDeviceFuncs().pfnDiscard(Device.GetDriverDevice(), Type, Handle,
@@ -294,6 +309,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::DiscardResource(
     _In_ ID3D11Resource* pResource)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Resource = RxGetDdiResource(pResource);
     RxResourceInfo Info;
 
@@ -313,6 +329,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::DiscardView(
     _In_ ID3D11View* pResourceView)
 {
+    RxContextGuard Guard(Device);
     DiscardView1(pResourceView, nullptr, 0);
 }
 
@@ -323,6 +340,7 @@ RxImmediateContext::DiscardView1(
     _In_reads_opt_(NumRects) const D3D11_RECT* pRects,
     UINT NumRects)
 {
+    RxContextGuard Guard(Device);
     D3D11DDI_HANDLETYPE Type;
     DdiResource* Backing;
     VOID* Handle;
@@ -345,6 +363,7 @@ RxImmediateContext::ClearView(
     _In_reads_opt_(NumRects) const D3D11_RECT* pRect,
     UINT NumRects)
 {
+    RxContextGuard Guard(Device);
     D3D11DDI_HANDLETYPE Type;
     DdiResource* Backing;
     VOID* Handle;
@@ -371,6 +390,7 @@ BOOL
 STDMETHODCALLTYPE
 RxImmediateContext::IsAnnotationEnabled(VOID)
 {
+    RxContextGuard Guard(Device);
     return FALSE;
 }
 
@@ -380,6 +400,7 @@ RxImmediateContext::SetMarkerInt(
     _In_ LPCWSTR pLabel,
     INT Data)
 {
+    RxContextGuard Guard(Device);
     UNREFERENCED_PARAMETER(pLabel);
     UNREFERENCED_PARAMETER(Data);
 }
@@ -390,6 +411,7 @@ RxImmediateContext::BeginEventInt(
     _In_ LPCWSTR pLabel,
     INT Data)
 {
+    RxContextGuard Guard(Device);
     UNREFERENCED_PARAMETER(pLabel);
     UNREFERENCED_PARAMETER(Data);
 }
@@ -398,4 +420,5 @@ VOID
 STDMETHODCALLTYPE
 RxImmediateContext::EndEvent(VOID)
 {
+    RxContextGuard Guard(Device);
 }

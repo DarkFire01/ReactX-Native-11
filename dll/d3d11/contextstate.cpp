@@ -126,6 +126,7 @@ RxDevice::CreateDeviceContextState(
 VOID
 RxImmediateContext::ResendPipeline()
 {
+    RxContextGuard Guard(Device);
     UINT Stage;
 
     for (Stage = 0; Stage < RxStageCount; Stage++)
@@ -160,6 +161,7 @@ RxImmediateContext::SwapDeviceContextState(
     _In_ ID3DDeviceContextState* pState,
     _Outptr_opt_ ID3DDeviceContextState** ppPreviousState)
 {
+    RxContextGuard Guard(Device);
     RxContextState* Next = RxUnwrap<RxContextState>(pState);
     RxContextState* Previous = static_cast<RxContextState*>(ActiveState);
     RxPipelineState Leaving;
@@ -214,6 +216,7 @@ RxImmediateContext::SwapDeviceContextState(
 VOID
 RxImmediateContext::ReleaseContextState()
 {
+    RxContextGuard Guard(Device);
     RxContextState* Active = static_cast<RxContextState*>(ActiveState);
 
     ActiveState = nullptr;
@@ -230,6 +233,7 @@ RxImmediateContext::GetPrivateData(
     _Inout_ UINT* pDataSize,
     _Out_writes_bytes_opt_(*pDataSize) void* pData)
 {
+    RxContextGuard Guard(Device);
     return PrivateData.Get(guid, pDataSize, pData);
 }
 
@@ -240,6 +244,7 @@ RxImmediateContext::SetPrivateData(
     _In_ UINT DataSize,
     _In_reads_bytes_opt_(DataSize) const void* pData)
 {
+    RxContextGuard Guard(Device);
     return PrivateData.Set(guid, DataSize, pData, nullptr);
 }
 
@@ -249,5 +254,6 @@ RxImmediateContext::SetPrivateDataInterface(
     _In_ REFGUID guid,
     _In_opt_ const IUnknown* pData)
 {
+    RxContextGuard Guard(Device);
     return PrivateData.Set(guid, 0, nullptr, pData);
 }

@@ -330,6 +330,7 @@ RxImmediateContext::Flush1(
     _In_ D3D11_CONTEXT_TYPE ContextType,
     _In_opt_ HANDLE hEvent)
 {
+    RxContextGuard Guard(Device);
     RxFence* Fence = nullptr;
     UINT64 Value = 1;
 
@@ -355,6 +356,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::SetHardwareProtectionState(
     _In_ BOOL HwProtectionEnable)
 {
+    RxContextGuard Guard(Device);
     IsHardwareProtected = HwProtectionEnable ? TRUE : FALSE;
 }
 
@@ -363,6 +365,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::GetHardwareProtectionState(
     _Out_ BOOL* pHwProtectionEnable)
 {
+    RxContextGuard Guard(Device);
     *pHwProtectionEnable = IsHardwareProtected;
 }
 
@@ -374,6 +377,7 @@ RxImmediateContext::Signal(
     _In_ ID3D11Fence* pFence,
     _In_ UINT64 Value)
 {
+    RxContextGuard Guard(Device);
     RxFence* Fence = RxUnwrap<RxFence>(pFence);
     D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMCPU CpuSignal = {};
     D3DKMT_HANDLE Object;
@@ -403,6 +407,7 @@ RxImmediateContext::Wait(
     _In_ ID3D11Fence* pFence,
     _In_ UINT64 Value)
 {
+    RxContextGuard Guard(Device);
     RxFence* Fence = RxUnwrap<RxFence>(pFence);
 
     if (Fence == nullptr)

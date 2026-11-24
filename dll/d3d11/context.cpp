@@ -76,6 +76,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::GetDevice(
     _Outptr_ ID3D11Device** ppDevice)
 {
+    RxContextGuard Guard(Device);
     Device.AddRef();
     *ppDevice = &Device;
 }
@@ -84,6 +85,7 @@ D3D11_DEVICE_CONTEXT_TYPE
 STDMETHODCALLTYPE
 RxImmediateContext::GetType(VOID)
 {
+    RxContextGuard Guard(Device);
     return D3D11_DEVICE_CONTEXT_IMMEDIATE;
 }
 
@@ -91,6 +93,7 @@ UINT
 STDMETHODCALLTYPE
 RxImmediateContext::GetContextFlags(VOID)
 {
+    RxContextGuard Guard(Device);
     return 0;
 }
 
@@ -98,6 +101,7 @@ VOID
 STDMETHODCALLTYPE
 RxImmediateContext::Flush(VOID)
 {
+    RxContextGuard Guard(Device);
     Device.FlushDriver(0);
 }
 
@@ -110,6 +114,7 @@ RxImmediateContext::Map(
     _In_ UINT MapFlags,
     _Out_opt_ D3D11_MAPPED_SUBRESOURCE* pMappedResource)
 {
+    RxContextGuard Guard(Device);
     D3D11_MAPPED_SUBRESOURCE Ignored;
     DdiResource* Resource = RxGetDdiResource(pResource);
     RxResourceInfo Info;
@@ -154,6 +159,7 @@ RxImmediateContext::Unmap(
     _In_ ID3D11Resource* pResource,
     _In_ UINT Subresource)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Resource = RxGetDdiResource(pResource);
 
     if (Resource != nullptr)
@@ -172,6 +178,7 @@ RxImmediateContext::CopySubresourceRegion(
     _In_ UINT SrcSubresource,
     _In_opt_ const D3D11_BOX* pSrcBox)
 {
+    RxContextGuard Guard(Device);
     CopySubresourceRegion1(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox, 0);
 }
 
@@ -188,6 +195,7 @@ RxImmediateContext::CopySubresourceRegion1(
     _In_opt_ const D3D11_BOX* pSrcBox,
     _In_ UINT CopyFlags)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Destination = RxGetDdiResource(pDstResource);
     DdiResource* Source = RxGetDdiResource(pSrcResource);
 
@@ -214,6 +222,7 @@ RxImmediateContext::CopyResource(
     _In_ ID3D11Resource* pDstResource,
     _In_ ID3D11Resource* pSrcResource)
 {
+    RxContextGuard Guard(Device);
     DdiResource* Destination = RxGetDdiResource(pDstResource);
     DdiResource* Source = RxGetDdiResource(pSrcResource);
 
@@ -229,6 +238,7 @@ RxImmediateContext::ClearRenderTargetView(
     _In_ ID3D11RenderTargetView* pRenderTargetView,
     _In_ const FLOAT ColorRGBA[4])
 {
+    RxContextGuard Guard(Device);
     RxRenderTargetView* View = RxUnwrap<RxRenderTargetView>(pRenderTargetView);
     FLOAT Color[4];
     UINT Channel;

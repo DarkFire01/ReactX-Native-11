@@ -15,6 +15,7 @@ RxImmediateContext::ExecuteCommandList(
     _In_ ID3D11CommandList* pCommandList,
     BOOL RestoreContextState)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
 }
 
@@ -24,6 +25,7 @@ RxImmediateContext::FinishCommandList(
     BOOL RestoreDeferredContextState,
     _COM_Outptr_opt_ ID3D11CommandList** ppCommandList)
 {
+    RxContextGuard Guard(Device);
     if (ppCommandList != nullptr)
         *ppCommandList = nullptr;
 
@@ -45,6 +47,7 @@ RxImmediateContext::UpdateTileMappings(
     _In_reads_opt_(NumRanges) const UINT* pRangeTileCounts,
     _In_ UINT Flags)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -59,6 +62,7 @@ RxImmediateContext::CopyTileMappings(
     _In_ const D3D11_TILE_REGION_SIZE* pTileRegionSize,
     _In_ UINT Flags)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -73,6 +77,7 @@ RxImmediateContext::CopyTiles(
     _In_ UINT64 BufferStartOffsetInBytes,
     _In_ UINT Flags)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
 }
 
@@ -85,6 +90,7 @@ RxImmediateContext::UpdateTiles(
     _In_ const void* pSourceTileData,
     _In_ UINT Flags)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
 }
 
@@ -94,6 +100,7 @@ RxImmediateContext::ResizeTilePool(
     _In_ ID3D11Buffer* pTilePool,
     _In_ UINT64 NewSizeInBytes)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -104,5 +111,6 @@ RxImmediateContext::TiledResourceBarrier(
     _In_opt_ ID3D11DeviceChild* pTiledResourceOrViewAccessBeforeBarrier,
     _In_opt_ ID3D11DeviceChild* pTiledResourceOrViewAccessAfterBarrier)
 {
+    RxContextGuard Guard(Device);
     RX_UNIMPLEMENTED();
 }

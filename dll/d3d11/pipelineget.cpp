@@ -16,6 +16,7 @@ RxImmediateContext::GetShader(
     _Outptr_result_maybenull_ VOID** Shader,
     _Out_opt_ UINT* ClassInstanceCount)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
 
     /* Class instances are never bound, so the count is always zero */
@@ -36,6 +37,7 @@ RxImmediateContext::GetConstantBuffers(
     _In_ UINT Count,
     _Out_writes_opt_(Count) ID3D11Buffer** Buffers)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     UINT Index;
 
@@ -53,6 +55,7 @@ RxImmediateContext::GetShaderResources(
     _In_ UINT Count,
     _Out_writes_opt_(Count) ID3D11ShaderResourceView** Views)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     UINT Index;
 
@@ -70,6 +73,7 @@ RxImmediateContext::GetSamplers(
     _In_ UINT Count,
     _Out_writes_opt_(Count) ID3D11SamplerState** Samplers)
 {
+    RxContextGuard Guard(Device);
     RxStageState& State = Pipeline.Stages[(UINT)Stage];
     UINT Index;
 
@@ -85,6 +89,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::IAGetInputLayout(
     _Outptr_result_maybenull_ ID3D11InputLayout** ppInputLayout)
 {
+    RxContextGuard Guard(Device);
     if (ppInputLayout != nullptr)
         *ppInputLayout = RxHandBack<ID3D11InputLayout>(Pipeline.InputLayout);
 }
@@ -98,6 +103,7 @@ RxImmediateContext::IAGetVertexBuffers(
     _Out_writes_opt_(NumBuffers) UINT* pStrides,
     _Out_writes_opt_(NumBuffers) UINT* pOffsets)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     if (StartSlot >= Pipeline.VertexBuffers.size() || NumBuffers > Pipeline.VertexBuffers.size() - StartSlot)
@@ -121,6 +127,7 @@ RxImmediateContext::IAGetIndexBuffer(
     _Out_opt_ DXGI_FORMAT* Format,
     _Out_opt_ UINT* Offset)
 {
+    RxContextGuard Guard(Device);
     if (pIndexBuffer != nullptr)
         *pIndexBuffer = RxHandBack<ID3D11Buffer>(Pipeline.IndexBuffer);
     if (Format != nullptr)
@@ -134,6 +141,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::IAGetPrimitiveTopology(
     _Out_ D3D11_PRIMITIVE_TOPOLOGY* pTopology)
 {
+    RxContextGuard Guard(Device);
     if (pTopology != nullptr)
         *pTopology = Pipeline.Topology;
 }
@@ -143,6 +151,7 @@ STDMETHODCALLTYPE
 RxImmediateContext::RSGetState(
     _Outptr_result_maybenull_ ID3D11RasterizerState** ppRasterizerState)
 {
+    RxContextGuard Guard(Device);
     if (ppRasterizerState != nullptr)
         *ppRasterizerState = RxHandBack<ID3D11RasterizerState>(Pipeline.Rasterizer);
 }
@@ -153,6 +162,7 @@ RxImmediateContext::RSGetViewports(
     _Inout_ UINT* pNumViewports,
     _Out_writes_opt_(*pNumViewports) D3D11_VIEWPORT* pViewports)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     if (pNumViewports == nullptr)
@@ -188,6 +198,7 @@ RxImmediateContext::RSGetScissorRects(
     _Inout_ UINT* pNumRects,
     _Out_writes_opt_(*pNumRects) D3D11_RECT* pRects)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     if (pNumRects == nullptr)
@@ -216,6 +227,7 @@ RxImmediateContext::OMGetRenderTargets(
     _Out_writes_opt_(NumViews) ID3D11RenderTargetView** ppRenderTargetViews,
     _Outptr_opt_result_maybenull_ ID3D11DepthStencilView** ppDepthStencilView)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     if (ppRenderTargetViews != nullptr && NumViews <= Pipeline.RenderTargets.size())
@@ -235,6 +247,7 @@ RxImmediateContext::OMGetBlendState(
     _Out_opt_ FLOAT BlendFactor[4],
     _Out_opt_ UINT* pSampleMask)
 {
+    RxContextGuard Guard(Device);
     if (ppBlendState != nullptr)
         *ppBlendState = RxHandBack<ID3D11BlendState>(Pipeline.Blend);
     if (BlendFactor != nullptr)
@@ -249,6 +262,7 @@ RxImmediateContext::OMGetDepthStencilState(
     _Outptr_opt_result_maybenull_ ID3D11DepthStencilState** ppDepthStencilState,
     _Out_opt_ UINT* pStencilRef)
 {
+    RxContextGuard Guard(Device);
     if (ppDepthStencilState != nullptr)
         *ppDepthStencilState = RxHandBack<ID3D11DepthStencilState>(Pipeline.DepthStencil);
     if (pStencilRef != nullptr)
@@ -265,6 +279,7 @@ RxImmediateContext::DrawInstanced(
     _In_ UINT StartVertexLocation,
     _In_ UINT StartInstanceLocation)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnDrawInstanced(Device.GetDriverDevice(), VertexCountPerInstance, InstanceCount,
                                              StartVertexLocation, StartInstanceLocation);
 }
@@ -278,6 +293,7 @@ RxImmediateContext::DrawIndexedInstanced(
     _In_ INT BaseVertexLocation,
     _In_ UINT StartInstanceLocation)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnDrawIndexedInstanced(Device.GetDriverDevice(), IndexCountPerInstance, InstanceCount,
                                                     StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
 }
@@ -312,6 +328,7 @@ RxImmediateContext::DrawInstancedIndirect(
     _In_ ID3D11Buffer* pBufferForArgs,
     _In_ UINT AlignedByteOffsetForArgs)
 {
+    RxContextGuard Guard(Device);
     RxBuffer* Arguments = RxIndirectArguments(pBufferForArgs, AlignedByteOffsetForArgs, 4 * sizeof(UINT));
 
     if (Arguments != nullptr)
@@ -328,6 +345,7 @@ RxImmediateContext::DrawIndexedInstancedIndirect(
     _In_ ID3D11Buffer* pBufferForArgs,
     _In_ UINT AlignedByteOffsetForArgs)
 {
+    RxContextGuard Guard(Device);
     RxBuffer* Arguments = RxIndirectArguments(pBufferForArgs, AlignedByteOffsetForArgs, 5 * sizeof(UINT));
 
     if (Arguments != nullptr)
@@ -344,6 +362,7 @@ RxImmediateContext::DispatchIndirect(
     _In_ ID3D11Buffer* pBufferForArgs,
     _In_ UINT AlignedByteOffsetForArgs)
 {
+    RxContextGuard Guard(Device);
     RxBuffer* Arguments = RxIndirectArguments(pBufferForArgs, AlignedByteOffsetForArgs, 3 * sizeof(UINT));
 
     if (Arguments != nullptr)

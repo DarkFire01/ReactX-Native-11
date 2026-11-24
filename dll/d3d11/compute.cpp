@@ -18,6 +18,7 @@ RxImmediateContext::SendComputeUavs(
     _In_ UINT Start,
     _In_ UINT Count)
 {
+    RxContextGuard Guard(Device);
     if (Start >= RxUavSlotCount)
         return;
     if (Count == UINT_MAX)
@@ -34,6 +35,7 @@ VOID
 RxImmediateContext::SendStreamTargets(
     _In_ UINT ClearTargets)
 {
+    RxContextGuard Guard(Device);
     /* Offsets of -1 keep appending where the targets left off */
     Device.GetDeviceFuncs().pfnSoSetTargets(Device.GetDriverDevice(), Pipeline.StreamTargetCount, ClearTargets,
                                             Pipeline.StreamTargetHandles.data(), RxKeepCounters.data());
@@ -49,6 +51,7 @@ RxImmediateContext::CSSetUnorderedAccessViews(
     _In_reads_opt_(NumUAVs) ID3D11UnorderedAccessView* const* ppUnorderedAccessViews,
     _In_reads_opt_(NumUAVs) const UINT* pUAVInitialCounts)
 {
+    RxContextGuard Guard(Device);
     RxUnorderedAccessView* View;
     UINT Index;
 
@@ -89,6 +92,7 @@ RxImmediateContext::CSGetUnorderedAccessViews(
     _In_range_(0, D3D11_1_UAV_SLOT_COUNT - StartSlot) UINT NumUAVs,
     _Out_writes_opt_(NumUAVs) ID3D11UnorderedAccessView** ppUnorderedAccessViews)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     if (ppUnorderedAccessViews == nullptr || StartSlot >= RxUavSlotCount || NumUAVs > RxUavSlotCount - StartSlot)
@@ -108,6 +112,7 @@ RxImmediateContext::OMGetRenderTargetsAndUnorderedAccessViews(
     _In_range_(0, D3D11_PS_CS_UAV_REGISTER_COUNT - UAVStartSlot) UINT NumUAVs,
     _Out_writes_opt_(NumUAVs) ID3D11UnorderedAccessView** ppUnorderedAccessViews)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     OMGetRenderTargets(NumRTVs, ppRenderTargetViews, ppDepthStencilView);
@@ -125,6 +130,7 @@ RxImmediateContext::Dispatch(
     _In_ UINT ThreadGroupCountY,
     _In_ UINT ThreadGroupCountZ)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnDispatch(Device.GetDriverDevice(), ThreadGroupCountX, ThreadGroupCountY,
                                         ThreadGroupCountZ);
 }
@@ -135,6 +141,7 @@ RxImmediateContext::ClearUnorderedAccessViewUint(
     _In_ ID3D11UnorderedAccessView* pUnorderedAccessView,
     _In_ const UINT Values[4])
 {
+    RxContextGuard Guard(Device);
     RxUnorderedAccessView* View = RxUnwrap<RxUnorderedAccessView>(pUnorderedAccessView);
 
     if (View == nullptr || Values == nullptr)
@@ -150,6 +157,7 @@ RxImmediateContext::ClearUnorderedAccessViewFloat(
     _In_ ID3D11UnorderedAccessView* pUnorderedAccessView,
     _In_ const FLOAT Values[4])
 {
+    RxContextGuard Guard(Device);
     RxUnorderedAccessView* View = RxUnwrap<RxUnorderedAccessView>(pUnorderedAccessView);
     FLOAT Flushed[4];
     UINT Index;
@@ -171,6 +179,7 @@ RxImmediateContext::CopyStructureCount(
     _In_ UINT DstAlignedByteOffset,
     _In_ ID3D11UnorderedAccessView* pSrcView)
 {
+    RxContextGuard Guard(Device);
     RxUnorderedAccessView* View = RxUnwrap<RxUnorderedAccessView>(pSrcView);
     RxBuffer* Destination = RxUnwrap<RxBuffer>(pDstBuffer);
     D3D11_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
@@ -205,6 +214,7 @@ RxImmediateContext::SOSetTargets(
     _In_reads_opt_(NumBuffers) ID3D11Buffer* const* ppSOTargets,
     _In_reads_opt_(NumBuffers) const UINT* pOffsets)
 {
+    RxContextGuard Guard(Device);
     UINT Previous = Pipeline.StreamTargetCount;
     RxBuffer* Buffer;
     UINT Index;
@@ -233,6 +243,7 @@ RxImmediateContext::SOGetTargets(
     _In_range_(0, D3D11_SO_BUFFER_SLOT_COUNT) UINT NumBuffers,
     _Out_writes_opt_(NumBuffers) ID3D11Buffer** ppSOTargets)
 {
+    RxContextGuard Guard(Device);
     UINT Index;
 
     if (ppSOTargets == nullptr || NumBuffers > Pipeline.StreamTargets.size())
@@ -246,5 +257,6 @@ VOID
 STDMETHODCALLTYPE
 RxImmediateContext::DrawAuto(VOID)
 {
+    RxContextGuard Guard(Device);
     Device.GetDeviceFuncs().pfnDrawAuto(Device.GetDriverDevice());
 }

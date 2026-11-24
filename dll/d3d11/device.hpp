@@ -1094,6 +1094,31 @@ public:
     BOOL IsThreadProtected = FALSE;
 };
 
+/* Holds the device lock for one immediate context call while multithread protection is on */
+class RxContextGuard final
+{
+public:
+    explicit RxContextGuard(
+        _In_ RxDevice& Device)
+        : Lock(Device.IsThreadProtected ? &Device.ThreadLock : nullptr)
+    {
+        if (Lock != nullptr)
+            EnterCriticalSection(Lock);
+    }
+
+    ~RxContextGuard()
+    {
+        if (Lock != nullptr)
+            LeaveCriticalSection(Lock);
+    }
+
+    RxContextGuard(const RxContextGuard&) = delete;
+    RxContextGuard& operator=(const RxContextGuard&) = delete;
+
+private:
+    CRITICAL_SECTION* Lock;
+};
+
 /* Every creation flag the runtime accepts */
 inline constexpr UINT RxKnownCreateFlags =
     D3D11_CREATE_DEVICE_SINGLETHREADED |
