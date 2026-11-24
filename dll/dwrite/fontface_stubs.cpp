@@ -92,14 +92,3 @@ RxFontFace::ReleaseGlyphImageData(
     RX_UNIMPLEMENTED();
 }
 
-HRESULT
-STDMETHODCALLTYPE
-RxFontFace::GetFontResource(
-    _COM_Outptr_ IDWriteFontResource** fontResource)
-{
-    if (fontResource != nullptr)
-        *fontResource = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}

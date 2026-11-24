@@ -23,6 +23,9 @@ struct RxStyleAxis
     INT32 Maximum;
     INT32 Ordering;
     UINT32 Source;
+    USHORT NameId;
+    /* DWRITE_FONT_AXIS_ATTRIBUTES from fvar */
+    USHORT Attributes;
 };
 
 /* One axis a STAT value applies to, as an axis index and a range around a nominal value */
@@ -193,7 +196,7 @@ RxReadDesignAxes(
         if (!Stat.Has(Record, 8))
             return FALSE;
         Table.Axes.push_back({ static_cast<DWRITE_FONT_AXIS_TAG>(RxDWriteTag(Stat.U32(Record))), RxFixedMaximum,
-                               RxFixedMaximum, RxFixedMinimum, Stat.U16(Record + 6), Index });
+                               RxFixedMaximum, RxFixedMinimum, Stat.U16(Record + 6), Index, Stat.U16(Record + 4), 0 });
     }
     return TRUE;
 }
@@ -255,6 +258,8 @@ RxMergeStyleAxes(
         Target->Default = Variation.Default;
         Target->Minimum = Variation.Minimum;
         Target->Maximum = Variation.Maximum;
+        Target->NameId = Variation.NameId;
+        Target->Attributes = Variation.Attributes;
     }
 }
 
@@ -306,7 +311,7 @@ RxAddStandardAxes(
                 break;
         }
         Table.Axes.push_back({ RxStandardAxes[Index], Value, Value, Value, RxFixedMaximum,
-                               static_cast<UINT32>(Table.Axes.size()) });
+                               static_cast<UINT32>(Table.Axes.size()), 0xFFFF, 0 });
     }
 }
 
@@ -616,6 +621,51 @@ RxFaceAxisValues(
 
     RxBuildStyleTable(Face, Weight, Stretch, Style, Table);
     RxCanonicalValues(Table, Coordinates, Values);
+}
+
+VOID
+RxDescribeAxes(
+    _In_ const RxFaceTables* Face,
+    _Out_ std::vector<RxFontAxisInfo>& Axes)
+{
+    RxStyleTable Table;
+    std::vector<RxAxisValue> None;
+    USHORT Weight = RxFaceWeight(Face->Header());
+    BYTE Stretch = RxFaceStretch(Face->Header());
+    BYTE Style = RxFaceStyle(Face->Header());
+
+    /* Without STAT the standard axes take the values the name heuristic settles on */
+    if (!Face->Sfnt().HasTable(RxTag('S', 'T', 'A', 'T')))
+    {
+        RxFaceDescription Description;
+
+        RxDescribeFace(Face, None, &Description);
+        Weight = Description.Weight;
+        Stretch = Description.Stretch;
+        Style = Description.Style;
+    }
+    RxBuildStyleTable(Face, Weight, Stretch, Style, Table);
+
+    Axes.clear();
+    for (UINT32 Index = 0; Index < Table.Axes.size(); Index++)
+    {
+        const RxStyleAxis& Axis = Table.Axes[Index];
+        RxFontAxisInfo Info;
+
+        Info.Tag = Axis.Tag;
+        Info.Default = Axis.Default;
+        Info.Minimum = Axis.Minimum;
+        Info.Maximum = Axis.Maximum;
+        Info.Attributes = Axis.Attributes;
+        if (Axis.NameId != 0xFFFF)
+            RxReadNames(Face, Axis.NameId, Info.Names);
+        for (const auto& Record : Table.Records)
+        {
+            if (Record.SortKey == static_cast<INT32>(Index))
+                Info.Values.push_back({ Record.Conditions[0].Minimum, Record.Conditions[0].Maximum, Record.Names });
+        }
+        Axes.push_back(std::move(Info));
+    }
 }
 
 USHORT

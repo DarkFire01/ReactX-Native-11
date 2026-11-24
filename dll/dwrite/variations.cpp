@@ -118,6 +118,26 @@ RxNamedInstanceValues(
 }
 
 INT32
+RxFloatToFixed(
+    _In_ FLOAT Value)
+{
+    /* Scaled to 32 fractional bits first, then rounded to 16 */
+    FLOAT Scaled = Value * 65536.0f * 65536.0f;
+    INT64 Rounded;
+
+    if (!(Scaled > -9.2e18f))
+        return Value != Value ? 0 : RxFixedMinimum;
+    if (Scaled > 9.2e18f)
+        return RxFixedMaximum;
+    Rounded = (static_cast<INT64>(Scaled) + 0x8000) >> 16;
+    if (Rounded < RxFixedMinimum)
+        return RxFixedMinimum;
+    if (Rounded > RxFixedMaximum)
+        return RxFixedMaximum;
+    return static_cast<INT32>(Rounded);
+}
+
+INT32
 RxFixedSubtract(
     _In_ INT32 Left,
     _In_ INT32 Right)

@@ -9,6 +9,7 @@
 #include "fontface.hpp"
 #include "glyphraster.hpp"
 #include "names.hpp"
+#include "fontresource.hpp"
 
 /* Private interface our faces answer to, so internal code can find the tables behind one */
 static constexpr GUID RxFontFaceIid = { 0x5a0f8b31, 0x7c2e, 0x4d6a, { 0x9e, 0x13, 0x48, 0xb2, 0x0c, 0x7f, 0xd1, 0x66 } };
@@ -62,13 +63,24 @@ RxFontFace::Create(
     }
 
     Result->Simulations = Simulations;
+    /* Each fvar axis takes the first value given for it, kept in range; other tags are dropped */
     RxNamedInstanceValues(Result->Data->Sfnt(), 0xFFFF, Result->AxisValues);
-    for (UINT32 Index = 0; Values != nullptr && Index < ValueCount; Index++)
+    if (Values != nullptr && !Result->AxisValues.empty())
     {
-        for (auto& Value : Result->AxisValues)
+        std::vector<RxVariationAxis> Axes;
+
+        RxReadVariationAxes(Result->Data->Sfnt(), Axes);
+        for (SIZE_T Axis = 0; Axis < Result->AxisValues.size() && Axis < Axes.size(); Axis++)
         {
-            if (Value.Tag == Values[Index].Tag)
-                Value.Value = Values[Index].Value;
+            for (UINT32 Index = 0; Index < ValueCount; Index++)
+            {
+                if (Values[Index].Tag == Result->AxisValues[Axis].Tag)
+                {
+                    Result->AxisValues[Axis].Value = std::min(std::max(Values[Index].Value, Axes[Axis].Minimum),
+                                                              Axes[Axis].Maximum);
+                    break;
+                }
+            }
         }
     }
     {
@@ -747,6 +759,14 @@ RxFontFace::GetFontAxisValues(
         fontAxisValues[Index].value = static_cast<FLOAT>(ReportedValues[Index].Value) / RxFixedOne;
     }
     return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxFontFace::GetFontResource(
+    _COM_Outptr_ IDWriteFontResource** fontResource)
+{
+    return RxFontResource::Create(Data->File(), Data->Index(), fontResource);
 }
 
 BOOL

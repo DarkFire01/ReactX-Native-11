@@ -9,6 +9,8 @@
 
 #include "sfnt.hpp"
 
+#include <math.h>
+
 /* 16.16 fixed point limits, which also stand for the infinities */
 constexpr INT32 RxFixedOne = 0x10000;
 constexpr INT32 RxFixedMinimum = static_cast<INT32>(0x80000000);
@@ -50,6 +52,24 @@ RxNamedInstanceValues(
     _In_ const RxSfnt& Sfnt,
     _In_ USHORT Instance,
     _Out_ std::vector<RxAxisValue>& Values);
+
+/* Nearest 16.16 value, saturated */
+INT32
+RxFloatToFixed(
+    _In_ FLOAT Value);
+
+/* The limits read back as the infinities they stand for */
+inline
+FLOAT
+RxFixedToFloat(
+    _In_ INT32 Value)
+{
+    if (Value == RxFixedMaximum)
+        return INFINITY;
+    if (Value == RxFixedMinimum)
+        return -INFINITY;
+    return static_cast<FLOAT>(Value) / RxFixedOne;
+}
 
 /* Fixed point subtraction that keeps the infinities and saturates */
 INT32

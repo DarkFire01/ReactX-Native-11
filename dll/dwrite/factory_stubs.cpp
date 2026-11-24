@@ -209,20 +209,6 @@ RxWriteFactory::CreateFontFaceReference(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::CreateFontResource(
-    _In_ IDWriteFontFile* fontFile,
-    UINT32 faceIndex,
-    _COM_Outptr_ IDWriteFontResource** fontResource)
-{
-    if (fontResource != nullptr)
-        *fontResource = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::GetSystemFontSet(
     BOOL includeDownloadableFonts,
     _COM_Outptr_ IDWriteFontSet1** fontSet)

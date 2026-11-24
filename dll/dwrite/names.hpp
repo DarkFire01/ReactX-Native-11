@@ -81,6 +81,32 @@ RxFaceAxisValues(
     _In_ BYTE Style,
     _Out_ std::vector<RxAxisValue>& Values);
 
+/* A named value on one axis */
+struct RxAxisValueName
+{
+    INT32 Minimum;
+    INT32 Maximum;
+    RxNameList Names;
+};
+
+/* An axis of a font resource */
+struct RxFontAxisInfo
+{
+    DWRITE_FONT_AXIS_TAG Tag;
+    INT32 Default;
+    INT32 Minimum;
+    INT32 Maximum;
+    USHORT Attributes;
+    RxNameList Names;
+    std::vector<RxAxisValueName> Values;
+};
+
+/* Every axis a face reports with its range, attributes and names */
+VOID
+RxDescribeAxes(
+    _In_ const RxFaceTables* Face,
+    _Out_ std::vector<RxFontAxisInfo>& Axes);
+
 /* OS/2 and head values */
 USHORT
 RxFaceWeight(
