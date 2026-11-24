@@ -667,8 +667,10 @@ RxDxgiFactory::CreateSwapChainForHwnd(
     _In_opt_ IDXGIOutput* pRestrictToOutput,
     _COM_Outptr_ IDXGISwapChain1** ppSwapChain)
 {
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC Windowed;
     IRxPresentDevice* Device;
     RxSwapChain* SwapChain;
+    BOOL WantFullscreen;
     HRESULT hr;
 
     UNREFERENCED_PARAMETER(pRestrictToOutput);
@@ -691,9 +693,6 @@ RxDxgiFactory::CreateSwapChainForHwnd(
         return System->CreateSwapChainForHwnd(pDevice, hWnd, pDesc, pFullscreenDesc, nullptr, ppSwapChain);
     }
 
-    if (pFullscreenDesc != nullptr && !pFullscreenDesc->Windowed)
-        return DXGI_ERROR_UNSUPPORTED;
-
     /* Aspect ratio stretching is only for CoreWindow and composition swapchains */
     if (pDesc->Scaling == DXGI_SCALING_ASPECT_RATIO_STRETCH)
         return DXGI_ERROR_INVALID_CALL;
@@ -707,10 +706,25 @@ RxDxgiFactory::CreateSwapChainForHwnd(
     if (FAILED(pDevice->QueryInterface(IID_PPV_ARGS(&Device))))
         return DXGI_ERROR_INVALID_CALL;
 
+    /* A swapchain asked for fullscreen starts windowed and then enters fullscreen, as SetFullscreenState would */
+    WantFullscreen = (pFullscreenDesc != nullptr && !pFullscreenDesc->Windowed);
+    if (WantFullscreen)
+    {
+        Windowed = *pFullscreenDesc;
+        Windowed.Windowed = TRUE;
+        pFullscreenDesc = &Windowed;
+    }
+
     hr = RxSwapChain::Create(*this, Device, hWnd, *pDesc, pFullscreenDesc, &SwapChain);
     Device->Release();
-    if (SUCCEEDED(hr))
-        *ppSwapChain = SwapChain;
+    if (FAILED(hr))
+        return hr;
+
+    /* When fullscreen cannot be had now the swapchain stays windowed and says it is occluded */
+    if (WantFullscreen && FAILED(SwapChain->SetFullscreenState(TRUE, nullptr)))
+        hr = DXGI_STATUS_OCCLUDED;
+
+    *ppSwapChain = SwapChain;
     return hr;
 }
 
