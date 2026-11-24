@@ -159,6 +159,14 @@ RxImmediate(
              ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT), Value };
 }
 
+/* Halves and 16 bit integers */
+BOOLEAN
+RxIsShort(
+    _In_ llvm::Type *Type)
+{
+    return Type->isHalfTy() || Type->isIntegerTy(16);
+}
+
 /* Doubles and 64 bit integers take two neighboring components, low word first */
 BOOLEAN
 RxIsWide(
@@ -194,6 +202,38 @@ RxModified(
     Tokens.insert(Tokens.begin() + 1, ENCODE_D3D10_SB_EXTENDED_OPERAND_TYPE(D3D10_SB_EXTENDED_OPERAND_MODIFIER) |
                                       ENCODE_D3D10_SB_EXTENDED_OPERAND_MODIFIER(Modifier));
     return Tokens;
+}
+
+/*
+ * Programs the reference runs with 64 bit values: doubles and 64 bit integers anywhere, and
+ * 16 bit group shared memory, which it reaches through 64 bit words (fitted to its outputs)
+ */
+BOOLEAN
+RxKeepsWideValues(
+    _In_ llvm::Function &Entry)
+{
+    for (llvm::BasicBlock &Block : Entry)
+    {
+        for (llvm::Instruction &Instruction : Block)
+        {
+            if (RxIsWide(Instruction.getType()))
+                return TRUE;
+            for (UINT Index = 0; Index < Instruction.getNumOperands(); Index++)
+            {
+                if (RxIsWide(Instruction.getOperand(Index)->getType()))
+                    return TRUE;
+            }
+            if (llvm::isa<llvm::LoadInst>(Instruction) || llvm::isa<llvm::StoreInst>(Instruction))
+            {
+                llvm::Value *Pointer = llvm::isa<llvm::LoadInst>(Instruction) ? Instruction.getOperand(0) : Instruction.getOperand(1);
+                llvm::PointerType *Type = llvm::cast<llvm::PointerType>(Pointer->getType());
+
+                if (Type->getAddressSpace() == hlsl::DXIL::kTGSMAddrSpace && RxIsShort(Type->getElementType()))
+                    return TRUE;
+            }
+        }
+    }
+    return FALSE;
 }
 
 typedef struct _RX_HANDLE
@@ -340,6 +380,40 @@ private:
         _In_ llvm::CallInst *Call,
         _In_ OpCode Code,
         _In_ const RX_HANDLE &Handle);
+
+    BOOLEAN
+    ShortAccess(
+        _In_ llvm::CallInst *Call,
+        _In_ OpCode Code,
+        _In_ const RX_HANDLE &Handle);
+
+    /* One 16 bit field of Word into a component, as the float a half holds or zero extended */
+    VOID
+    Unpack(
+        _In_ RxTokens Target,
+        _In_ RxTokens Word,
+        _In_ UINT Shift,
+        _In_ BOOLEAN Real)
+    {
+        UINT Bits = Fresh();
+
+        Emit(D3D11_SB_OPCODE_UBFE, { SlotDest(Bits, FALSE), RxImmediate(16), RxImmediate(Shift), Word });
+        Emit(Real ? RxWarpOpcodeHalfToFloat : D3D10_SB_OPCODE_MOV, { Target, SlotSource(Bits, FALSE) });
+    }
+
+    /* A 16 bit value as the bits memory holds: a half's encoding, or the integer */
+    RxTokens
+    Packed(
+        _In_ llvm::Value *Value)
+    {
+        UINT Bits;
+
+        if (!Value->getType()->isHalfTy())
+            return Source(Value);
+        Bits = Fresh();
+        Emit(D3D11_SB_OPCODE_F32TOF16, { SlotDest(Bits, FALSE), Source(Value) });
+        return SlotSource(Bits, FALSE);
+    }
 
     RxTokens
     Temp(
@@ -550,6 +624,8 @@ private:
     std::unordered_map<const llvm::Value *, UINT> StatusSlots;     /* the residency status a resource access returns last */
     std::unordered_map<const llvm::Value *, UINT> SharedRegisters;
     std::unordered_map<const llvm::Value *, UINT> Arrays;
+    std::unordered_map<const llvm::Value *, UINT> ArrayUnits;
+    std::unordered_map<const llvm::Value *, BOOLEAN> Unpacked;    /* results of native 16 bit loads, exact already */     /* bytes per cell: 2 for 16 bit arrays, else 4 */
     std::unordered_map<UINT64, UINT> Bases;
     std::unordered_map<const llvm::Value *, UINT> Overrides;
     std::unordered_map<const llvm::Value *, RX_HEAP_SLOT> HeapSlots;
@@ -562,6 +638,7 @@ private:
     llvm::LoopInfo Loops;
     std::vector<RX_LOOP> Open;
     BOOLEAN PixelShader = FALSE;
+    BOOLEAN NearestHalves = FALSE;
     BOOLEAN Failed = FALSE;
 
 public:
@@ -1320,6 +1397,15 @@ RxLowering::Lower(
     }
     if (!LowerPlain(Instruction))
         return FALSE;
+
+    /* Loads and parts of unpacked 16 bit data already hold exact values */
+    if (llvm::isa<llvm::LoadInst>(Instruction))
+        return TRUE;
+    if (llvm::ExtractValueInst *Extract = llvm::dyn_cast<llvm::ExtractValueInst>(Instruction))
+    {
+        if (Unpacked.count(Extract->getAggregateOperand()) != 0)
+            return TRUE;
+    }
     Narrow(Instruction);
     return TRUE;
 }
@@ -1644,7 +1730,7 @@ RxLowering::LowerPlain(
             return TRUE;
         case llvm::Instruction::BitCast:
             if (Instruction->getType()->isHalfTy())
-                Emit(D3D11_SB_OPCODE_F16TOF32, { Dest(Instruction), Source(Instruction->getOperand(0)) });
+                Emit(RxWarpOpcodeHalfToFloat, { Dest(Instruction), Source(Instruction->getOperand(0)) });
             else if (Instruction->getOperand(0)->getType()->isHalfTy())
                 Emit(D3D11_SB_OPCODE_F32TOF16, { Dest(Instruction), Source(Instruction->getOperand(0)) });
             else
@@ -1655,10 +1741,13 @@ RxLowering::LowerPlain(
             return TRUE;
         case llvm::Instruction::FPTrunc:
         {
-            /* The reference converts fast math results toward zero and everything else to nearest */
+            /*
+             * The reference converts fast math results toward zero and everything else to nearest,
+             * except in programs that keep 64 bit values, where its conversions round to nearest
+             */
             llvm::FPMathOperator *Math = llvm::dyn_cast<llvm::FPMathOperator>(Instruction->getOperand(0));
 
-            if (Math != nullptr && Math->hasUnsafeAlgebra())
+            if (Math != nullptr && Math->hasUnsafeAlgebra() && !NearestHalves)
                 Emit(RxWarpOpcodeHalfTowardZero, { Dest(Instruction), Source(Instruction->getOperand(0)) });
             else
                 Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(Instruction->getOperand(0)) });
@@ -1728,16 +1817,25 @@ RxLowering::LowerPlain(
             const llvm::DataLayout &Layout = Dxil.GetModule()->getDataLayout();
             llvm::ConstantInt *Count = llvm::dyn_cast<llvm::ConstantInt>(Alloca->getArraySize());
             UINT Bytes;
+            UINT Unit;
             UINT Register = (UINT)Arrays.size();
 
             if (Count == nullptr)
                 return FALSE;
             Bytes = (UINT)(Layout.getTypeAllocSize(Alloca->getAllocatedType()) * Count->getZExtValue());
-            if (Bytes == 0 || (Bytes & 3) != 0)
+
+            /* Arrays of 16 bit values keep one value per cell */
+            llvm::Type *Scalar = Alloca->getAllocatedType();
+
+            while (Scalar->isArrayTy())
+                Scalar = Scalar->getArrayElementType();
+            Unit = RxIsShort(Scalar) ? 2 : 4;
+            if (Bytes == 0 || (Bytes % Unit) != 0)
                 return FALSE;
             Arrays[Alloca] = Register;
+            ArrayUnits[Alloca] = Unit;
             Decls.insert(Decls.end(), { ENCODE_D3D10_SB_OPCODE_TYPE(D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP) |
-                                        ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(4), Register, Bytes / 4, 4 });
+                                        ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(4), Register, Bytes / Unit, 4 });
             return TRUE;
         }
         case llvm::Instruction::Load:
@@ -1846,7 +1944,7 @@ RxLowering::Memory(
     RX_POINTER Place;
     RxTokens Address;
 
-    if (!Resolve(Pointer, &Place) || (Size != 4 && Size != 8))
+    if (!Resolve(Pointer, &Place) || (Size != 2 && Size != 4 && Size != 8))
         return FALSE;
 
     auto Array = Arrays.find(Place.Base);
@@ -1855,24 +1953,25 @@ RxLowering::Memory(
     {
         UINT Mode = Loading ? RxSelectMode : RxMaskMode;
         UINT Bits = Loading ? 0 : 1;
+        UINT Unit = ArrayUnits[Place.Base];
 
-        if ((Place.Bytes & 3) != 0)
+        if ((Place.Bytes % Unit) != 0 || (Unit == 2) != (Size == 2))
             return FALSE;
         for (const std::pair<llvm::Value *, UINT> &Term : Place.Terms)
         {
-            if ((Term.second & 3) != 0)
+            if ((Term.second % Unit) != 0)
                 return FALSE;
         }
-        Address = Offset(Place, 4);
+        Address = Offset(Place, Unit);
 
         /* A 64 bit element spans two cells, low word first */
         RxTokens Cells[2];
 
-        for (UINT Word = 0; Word < Size / 4; Word++)
+        for (UINT Word = 0; Word < ((Size == 8) ? 2u : 1u); Word++)
         {
             if (Place.Terms.empty())
             {
-                Cells[Word] = RxRegister(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, Mode, Bits, { Array->second, Place.Bytes / 4 + Word });
+                Cells[Word] = RxRegister(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, Mode, Bits, { Array->second, Place.Bytes / Unit + Word });
             }
             else
             {
@@ -1881,7 +1980,7 @@ RxLowering::Memory(
                 Cells[Word].insert(Cells[Word].end(), Address.begin(), Address.end());
             }
         }
-        if (Size == 4)
+        if (Size != 8)
         {
             if (Loading)
                 Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Cells[0] });
@@ -1913,6 +2012,21 @@ RxLowering::Memory(
     if (Shared == SharedRegisters.end())
         return FALSE;
     Address = Offset(Place, 1);
+    if (Size == 2)
+    {
+        RxTokens Region = RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, Loading ? RxSelectMode : RxMaskMode, Loading ? 0 : 1,
+                                     { Shared->second });
+        UINT Word = Fresh();
+
+        if (!Loading)
+        {
+            Emit(RxWarpOpcodeStoreHalves, { Region, Address, Packed(Value) });
+            return TRUE;
+        }
+        Emit(D3D11_SB_OPCODE_LD_RAW, { SlotDest(Word, FALSE), Address, Region });
+        Unpack(Dest(Instruction), SlotSource(Word, FALSE), 0, Instruction->getType()->isHalfTy());
+        return TRUE;
+    }
     if (Loading)
     {
         Emit(D3D11_SB_OPCODE_LD_RAW, { Dest(Instruction), Address,
@@ -2176,6 +2290,20 @@ RxLowering::LowerCall(
 
                 Buffer.insert(Buffer.end(), Relative.begin(), Relative.end());
             }
+            /* Native 16 bit rows hold eight values, two to a word */
+            if (llvm::cast<llvm::StructType>(Call->getType())->getNumElements() == 8)
+            {
+                BOOLEAN Real = llvm::cast<llvm::StructType>(Call->getType())->getElementType(0)->isHalfTy();
+                UINT Halves = Fresh4();
+
+                Fresh4();
+                Slots[Call] = Halves * 4;
+                Unpacked[Call] = TRUE;
+                Emit(D3D10_SB_OPCODE_MOV, { Temp(Register, RxMaskMode, 0xF), Buffer });
+                for (UINT Element = 0; Element < 8; Element++)
+                    Unpack(Temp(Halves + Element / 4, RxMaskMode, 1u << (Element & 3)), Temp(Register, RxSelectMode, Element / 2), (Element & 1) * 16, Real);
+                return TRUE;
+            }
             Emit(D3D10_SB_OPCODE_MOV, { Temp(Register, RxMaskMode, 0xF), Buffer });
             return TRUE;
         }
@@ -2271,9 +2399,6 @@ RxLowering::LowerCall(
         case OpCode::WaveMultiPrefixBitCount:
             return LowerWave(Call, Code);
         default:
-            /* Native 16 bit resource data has its own memory layout, not lowered yet */
-            if (!Dxil.GetUseMinPrecision() && RxNamesSixteen(Call))
-                return FALSE;
             return LowerResource(Call, Code);
     }
 }
@@ -2463,6 +2588,12 @@ RxLowering::LowerResource(
 
     if (Call->getNumArgOperands() < 2 || !HandleOf(Call->getArgOperand(1), &Handle))
         return FALSE;
+    if (!Dxil.GetUseMinPrecision() &&
+        ((Code == OpCode::RawBufferLoad && RxIsShort(llvm::cast<llvm::StructType>(Call->getType())->getElementType(0))) ||
+         (Code == OpCode::RawBufferStore && RxIsShort(Call->getArgOperand(4)->getType()))))
+    {
+        return ShortAccess(Call, Code, Handle);
+    }
     if ((Code == OpCode::RawBufferLoad && RxIsWide(llvm::cast<llvm::StructType>(Call->getType())->getElementType(0))) ||
         (Code == OpCode::RawBufferStore && RxIsWide(Call->getArgOperand(4)->getType())))
     {
@@ -2819,6 +2950,58 @@ RxLowering::WideAccess(
     return TRUE;
 }
 
+/* Raw and structured accesses of native 16 bit elements, packed two bytes apart */
+BOOLEAN
+RxLowering::ShortAccess(
+    _In_ llvm::CallInst *Call,
+    _In_ OpCode Code,
+    _In_ const RX_HANDLE &Handle)
+{
+    BOOLEAN Structured = Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::StructuredBuffer;
+    BOOLEAN Loading = Code == OpCode::RawBufferLoad;
+    llvm::ConstantInt *Bits = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(Loading ? 4 : 8));
+    RxTokens Offset = Source(Call->getArgOperand(Structured ? 3 : 2));
+    UINT Mask;
+    UINT Words;
+
+    if (Bits == nullptr || (!Structured && Handle.Kind != (UINT)hlsl::DXIL::ResourceKind::RawBuffer))
+        return FALSE;
+    Mask = (UINT)Bits->getZExtValue() & 0xF;
+    if (Loading)
+    {
+        BOOLEAN Real = llvm::cast<llvm::StructType>(Call->getType())->getElementType(0)->isHalfTy();
+        UINT Result = ResultRegister(Call);
+
+        Unpacked[Call] = TRUE;
+
+        /* Byte granular reads: two words hold the four elements wherever they start */
+        Words = Fresh4();
+        if (Structured)
+            Emit(D3D11_SB_OPCODE_LD_STRUCTURED, { Temp(Words, RxMaskMode, 3), Source(Call->getArgOperand(2)), Offset, ResourceOperand(Handle) });
+        else
+            Emit(D3D11_SB_OPCODE_LD_RAW, { Temp(Words, RxMaskMode, 3), Offset, ResourceOperand(Handle) });
+        for (UINT Element = 0; Element < 4; Element++)
+        {
+            if (Mask & (1u << Element))
+                Unpack(Temp(Result, RxMaskMode, 1u << Element), Temp(Words, RxSelectMode, Element / 2), (Element & 1) * 16, Real);
+        }
+        return TRUE;
+    }
+    Words = Fresh4();
+    for (UINT Element = 0; Element < 4; Element++)
+    {
+        RxTokens Value = (Mask & (1u << Element)) ? Packed(Call->getArgOperand(4 + Element)) : RxImmediate(0);
+
+        Emit(D3D10_SB_OPCODE_MOV, { Temp(Words, RxMaskMode, 1u << Element), Value });
+    }
+    if (Structured)
+        Emit(RxWarpOpcodeStoreHalves, { ResourceOperand(Handle, RxMaskMode, Mask), Source(Call->getArgOperand(2)), Offset,
+                                        Temp(Words, RxSwizzleMode, RxXyzw) });
+    else
+        Emit(RxWarpOpcodeStoreHalves, { ResourceOperand(Handle, RxMaskMode, Mask), Offset, Temp(Words, RxSwizzleMode, RxXyzw) });
+    return TRUE;
+}
+
 /* Phi values for the edge From to To; copied through fresh temps so swaps stay right */
 VOID
 RxLowering::Edge(
@@ -3069,6 +3252,7 @@ RxLowering::Run(
     else
         return FALSE;
 
+    NearestHalves = RxKeepsWideValues(*Entry);
     if (!Declarations())
         return FALSE;
     Dominators.recalculate(*Entry);

@@ -42,6 +42,12 @@ static constexpr UINT RxWarpOpcodeLong = 0x403;
  */
 static constexpr UINT RxWarpOpcodePairScatter = 0x404;
 
+/* store_raw, or store_structured with four operands, writing the low 16 bits of each component two bytes apart */
+static constexpr UINT RxWarpOpcodeStoreHalves = 0x405;
+
+/* The low 16 bits of each component as a half, to float, keeping NaN payloads: dest, value */
+static constexpr UINT RxWarpOpcodeHalfToFloat = 0x406;
+
 typedef enum _RX_WARP_LONG_KIND
 {
     RxWarpLongAdd,

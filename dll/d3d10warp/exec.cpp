@@ -250,6 +250,10 @@ private:
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
+    HalfToFloat(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
     Grouped(
         _In_ const RX_WARP_INSTRUCTION &Prefix,
         _In_ const RX_WARP_INSTRUCTION &Instruction);
@@ -833,6 +837,7 @@ RxWarpMachine::Operate(
         case D3D11_SB_OPCODE_IMM_ATOMIC_IMIN:
         case D3D11_SB_OPCODE_IMM_ATOMIC_UMAX:
         case D3D11_SB_OPCODE_IMM_ATOMIC_UMIN:
+        case RxWarpOpcodeStoreHalves:
             Access(Instruction);
             break;
         case D3D11_SB_OPCODE_DADD:
@@ -892,6 +897,9 @@ RxWarpMachine::Operate(
             break;
         case RxWarpOpcodePairScatter:
             PairScatter(Instruction);
+            break;
+        case RxWarpOpcodeHalfToFloat:
+            HalfToFloat(Instruction);
             break;
         default:
             Arithmetic(Instruction);
@@ -1400,6 +1408,31 @@ RxWarpMachine::Long(
         Result[Lane][1] = Result[Lane][3] = Narrow ? (UINT)Value : (UINT)(Value >> 32);
     }
     Store(Instruction, 0, Result, FALSE);
+}
+
+/* Half NaNs keep their payload, made quiet; everything else converts as f16tof32 does */
+VOID
+RxWarpMachine::HalfToFloat(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Values;
+
+    if (Instruction.OperandCount < 2)
+        return;
+    FetchAll(Instruction.Operands[1], TRUE, Values);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            UINT Half = Values[Lane][Component] & 0xFFFF;
+
+            if ((Half & 0x7C00) == 0x7C00 && (Half & 0x3FF) != 0)
+                Values[Lane][Component] = ((Half & 0x8000) << 16) | 0x7FC00000 | ((Half & 0x3FF) << 13);
+            else
+                Values[Lane][Component] = RxWarpAsUint(RxWarpHalfToFloat(Half));
+        }
+    }
+    Store(Instruction, 0, Values, FALSE);
 }
 
 /* Lanes that agree on the element store their own words; otherwise the first two store the last two's */
@@ -2970,8 +3003,11 @@ RxWarpMachine::Access(
                 {
                     SIZE_T At = Offset + (SIZE_T)Component * 4;
 
+                    /* A word a 16 bit load reads across the end keeps its two bytes inside */
                     if (Memory.Data != nullptr && At + 4 <= Memory.Size)
                         memcpy(&Raw[Component], Memory.Data + At, 4);
+                    else if (Memory.Data != nullptr && At + 2 == Memory.Size)
+                        memcpy(&Raw[Component], Memory.Data + At, 2);
                 }
                 for (UINT Component = 0; Component < 4; Component++)
                     Result[Lane][Component] = Raw[Target->Swizzle[Component] & 3];
@@ -2981,8 +3017,11 @@ RxWarpMachine::Access(
         }
         case D3D11_SB_OPCODE_STORE_RAW:
         case D3D11_SB_OPCODE_STORE_STRUCTURED:
+        case RxWarpOpcodeStoreHalves:
         {
-            BOOLEAN Structured = (Opcode == D3D11_SB_OPCODE_STORE_STRUCTURED);
+            BOOLEAN Structured = (Opcode == D3D11_SB_OPCODE_STORE_STRUCTURED) ||
+                                 (Opcode == RxWarpOpcodeStoreHalves && Instruction.OperandCount == 4);
+            SIZE_T Unit = (Opcode == RxWarpOpcodeStoreHalves) ? 2 : 4;
             const RX_WARP_OPERAND &Value = Instruction.Operands[Structured ? 3 : 2];
 
             Target = &Instruction.Operands[0];
@@ -3000,10 +3039,10 @@ RxWarpMachine::Access(
                     continue;
                 for (UINT Component = 0; Component < 4; Component++)
                 {
-                    SIZE_T At = Offset + (SIZE_T)Component * 4;
+                    SIZE_T At = Offset + (SIZE_T)Component * Unit;
 
-                    if ((Target->Mask & (1u << Component)) && At + 4 <= Memory.Size)
-                        memcpy(Memory.Data + At, &Third[Lane][Component], 4);
+                    if ((Target->Mask & (1u << Component)) && At + Unit <= Memory.Size)
+                        memcpy(Memory.Data + At, &Third[Lane][Component], Unit);
                 }
             }
             return;
