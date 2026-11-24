@@ -22,9 +22,11 @@ RxImmediateContext::QueryInterface(
         riid == __uuidof(ID3D11DeviceChild) ||
         riid == __uuidof(ID3D11DeviceContext) ||
         riid == __uuidof(ID3D11DeviceContext1) ||
-        riid == __uuidof(ID3D11DeviceContext2))
+        riid == __uuidof(ID3D11DeviceContext2) ||
+        riid == __uuidof(ID3D11DeviceContext3) ||
+        riid == __uuidof(ID3D11DeviceContext4))
     {
-        *ppvObject = static_cast<ID3D11DeviceContext2*>(this);
+        *ppvObject = static_cast<ID3D11DeviceContext4*>(this);
         AddRef();
         return S_OK;
     }

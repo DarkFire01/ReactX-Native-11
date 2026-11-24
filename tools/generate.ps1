@@ -24,8 +24,8 @@ $DefaultDir = 'dll\d3d11'
 $Classes = @(
     @{
         Class       = 'RxDevice'
-        Interfaces  = @('ID3D11Device', 'ID3D11Device1', 'ID3D11Device2')
-        Headers     = @('um\d3d11.h', 'um\d3d11_1.h', 'um\d3d11_2.h')
+        Interfaces  = @('ID3D11Device', 'ID3D11Device1', 'ID3D11Device2', 'ID3D11Device3', 'ID3D11Device4', 'ID3D11Device5')
+        Headers     = @('um\d3d11.h', 'um\d3d11_1.h', 'um\d3d11_2.h', 'um\d3d11_3.h', 'um\d3d11_4.h')
         Name        = 'device'
         Purpose     = 'ID3D11Device methods'
         Implemented = @(
@@ -39,17 +39,19 @@ $Classes = @(
             'CreateHullShader', 'CreateDomainShader', 'CreateComputeShader', 'CheckFormatSupport',
             'CreateQuery', 'CreatePredicate', 'CheckFeatureSupport', 'GetImmediateContext1', 'CreateBlendState1',
             'CreateRasterizerState1', 'GetImmediateContext2', 'GetResourceTiling', 'CheckMultisampleQualityLevels1',
-            'CreateDeviceContextState', 'OpenSharedResource', 'OpenSharedResource1'
+            'CreateDeviceContextState', 'OpenSharedResource', 'OpenSharedResource1', 'CreateFence', 'OpenSharedFence',
+            'RegisterDeviceRemovedEvent', 'UnregisterDeviceRemoved', 'GetImmediateContext3'
         )
     },
     @{
         Class       = 'RxImmediateContext'
-        Interfaces  = @('ID3D11DeviceChild', 'ID3D11DeviceContext', 'ID3D11DeviceContext1', 'ID3D11DeviceContext2')
-        Headers     = @('um\d3d11.h', 'um\d3d11_1.h', 'um\d3d11_2.h')
+        Interfaces  = @('ID3D11DeviceChild', 'ID3D11DeviceContext', 'ID3D11DeviceContext1', 'ID3D11DeviceContext2', 'ID3D11DeviceContext3', 'ID3D11DeviceContext4')
+        Headers     = @('um\d3d11.h', 'um\d3d11_1.h', 'um\d3d11_2.h', 'um\d3d11_3.h', 'um\d3d11_4.h')
         Name        = 'context'
         Purpose     = 'ID3D11DeviceContext methods'
         Implemented = @(
-            'GetDevice', 'GetType', 'GetContextFlags', 'Flush', 'ClearState', 'Map', 'Unmap',
+            'GetDevice', 'GetType', 'GetContextFlags', 'Flush', 'ClearState', 'Map', 'Unmap', 'Flush1',
+            'SetHardwareProtectionState', 'GetHardwareProtectionState', 'Signal', 'Wait',
             'CopySubresourceRegion', 'CopyResource', 'ClearRenderTargetView', 'VSSetConstantBuffers',
             'PSSetShaderResources', 'PSSetShader', 'PSSetSamplers', 'VSSetShader', 'DrawIndexed', 'Draw',
             'PSSetConstantBuffers', 'IASetInputLayout', 'IASetVertexBuffers', 'IASetIndexBuffer',

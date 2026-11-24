@@ -181,7 +181,7 @@ private:
     RxDevice& Device;
 };
 
-class RxImmediateContext final : public ID3D11DeviceContext2
+class RxImmediateContext final : public ID3D11DeviceContext4
 {
 public:
     explicit RxImmediateContext(
@@ -452,6 +452,8 @@ private:
 
     /* The state object SwapDeviceContextState last made active, held by an internal reference */
     RxChildLifetime* ActiveState = nullptr;
+
+    BOOL IsHardwareProtected = FALSE;
 };
 
 /* A tear-off of RxDevice: same lifetime, QueryInterface goes back to the device */
@@ -722,7 +724,7 @@ private:
     RxDevice& Device;
 };
 
-class RxDevice final : public ID3D11Device2, public RxKernelDevice
+class RxDevice final : public ID3D11Device5, public RxKernelDevice
 {
 public:
     static
@@ -1065,6 +1067,17 @@ private:
     D3D11_1DDI_VIDEODEVICEFUNCS VideoFuncs = {};
 
     RxPrivateDataStore PrivateData;
+
+    /* Events RegisterDeviceRemovedEvent took, closed with the device */
+    struct RemovedEvent
+    {
+        DWORD Cookie;
+        HANDLE Event;
+    };
+
+    SRWLOCK RemovedLock = SRWLOCK_INIT;
+    DWORD RemovedCookie = 0;
+    std::vector<RemovedEvent> RemovedEvents;
 
 public:
     /* Made through d3d10.dll or d3d10_1.dll: the device and its objects also answer as Direct3D 10 */

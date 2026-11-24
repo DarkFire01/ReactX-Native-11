@@ -51,6 +51,9 @@ RxDevice::~RxDevice()
     if (DxgiAdapter != nullptr)
         DxgiAdapter->Release();
 
+    for (const RemovedEvent& Each : RemovedEvents)
+        CloseHandle(Each.Event);
+
     DeleteCriticalSection(&ThreadLock);
 
     /* The driver sees its state bindings emptied first, then bound objects and defaults go while it lives */
@@ -351,9 +354,10 @@ RxDevice::QueryInterface(
     }
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11Device) || riid == __uuidof(ID3D11Device1) ||
-        riid == __uuidof(ID3D11Device2))
+        riid == __uuidof(ID3D11Device2) || riid == __uuidof(ID3D11Device3) || riid == __uuidof(ID3D11Device4) ||
+        riid == __uuidof(ID3D11Device5))
     {
-        *ppvObject = static_cast<ID3D11Device2*>(this);
+        *ppvObject = static_cast<ID3D11Device5*>(this);
         AddRef();
         return S_OK;
     }

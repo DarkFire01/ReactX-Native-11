@@ -20,6 +20,7 @@ nt_add_usermode_dll(d3d11
         buffer_stubs.cpp
         dxbc.cpp
         features.cpp
+        fence.cpp
         formatsupport.cpp
         dxgisurface.cpp
         dxgidevice.cpp
