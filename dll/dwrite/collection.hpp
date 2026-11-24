@@ -66,18 +66,21 @@ public:
             delete this;
     }
 
-    /* MAXUINT32 when no family has the name */
+    /* MAXUINT32 when no family of the model has the name */
     UINT32
     FindFamily(
-        _In_z_ PCWSTR Name) const;
+        _In_z_ PCWSTR Name,
+        _In_ DWRITE_FONT_FAMILY_MODEL Model) const;
 
     /* The family listing an entry; MAXUINT32 if none does */
     UINT32
     FamilyOfEntry(
-        _In_ UINT32 Entry) const;
+        _In_ UINT32 Entry,
+        _In_ DWRITE_FONT_FAMILY_MODEL Model) const;
 
     std::vector<RxFontEntry> Entries;
-    std::vector<RxFamilyData> Families;
+    /* Indexed by DWRITE_FONT_FAMILY_MODEL: typographic, then weight stretch style */
+    std::vector<RxFamilyData> Families[2];
     /* Built from the installed fonts */
     BOOLEAN IsSystem;
 
@@ -89,7 +92,8 @@ private:
         _In_ IDWriteFontFile* File);
 
     VOID
-    BuildFamilies(VOID);
+    BuildFamilies(
+        _In_ DWRITE_FONT_FAMILY_MODEL Model);
 
     struct NameIndex
     {
@@ -98,7 +102,7 @@ private:
     };
 
     LONG RefCount;
-    std::vector<NameIndex> NameMap;
+    std::vector<NameIndex> NameMap[2];
 };
 
 /* Weight and style a face shows with its simulations */
@@ -139,13 +143,14 @@ RxWin32Candidates(
     _In_ SIZE_T Length,
     _Inout_ std::vector<UINT32>& Entries);
 
-class RxFontCollection final : public IDWriteFontCollection
+class RxFontCollection final : public IDWriteFontCollection3
 {
 public:
     static
     HRESULT
     Create(
         _In_ RxFontSetData* Data,
+        _In_ DWRITE_FONT_FAMILY_MODEL Model,
         _Outptr_ RxFontCollection** Collection);
 
     RX_DECLARE_IUNKNOWN
@@ -158,20 +163,34 @@ public:
         return SetData;
     }
 
+    DWRITE_FONT_FAMILY_MODEL
+    Model(VOID) const
+    {
+        return FamilyModel;
+    }
+
+    /* The families of the model this collection groups by */
+    const std::vector<RxFamilyData>&
+    FamilyList(VOID) const
+    {
+        return SetData->Families[FamilyModel];
+    }
+
     static
     RxFontCollection*
     FromInterface(
         _In_opt_ IUnknown* Collection);
 
 private:
-    RxFontCollection() : RefCount(1), SetData(nullptr) {}
+    RxFontCollection() : RefCount(1), SetData(nullptr), FamilyModel(DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE) {}
     ~RxFontCollection();
 
     LONG RefCount;
     RxFontSetData* SetData;
+    DWRITE_FONT_FAMILY_MODEL FamilyModel;
 };
 
-class RxFontFamily final : public IDWriteFontFamily
+class RxFontFamily final : public IDWriteFontFamily2, public IDWriteFontList2
 {
 public:
     static
@@ -204,7 +223,7 @@ private:
     std::vector<RxFontItem> Items;
 };
 
-class RxFont final : public IDWriteFont
+class RxFont final : public IDWriteFont3
 {
 public:
     static

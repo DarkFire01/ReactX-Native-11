@@ -241,7 +241,7 @@ RxGdiInterop::CreateFontFromLOGFONT(
     if (Best == MAXUINT32)
         return DWRITE_E_NOFONT;
 
-    Family = Data->FamilyOfEntry(BestEntry);
+    Family = Data->FamilyOfEntry(BestEntry, Collection->Model());
     if (Family == MAXUINT32)
         return DWRITE_E_NOFONT;
 

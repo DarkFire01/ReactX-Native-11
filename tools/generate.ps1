@@ -452,35 +452,37 @@ $Classes = @(
     },
     @{
         Class       = 'RxFontCollection'
-        Interfaces  = @('IDWriteFontCollection')
-        Headers     = @('um\dwrite.h')
+        Interfaces  = @('IDWriteFontCollection', 'IDWriteFontCollection1', 'IDWriteFontCollection2', 'IDWriteFontCollection3')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h', 'um\dwrite_3.h')
         Include     = 'collection.hpp'
         Dir         = 'dll\dwrite'
         Name        = 'collection'
         Purpose     = 'IDWriteFontCollection methods'
-        Implemented = @('GetFontFamilyCount', 'GetFontFamily', 'FindFamilyName', 'GetFontFromFontFace')
+        Implemented = @('GetFontFamilyCount', 'GetFontFamily', 'FindFamilyName', 'GetFontFromFontFace', 'GetFontFamilyModel')
     },
     @{
         Class       = 'RxFontFamily'
-        Interfaces  = @('IDWriteFontList', 'IDWriteFontFamily')
-        Headers     = @('um\dwrite.h')
+        Interfaces  = @('IDWriteFontList', 'IDWriteFontFamily', 'IDWriteFontList1', 'IDWriteFontFamily1', 'IDWriteFontList2',
+                        'IDWriteFontFamily2')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h', 'um\dwrite_3.h')
         Include     = 'collection.hpp'
         Dir         = 'dll\dwrite'
         Name        = 'family'
         Purpose     = 'IDWriteFontFamily methods'
         Implemented = @('GetFontCollection', 'GetFontCount', 'GetFont', 'GetFamilyNames', 'GetFirstMatchingFont',
-                        'GetMatchingFonts')
+                        'GetMatchingFonts', 'GetFontLocality')
     },
     @{
         Class       = 'RxFont'
-        Interfaces  = @('IDWriteFont')
-        Headers     = @('um\dwrite.h')
+        Interfaces  = @('IDWriteFont', 'IDWriteFont1', 'IDWriteFont2', 'IDWriteFont3')
+        Headers     = @('um\dwrite.h', 'um\dwrite_1.h', 'um\dwrite_2.h', 'um\dwrite_3.h')
         Include     = 'collection.hpp'
         Dir         = 'dll\dwrite'
         Name        = 'font'
         Purpose     = 'IDWriteFont methods'
         Implemented = @('GetFontFamily', 'GetWeight', 'GetStretch', 'GetStyle', 'IsSymbolFont', 'GetFaceNames',
-                        'GetInformationalStrings', 'GetSimulations', 'GetMetrics', 'HasCharacter', 'CreateFontFace')
+                        'GetInformationalStrings', 'GetSimulations', 'GetMetrics', 'HasCharacter', 'CreateFontFace',
+                        'GetPanose', 'IsMonospacedFont', 'IsColorFont', 'Equals', 'GetLocality')
     },
     @{
         Class       = 'RxTextFormat'

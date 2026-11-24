@@ -213,7 +213,7 @@ RxWriteFactory::CreateCustomFontCollection(
     hr = RxFontSetData::CreateFromFiles(Files.data(), static_cast<UINT32>(Files.size()), &Data);
     if (FAILED(hr))
         return hr;
-    hr = RxFontCollection::Create(Data, &Collection);
+    hr = RxFontCollection::Create(Data, DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE, &Collection);
     Data->Release();
     if (FAILED(hr))
         return hr;
@@ -278,7 +278,7 @@ RxWriteFactory::GetEudcFontCollection(
     hr = RxFontSetData::CreateFromFiles(Files.data(), static_cast<UINT32>(Files.size()), &Data);
     if (FAILED(hr))
         return hr;
-    hr = RxFontCollection::Create(Data, &Collection);
+    hr = RxFontCollection::Create(Data, DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE, &Collection);
     Data->Release();
     if (FAILED(hr))
         return hr;

@@ -18,15 +18,18 @@ RxWriteFactory::Create(
 }
 
 RxWriteFactory::RxWriteFactory(
-    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System(nullptr), Interop(nullptr)
+    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System{}, Interop(nullptr)
 {
     InitializeSRWLock(&Lock);
 }
 
 RxWriteFactory::~RxWriteFactory()
 {
-    if (System != nullptr)
-        System->Release();
+    for (RxFontCollection* Collection : System)
+    {
+        if (Collection != nullptr)
+            Collection->Release();
+    }
     delete Interop;
 }
 
@@ -54,28 +57,38 @@ RxWriteFactory::GetGdiInterop(
 /* Font collections */
 
 HRESULT
-RxWriteFactory::SystemCollection(
+RxWriteFactory::SystemCollectionOf(
+    _In_ DWRITE_FONT_FAMILY_MODEL Model,
     _Outptr_ RxFontCollection** Collection)
 {
     HRESULT hr = S_OK;
 
     *Collection = nullptr;
     AcquireSRWLockExclusive(&Lock);
-    if (System == nullptr)
+    if (System[Model] == nullptr)
     {
+        RxFontCollection* Other = System[Model == DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC ?
+                                         DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE : DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC];
         RxFontSetData* Data;
 
-        hr = RxFontSetData::CreateSystem(&Data);
-        if (SUCCEEDED(hr))
+        if (Other != nullptr)
         {
-            hr = RxFontCollection::Create(Data, &System);
-            Data->Release();
+            hr = RxFontCollection::Create(Other->Data(), Model, &System[Model]);
+        }
+        else
+        {
+            hr = RxFontSetData::CreateSystem(&Data);
+            if (SUCCEEDED(hr))
+            {
+                hr = RxFontCollection::Create(Data, Model, &System[Model]);
+                Data->Release();
+            }
         }
     }
     if (SUCCEEDED(hr))
     {
-        System->AddRef();
-        *Collection = System;
+        System[Model]->AddRef();
+        *Collection = System[Model];
     }
     ReleaseSRWLockExclusive(&Lock);
     return hr;
@@ -108,10 +121,8 @@ RxWriteFactory::GetSystemFontCollection(
     _COM_Outptr_ IDWriteFontCollection1** fontCollection,
     BOOL checkForUpdates)
 {
-    RX_UNIMPLEMENTED();
-    if (fontCollection != nullptr)
-        *fontCollection = nullptr;
-    return E_NOTIMPL;
+    return GetSystemFontCollection(includeDownloadableFonts, DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE,
+                                   reinterpret_cast<IDWriteFontCollection3**>(fontCollection));
 }
 
 HRESULT
@@ -121,10 +132,8 @@ RxWriteFactory::GetSystemFontCollection(
     DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
     _COM_Outptr_ IDWriteFontCollection2** fontCollection)
 {
-    RX_UNIMPLEMENTED();
-    if (fontCollection != nullptr)
-        *fontCollection = nullptr;
-    return E_NOTIMPL;
+    return GetSystemFontCollection(includeDownloadableFonts, fontFamilyModel,
+                                   reinterpret_cast<IDWriteFontCollection3**>(fontCollection));
 }
 
 HRESULT
@@ -134,10 +143,21 @@ RxWriteFactory::GetSystemFontCollection(
     DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
     _COM_Outptr_ IDWriteFontCollection3** fontCollection)
 {
-    RX_UNIMPLEMENTED();
-    if (fontCollection != nullptr)
-        *fontCollection = nullptr;
-    return E_NOTIMPL;
+    RxFontCollection* Collection;
+    HRESULT hr;
+
+    if (fontCollection == nullptr)
+        return E_INVALIDARG;
+    *fontCollection = nullptr;
+    if (static_cast<UINT32>(fontFamilyModel) > DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE)
+        return E_INVALIDARG;
+
+    /* Downloadable fonts are never offered, so both answers are the local set */
+    hr = SystemCollectionOf(fontFamilyModel, &Collection);
+    if (FAILED(hr))
+        return hr;
+    *fontCollection = Collection;
+    return S_OK;
 }
 
 HRESULT

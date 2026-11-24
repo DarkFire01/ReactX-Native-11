@@ -34,6 +34,15 @@ public:
     /* Built on first use and kept for the factory's life; the caller gets a reference */
     HRESULT
     SystemCollection(
+        _Outptr_ RxFontCollection** Collection)
+    {
+        return SystemCollectionOf(DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE, Collection);
+    }
+
+    /* The installed fonts grouped by one family model; both share one parse */
+    HRESULT
+    SystemCollectionOf(
+        _In_ DWRITE_FONT_FAMILY_MODEL Model,
         _Outptr_ RxFontCollection** Collection);
 
 private:
@@ -50,6 +59,6 @@ private:
     SRWLOCK Lock;
     std::vector<RxComPtr<IDWriteFontFileLoader>> FileLoaders;
     std::vector<RxComPtr<IDWriteFontCollectionLoader>> CollectionLoaders;
-    RxFontCollection* System;
+    RxFontCollection* System[2];
     RxGdiInterop* Interop;
 };

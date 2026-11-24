@@ -5,9 +5,11 @@ nt_add_usermode_dll(dwrite
         facetables.cpp
         factory.cpp
         factorymisc.cpp
+        family_stubs.cpp
         factory_stubs.cpp
         fontface.cpp
         fontface_stubs.cpp
+        font_stubs.cpp
         fontfile.cpp
         fontgdi.cpp
         fontmode.cpp
@@ -16,6 +18,8 @@ nt_add_usermode_dll(dwrite
         glyphrun.cpp
         gpos.cpp
         collection.cpp
+        collection1.cpp
+        collection_stubs.cpp
         hinter.cpp
         layoutengine.cpp
         linebreak.cpp

@@ -179,41 +179,46 @@ RxFontSetData::AddFile(
 }
 
 VOID
-RxFontSetData::BuildFamilies(VOID)
+RxFontSetData::BuildFamilies(
+    _In_ DWRITE_FONT_FAMILY_MODEL Model)
 {
-    auto Lower = [this](const NameIndex& Item, const std::wstring& Name) { return RxCompareNames(Item.Name, Name) < 0; };
+    auto Lower = [](const NameIndex& Item, const std::wstring& Name) { return RxCompareNames(Item.Name, Name) < 0; };
+    std::vector<RxFamilyData>& ModelFamilies = Families[Model];
+    std::vector<NameIndex>& ModelNames = NameMap[Model];
 
     for (UINT32 Index = 0; Index < Entries.size(); Index++)
     {
-        const RxNameList& Names = Entries[Index].Description.WwsFamily;
+        const RxFaceDescription& Description = Entries[Index].Description;
+        const RxNameList& Names = Model == DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC ? Description.TypographicFamily :
+                                                                                  Description.WwsFamily;
         const std::wstring& Identity = RxIdentityName(Names);
         UINT32 Family;
-        auto Found = std::lower_bound(NameMap.begin(), NameMap.end(), Identity, Lower);
+        auto Found = std::lower_bound(ModelNames.begin(), ModelNames.end(), Identity, Lower);
 
-        if (Found != NameMap.end() && RxCompareNames(Found->Name, Identity) == 0)
+        if (Found != ModelNames.end() && RxCompareNames(Found->Name, Identity) == 0)
         {
             Family = Found->Family;
         }
         else
         {
-            Family = static_cast<UINT32>(Families.size());
-            Families.push_back({ Names, {} });
-            NameMap.insert(Found, { Identity, Family });
+            Family = static_cast<UINT32>(ModelFamilies.size());
+            ModelFamilies.push_back({ Names, {} });
+            ModelNames.insert(Found, { Identity, Family });
         }
-        Families[Family].Items.push_back({ Index, DWRITE_FONT_SIMULATIONS_NONE });
+        ModelFamilies[Family].Items.push_back({ Index, DWRITE_FONT_SIMULATIONS_NONE });
 
         /* Other languages point at the same family unless another family took the name first */
         for (const auto& Localized : Names)
         {
-            auto Slot = std::lower_bound(NameMap.begin(), NameMap.end(), Localized.Text, Lower);
+            auto Slot = std::lower_bound(ModelNames.begin(), ModelNames.end(), Localized.Text, Lower);
 
-            if (Slot == NameMap.end() || RxCompareNames(Slot->Name, Localized.Text) != 0)
-                NameMap.insert(Slot, { Localized.Text, Family });
+            if (Slot == ModelNames.end() || RxCompareNames(Slot->Name, Localized.Text) != 0)
+                ModelNames.insert(Slot, { Localized.Text, Family });
         }
     }
 
     /* Within a family: weight, style, then normal stretch first, then stretch, then set order */
-    for (auto& Family : Families)
+    for (auto& Family : ModelFamilies)
     {
         std::stable_sort(Family.Items.begin(), Family.Items.end(), [this](const RxFontItem& A, const RxFontItem& B)
         {
@@ -274,10 +279,11 @@ RxFontSetData::CreateSystem(
         File->Release();
     }
 
-    Result->BuildFamilies();
+    Result->BuildFamilies(DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC);
+    Result->BuildFamilies(DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE);
     Result->IsSystem = TRUE;
     RX_TRACE(L"system collection: %Iu fonts in %Iu families from %Iu files", Result->Entries.size(),
-             Result->Families.size(), Paths.size());
+             Result->Families[DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE].size(), Paths.size());
     *Data = Result;
     return S_OK;
 }
@@ -297,31 +303,37 @@ RxFontSetData::CreateFromFiles(
 
     for (UINT32 Index = 0; Index < Count; Index++)
         Result->AddFile(Files[Index]);
-    Result->BuildFamilies();
+    Result->BuildFamilies(DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC);
+    Result->BuildFamilies(DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE);
     *Data = Result;
     return S_OK;
 }
 
 UINT32
 RxFontSetData::FindFamily(
-    _In_z_ PCWSTR Name) const
+    _In_z_ PCWSTR Name,
+    _In_ DWRITE_FONT_FAMILY_MODEL Model) const
 {
+    const std::vector<NameIndex>& ModelNames = NameMap[Model];
     std::wstring Wanted = Name;
-    auto Found = std::lower_bound(NameMap.begin(), NameMap.end(), Wanted,
+    auto Found = std::lower_bound(ModelNames.begin(), ModelNames.end(), Wanted,
                                   [](const NameIndex& Item, const std::wstring& Key) { return RxCompareNames(Item.Name, Key) < 0; });
 
-    if (Found != NameMap.end() && RxCompareNames(Found->Name, Wanted) == 0)
+    if (Found != ModelNames.end() && RxCompareNames(Found->Name, Wanted) == 0)
         return Found->Family;
     return MAXUINT32;
 }
 
 UINT32
 RxFontSetData::FamilyOfEntry(
-    _In_ UINT32 Entry) const
+    _In_ UINT32 Entry,
+    _In_ DWRITE_FONT_FAMILY_MODEL Model) const
 {
-    for (UINT32 Family = 0; Family < Families.size(); Family++)
+    const std::vector<RxFamilyData>& ModelFamilies = Families[Model];
+
+    for (UINT32 Family = 0; Family < ModelFamilies.size(); Family++)
     {
-        for (const auto& Item : Families[Family].Items)
+        for (const auto& Item : ModelFamilies[Family].Items)
         {
             if (Item.Entry == Entry)
                 return Family;
@@ -360,7 +372,7 @@ RxWin32Candidates(
     /* Walked family by family in WWS order, which is the order earlier matches win ties in */
     for (UINT32 Pass = 0; Pass < 2 && Entries.empty(); Pass++)
     {
-        for (const auto& Family : Data->Families)
+        for (const auto& Family : Data->Families[DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE])
         {
             for (const auto& Item : Family.Items)
             {
@@ -668,6 +680,7 @@ RxAddCompletenessSimulations(
 HRESULT
 RxFontCollection::Create(
     _In_ RxFontSetData* Data,
+    _In_ DWRITE_FONT_FAMILY_MODEL Model,
     _Outptr_ RxFontCollection** Collection)
 {
     *Collection = new (std::nothrow) RxFontCollection();
@@ -675,6 +688,7 @@ RxFontCollection::Create(
         return E_OUTOFMEMORY;
     Data->AddRef();
     (*Collection)->SetData = Data;
+    (*Collection)->FamilyModel = Model;
     return S_OK;
 }
 
@@ -705,9 +719,11 @@ RxFontCollection::QueryInterface(
     if (ppvObject == nullptr)
         return E_POINTER;
 
-    if (riid == RxCollectionIid || riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFontCollection))
+    if (riid == RxCollectionIid || riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFontCollection) ||
+        riid == __uuidof(IDWriteFontCollection1) || riid == __uuidof(IDWriteFontCollection2) ||
+        riid == __uuidof(IDWriteFontCollection3))
     {
-        *ppvObject = static_cast<IDWriteFontCollection*>(this);
+        *ppvObject = static_cast<IDWriteFontCollection3*>(this);
         AddRef();
         return S_OK;
     }
@@ -722,7 +738,7 @@ UINT32
 STDMETHODCALLTYPE
 RxFontCollection::GetFontFamilyCount(VOID)
 {
-    return static_cast<UINT32>(SetData->Families.size());
+    return static_cast<UINT32>(FamilyList().size());
 }
 
 HRESULT
@@ -737,7 +753,7 @@ RxFontCollection::GetFontFamily(
     if (fontFamily == nullptr)
         return E_INVALIDARG;
     *fontFamily = nullptr;
-    if (index >= SetData->Families.size())
+    if (index >= FamilyList().size())
         return E_FAIL;
 
     hr = RxFontFamily::Create(this, index, TRUE, &Family);
@@ -759,7 +775,7 @@ RxFontCollection::FindFamilyName(
     if (familyName == nullptr)
         return E_INVALIDARG;
 
-    *index = SetData->FindFamily(familyName);
+    *index = SetData->FindFamily(familyName, FamilyModel);
     *exists = *index != MAXUINT32;
     return S_OK;
 }
@@ -784,9 +800,9 @@ RxFontCollection::GetFontFromFontFace(
     if (FAILED(hr))
         return hr;
 
-    for (UINT32 Family = 0; Family < SetData->Families.size(); Family++)
+    for (UINT32 Family = 0; Family < FamilyList().size(); Family++)
     {
-        for (const auto& Item : SetData->Families[Family].Items)
+        for (const auto& Item : FamilyList()[Family].Items)
         {
             const RxFontEntry& Entry = SetData->Entries[Item.Entry];
             RxFontFile* Ours = static_cast<RxFontFile*>(Entry.File.Get());
@@ -815,7 +831,7 @@ RxFontFamily::Create(
     _In_ BOOLEAN AddSimulations,
     _Outptr_ RxFontFamily** Result)
 {
-    std::vector<RxFontItem> Items = Collection->Data()->Families[Family].Items;
+    std::vector<RxFontItem> Items = Collection->FamilyList()[Family].Items;
 
     if (AddSimulations)
         RxAddCompletenessSimulations(Collection->Data(), Items);
@@ -847,9 +863,16 @@ RxFontFamily::QueryInterface(
     if (ppvObject == nullptr)
         return E_POINTER;
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFontList) || riid == __uuidof(IDWriteFontFamily))
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFontList) || riid == __uuidof(IDWriteFontFamily) ||
+        riid == __uuidof(IDWriteFontFamily1) || riid == __uuidof(IDWriteFontFamily2))
     {
-        *ppvObject = static_cast<IDWriteFontFamily*>(this);
+        *ppvObject = static_cast<IDWriteFontFamily2*>(this);
+        AddRef();
+        return S_OK;
+    }
+    if (riid == __uuidof(IDWriteFontList1) || riid == __uuidof(IDWriteFontList2))
+    {
+        *ppvObject = static_cast<IDWriteFontList2*>(this);
         AddRef();
         return S_OK;
     }
@@ -907,7 +930,7 @@ RxFontFamily::GetFamilyNames(
 {
     if (names == nullptr)
         return E_INVALIDARG;
-    return RxLocalizedStrings::Create(Collection->Data()->Families[FamilyIndex].Names, names);
+    return RxLocalizedStrings::Create(Collection->FamilyList()[FamilyIndex].Names, names);
 }
 
 HRESULT
@@ -918,7 +941,7 @@ RxFontFamily::GetFirstMatchingFont(
     DWRITE_FONT_STYLE style,
     _COM_Outptr_ IDWriteFont** matchingFont)
 {
-    const std::vector<RxFontItem>& Real = Collection->Data()->Families[FamilyIndex].Items;
+    const std::vector<RxFontItem>& Real = Collection->FamilyList()[FamilyIndex].Items;
     DWRITE_FONT_SIMULATIONS Simulations;
     SIZE_T Index;
     RxFont* Result;
@@ -948,7 +971,7 @@ RxFontFamily::GetMatchingFonts(
     _COM_Outptr_ IDWriteFontList** matchingFonts)
 {
     const RxFontSetData* Data = Collection->Data();
-    std::vector<RxFontItem> Sorted = Data->Families[FamilyIndex].Items;
+    std::vector<RxFontItem> Sorted = Collection->FamilyList()[FamilyIndex].Items;
     INT64 X = 1100 * (static_cast<INT64>(stretch) - 5);
     INT64 Y = 700 * static_cast<INT64>(style);
     INT64 Z = 5 * (static_cast<INT64>(weight) - 400);
@@ -971,7 +994,7 @@ RxFontFamily::GetMatchingFonts(
     hr = CreateList(Collection.Get(), FamilyIndex, std::move(Sorted), &Result);
     if (FAILED(hr))
         return hr;
-    *matchingFonts = Result;
+    *matchingFonts = static_cast<IDWriteFontFamily2*>(Result);
     return S_OK;
 }
 
@@ -1014,9 +1037,10 @@ RxFont::QueryInterface(
     if (ppvObject == nullptr)
         return E_POINTER;
 
-    if (riid == RxFontIid || riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFont))
+    if (riid == RxFontIid || riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFont) ||
+        riid == __uuidof(IDWriteFont1) || riid == __uuidof(IDWriteFont2) || riid == __uuidof(IDWriteFont3))
     {
-        *ppvObject = static_cast<IDWriteFont*>(this);
+        *ppvObject = static_cast<IDWriteFont3*>(this);
         AddRef();
         return S_OK;
     }
@@ -1097,7 +1121,9 @@ STDMETHODCALLTYPE
 RxFont::GetFaceNames(
     _COM_Outptr_ IDWriteLocalizedStrings** names)
 {
-    const RxNameList& Faces = Entry().Description.WwsFace;
+    const RxFaceDescription& Description = Entry().Description;
+    const RxNameList& Faces = (Collection->Model() == DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC &&
+                               !Description.TypographicFace.empty()) ? Description.TypographicFace : Description.WwsFace;
 
     if (names == nullptr)
         return E_INVALIDARG;
