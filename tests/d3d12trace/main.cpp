@@ -4,14 +4,15 @@
  * PURPOSE:     Direct3D 12 runtime traffic to its user mode driver and the kernel, printed for comparison
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  *
- * d3d12trace [-runtime system|reactx|<dir>] [-threads] [-ddi] [-nokernel] [scenario ...]
+ * d3d12trace [-runtime system|reactx|<dir>] [-threads] [-ddi] [-nokernel] [-warp] [scenario ...]
  *
  * The core's imports of GetProcAddress and the D3DKMT thunks are pointed at wrappers in this process
  * only. The wrapper for the driver's OpenAdapter12 wraps the adapter table, every DDI table the driver
  * fills and the callback tables handed to it, so each call prints with its arguments. Handles print as
  * ids in the order they first appear: r for runtime handles, d for driver handles, k for kernel handles.
  * With -ddi the driver's callbacks and what they call are left out. With -nokernel the D3DKMT thunks are left
- * out, since the system core reaches the kernel through calls the tracer does not see.
+ * out, since the system core reaches the kernel through calls the tracer does not see. With -warp devices are made
+ * on the system's WARP adapter.
  */
 
 #define WIN32_NO_STATUS
@@ -23,6 +24,7 @@
 #include <d3dkmthk.h>
 #include <d3d12umddi.h>
 #include <d3dcompiler.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 
 #include <cstdarg>
@@ -2147,8 +2149,20 @@ TrPatchImports(
 
 struct TrRun
 {
-    PFN_D3D12_CREATE_DEVICE CreateDevice;
+    PFN_D3D12_CREATE_DEVICE RealCreateDevice;
     PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE SerializeVersioned;
+    IUnknown* DefaultAdapter;
+
+    /* D3D12CreateDevice, with the adapter chosen on the command line standing in for the default one */
+    HRESULT
+    CreateDevice(
+        _In_opt_ IUnknown* Adapter,
+        _In_ D3D_FEATURE_LEVEL Level,
+        _In_ REFIID riid,
+        _COM_Outptr_opt_ void** ppDevice)
+    {
+        return RealCreateDevice(Adapter != nullptr ? Adapter : DefaultAdapter, Level, riid, ppDevice);
+    }
 };
 
 static
@@ -2971,6 +2985,8 @@ wmain(
     std::wstring Directory;
     std::vector<std::string> Wanted;
     PCWSTR Runtime = L"system";
+    BOOLEAN UseWarp = FALSE;
+    ComPtr<IDXGIAdapter> Warp;
     WCHAR Module[MAX_PATH];
     HMODULE D3d12;
     HMODULE Core;
@@ -3001,6 +3017,10 @@ wmain(
         else if (_wcsicmp(argv[Index], L"-nokernel") == 0)
         {
             Tr.NoKernel = TRUE;
+        }
+        else if (_wcsicmp(argv[Index], L"-warp") == 0)
+        {
+            UseWarp = TRUE;
         }
         else
         {
@@ -3043,11 +3063,30 @@ wmain(
         fwprintf(stderr, L"loaded %s\n", Module);
     }
 
-    Run.CreateDevice = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(D3d12, "D3D12CreateDevice"));
+    Run.RealCreateDevice = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(D3d12, "D3D12CreateDevice"));
     Run.SerializeVersioned = reinterpret_cast<PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE>(
         GetProcAddress(D3d12, "D3D12SerializeVersionedRootSignature"));
-    if (Run.CreateDevice == nullptr)
+    if (Run.RealCreateDevice == nullptr)
         return 1;
+
+    /* The system's DXGI hands out the system's WARP adapter for either runtime */
+    if (UseWarp)
+    {
+        decltype(&CreateDXGIFactory1) CreateFactory;
+        ComPtr<IDXGIFactory4> Factory;
+
+        CreateFactory = reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(LoadLibraryW(L"dxgi.dll"),
+                                                                                      "CreateDXGIFactory1"));
+        TrQuiet = TRUE;
+        if (CreateFactory == nullptr || FAILED(CreateFactory(IID_PPV_ARGS(&Factory))) ||
+            FAILED(Factory->EnumWarpAdapter(IID_PPV_ARGS(&Warp))))
+        {
+            fprintf(stderr, "error: no WARP adapter\n");
+            return 1;
+        }
+        TrQuiet = FALSE;
+        Run.DefaultAdapter = Warp.Get();
+    }
 
     for (const TrScenario& Scenario : TrScenarios)
     {
