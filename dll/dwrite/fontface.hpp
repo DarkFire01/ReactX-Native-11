@@ -69,6 +69,8 @@ private:
     RxFaceTables* Data;
     DWRITE_FONT_SIMULATIONS Simulations;
     std::vector<RxAxisValue> AxisValues;
+    /* What GetFontAxisValues reports: design axes, then the standard ones */
+    std::vector<RxAxisValue> ReportedValues;
     DWRITE_FONT_METRICS1 Metrics;
     RxGlyphRasterizer* GlyphRasterizer;
     INIT_ONCE RasterizerOnce;

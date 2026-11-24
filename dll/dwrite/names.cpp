@@ -1000,6 +1000,8 @@ RxDescribeFace(
         Description->WwsFamily = Description->TypographicFamily;
     if (Description->WwsFace.empty())
         Description->WwsFace = Description->TypographicFace;
+    RxFaceAxisValues(Face, Coordinates, Description->Weight, Description->Stretch, Description->Style,
+                     Description->AxisValues);
 }
 
 std::wstring

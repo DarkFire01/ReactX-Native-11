@@ -94,16 +94,6 @@ RxFontFace::ReleaseGlyphImageData(
 
 HRESULT
 STDMETHODCALLTYPE
-RxFontFace::GetFontAxisValues(
-    _Out_writes_(fontAxisValueCount) DWRITE_FONT_AXIS_VALUE* fontAxisValues,
-    UINT32 fontAxisValueCount)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxFontFace::GetFontResource(
     _COM_Outptr_ IDWriteFontResource** fontResource)
 {

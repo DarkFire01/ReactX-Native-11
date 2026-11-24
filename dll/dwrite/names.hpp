@@ -46,6 +46,8 @@ struct RxFaceDescription
     BOOLEAN FromStyleTable;
     /* The face has fvar axes */
     BOOLEAN HasVariations;
+    /* Values on every axis the face reports, design axes first */
+    std::vector<RxAxisValue> AxisValues;
 };
 
 /* Reads every record of a name ID, one per language */
@@ -68,6 +70,16 @@ RxDescribeStyledFace(
     _In_ const RxFaceTables* Face,
     _In_ const std::vector<RxAxisValue>& Coordinates,
     _Out_ RxFaceDescription* Description);
+
+/* Axis values a face reports for instance Coordinates, standard axes valued from Weight, Stretch and Style */
+VOID
+RxFaceAxisValues(
+    _In_ const RxFaceTables* Face,
+    _In_ const std::vector<RxAxisValue>& Coordinates,
+    _In_ USHORT Weight,
+    _In_ BYTE Stretch,
+    _In_ BYTE Style,
+    _Out_ std::vector<RxAxisValue>& Values);
 
 /* OS/2 and head values */
 USHORT

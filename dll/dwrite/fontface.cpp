@@ -8,6 +8,7 @@
 #include "precomp.hpp"
 #include "fontface.hpp"
 #include "glyphraster.hpp"
+#include "names.hpp"
 
 /* Private interface our faces answer to, so internal code can find the tables behind one */
 static constexpr GUID RxFontFaceIid = { 0x5a0f8b31, 0x7c2e, 0x4d6a, { 0x9e, 0x13, 0x48, 0xb2, 0x0c, 0x7f, 0xd1, 0x66 } };
@@ -69,6 +70,12 @@ RxFontFace::Create(
             if (Value.Tag == Values[Index].Tag)
                 Value.Value = Values[Index].Value;
         }
+    }
+    {
+        RxFaceDescription Description;
+
+        RxDescribeFace(Result->Data, Result->AxisValues, &Description);
+        Result->ReportedValues = std::move(Description.AxisValues);
     }
     Result->ComputeMetrics();
     *Face = Result;
@@ -721,14 +728,32 @@ UINT32
 STDMETHODCALLTYPE
 RxFontFace::GetFontAxisValueCount(VOID)
 {
-    return Data->Sfnt().Table(RxTag('f', 'v', 'a', 'r')).U16(8);
+    return static_cast<UINT32>(ReportedValues.size());
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxFontFace::GetFontAxisValues(
+    _Out_writes_(fontAxisValueCount) DWRITE_FONT_AXIS_VALUE* fontAxisValues,
+    UINT32 fontAxisValueCount)
+{
+    memset(fontAxisValues, 0, fontAxisValueCount * sizeof(*fontAxisValues));
+    if (fontAxisValueCount < ReportedValues.size())
+        return E_NOT_SUFFICIENT_BUFFER;
+
+    for (SIZE_T Index = 0; Index < ReportedValues.size(); Index++)
+    {
+        fontAxisValues[Index].axisTag = ReportedValues[Index].Tag;
+        fontAxisValues[Index].value = static_cast<FLOAT>(ReportedValues[Index].Value) / RxFixedOne;
+    }
+    return S_OK;
 }
 
 BOOL
 STDMETHODCALLTYPE
 RxFontFace::HasVariations(VOID)
 {
-    return Data->Sfnt().HasTable(RxTag('f', 'v', 'a', 'r'));
+    return !AxisValues.empty();
 }
 
 BOOL

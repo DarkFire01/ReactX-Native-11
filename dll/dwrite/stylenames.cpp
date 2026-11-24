@@ -21,7 +21,7 @@ struct RxStyleAxis
     INT32 Default;
     INT32 Minimum;
     INT32 Maximum;
-    USHORT Ordering;
+    INT32 Ordering;
     UINT32 Source;
 };
 
@@ -76,6 +76,19 @@ static const RxStyleFilter RxWin32Axes[] =
     { DWRITE_FONT_AXIS_TAG_WEIGHT, 675 * RxFixedOne, 725 * RxFixedOne },
     { DWRITE_FONT_AXIS_TAG_ITALIC, 0, 0 },
     { DWRITE_FONT_AXIS_TAG_ITALIC, RxFixedOne, RxFixedOne },
+};
+
+/* Axes every face reports, in the order they are added when missing */
+static const DWRITE_FONT_AXIS_TAG RxStandardAxes[] =
+{
+    DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_TAG_ITALIC, DWRITE_FONT_AXIS_TAG_SLANT
+};
+
+/* wdth value of each stretch */
+static const INT32 RxStretchWidths[] =
+{
+    0x00640000, 0x00320000, 0x003E8000, 0x004B0000, 0x00578000, 0x00640000, 0x00708000, 0x007D0000, 0x00960000,
+    0x00C80000
 };
 
 /* Lower wdth bound of stretch 2 through 9 */
@@ -162,18 +175,16 @@ RxReadStyleRecords(
     return TRUE;
 }
 
-/* Design axes with ranges widened by every value naming them, then the fvar axes over them */
+/* Design axes from STAT; FALSE when the table is damaged */
 static
 BOOLEAN
-RxReadStyleAxes(
-    _In_ const RxFaceTables* Face,
+RxReadDesignAxes(
     _In_ const RxSpan& Stat,
     _Inout_ RxStyleTable& Table)
 {
     UINT32 Size = Stat.U16(4);
     UINT32 Count = Stat.U16(6);
     UINT32 Offset = Stat.U32(8);
-    std::vector<RxVariationAxis> Variations;
 
     for (UINT32 Index = 0; Index < Count; Index++)
     {
@@ -184,6 +195,17 @@ RxReadStyleAxes(
         Table.Axes.push_back({ static_cast<DWRITE_FONT_AXIS_TAG>(RxDWriteTag(Stat.U32(Record))), RxFixedMaximum,
                                RxFixedMaximum, RxFixedMinimum, Stat.U16(Record + 6), Index });
     }
+    return TRUE;
+}
+
+/* Design axis ranges widened by every value naming them, then the fvar axes over them */
+static
+VOID
+RxMergeStyleAxes(
+    _In_ const RxFaceTables* Face,
+    _Inout_ RxStyleTable& Table)
+{
+    std::vector<RxVariationAxis> Variations;
 
     for (const auto& Record : Table.Records)
     {
@@ -234,7 +256,58 @@ RxReadStyleAxes(
         Target->Minimum = Variation.Minimum;
         Target->Maximum = Variation.Maximum;
     }
-    return TRUE;
+}
+
+/* Standard axes the face lacks, valued from its weight, stretch, style and post italic angle */
+static
+VOID
+RxAddStandardAxes(
+    _In_ const RxFaceTables* Face,
+    _In_ USHORT Weight,
+    _In_ BYTE Stretch,
+    _In_ BYTE Style,
+    _Inout_ RxStyleTable& Table)
+{
+    BOOLEAN Present[_countof(RxStandardAxes)] = {};
+
+    for (const auto& Axis : Table.Axes)
+    {
+        for (SIZE_T Index = 0; Index < _countof(RxStandardAxes); Index++)
+            Present[Index] |= Axis.Tag == RxStandardAxes[Index];
+    }
+
+    for (SIZE_T Index = 0; Index < _countof(RxStandardAxes); Index++)
+    {
+        RxSpan Post = Face->Sfnt().Table(RxTag('p', 'o', 's', 't'));
+        INT32 Value;
+
+        if (Present[Index])
+            continue;
+        switch (RxStandardAxes[Index])
+        {
+            case DWRITE_FONT_AXIS_TAG_WEIGHT:
+                Value = static_cast<INT32>(Weight) << 16;
+                break;
+            case DWRITE_FONT_AXIS_TAG_WIDTH:
+                Value = Stretch < _countof(RxStretchWidths) ? RxStretchWidths[Stretch] : RxStretchWidths[0];
+                break;
+            case DWRITE_FONT_AXIS_TAG_ITALIC:
+                Value = Style == DWRITE_FONT_STYLE_ITALIC ? RxFixedOne : 0;
+                break;
+            default:
+                if (!Post.IsEmpty())
+                    Value = Post.S32(4);
+                else if (Style == DWRITE_FONT_STYLE_ITALIC)
+                    Value = -12 * RxFixedOne;
+                else if (Style == DWRITE_FONT_STYLE_OBLIQUE)
+                    Value = -20 * RxFixedOne;
+                else
+                    Value = 0;
+                break;
+        }
+        Table.Axes.push_back({ RxStandardAxes[Index], Value, Value, Value, RxFixedMaximum,
+                               static_cast<UINT32>(Table.Axes.size()) });
+    }
 }
 
 /* Puts axes in STAT ordering and renumbers the values to match */
@@ -271,10 +344,14 @@ RxOrderStyleAxes(
     });
 }
 
+/* Axes and values of STAT, fvar and the standard axes the face lacks */
 static
-BOOLEAN
-RxReadStyleTable(
+VOID
+RxBuildStyleTable(
     _In_ const RxFaceTables* Face,
+    _In_ USHORT Weight,
+    _In_ BYTE Stretch,
+    _In_ BYTE Style,
     _Out_ RxStyleTable& Table)
 {
     RxSpan Stat = Face->Sfnt().Table(RxTag('S', 'T', 'A', 'T'));
@@ -282,20 +359,19 @@ RxReadStyleTable(
     Table.Axes.clear();
     Table.Records.clear();
     Table.ElidedName.clear();
-    if (Stat.Length() < 18)
-        return FALSE;
-
-    if (!RxReadStyleRecords(Face, Stat, Table) || !RxReadStyleAxes(Face, Stat, Table))
+    if (Stat.Length() >= 18)
     {
-        Table.Axes.clear();
-        Table.Records.clear();
-        return FALSE;
+        if (!RxReadStyleRecords(Face, Stat, Table) || !RxReadDesignAxes(Stat, Table))
+        {
+            Table.Axes.clear();
+            Table.Records.clear();
+        }
+        if (Stat.U16(2) >= 1 && Stat.Has(18, 2))
+            RxReadNames(Face, Stat.U16(18), Table.ElidedName);
     }
+    RxMergeStyleAxes(Face, Table);
+    RxAddStandardAxes(Face, Weight, Stretch, Style, Table);
     RxOrderStyleAxes(Table);
-
-    if (Stat.U16(2) >= 1 && Stat.Has(18, 2))
-        RxReadNames(Face, Stat.U16(18), Table.ElidedName);
-    return TRUE;
 }
 
 /* The face coordinates clamped to every design axis, defaults filled in, then the rest */
@@ -527,6 +603,21 @@ RxPostscriptFromNames(
     Names.push_back({ Source[0].Locale, Text });
 }
 
+VOID
+RxFaceAxisValues(
+    _In_ const RxFaceTables* Face,
+    _In_ const std::vector<RxAxisValue>& Coordinates,
+    _In_ USHORT Weight,
+    _In_ BYTE Stretch,
+    _In_ BYTE Style,
+    _Out_ std::vector<RxAxisValue>& Values)
+{
+    RxStyleTable Table;
+
+    RxBuildStyleTable(Face, Weight, Stretch, Style, Table);
+    RxCanonicalValues(Table, Coordinates, Values);
+}
+
 USHORT
 RxAxisWeight(
     _In_ const RxFaceHeader& Header,
@@ -592,8 +683,10 @@ RxDescribeStyledFace(
     if (Base.empty())
         RxReadNames(Face, RxNameFamily, Base);
 
-    RxReadStyleTable(Face, Table);
+    RxBuildStyleTable(Face, RxFaceWeight(Face->Header()), RxFaceStretch(Face->Header()), RxFaceStyle(Face->Header()),
+                      Table);
     RxCanonicalValues(Table, Coordinates, Canonical);
+    Description->AxisValues = Canonical;
     RxMatchStyleRecords(Table, Canonical, Matched);
 
     Description->Weight = RxAxisWeight(Face->Header(), Canonical);
