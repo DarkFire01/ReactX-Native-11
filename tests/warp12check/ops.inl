@@ -826,3 +826,42 @@ SceneOpsHeap(
     return TcOpsRun(Device, Result, TcOpsHeapSource, "heaps", TcOpsHeapBuilds, ARRAYSIZE(TcOpsHeapBuilds), 1,
                     D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED);
 }
+
+/* Minimum precision and native 16 bit arithmetic, floats and both integer kinds */
+static const char TcOpsHalfSource[] =
+    "[numthreads(64, 1, 1)] void halves(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 64;\n"
+    "    min16float a = (min16float)(t * 0.37 + 0.1);\n"
+    "    min16float b = (min16float)asfloat(Knob.w) / (min16float)(t + 3);\n"
+    "    min16float c = a * b + (min16float)1.0 / (min16float)3.0;\n"
+    "    min16uint u = (min16uint)(t * 4099 + Knob.y);\n"
+    "    min16uint v = u * (min16uint)(t + 7) + (min16uint)60000;\n"
+    "    min16int s = (min16int)(int)(t * 911) - (min16int)20000;\n"
+    "    min16int r = (s * (min16int)3) >> 2;\n"
+    "    Out.Store4(Base, uint4(asuint((float)a), asuint((float)b), asuint((float)c), (uint)v));\n"
+    "    Out.Store4(Base + 16, uint4((uint)(int)r, (uint)(u >> 3), asuint((float)(a * a * a * (min16float)1000.0)), (uint)(int)((s ^ (min16int)0x7F3) + r)));\n"
+    "    Out.Store4(Base + 32, uint4(asuint((float)sqrt(a)), asuint((float)frac(c * (min16float)17.0)), (uint)(min16uint)(c * (min16float)900.0), asuint((float)max(a, b))));\n"
+    "    float One = (float)Knob.x / 3.0;\n"
+    "    float Edge = (t % 6 == 0) ? 70000.0 + t : (t % 6 == 1) ? -65519.0 - t : (t % 6 == 2) ? 3.0e-6 * (t + 1) :\n"
+    "                 (t % 6 == 3) ? -6.2e-5 / (t + 1) : (t % 6 == 4) ? asfloat(0x7F800000u + (t & 8) * 0x100000u) : 65504.0 - t * 0.25;\n"
+    "    min16float e = (min16float)(Edge * One);\n"
+    "    Out.Store4(Base + 48, uint4(asuint((float)e), asuint((float)(e * (min16float)2.0)), asuint((float)(e * (min16float)0.001)),\n"
+    "                                asuint((float)(min16float)(uint)(t * 40503 * Knob.x))));\n"
+    "}\n";
+
+static const TcOpsBuild TcOpsHalfBuilds[] =
+{
+    { "cs_5_1", NULL, NULL },
+    { NULL, L"cs_6_0", NULL },
+    { NULL, L"cs_6_2", L"-enable-16bit-types" },
+};
+
+static
+HRESULT
+SceneOpsHalf(
+    _In_ ID3D12Device *Device,
+    _Inout_ TcResult *Result)
+{
+    return TcOpsRun(Device, Result, TcOpsHalfSource, "halves", TcOpsHalfBuilds, ARRAYSIZE(TcOpsHalfBuilds), 1);
+}
