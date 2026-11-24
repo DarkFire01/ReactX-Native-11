@@ -409,6 +409,7 @@ $Classes = @(
         Implemented = @(
             'CreateFontFileReference', 'CreateCustomFontFileReference', 'RegisterFontFileLoader',
             'UnregisterFontFileLoader', 'RegisterFontCollectionLoader', 'UnregisterFontCollectionLoader', 'CreateFontFace', 'CreateRenderingParams',
+            'GetGdiInterop',
             'CreateMonitorRenderingParams', 'CreateCustomRenderingParams', 'CreateGlyphRunAnalysis',
             'GetSystemFontCollection', 'CreateTextFormat',
             'CreateTextLayout', 'CreateGdiCompatibleTextLayout', 'CreateEllipsisTrimmingSign', 'CreateTypography'

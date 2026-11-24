@@ -10,6 +10,7 @@
 #include "glyphrun.hpp"
 #include "collection.hpp"
 #include "textlayout.hpp"
+#include "gdiinterop.hpp"
 
 class RxWriteFactory final : public IDWriteFactory7
 {
@@ -50,4 +51,5 @@ private:
     std::vector<RxComPtr<IDWriteFontFileLoader>> FileLoaders;
     std::vector<RxComPtr<IDWriteFontCollectionLoader>> CollectionLoaders;
     RxFontCollection* System;
+    RxGdiInterop* Interop;
 };

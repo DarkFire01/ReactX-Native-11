@@ -17,6 +17,8 @@ struct RxFontEntry
     UINT32 FaceIndex;
     DWRITE_FONT_FACE_TYPE FaceType;
     BOOLEAN IsSymbol;
+    /* OS/2 Unicode and code page ranges, as GetFontSignature reports them */
+    FONTSIGNATURE Signature;
     RxFaceDescription Description;
 };
 
@@ -69,11 +71,18 @@ public:
     FindFamily(
         _In_z_ PCWSTR Name) const;
 
+    /* The family listing an entry; MAXUINT32 if none does */
+    UINT32
+    FamilyOfEntry(
+        _In_ UINT32 Entry) const;
+
     std::vector<RxFontEntry> Entries;
     std::vector<RxFamilyData> Families;
+    /* Built from the installed fonts */
+    BOOLEAN IsSystem;
 
 private:
-    RxFontSetData() : RefCount(1) {}
+    RxFontSetData() : IsSystem(FALSE), RefCount(1) {}
 
     VOID
     AddFile(
@@ -112,6 +121,23 @@ RxFindMatchingItem(
     _In_ DWRITE_FONT_STRETCH Stretch,
     _In_ DWRITE_FONT_STYLE Style,
     _Out_ DWRITE_FONT_SIMULATIONS* Simulations);
+
+/* GDI weight, style, stretch and charset distance of an entry; Simulations gets what closes the gap */
+UINT32
+RxWin32Penalty(
+    _In_ const RxFontEntry& Entry,
+    _In_ UINT32 CharsetMask,
+    _In_ LONG Weight,
+    _In_ BOOLEAN Italic,
+    _Out_ DWRITE_FONT_SIMULATIONS* Simulations);
+
+/* Entries whose Win32 family name is Name, else those whose full name is */
+VOID
+RxWin32Candidates(
+    _In_ const RxFontSetData* Data,
+    _In_reads_(Length) PCWCH Name,
+    _In_ SIZE_T Length,
+    _Inout_ std::vector<UINT32>& Entries);
 
 class RxFontCollection final : public IDWriteFontCollection
 {
@@ -193,14 +219,25 @@ public:
 
 #include "font.inl"
 
-private:
-    RxFont() : RefCount(1), FamilyIndex(0), Item{} {}
+    static
+    RxFont*
+    FromInterface(
+        _In_opt_ IUnknown* Font);
 
     const RxFontEntry&
     Entry(VOID) const
     {
         return Collection->Data()->Entries[Item.Entry];
     }
+
+    RxFontCollection*
+    Owner(VOID) const
+    {
+        return Collection.Get();
+    }
+
+private:
+    RxFont() : RefCount(1), FamilyIndex(0), Item{} {}
 
     HRESULT
     Face(

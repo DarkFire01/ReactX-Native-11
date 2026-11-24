@@ -93,6 +93,16 @@ public:
         _Out_ FLOAT* blendEnhancedContrast,
         _Out_ FLOAT* blendClearTypeLevel) override;
 
+    /* Blends the run into a top down BGRA bitmap the way a bitmap render target draws; Drawn gets the touched box */
+    VOID
+    DrawInto(
+        _In_ const RxParamValues& Params,
+        _In_ COLORREF Color,
+        _Inout_updates_(Width * Height) UINT32* Bits,
+        _In_ UINT32 Width,
+        _In_ UINT32 Height,
+        _Out_ RECT* Drawn) const;
+
 private:
     struct Placed
     {

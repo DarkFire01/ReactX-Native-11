@@ -26,18 +26,6 @@ RxWriteFactory::CreateCustomFontCollection(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::GetGdiInterop(
-    _COM_Outptr_ IDWriteGdiInterop** gdiInterop)
-{
-    if (gdiInterop != nullptr)
-        *gdiInterop = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateTextAnalyzer(
     _COM_Outptr_ IDWriteTextAnalyzer** textAnalyzer)
 {

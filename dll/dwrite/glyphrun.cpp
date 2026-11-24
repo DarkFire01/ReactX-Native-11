@@ -665,3 +665,244 @@ RxGlyphRunAnalysis::GetAlphaBlendParams(
                        blendClearTypeLevel);
     return S_OK;
 }
+
+/* Drawing into a bitmap */
+
+namespace
+{
+
+/* Linear and encoded values of one gamma, 0 and 255 kept exact */
+struct RxGammaPair
+{
+    BYTE Linear[256];
+    BYTE Encode[256];
+};
+
+VOID
+RxBuildGamma(
+    _In_ FLOAT Gamma,
+    _Out_ RxGammaPair* Table)
+{
+    Table->Linear[0] = Table->Encode[0] = 0;
+    Table->Linear[255] = Table->Encode[255] = 255;
+    for (UINT32 Index = 1; Index < 255; Index++)
+    {
+        double X = Index * (1.0 / 255.0);
+
+        Table->Linear[Index] = static_cast<BYTE>(std::floor(255.0 * std::pow(X, static_cast<double>(Gamma)) + 0.5));
+        Table->Encode[Index] = static_cast<BYTE>(std::floor(255.0 * std::pow(X, 1.0 / Gamma) + 0.5));
+    }
+}
+
+VOID
+RxBuildContrast(
+    _In_ FLOAT Contrast,
+    _Out_writes_(256) USHORT* Table)
+{
+    Table[0] = 0;
+    Table[255] = 256;
+    for (UINT32 Index = 1; Index < 255; Index++)
+    {
+        FLOAT X = Index * 0.0039216f;
+
+        Table[Index] = static_cast<USHORT>(std::floor(256.0f * (Contrast + 1.0f) * X / (Contrast * X + 1.0f) + 0.5f));
+    }
+}
+
+/* Curve corrections per gamma step, for grayscale coverage */
+const FLOAT RxGammaRatios[12][4] =
+{
+    { 0.0166f, -0.0807f, 0.2227f, -0.0751f },
+    { 0.0350f, -0.1760f, 0.4325f, -0.1370f },
+    { 0.0543f, -0.2821f, 0.6302f, -0.1876f },
+    { 0.0739f, -0.3963f, 0.8167f, -0.2287f },
+    { 0.0933f, -0.5161f, 0.9926f, -0.2616f },
+    { 0.1121f, -0.6395f, 1.1588f, -0.2877f },
+    { 0.1300f, -0.7649f, 1.3159f, -0.3080f },
+    { 0.1469f, -0.8911f, 1.4644f, -0.3234f },
+    { 0.1627f, -1.0170f, 1.6051f, -0.3347f },
+    { 0.1773f, -1.1420f, 1.7385f, -0.3426f },
+    { 0.1908f, -1.2652f, 1.8650f, -0.3476f },
+    { 0.2031f, -1.3864f, 1.9851f, -0.3501f },
+};
+
+VOID
+RxGrayscaleAlphas(
+    _In_ FLOAT Contrast,
+    _In_ FLOAT Gamma,
+    _In_ COLORREF Color,
+    _In_ UINT32 Levels,
+    _Out_writes_(Levels) BYTE* Alphas)
+{
+    const FLOAT* Ratios = nullptr;
+    FLOAT Step = 1.0f / Levels;
+    FLOAT Lum = GetRValue(Color) * (1.0f / 1020.0f) + GetGValue(Color) * (1.0f / 510.0f) +
+                GetBValue(Color) * (1.0f / 1020.0f);
+    FLOAT Steps = (Gamma - 1.05f) * 10.0f;
+    UINT32 Row = Steps > 0.0f ? static_cast<UINT32>(Steps) : 0;
+    FLOAT X = 0.0f;
+
+    if (Row != 0)
+        Ratios = RxGammaRatios[std::min<UINT32>(Row, 11)];
+
+    for (UINT32 Index = 0; Index + 1 < Levels; Index++)
+    {
+        FLOAT Value;
+
+        X += Step;
+        Value = X;
+        if (Contrast != 0.0f)
+            Value = (Contrast + 1.0f) * Value / (Contrast * Value + 1.0f);
+        if (Ratios != nullptr)
+            Value += ((Ratios[0] * Lum + Ratios[1]) * Value + (Ratios[2] * Lum + Ratios[3])) * Value * (1.0f - Value);
+        Alphas[Index] = static_cast<BYTE>(std::min(255.0, RxRoundHalfUp(Value * 256.0)));
+    }
+}
+
+} // namespace
+
+VOID
+RxGlyphRunAnalysis::DrawInto(
+    _In_ const RxParamValues& Params,
+    _In_ COLORREF Color,
+    _Inout_updates_(Width * Height) UINT32* Bits,
+    _In_ UINT32 Width,
+    _In_ UINT32 Height,
+    _Out_ RECT* Drawn) const
+{
+    INT32 X = Traits.OversampleX;
+    INT32 Y = Traits.OversampleY;
+    const BYTE Text[3] = { GetBValue(Color), GetGValue(Color), GetRValue(Color) };
+    FLOAT Factor = RxLightOnDarkFactor(Text[2] / 255.0f, Text[1] / 255.0f, Text[0] / 255.0f);
+    RECT Box;
+    INT32 BoxWidth;
+    INT32 BoxHeight;
+    std::vector<BYTE> Samples;
+
+    TextureBounds(&Box);
+    *Drawn = Box;
+    if (IsRectEmpty(&Box))
+        return;
+    BoxWidth = Box.right - Box.left;
+    BoxHeight = Box.bottom - Box.top;
+
+    if (Traits.ClearTypeTexture && X == 6)
+    {
+        static const INT32 RowWeights[5] = { 4, 9, 10, 9, 4 };
+        RxGammaPair Gamma;
+        USHORT Contrast[256];
+        DWRITE_PIXEL_GEOMETRY Geometry = IsGrayscale ? DWRITE_PIXEL_GEOMETRY_FLAT : Params.PixelGeometry;
+        FLOAT Level = Traits.GdiBlend ? (Params.CompatibleSmoothing == 2 ? 0.0f : 1.0f) : Params.ClearTypeLevel;
+        INT32 Reach = 0;
+        INT32 Starts[3];
+        INT32 SampleWidth = BoxWidth * 6 + 4;
+
+        /* Classic filters reach two subpixels each way, intermediate ones one, grayscale none */
+        if (Geometry != DWRITE_PIXEL_GEOMETRY_FLAT && Level >= 0.25f)
+            Reach = Level > 0.75f ? 2 : 1;
+        for (INT32 Channel = 0; Channel < 3; Channel++)
+            Starts[Channel] = Channel * Reach - Reach;
+        if (Geometry == DWRITE_PIXEL_GEOMETRY_BGR)
+            std::swap(Starts[0], Starts[2]);
+
+        RxBuildGamma(Traits.GdiBlend ? Params.CompatibleGamma : Params.Gamma, &Gamma);
+        RxBuildContrast(Traits.GdiBlend ? 0.0f : std::max(0.0f, Params.EnhancedContrast * Factor), Contrast);
+
+        MergeSamples(static_cast<INT32>(Box.left) * 6 - 2, Box.top * Y, SampleWidth, BoxHeight * Y, Samples);
+
+        for (INT32 Row = 0; Row < BoxHeight; Row++)
+        {
+            INT32 PixelY = Box.top + Row;
+
+            if (PixelY < 0 || PixelY >= static_cast<INT32>(Height))
+                continue;
+            for (INT32 Column = 0; Column < BoxWidth; Column++)
+            {
+                INT32 PixelX = Box.left + Column;
+                BYTE* Pixel;
+
+                if (PixelX < 0 || PixelX >= static_cast<INT32>(Width))
+                    continue;
+                Pixel = reinterpret_cast<BYTE*>(&Bits[static_cast<SIZE_T>(PixelY) * Width + PixelX]);
+
+                /* Byte 0 is blue, which reads the window of the third channel */
+                for (INT32 Byte = 0; Byte < 3; Byte++)
+                {
+                    INT32 First = Column * 6 + 2 + Starts[2 - Byte];
+                    INT32 Total = 0;
+                    USHORT Weight;
+
+                    for (INT32 Sub = 0; Sub < Y; Sub++)
+                    {
+                        const BYTE* Line = &Samples[(static_cast<SIZE_T>(Row) * Y + Sub) * SampleWidth];
+                        INT32 Count = 0;
+
+                        for (INT32 Bit = 0; Bit < 6; Bit++)
+                            Count += Line[First + Bit];
+                        Total += (Y == 5) ? Count * RowWeights[Sub] : Count;
+                    }
+                    if (Total == 0)
+                        continue;
+
+                    Weight = Contrast[static_cast<BYTE>(RxRoundHalfUp(Total * 255.0 / (Y == 5 ? 216.0 : 6.0)))];
+                    Pixel[Byte] = Gamma.Encode[(Gamma.Linear[Text[Byte]] * Weight +
+                                                Gamma.Linear[Pixel[Byte]] * (256 - Weight) + 128) >> 8];
+                }
+            }
+        }
+        return;
+    }
+
+    /* Aliased and grayscale coverage */
+    {
+        INT32 Levels = X * Y;
+        INT32 SampleWidth = BoxWidth * X;
+        BYTE Alphas[16] = {};
+
+        if (Levels > 1)
+            RxGrayscaleAlphas(Params.GrayscaleEnhancedContrast * Factor, Params.Gamma, Color,
+                              static_cast<UINT32>(std::min(Levels, 16)), Alphas);
+
+        MergeSamples(Box.left * X, Box.top * Y, SampleWidth, BoxHeight * Y, Samples);
+        for (INT32 Row = 0; Row < BoxHeight; Row++)
+        {
+            INT32 PixelY = Box.top + Row;
+
+            if (PixelY < 0 || PixelY >= static_cast<INT32>(Height))
+                continue;
+            for (INT32 Column = 0; Column < BoxWidth; Column++)
+            {
+                INT32 PixelX = Box.left + Column;
+                INT32 Count = 0;
+                BYTE* Pixel;
+
+                if (PixelX < 0 || PixelX >= static_cast<INT32>(Width))
+                    continue;
+                for (INT32 Sub = 0; Sub < Y; Sub++)
+                {
+                    const BYTE* Line = &Samples[(static_cast<SIZE_T>(Row) * Y + Sub) * SampleWidth];
+
+                    for (INT32 Bit = 0; Bit < X; Bit++)
+                        Count += Line[Column * X + Bit];
+                }
+                if (Count == 0)
+                    continue;
+
+                Pixel = reinterpret_cast<BYTE*>(&Bits[static_cast<SIZE_T>(PixelY) * Width + PixelX]);
+                for (INT32 Byte = 0; Byte < 3; Byte++)
+                {
+                    UINT32 Alpha;
+
+                    if (Count >= Levels)
+                    {
+                        Pixel[Byte] = Text[Byte];
+                        continue;
+                    }
+                    Alpha = Alphas[Count - 1];
+                    Pixel[Byte] = static_cast<BYTE>(((Text[Byte] * Alpha + 127) >> 8) +
+                                                    ((Pixel[Byte] * (256 - Alpha) + 127) >> 8));
+                }
+            }
+        }
+    }
+}

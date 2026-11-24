@@ -9,6 +9,7 @@
 #include "collection.hpp"
 
 static constexpr GUID RxCollectionIid = { 0x8e4a2f17, 0x93d0, 0x4b6c, { 0xa1, 0x5f, 0x2d, 0x70, 0xc8, 0x14, 0x6b, 0xe9 } };
+static constexpr GUID RxFontIid = { 0x3c61d0a4, 0x5be2, 0x4f19, { 0x8d, 0x27, 0x96, 0x0e, 0xb3, 0x41, 0xc5, 0x7a } };
 
 static const WCHAR RxFontsKey[] = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts";
 
@@ -164,6 +165,12 @@ RxFontSetData::AddFile(
         Entry.FaceType = Tables->Sfnt().IsCff() ? DWRITE_FONT_FACE_TYPE_CFF : DWRITE_FONT_FACE_TYPE_TRUETYPE;
         Entry.IsSymbol = Tables->IsSymbolFont() || (Tables->Header().HasOs2 && Tables->Header().Panose[0] == 5);
         RxDescribeFace(Tables, &Entry.Description);
+        memset(&Entry.Signature, 0, sizeof(Entry.Signature));
+        if (Tables->Header().HasOs2)
+        {
+            memcpy(Entry.Signature.fsUsb, Tables->Header().UnicodeRange, sizeof(Entry.Signature.fsUsb));
+            memcpy(Entry.Signature.fsCsb, Tables->Header().CodePageRange, sizeof(Entry.Signature.fsCsb));
+        }
         Tables->Release();
 
         if (!Entry.Description.WwsFamily.empty())
@@ -268,6 +275,7 @@ RxFontSetData::CreateSystem(
     }
 
     Result->BuildFamilies();
+    Result->IsSystem = TRUE;
     RX_TRACE(L"system collection: %Iu fonts in %Iu families from %Iu files", Result->Entries.size(),
              Result->Families.size(), Paths.size());
     *Data = Result;
@@ -305,6 +313,109 @@ RxFontSetData::FindFamily(
     if (Found != NameMap.end() && RxCompareNames(Found->Name, Wanted) == 0)
         return Found->Family;
     return MAXUINT32;
+}
+
+UINT32
+RxFontSetData::FamilyOfEntry(
+    _In_ UINT32 Entry) const
+{
+    for (UINT32 Family = 0; Family < Families.size(); Family++)
+    {
+        for (const auto& Item : Families[Family].Items)
+        {
+            if (Item.Entry == Entry)
+                return Family;
+        }
+    }
+    return MAXUINT32;
+}
+
+/* GDI style matching */
+
+static
+BOOLEAN
+RxListHasName(
+    _In_ const RxNameList& Names,
+    _In_reads_(Length) PCWCH Name,
+    _In_ SIZE_T Length)
+{
+    for (const auto& Localized : Names)
+    {
+        if (CompareStringW(LOCALE_INVARIANT, NORM_IGNORECASE, Localized.Text.c_str(),
+                           static_cast<INT>(Localized.Text.size()), Name, static_cast<INT>(Length)) == CSTR_EQUAL)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+VOID
+RxWin32Candidates(
+    _In_ const RxFontSetData* Data,
+    _In_reads_(Length) PCWCH Name,
+    _In_ SIZE_T Length,
+    _Inout_ std::vector<UINT32>& Entries)
+{
+    Entries.clear();
+
+    /* Walked family by family in WWS order, which is the order earlier matches win ties in */
+    for (UINT32 Pass = 0; Pass < 2 && Entries.empty(); Pass++)
+    {
+        for (const auto& Family : Data->Families)
+        {
+            for (const auto& Item : Family.Items)
+            {
+                const RxFaceDescription& Description = Data->Entries[Item.Entry].Description;
+
+                if (RxListHasName(Pass == 0 ? Description.Win32Family : Description.FullName, Name, Length))
+                    Entries.push_back(Item.Entry);
+            }
+        }
+    }
+}
+
+UINT32
+RxWin32Penalty(
+    _In_ const RxFontEntry& Entry,
+    _In_ UINT32 CharsetMask,
+    _In_ LONG Weight,
+    _In_ BOOLEAN Italic,
+    _Out_ DWRITE_FONT_SIMULATIONS* Simulations)
+{
+    BYTE Style = Entry.Description.Style;
+    BYTE Stretch = Entry.Description.Stretch;
+    LONG Delta = Weight - static_cast<LONG>(Entry.Description.Win32Weight);
+    UINT32 Penalty = 0;
+    UINT32 Simulated = DWRITE_FONT_SIMULATIONS_NONE;
+    UINT32 StretchCost;
+
+    if (Italic)
+    {
+        if (Style != DWRITE_FONT_STYLE_ITALIC)
+            Penalty = 1;
+        if (Style == DWRITE_FONT_STYLE_NORMAL)
+            Simulated |= DWRITE_FONT_SIMULATIONS_OBLIQUE;
+    }
+    else if (Style != DWRITE_FONT_STYLE_NORMAL)
+    {
+        Penalty = 4;
+    }
+
+    /* Far lighter faces get bold simulation and a smaller weight cost */
+    if (Delta > 150)
+    {
+        Simulated |= DWRITE_FONT_SIMULATIONS_BOLD;
+        Delta -= 120;
+    }
+    if (Delta < 0)
+        Delta = -Delta;
+    Penalty += static_cast<UINT32>(73 * Delta / 256);
+
+    if ((Entry.Signature.fsCsb[0] & CharsetMask) == 0)
+        Penalty += 65000;
+
+    StretchCost = Stretch <= 5 ? 5 - Stretch : Stretch - 6;
+    *Simulations = static_cast<DWRITE_FONT_SIMULATIONS>(Simulated);
+    return StretchCost + 10 * Penalty;
 }
 
 /* Matching */
@@ -866,6 +977,18 @@ RxFontFamily::GetMatchingFonts(
 
 /* RxFont */
 
+RxFont*
+RxFont::FromInterface(
+    _In_opt_ IUnknown* Font)
+{
+    RxFont* Result = nullptr;
+
+    if (Font == nullptr || FAILED(Font->QueryInterface(RxFontIid, reinterpret_cast<void**>(&Result))))
+        return nullptr;
+    Result->Release();
+    return Result;
+}
+
 HRESULT
 RxFont::Create(
     _In_ RxFontCollection* Collection,
@@ -891,7 +1014,7 @@ RxFont::QueryInterface(
     if (ppvObject == nullptr)
         return E_POINTER;
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFont))
+    if (riid == RxFontIid || riid == __uuidof(IUnknown) || riid == __uuidof(IDWriteFont))
     {
         *ppvObject = static_cast<IDWriteFont*>(this);
         AddRef();

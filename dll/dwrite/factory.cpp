@@ -18,7 +18,7 @@ RxWriteFactory::Create(
 }
 
 RxWriteFactory::RxWriteFactory(
-    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System(nullptr)
+    _In_ DWRITE_FACTORY_TYPE FactoryType) : RefCount(1), Type(FactoryType), System(nullptr), Interop(nullptr)
 {
     InitializeSRWLock(&Lock);
 }
@@ -27,6 +27,28 @@ RxWriteFactory::~RxWriteFactory()
 {
     if (System != nullptr)
         System->Release();
+    delete Interop;
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxWriteFactory::GetGdiInterop(
+    _COM_Outptr_ IDWriteGdiInterop** gdiInterop)
+{
+    if (gdiInterop == nullptr)
+        return E_INVALIDARG;
+    *gdiInterop = nullptr;
+
+    AcquireSRWLockExclusive(&Lock);
+    if (Interop == nullptr)
+        Interop = new (std::nothrow) RxGdiInterop(this);
+    ReleaseSRWLockExclusive(&Lock);
+    if (Interop == nullptr)
+        return E_OUTOFMEMORY;
+
+    Interop->AddRef();
+    *gdiInterop = Interop;
+    return S_OK;
 }
 
 /* Font collections */
