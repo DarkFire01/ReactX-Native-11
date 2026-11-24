@@ -1747,6 +1747,9 @@ NineDrawFan(
 
     if (Device->FanRing.Buffer.get() == nullptr || Primitives > Device->FanCapacity)
     {
+        /* The list it replaces may still be bound */
+        if (Device->FanRing.Buffer.get() != nullptr)
+            Device->FanRing.Buffer.get()->ClearInputBindings();
         Device->FanRing.Capacity = 4 * ((3 * Primitives) & 0x3FFFFFFF);
         Device->FanRing.Cursor = Device->FanRing.Capacity;
         Slice = NineAllocateUpload(&Device->FanRing, Device->FanRing.Capacity);

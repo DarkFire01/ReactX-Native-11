@@ -11,6 +11,16 @@
 #include "scfinal.hpp"
 
 /* A piece of an upload buffer: where the GPU and the CPU see it */
+/* Clears what the translation layer still has bound before letting a resource go */
+struct NineUnderlyingDeleter
+{
+    VOID
+    operator()(
+        _In_opt_ TL::Resource* Resource) const;
+};
+
+typedef std::unique_ptr<TL::Resource, NineUnderlyingDeleter> NineUnderlying;
+
 struct NineUploadSlice
 {
     TL::Resource* Buffer;
@@ -341,7 +351,7 @@ struct NineDevice
     NineUploadRing UserRing;
     NineUploadRing FanRing;
     UINT FanCapacity;
-    TL::unique_comptr<TL::Resource> UserFanList;
+    TL::unique_comptr<TL::Resource, NineUnderlyingDeleter> UserFanList;
 
     /* Discarded ranges of each buffer locked since it was created */
     std::mutex LockRangesLock;
@@ -381,16 +391,6 @@ struct NineSharedResourceInfo
     UINT Levels;
     UINT Depth;
 };
-
-/* Clears what the translation layer still has bound before letting a resource go */
-struct NineUnderlyingDeleter
-{
-    VOID
-    operator()(
-        _In_opt_ TL::Resource* Resource) const;
-};
-
-typedef std::unique_ptr<TL::Resource, NineUnderlyingDeleter> NineUnderlying;
 
 /* What one lock of a subresource asked for, kept until its unlock */
 struct NineLockState
@@ -467,7 +467,7 @@ struct NineResource
     BOOLEAN BoundAsIndices;
 
     /* The list indices last made from this index buffer for a triangle fan, and where they started */
-    TL::unique_comptr<TL::Resource> FanList;
+    TL::unique_comptr<TL::Resource, NineUnderlyingDeleter> FanList;
     UINT FanStart;
     BOOLEAN FanValid;
 
