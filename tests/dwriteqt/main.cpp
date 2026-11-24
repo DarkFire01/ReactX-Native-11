@@ -150,7 +150,7 @@ DqEngine(
         const void* Key = nullptr;
         UINT32 KeySize = 0;
         UINT32 Length = 0;
-        WCHAR Path[MAX_PATH] = L"";
+        WCHAR FilePath[MAX_PATH] = L"";
 
         hr = Face->GetFiles(&Files, &File);
         if (SUCCEEDED(hr))
@@ -162,9 +162,9 @@ DqEngine(
         if (SUCCEEDED(hr))
             hr = Local->GetFilePathLengthFromKey(Key, KeySize, &Length);
         if (SUCCEEDED(hr))
-            hr = Local->GetFilePathFromKey(Key, KeySize, Path, MAX_PATH);
-        _wcslwr_s(Path);
-        Log.Add("  file %08lX length %u %ls", hr, Length, Path);
+            hr = Local->GetFilePathFromKey(Key, KeySize, FilePath, MAX_PATH);
+        _wcslwr_s(FilePath);
+        Log.Add("  file %08lX length %u %ls", hr, Length, FilePath);
     }
     {
         const void* Table = nullptr;
@@ -324,7 +324,7 @@ DqWalk(
 
         hr = Factory6->GetSystemFontCollection(FALSE, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, &Collection);
         Log.Add("GetSystemFontCollection typographic %08lX families %u", hr, Collection ? Collection->GetFontFamilyCount() : 0);
-        for (UINT32 Family = 0; Collection && Family < Collection->GetFontFamilyCount() && Family < 12; Family++)
+        for (UINT32 Family = 0; Collection && Family < Collection->GetFontFamilyCount(); Family++)
         {
             ComPtr<IDWriteFontFamily2> Entry;
             ComPtr<IDWriteLocalizedStrings> Names;
@@ -348,8 +348,50 @@ DqWalk(
                     continue;
                 }
                 Font1->GetFaceNames(&Faces);
-                Log.Add("    font %s w%d s%d st%d mono %d", DqString(Faces.Get(), L"en-us").c_str(), Font1->GetWeight(),
-                        Font1->GetStretch(), Font1->GetStyle(), Font1->IsMonospacedFont());
+                Log.Add("    font %s / %s w%d s%d st%d mono %d", DqString(Faces.Get(), L"en-us").c_str(),
+                        DqString(Faces.Get(), DefaultLocale).c_str(), Font1->GetWeight(), Font1->GetStretch(),
+                        Font1->GetStyle(), Font1->IsMonospacedFont());
+
+                /* populateFamily reads the family again through the font, then the face and its OS/2 table */
+                {
+                    ComPtr<IDWriteFontFamily> Owner;
+                    ComPtr<IDWriteFontFamily2> Owner2;
+                    ComPtr<IDWriteLocalizedStrings> OwnerNames;
+                    ComPtr<IDWriteFontFace> Face;
+                    ComPtr<IDWriteFontFace1> Face1;
+                    ComPtr<IDWriteFontFile> File;
+                    ComPtr<IDWriteFontFileLoader> Loader;
+                    ComPtr<IDWriteLocalFontFileLoader> Local;
+                    UINT32 Files = 1;
+                    WCHAR FilePath[MAX_PATH] = L"";
+                    BOOL HasOs2 = FALSE;
+
+                    if (SUCCEEDED(Font1->GetFontFamily(&Owner)) && SUCCEEDED(Owner.As(&Owner2)))
+                        Owner2->GetFamilyNames(&OwnerNames);
+                    hr = Font1->CreateFontFace(&Face);
+                    if (SUCCEEDED(hr) && SUCCEEDED(Face->GetFiles(&Files, &File)) && SUCCEEDED(File->GetLoader(&Loader)) &&
+                        SUCCEEDED(Loader.As(&Local)))
+                    {
+                        const void* Key;
+                        UINT32 KeySize;
+
+                        File->GetReferenceKey(&Key, &KeySize);
+                        Local->GetFilePathFromKey(Key, KeySize, FilePath, MAX_PATH);
+                        _wcslwr_s(FilePath);
+                    }
+                    if (Face && SUCCEEDED(Face.As(&Face1)))
+                    {
+                        const void* Table;
+                        UINT32 Size = 0;
+                        void* Context;
+
+                        if (SUCCEEDED(Face1->TryGetFontTable(DWRITE_MAKE_OPENTYPE_TAG('O', 'S', '/', '2'), &Table, &Size,
+                                                             &Context, &HasOs2)) && HasOs2)
+                            Face1->ReleaseFontTable(Context);
+                    }
+                    Log.Add("      family %s face %08lX index %u %ls os2 %d", DqString(OwnerNames.Get(), L"en-us").c_str(),
+                            hr, Face ? Face->GetIndex() : 0, FilePath, HasOs2);
+                }
             }
         }
     }
@@ -407,22 +449,85 @@ wmain(
     Want = DqWalk(SystemPath);
     Got = DqWalk(argv[1]);
 
-    for (UINT32 Section = 0; Section < 2; Section++)
+    /* The database walk is compared family by family, so one family's extra fonts do not shift the rest */
+    {
+        auto Blocks = [](const std::vector<std::string>& Lines)
+        {
+            std::vector<std::pair<std::string, std::vector<std::string>>> Result;
+
+            for (const auto& Line : Lines)
+            {
+                if (Result.empty() || Line.compare(0, 9, "  family ") == 0)
+                    Result.push_back({ Line.substr(0, Line.find(':')), {} });
+                Result.back().second.push_back(Line);
+            }
+            return Result;
+        };
+        auto Expected = Blocks(Want.Lines[0]);
+        auto Actual = Blocks(Got.Lines[0]);
+
+        printf("font database\n");
+        for (const auto& Block : Expected)
+        {
+            const std::vector<std::string>* Match = nullptr;
+
+            for (const auto& Other : Actual)
+            {
+                if (Other.first == Block.first)
+                    Match = &Other.second;
+            }
+            if (Match == nullptr)
+            {
+                Different++;
+                printf("!= missing %s\n", Block.first.c_str());
+                continue;
+            }
+            BOOLEAN Named = FALSE;
+
+            for (SIZE_T Index = 0; Index < std::max(Block.second.size(), Match->size()); Index++)
+            {
+                PCSTR A = Index < Block.second.size() ? Block.second[Index].c_str() : "(none)";
+                PCSTR B = Index < Match->size() ? (*Match)[Index].c_str() : "(none)";
+
+                if (strcmp(A, B) == 0)
+                    continue;
+                if (!Named)
+                    printf("in %s\n", Block.first.c_str());
+                Named = TRUE;
+                Different++;
+                printf("!= %s\n   got %s\n", A, B);
+            }
+        }
+        for (const auto& Block : Actual)
+        {
+            BOOLEAN Known = FALSE;
+
+            for (const auto& Other : Expected)
+            {
+                if (Other.first == Block.first)
+                    Known = TRUE;
+            }
+            if (!Known)
+            {
+                Different++;
+                printf("!= extra %s\n", Block.first.c_str());
+            }
+        }
+    }
+
+    for (UINT32 Section = 1; Section < 2; Section++)
     {
         const auto& Expected = Want.Lines[Section];
         const auto& Actual = Got.Lines[Section];
 
-        printf(Section == 0 ? "font database\n" : "font engine\n");
+        printf("font engine\n");
         for (SIZE_T Index = 0; Index < std::max(Expected.size(), Actual.size()); Index++)
         {
             PCSTR A = Index < Expected.size() ? Expected[Index].c_str() : "(none)";
             PCSTR B = Index < Actual.size() ? Actual[Index].c_str() : "(none)";
 
             if (strcmp(A, B) == 0)
-            {
-                printf("   %s\n", A);
                 continue;
-            }
             Different++;
             printf("!= %s\n   got %s\n", A, B);
         }
