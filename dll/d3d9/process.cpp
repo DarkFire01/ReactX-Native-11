@@ -1295,6 +1295,753 @@ D9Device::BindTransformed(VOID)
     DrawDirty |= D9DrawStreams;
 }
 
+/* The flags a clip vertex keeps besides its outcodes: an edge of the original triangle, and the plane that made
+   the vertex, which the screen transform clamps it to */
+static constexpr DWORD D9ClipEdge = 0x40000;
+static constexpr DWORD D9ClipMadeFront = 0x10000;
+static constexpr DWORD D9ClipMadeBack = 0x20000;
+static constexpr DWORD D9ClipMadeLeft = 0x1000;
+static constexpr DWORD D9ClipMadeRight = 0x2000;
+static constexpr DWORD D9ClipMadeTop = 0x4000;
+static constexpr DWORD D9ClipMadeBottom = 0x8000;
+static constexpr DWORD D9ClipMadePlane = 0x80000;
+
+/* The guard band outcodes, which the clipper tests in place of the side planes when the driver has a band */
+static constexpr DWORD D9ClipBandLeft = 0x1000;
+static constexpr DWORD D9ClipBandRight = 0x2000;
+static constexpr DWORD D9ClipBandTop = 0x4000;
+static constexpr DWORD D9ClipBandBottom = 0x8000;
+
+/* Vertices one triangle may grow to while the clipper cuts it */
+static constexpr UINT D9ClipPoolSize = 160;
+static constexpr UINT D9ClipListSize = 32;
+
+/* A vertex while the clipper works on it: the half space position, its flags, the colors, the screen position,
+   the separate fog and the coordinate sets as the transformed vertex holds them */
+struct D9ClipVertex
+{
+    FLOAT Clip[4];
+    DWORD Flags;
+    DWORD Diffuse;
+    DWORD Specular;
+    FLOAT Screen[4];
+    FLOAT Fog;
+    BYTE Coordinates[8 * 4 * sizeof(FLOAT)];
+};
+
+/* The planes the clipper cuts against */
+enum class D9ClipPlane
+{
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    BandLeft,
+    BandRight,
+    BandTop,
+    BandBottom,
+    User,
+};
+
+/* What one clipped draw needs besides the run: the viewport and band edges, where the coordinates sit and
+   the vertices the planes make */
+struct D9Clipper
+{
+    const D9PvRun* Run;
+    UINT CoordinateBytes;
+    UINT CoordinateSets;
+    DWORD Wraps[8];
+    BOOLEAN Flat;
+    FLOAT Inverse[3];
+    FLOAT Low[2];
+    FLOAT High[2];
+    FLOAT Band[4];
+    D9ClipVertex Pool[D9ClipPoolSize];
+    UINT PoolUsed;
+    D9ClipVertex* Lists[2][D9ClipListSize];
+};
+
+/* A color channel by channel along an edge, rounded half away from zero like the system */
+static
+DWORD
+D9ClipBlendColor(
+    _In_ DWORD From,
+    _In_ DWORD To,
+    _In_ FLOAT Along)
+{
+    DWORD Result = 0;
+
+    for (UINT Shift = 0; Shift < 32; Shift += 8)
+    {
+        FLOAT Start = static_cast<FLOAT>((From >> Shift) & 0xFF);
+        FLOAT Value = ((static_cast<FLOAT>((To >> Shift) & 0xFF) - Start) * Along) + Start;
+        INT Rounded = static_cast<INT>(Value >= 0.0f ? Value + 0.5f : Value - 0.5f);
+
+        Result |= (static_cast<DWORD>(Rounded) & 0xFF) << Shift;
+    }
+    return Result;
+}
+
+/* The vertex where an edge from an inside vertex to an outside one crosses a plane */
+static
+D9ClipVertex*
+D9ClipCross(
+    _Inout_ D9Clipper* Clipper,
+    _In_ const D9ClipVertex* Inside,
+    _In_ const D9ClipVertex* Outside,
+    _In_ DWORD Made,
+    _In_ FLOAT Near,
+    _In_ FLOAT Span)
+{
+    D9ClipVertex* Made_;
+    FLOAT Along = Near / Span;
+    const FLOAT* From = reinterpret_cast<const FLOAT*>(Inside->Coordinates);
+    const FLOAT* To = reinterpret_cast<const FLOAT*>(Outside->Coordinates);
+    FLOAT* Into;
+
+    if (Clipper->PoolUsed == D9ClipPoolSize)
+        return nullptr;
+    Made_ = &Clipper->Pool[Clipper->PoolUsed];
+    Clipper->PoolUsed += 1;
+    Made_->Flags = (Inside->Flags & Outside->Flags & ~D9ClipEdge) | Made;
+    for (UINT Part = 0; Part < 4; Part++)
+        Made_->Clip[Part] = ((Outside->Clip[Part] - Inside->Clip[Part]) * Along) + Inside->Clip[Part];
+
+    if ((Clipper->Run->Parts & D3DFVF_DIFFUSE) != 0)
+    {
+        Made_->Diffuse = Clipper->Flat ? Inside->Diffuse : D9ClipBlendColor(Inside->Diffuse, Outside->Diffuse, Along);
+    }
+    if ((Clipper->Run->Parts & D3DFVF_SPECULAR) != 0)
+    {
+        if (Clipper->Flat)
+        {
+            FLOAT Start = static_cast<FLOAT>(Inside->Specular >> 24);
+            FLOAT Value = ((static_cast<FLOAT>(Outside->Specular >> 24) - Start) * Along) + Start;
+            INT Rounded = static_cast<INT>(Value >= 0.0f ? Value + 0.5f : Value - 0.5f);
+
+            Made_->Specular = (Inside->Specular & 0x00FFFFFF) | ((static_cast<DWORD>(Rounded) & 0xFF) << 24);
+        }
+        else
+        {
+            Made_->Specular = D9ClipBlendColor(Inside->Specular, Outside->Specular, Along);
+        }
+    }
+    if ((Clipper->Run->Parts & D9VmFogFormat) != 0)
+        Made_->Fog = ((Outside->Fog - Inside->Fog) * Along) + Inside->Fog;
+
+    /* Coordinates go straight along the edge; a wrapped one would take the shorter way, which no draw here uses */
+    Into = reinterpret_cast<FLOAT*>(Made_->Coordinates);
+    for (UINT Set = 0; Set < Clipper->CoordinateSets; Set++)
+    {
+        UINT Parts = Clipper->Run->Layout.CoordinateSizes[Set] / sizeof(FLOAT);
+
+        for (UINT Part = 0; Part < Parts; Part++)
+        {
+            *Into = ((*To - *From) * Along) + *From;
+            Into += 1;
+            From += 1;
+            To += 1;
+        }
+    }
+    return Made_;
+}
+
+/* How far inside a plane a vertex is, each plane computed the way the system orders its arithmetic */
+static
+FLOAT
+D9ClipDistance(
+    _In_ const D9Clipper* Clipper,
+    _In_ D9ClipPlane Plane,
+    _In_ UINT User,
+    _In_ const D9ClipVertex* Vertex)
+{
+    const FLOAT* At = Vertex->Clip;
+
+    switch (Plane)
+    {
+    case D9ClipPlane::Front:
+        return At[2];
+    case D9ClipPlane::Back:
+        return At[3] - At[2];
+    case D9ClipPlane::Left:
+        return At[0];
+    case D9ClipPlane::Right:
+        return At[3] - At[0];
+    case D9ClipPlane::Top:
+        return At[3] - At[1];
+    case D9ClipPlane::Bottom:
+        return At[1];
+    case D9ClipPlane::BandLeft:
+        return At[0] - (Clipper->Band[0] * At[3]);
+    case D9ClipPlane::BandRight:
+        return (Clipper->Band[2] * At[3]) - At[0];
+    case D9ClipPlane::BandTop:
+        return (Clipper->Band[3] * At[3]) - At[1];
+    case D9ClipPlane::BandBottom:
+        return At[1] - (Clipper->Band[1] * At[3]);
+    default:
+    {
+        const FLOAT* Given = Clipper->Run->Planes[User];
+
+        return (((At[1] * Given[1]) + (At[0] * Given[0])) + (At[2] * Given[2])) + (At[3] * Given[3]);
+    }
+    }
+}
+
+/* One plane of the polygon clipper: the vertices inside stay, and each edge across the plane adds where it
+   crosses */
+static
+UINT
+D9ClipAgainst(
+    _Inout_ D9Clipper* Clipper,
+    _In_ D9ClipPlane Plane,
+    _In_ UINT User,
+    _In_ DWORD Made,
+    _In_reads_(Count) D9ClipVertex* const* In,
+    _In_ UINT Count,
+    _Out_writes_(D9ClipListSize) D9ClipVertex** Out)
+{
+    const D9ClipVertex* Previous = In[Count - 1];
+    FLOAT Before = D9ClipDistance(Clipper, Plane, User, Previous);
+    UINT Kept = 0;
+
+    for (UINT Index = 0; Index < Count && Kept + 2 <= D9ClipListSize; Index++)
+    {
+        D9ClipVertex* Current = In[Index];
+        FLOAT Now = D9ClipDistance(Clipper, Plane, User, Current);
+
+        if (Before >= 0.0f)
+        {
+            Out[Kept++] = const_cast<D9ClipVertex*>(Previous);
+            if (Now < 0.0f)
+                Out[Kept++] = D9ClipCross(Clipper, Previous, Current, Made, Before, Before - Now);
+        }
+        else if (Now >= 0.0f)
+        {
+            Out[Kept++] = D9ClipCross(Clipper, Current, Previous, (Previous->Flags & D9ClipEdge) | Made, Now,
+                                      Now - Before);
+        }
+        if (Kept != 0 && Out[Kept - 1] == nullptr)
+            return 0;
+        Previous = Current;
+        Before = Now;
+    }
+    return Kept;
+}
+
+/* The outcodes of a vertex the front plane made, kept with its edge and front flags */
+static
+DWORD
+D9ClipRecode(
+    _In_ const D9Clipper* Clipper,
+    _Inout_ D9ClipVertex* Vertex)
+{
+    const FLOAT* At = Vertex->Clip;
+    DWORD Code = D9PvClipCode(Clipper->Run, At[0], At[1], At[2], At[3]);
+
+    if (Code != 0 && Clipper->Run->GuardBand)
+        Code |= D9PvBandCode(Clipper->Run, At[0], At[1], At[3]);
+    Vertex->Flags = (Vertex->Flags & (D9ClipEdge | D9ClipMadeFront)) | Code;
+    return Code;
+}
+
+/* Cuts a triangle against every plane it crosses and puts the clipped vertices on the screen; vertices a
+   side plane made sit on its edge */
+static
+UINT
+D9ClipTriangle(
+    _Inout_ D9Clipper* Clipper,
+    _In_ D9ClipVertex* First,
+    _In_ D9ClipVertex* Second,
+    _In_ D9ClipVertex* Third,
+    _Out_ D9ClipVertex*** Result)
+{
+    static const struct
+    {
+        DWORD Code;
+        D9ClipPlane Plane;
+        DWORD Made;
+    } Sides[2][5] =
+    {
+        {
+            { D3DCS_BACK, D9ClipPlane::Back, D9ClipMadeBack },
+            { D3DCS_LEFT, D9ClipPlane::Left, D9ClipMadeLeft },
+            { D3DCS_RIGHT, D9ClipPlane::Right, D9ClipMadeRight },
+            { D3DCS_BOTTOM, D9ClipPlane::Bottom, D9ClipMadeBottom },
+            { D3DCS_TOP, D9ClipPlane::Top, D9ClipMadeTop },
+        },
+        {
+            { D3DCS_BACK, D9ClipPlane::Back, D9ClipMadeBack },
+            { D9ClipBandLeft, D9ClipPlane::BandLeft, D9ClipMadeLeft },
+            { D9ClipBandRight, D9ClipPlane::BandRight, D9ClipMadeRight },
+            { D9ClipBandBottom, D9ClipPlane::BandBottom, D9ClipMadeBottom },
+            { D9ClipBandTop, D9ClipPlane::BandTop, D9ClipMadeTop },
+        },
+    };
+    D9ClipVertex** In = Clipper->Lists[0];
+    D9ClipVertex** Out = Clipper->Lists[1];
+    DWORD Code = First->Flags | Second->Flags | Third->Flags;
+    UINT Count = 3;
+    UINT Band = Clipper->Run->GuardBand ? 1 : 0;
+
+    Clipper->PoolUsed = 0;
+    In[0] = First;
+    In[1] = Second;
+    In[2] = Third;
+    if ((Code & D3DCS_FRONT) != 0)
+    {
+        Count = D9ClipAgainst(Clipper, D9ClipPlane::Front, 0, D9ClipMadeFront, In, Count, Out);
+        if (Count < 3)
+            return 0;
+        D9ClipVertex** Swap = In;
+        In = Out;
+        Out = Swap;
+
+        /* The vertices the front plane made are tested against the others again */
+        Code = 0;
+        for (UINT Index = 0; Index < Count; Index++)
+        {
+            DWORD Flags = In[Index]->Flags;
+
+            if ((Flags & D9ClipMadeFront) != 0)
+                Flags = D9ClipRecode(Clipper, In[Index]);
+            Code |= Flags;
+        }
+    }
+    for (UINT Side = 0; Side < 5; Side++)
+    {
+        if ((Code & Sides[Band][Side].Code) == 0)
+            continue;
+        Count = D9ClipAgainst(Clipper, Sides[Band][Side].Plane, 0, Sides[Band][Side].Made, In, Count, Out);
+        if (Count < 3)
+            return 0;
+        D9ClipVertex** Swap = In;
+        In = Out;
+        Out = Swap;
+    }
+    for (UINT Plane = 0; Plane < Clipper->Run->PlaneCount; Plane++)
+    {
+        if ((Code & (D3DCS_PLANE0 << Plane)) == 0)
+            continue;
+        Count = D9ClipAgainst(Clipper, D9ClipPlane::User, Plane, D9ClipMadePlane << Plane, In, Count, Out);
+        if (Count < 3)
+            return 0;
+        D9ClipVertex** Swap = In;
+        In = Out;
+        Out = Swap;
+    }
+
+    /* Clipped vertices go on the screen; one a side plane made lands on that side's edge */
+    for (UINT Index = 0; Index < Count; Index++)
+    {
+        D9ClipVertex* Vertex = In[Index];
+        DWORD Flags = Vertex->Flags;
+        FLOAT Reciprocal;
+
+        if ((Flags & ~D9ClipEdge) == 0)
+            continue;
+        Reciprocal = 1.0f / Vertex->Clip[3];
+        for (UINT Axis = 0; Axis < 2; Axis++)
+        {
+            DWORD Sides_ = (Flags >> (12 + Axis * 2)) & 3;
+            FLOAT Value;
+
+            if (Sides_ == 1)
+            {
+                Value = Clipper->Low[Axis];
+            }
+            else if (Sides_ == 2)
+            {
+                Value = Clipper->High[Axis];
+            }
+            else
+            {
+                Value = ((Clipper->Run->Scale[Axis] * Vertex->Clip[Axis]) * Reciprocal) + Clipper->Run->Offset[Axis];
+                if (Value < Clipper->Low[Axis])
+                    Value = Clipper->Low[Axis];
+                if (Value > Clipper->High[Axis])
+                    Value = Clipper->High[Axis];
+            }
+            Vertex->Screen[Axis] = Value;
+        }
+        Vertex->Screen[2] = ((Vertex->Clip[2] * Reciprocal) * Clipper->Run->Scale[2]) + Clipper->Run->Offset[2];
+        Vertex->Screen[3] = Reciprocal;
+    }
+    *Result = In;
+    return Count;
+}
+
+/* A clip vertex from a transformed one: one the vertex pipeline put on the screen goes back to the half
+   space, one it left there takes its position as it is */
+static
+VOID
+D9ClipFromTransformed(
+    _In_ const D9Clipper* Clipper,
+    _In_ const BYTE* Transformed,
+    _In_ DWORD Code,
+    _Out_ D9ClipVertex* Vertex)
+{
+    const D9PvRun* Run = Clipper->Run;
+    const BYTE* Next = Transformed + 4 * sizeof(FLOAT);
+    DWORD Mask = Run->GuardBand ? ~D9PvSidePlanes : 0xFFFFFFFF;
+
+    ZeroMemory(Vertex, sizeof(*Vertex));
+    if ((Code & Mask) == 0)
+    {
+        FLOAT W;
+
+        CopyMemory(Vertex->Screen, Transformed, sizeof(Vertex->Screen));
+        W = 1.0f / Vertex->Screen[3];
+        Vertex->Clip[3] = W;
+        for (UINT Axis = 0; Axis < 3; Axis++)
+            Vertex->Clip[Axis] = ((Vertex->Screen[Axis] - Run->Offset[Axis]) * W) * Clipper->Inverse[Axis];
+    }
+    else
+    {
+        CopyMemory(Vertex->Clip, Transformed, sizeof(Vertex->Clip));
+    }
+    Vertex->Flags = Code;
+
+    /* The colors, fog and coordinates follow the position in this order */
+    if ((Run->Parts & D3DFVF_DIFFUSE) != 0)
+    {
+        CopyMemory(&Vertex->Diffuse, Next, sizeof(Vertex->Diffuse));
+        Next += sizeof(DWORD);
+    }
+    if ((Run->Parts & D3DFVF_SPECULAR) != 0)
+    {
+        CopyMemory(&Vertex->Specular, Next, sizeof(Vertex->Specular));
+        Next += sizeof(DWORD);
+    }
+    if ((Run->Parts & D9VmFogFormat) != 0)
+    {
+        CopyMemory(&Vertex->Fog, Next, sizeof(Vertex->Fog));
+        Next += sizeof(DWORD);
+    }
+    CopyMemory(Vertex->Coordinates, Next, Clipper->CoordinateBytes);
+}
+
+/* The transformed vertex the driver draws for a clip vertex */
+static
+VOID
+D9ClipToTransformed(
+    _In_ const D9Clipper* Clipper,
+    _In_ const D9ClipVertex* Vertex,
+    _Out_ BYTE* Transformed)
+{
+    const D9PvLayout* Layout = &Clipper->Run->Layout;
+
+    CopyMemory(Transformed, Vertex->Screen, sizeof(Vertex->Screen));
+    if ((Clipper->Run->Parts & D3DFVF_DIFFUSE) != 0)
+        CopyMemory(Transformed + Layout->Diffuse, &Vertex->Diffuse, sizeof(Vertex->Diffuse));
+    if ((Clipper->Run->Parts & D3DFVF_SPECULAR) != 0)
+        CopyMemory(Transformed + Layout->Specular, &Vertex->Specular, sizeof(Vertex->Specular));
+    if ((Clipper->Run->Parts & D9VmFogFormat) != 0)
+        CopyMemory(Transformed + Layout->Fog, &Vertex->Fog, sizeof(Vertex->Fog));
+    if (Layout->CoordinateCount != 0)
+        CopyMemory(Transformed + Layout->Coordinates[0], Vertex->Coordinates, Clipper->CoordinateBytes);
+}
+
+/* Draws the triangles a strip of transformed vertices makes, from where the draw's vertices start, and moves
+   the start past them */
+VOID
+D9Device::DrawTransformedRun(
+    _In_ D3DPRIMITIVETYPE Type,
+    _In_ UINT Vertices,
+    _In_ UINT Primitives)
+{
+    D3DDDIARG_DRAWPRIMITIVE2 Draw = {};
+
+    if ((DrawDirty & D9DrawTextures) != 0)
+        FlushTextures();
+    BindTransformed();
+    SendTargets();
+    SettleSwitch(Type, FALSE);
+    Draw.PrimitiveType = Type;
+    Draw.FirstVertexOffset = TransformedStart;
+    Draw.PrimitiveCount = Primitives;
+    DdiDrawPrimitive2(&Draw);
+    TransformedStart += Vertices * TransformedStride;
+}
+
+/* Draws vertices the clipper made from memory of its own; stream 0 holds nothing the next draw can count on */
+VOID
+D9Device::DrawClippedVertices(
+    _In_ D3DPRIMITIVETYPE Type,
+    _In_reads_bytes_(Vertices * TransformedStride) const BYTE* Data,
+    _In_ UINT Vertices,
+    _In_ UINT Primitives)
+{
+    D3DDDIARG_SETSTREAMSOURCEUM Memory = {};
+    D3DDDIARG_DRAWPRIMITIVE Draw = {};
+
+    UNREFERENCED_PARAMETER(Vertices);
+    if ((DrawDirty & D9DrawTextures) != 0)
+        FlushTextures();
+    SendTargets();
+    SettleSwitch(Type, FALSE);
+    DriverStreamZero = NULL;
+    DriverStrideZero = TransformedStride;
+    Draw.PrimitiveType = Type;
+    Draw.PrimitiveCount = Primitives;
+    if (Batch != nullptr)
+    {
+        Batch->DrawMemory(&Draw, TransformedStride, Data);
+        return;
+    }
+    Memory.Stream = 0;
+    Memory.Stride = TransformedStride;
+    DeviceFunctions.pfnSetStreamSourceUm(DriverDevice, &Memory, Data);
+    DeviceFunctions.pfnDrawPrimitive(DriverDevice, &Draw, nullptr);
+}
+
+/* Clips a triangle and draws what is left as a fan; flat shading gives every vertex the first one's colors
+   while the clipper runs */
+HRESULT
+D9Device::DrawClippedTriangle(
+    _Inout_ D9Clipper* Clipper,
+    _Inout_ D9ClipVertex* First,
+    _Inout_ D9ClipVertex* Second,
+    _Inout_ D9ClipVertex* Third)
+{
+    D9ClipVertex** Polygon = nullptr;
+    DWORD Kept[4] = { Second->Diffuse, Second->Specular, Third->Diffuse, Third->Specular };
+    BYTE* Vertices;
+    UINT Count;
+
+    First->Flags |= D9ClipEdge;
+    Second->Flags |= D9ClipEdge;
+    Third->Flags |= D9ClipEdge;
+    if (Clipper->Flat)
+    {
+        Second->Diffuse = First->Diffuse;
+        Third->Diffuse = First->Diffuse;
+        Second->Specular = (Second->Specular & 0xFF000000) | (First->Specular & 0x00FFFFFF);
+        Third->Specular = (Third->Specular & 0xFF000000) | (First->Specular & 0x00FFFFFF);
+    }
+    Count = D9ClipTriangle(Clipper, First, Second, Third, &Polygon);
+    if (Count != 0)
+    {
+        Vertices = new (std::nothrow) BYTE[Count * TransformedStride];
+        if (Vertices == nullptr)
+            return E_OUTOFMEMORY;
+        for (UINT Index = 0; Index < Count; Index++)
+            D9ClipToTransformed(Clipper, Polygon[Index], Vertices + Index * TransformedStride);
+        DrawClippedVertices(D3DPT_TRIANGLEFAN, Vertices, Count, Count - 2);
+        delete[] Vertices;
+    }
+    First->Flags &= ~D9ClipEdge;
+    Second->Flags &= ~D9ClipEdge;
+    Third->Flags &= ~D9ClipEdge;
+    if (Clipper->Flat)
+    {
+        Second->Diffuse = Kept[0];
+        Second->Specular = Kept[1];
+        Third->Diffuse = Kept[2];
+        Third->Specular = Kept[3];
+    }
+    return S_OK;
+}
+
+/* A triangle draw some of whose triangles cross the frustum: runs of whole triangles draw from the transformed
+   vertex buffer, triangles outside one plane are dropped and the others clipped */
+HRESULT
+D9Device::DrawClipped(
+    _In_ const D9PvRun* Run,
+    _In_ D3DPRIMITIVETYPE Type,
+    _In_ UINT PrimitiveCount,
+    _In_reads_bytes_(VertexCount * Run->Stride) const BYTE* Data,
+    _In_ UINT VertexCount,
+    _In_reads_(VertexCount) const WORD* Codes)
+{
+    DWORD Mask = Run->GuardBand ? ~D9PvSidePlanes : 0xFFFFFFFF;
+    UINT Stride = Run->Stride;
+    D9Clipper* Clipper;
+    D9ClipVertex Corners[3];
+    UINT Pending = 0;
+    UINT RunFirst = 0;
+    HRESULT hr = S_OK;
+
+    UNREFERENCED_PARAMETER(VertexCount);
+    Clipper = new (std::nothrow) D9Clipper;
+    if (Clipper == nullptr)
+        return E_OUTOFMEMORY;
+    ZeroMemory(Clipper, sizeof(*Clipper));
+    Clipper->Run = Run;
+    Clipper->CoordinateSets = Run->Layout.CoordinateCount;
+    for (UINT Set = 0; Set < Run->Layout.CoordinateCount; Set++)
+        Clipper->CoordinateBytes += Run->Layout.CoordinateSizes[Set];
+    Clipper->Flat = RenderStates[D3DRS_SHADEMODE] == D3DSHADE_FLAT;
+    Clipper->Inverse[0] = 1.0f / Run->Scale[0];
+    Clipper->Inverse[1] = 1.0f / Run->Scale[1];
+    Clipper->Inverse[2] = 1.0f / Run->Scale[2];
+    if (Run->GuardBand)
+    {
+        FLOAT X = static_cast<FLOAT>(CurrentViewport.X);
+        FLOAT Y = static_cast<FLOAT>(CurrentViewport.Y);
+        FLOAT Width = static_cast<FLOAT>(CurrentViewport.Width);
+        FLOAT Height = static_cast<FLOAT>(CurrentViewport.Height);
+        FLOAT Left = 1.0f - ((Caps.GuardBandLeft - X) * (2.0f / Width));
+        FLOAT Right = ((Caps.GuardBandRight - X) * (2.0f / Width)) - 1.0f;
+        FLOAT Bottom = ((Caps.GuardBandBottom - Y) * (2.0f / Height)) - 1.0f;
+        FLOAT Top = 1.0f - ((Caps.GuardBandTop - Y) * (2.0f / Height));
+
+        Clipper->Low[0] = Caps.GuardBandLeft;
+        Clipper->Low[1] = Caps.GuardBandTop;
+        Clipper->High[0] = Caps.GuardBandRight;
+        Clipper->High[1] = Caps.GuardBandBottom;
+        Clipper->Band[0] = (1.0f - Left) * 0.5f;
+        Clipper->Band[1] = (1.0f - Bottom) * 0.5f;
+        Clipper->Band[2] = (Right + 1.0f) * 0.5f;
+        Clipper->Band[3] = (Top + 1.0f) * 0.5f;
+    }
+    else
+    {
+        Clipper->Low[0] = static_cast<FLOAT>(CurrentViewport.X);
+        Clipper->Low[1] = static_cast<FLOAT>(CurrentViewport.Y);
+        Clipper->High[0] = static_cast<FLOAT>(CurrentViewport.X) + static_cast<FLOAT>(CurrentViewport.Width);
+        Clipper->High[1] = static_cast<FLOAT>(CurrentViewport.Y) + static_cast<FLOAT>(CurrentViewport.Height);
+    }
+
+    if (Type == D3DPT_TRIANGLELIST)
+    {
+        for (UINT Triangle = 0; Triangle < PrimitiveCount && SUCCEEDED(hr); Triangle++)
+        {
+            const WORD* Three = &Codes[Triangle * 3];
+            const BYTE* At = Data + Triangle * 3 * Stride;
+
+            if ((Three[0] & Three[1] & Three[2]) == 0 && ((Three[0] | Three[1] | Three[2]) & Mask) == 0)
+            {
+                Pending += 1;
+                continue;
+            }
+            if (Pending != 0)
+                DrawTransformedRun(D3DPT_TRIANGLELIST, Pending * 3, Pending);
+            Pending = 0;
+            TransformedStart += 3 * Stride;
+            if ((Three[0] & Three[1] & Three[2]) != 0)
+                continue;
+            for (UINT Corner = 0; Corner < 3; Corner++)
+                D9ClipFromTransformed(Clipper, At + Corner * Stride, Three[Corner], &Corners[Corner]);
+            hr = DrawClippedTriangle(Clipper, &Corners[0], &Corners[1], &Corners[2]);
+        }
+        if (SUCCEEDED(hr) && Pending != 0)
+            DrawTransformedRun(D3DPT_TRIANGLELIST, Pending * 3, Pending);
+    }
+    else if (Type == D3DPT_TRIANGLESTRIP)
+    {
+        for (UINT Triangle = 0; Triangle < PrimitiveCount && SUCCEEDED(hr); Triangle++)
+        {
+            const WORD* Three = &Codes[Triangle];
+            const BYTE* At = Data + Triangle * Stride;
+            BOOLEAN Odd = (Triangle & 1) != 0;
+
+            if ((Three[0] & Three[1] & Three[2]) == 0 && ((Three[0] | Three[1] | Three[2]) & Mask) == 0)
+            {
+                if (Pending != 0 || !Odd)
+                {
+                    Pending += 1;
+                    continue;
+                }
+
+                /* A run may not start on an odd triangle, which draws alone with its winding put right */
+                BYTE* Alone = new (std::nothrow) BYTE[3 * Stride];
+
+                if (Alone == nullptr)
+                {
+                    hr = E_OUTOFMEMORY;
+                    break;
+                }
+                CopyMemory(Alone, At + Stride, Stride);
+                CopyMemory(Alone + Stride, At, Stride);
+                CopyMemory(Alone + 2 * Stride, At + 2 * Stride, Stride);
+                DrawClippedVertices(D3DPT_TRIANGLEFAN, Alone, 3, 1);
+                delete[] Alone;
+                TransformedStart += Stride;
+                continue;
+            }
+            if (Pending != 0)
+            {
+                DrawTransformedRun(D3DPT_TRIANGLESTRIP, Pending + 2, Pending);
+                TransformedStart -= Stride;
+            }
+            else
+            {
+                TransformedStart += Stride;
+            }
+            Pending = 0;
+            if ((Three[0] & Three[1] & Three[2]) != 0)
+                continue;
+            D9ClipFromTransformed(Clipper, At, Three[0], &Corners[0]);
+            D9ClipFromTransformed(Clipper, At + (Odd ? 2 : 1) * Stride, Three[Odd ? 2 : 1], &Corners[1]);
+            D9ClipFromTransformed(Clipper, At + (Odd ? 1 : 2) * Stride, Three[Odd ? 1 : 2], &Corners[2]);
+            hr = DrawClippedTriangle(Clipper, &Corners[0], &Corners[1], &Corners[2]);
+        }
+        if (SUCCEEDED(hr) && Pending != 0)
+            DrawTransformedRun(D3DPT_TRIANGLESTRIP, Pending + 2, Pending);
+    }
+    else
+    {
+        /* A fan keeps its first vertex; a run that does not start next to it borrows the vertex before it */
+        D9ClipVertex Hub;
+
+        D9ClipFromTransformed(Clipper, Data, Codes[0], &Hub);
+        for (UINT Triangle = 0; Triangle <= PrimitiveCount && SUCCEEDED(hr); Triangle++)
+        {
+            BOOLEAN Last = Triangle == PrimitiveCount;
+            WORD One = 0;
+            WORD Two = 0;
+            BOOLEAN Culled = FALSE;
+
+            if (!Last)
+            {
+                One = Codes[Triangle + 1];
+                Two = Codes[Triangle + 2];
+                Culled = (Codes[0] & One & Two) != 0;
+                if (!Culled && ((Codes[0] | One | Two) & Mask) == 0)
+                {
+                    Pending += 1;
+                    continue;
+                }
+            }
+            if (Pending != 0)
+            {
+                if (RunFirst == 0)
+                {
+                    DrawTransformedRun(D3DPT_TRIANGLEFAN, Pending + 2, Pending);
+                }
+                else
+                {
+                    BYTE* Borrowed = new (std::nothrow) BYTE[(Pending + 2) * Stride];
+
+                    if (Borrowed == nullptr)
+                    {
+                        hr = E_OUTOFMEMORY;
+                        break;
+                    }
+                    CopyMemory(Borrowed, Data, Stride);
+                    CopyMemory(Borrowed + Stride, Data + RunFirst * Stride, (Pending + 1) * Stride);
+                    DrawClippedVertices(D3DPT_TRIANGLEFAN, Borrowed, Pending + 2, Pending);
+                    delete[] Borrowed;
+                }
+            }
+            Pending = 0;
+            if (Last)
+                break;
+            RunFirst = Triangle + 2;
+            if (Culled)
+                continue;
+            D9ClipFromTransformed(Clipper, Data + (Triangle + 1) * Stride, One, &Corners[0]);
+            D9ClipFromTransformed(Clipper, Data + (Triangle + 2) * Stride, Two, &Corners[1]);
+            hr = DrawClippedTriangle(Clipper, &Corners[0], &Corners[1], &Hub);
+        }
+    }
+    delete Clipper;
+    return hr;
+}
+
 HRESULT
 D9Device::DrawSoftware(
     _In_ D3DPRIMITIVETYPE Type,
@@ -1432,7 +2179,15 @@ D9Device::DrawSoftware(
         hr = D9PvRunVertices(&Run, Declaration, First, VertexCount, Data, Codes);
 
         /* A primitive wholly outside one plane draws nothing */
-        if (SUCCEEDED(hr) && (Run.ClipIntersection == 0 || !Run.Clipping))
+        if (SUCCEEDED(hr) && Run.Clipping && Run.ClipIntersection == 0 && IndexData == nullptr &&
+            Run.Targets == nullptr && (Run.ClipUnion & (Run.GuardBand ? ~D9PvSidePlanes : 0xFFFFFFFF)) != 0 &&
+            (Type == D3DPT_TRIANGLELIST || Type == D3DPT_TRIANGLESTRIP || Type == D3DPT_TRIANGLEFAN))
+        {
+            /* Some triangles cross the frustum and go through the clipper */
+            hr = DrawClipped(&Run, Type, PrimitiveCount, Data, VertexCount, Codes);
+            TransformedUsed[TransformedBuffer] = TransformedStart;
+        }
+        else if (SUCCEEDED(hr) && (Run.ClipIntersection == 0 || !Run.Clipping))
         {
             if ((DrawDirty & D9DrawTextures) != 0)
                 FlushTextures();

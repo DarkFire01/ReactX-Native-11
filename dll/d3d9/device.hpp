@@ -165,6 +165,9 @@ public:
 };
 
 class D9Declaration;
+struct D9PvRun;
+struct D9Clipper;
+struct D9ClipVertex;
 
 /* Driver calls a batch records instead of making them */
 enum class D9BatchCall : UINT
@@ -3497,6 +3500,35 @@ private:
 
     BOOLEAN
     ProcessesInSoftware(VOID) const;
+
+    VOID
+    DrawTransformedRun(
+        _In_ D3DPRIMITIVETYPE Type,
+        _In_ UINT Vertices,
+        _In_ UINT Primitives);
+
+    VOID
+    DrawClippedVertices(
+        _In_ D3DPRIMITIVETYPE Type,
+        _In_reads_bytes_(Vertices * TransformedStride) const BYTE* Data,
+        _In_ UINT Vertices,
+        _In_ UINT Primitives);
+
+    HRESULT
+    DrawClippedTriangle(
+        _Inout_ D9Clipper* Clipper,
+        _Inout_ D9ClipVertex* First,
+        _Inout_ D9ClipVertex* Second,
+        _Inout_ D9ClipVertex* Third);
+
+    HRESULT
+    DrawClipped(
+        _In_ const D9PvRun* Run,
+        _In_ D3DPRIMITIVETYPE Type,
+        _In_ UINT PrimitiveCount,
+        _In_reads_bytes_(VertexCount * Run->Stride) const BYTE* Data,
+        _In_ UINT VertexCount,
+        _In_reads_(VertexCount) const WORD* Codes);
 
     HRESULT
     LockTransformed(
