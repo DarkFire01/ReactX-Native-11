@@ -241,8 +241,8 @@ DWRITE_FONT_FACE_TYPE
 STDMETHODCALLTYPE
 RxFontFace::GetType(VOID)
 {
-    /* A face from a collection still reports what its outlines are */
-    return Data->Sfnt().IsCff() ? DWRITE_FONT_FACE_TYPE_CFF : DWRITE_FONT_FACE_TYPE_TRUETYPE;
+    /* Faces of a collection file report the collection type */
+    return Data->FaceType();
 }
 
 HRESULT
