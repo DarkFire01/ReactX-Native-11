@@ -3910,6 +3910,638 @@ TcCheckQueries(
     }
 }
 
+/* Resources every view case may name, made fresh on each case's device */
+struct TcViewResources
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12DescriptorHeap> Views;
+    ComPtr<ID3D12DescriptorHeap> Samplers;
+    ComPtr<ID3D12DescriptorHeap> Targets;
+    ComPtr<ID3D12DescriptorHeap> Depths;
+    ComPtr<ID3D12Resource> Buffer;
+    ComPtr<ID3D12Resource> Upload;
+    ComPtr<ID3D12Resource> Typeless;
+    ComPtr<ID3D12Resource> Typed;
+    ComPtr<ID3D12Resource> Half;
+    ComPtr<ID3D12Resource> Volume;
+    ComPtr<ID3D12Resource> Depth;
+    ComPtr<ID3D12Resource> Float;
+    ComPtr<ID3D12Resource> Line;
+    ComPtr<ID3D12Resource> Hidden;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE View() { return Views->GetCPUDescriptorHandleForHeapStart(); }
+    D3D12_CPU_DESCRIPTOR_HANDLE Sampler() { return Samplers->GetCPUDescriptorHandleForHeapStart(); }
+    D3D12_CPU_DESCRIPTOR_HANDLE Target() { return Targets->GetCPUDescriptorHandleForHeapStart(); }
+    D3D12_CPU_DESCRIPTOR_HANDLE DepthView() { return Depths->GetCPUDescriptorHandleForHeapStart(); }
+};
+
+static
+ComPtr<ID3D12Resource>
+TcViewResource(
+    _In_ ID3D12Device* Device,
+    _In_ D3D12_HEAP_TYPE HeapType,
+    _In_ D3D12_RESOURCE_DIMENSION Dimension,
+    _In_ UINT64 Width,
+    _In_ UINT Height,
+    _In_ UINT16 DepthOrArraySize,
+    _In_ UINT16 MipLevels,
+    _In_ DXGI_FORMAT Format,
+    _In_ D3D12_RESOURCE_FLAGS Flags)
+{
+    D3D12_HEAP_PROPERTIES Heap = { HeapType };
+    D3D12_RESOURCE_DESC Desc = {};
+    ComPtr<ID3D12Resource> Resource;
+
+    Desc.Dimension = Dimension;
+    Desc.Width = Width;
+    Desc.Height = Height;
+    Desc.DepthOrArraySize = DepthOrArraySize;
+    Desc.MipLevels = MipLevels;
+    Desc.Format = Format;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR
+                                                               : D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    Desc.Flags = Flags;
+    Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                    HeapType == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ
+                                                                       : D3D12_RESOURCE_STATE_COMMON,
+                                    nullptr, IID_PPV_ARGS(&Resource));
+    return Resource;
+}
+
+/* One view call on a fresh device; the device's removed reason tells whether the call passed the checks */
+template <typename F>
+static
+VOID
+TcViewCase(
+    _In_ TwelveCheck& Check,
+    _In_z_ PCSTR Name,
+    _In_ F Call)
+{
+    TcViewResources Set;
+    D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
+    ID3D12Device* Device;
+
+    if (FAILED(Check.MakeDevice(&Set.Device)))
+    {
+        Check.Report(Name, "no device");
+        return;
+    }
+    Device = Set.Device.Get();
+
+    HeapDesc.NumDescriptors = 4;
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Set.Views));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Set.Samplers));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Set.Targets));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Set.Depths));
+
+    Set.Buffer = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_BUFFER, 65536, 1, 1, 1,
+                                DXGI_FORMAT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Set.Upload = TcViewResource(Device, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_DIMENSION_BUFFER, 65536, 1, 1, 1,
+                                DXGI_FORMAT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE);
+    Set.Typeless = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 0,
+                                  DXGI_FORMAT_R8G8B8A8_TYPELESS,
+                                  D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Set.Typed = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1,
+                               DXGI_FORMAT_R8G8B8A8_UNORM,
+                               D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Set.Half = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 32, 32, 12, 2,
+                              DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    Set.Volume = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE3D, 16, 16, 8, 3,
+                                DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Set.Depth = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 2, 1,
+                               DXGI_FORMAT_R24G8_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    Set.Float = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1,
+                               DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    Set.Line = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE1D, 64, 1, 4, 1,
+                              DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    Set.Hidden = TcViewResource(Device, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 1,
+                                DXGI_FORMAT_D16_UNORM,
+                                D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+    if (Set.Views == nullptr || Set.Samplers == nullptr || Set.Targets == nullptr || Set.Depths == nullptr ||
+        Set.Buffer == nullptr || Set.Upload == nullptr || Set.Typeless == nullptr || Set.Typed == nullptr ||
+        Set.Half == nullptr || Set.Volume == nullptr || Set.Depth == nullptr || Set.Float == nullptr ||
+        Set.Line == nullptr || Set.Hidden == nullptr)
+    {
+        Check.Report(Name, "setup failed");
+        return;
+    }
+
+    Call(Set);
+    Check.Report(Name, "0x%08lX", Device->GetDeviceRemovedReason());
+}
+
+/* views: the checks each view and sampler kind makes before the driver sees it */
+static
+VOID
+TcCheckViews(
+    _In_ TwelveCheck& Check)
+{
+    using R = TcViewResources;
+    const D3D12_SHADER_RESOURCE_VIEW_DESC SrvBuffer = []() {
+        D3D12_SHADER_RESOURCE_VIEW_DESC Desc = {};
+
+        Desc.Format = DXGI_FORMAT_R32_FLOAT;
+        Desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        Desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        Desc.Buffer.NumElements = 64;
+        return Desc;
+    }();
+    const D3D12_SHADER_RESOURCE_VIEW_DESC SrvTexture = []() {
+        D3D12_SHADER_RESOURCE_VIEW_DESC Desc = {};
+
+        Desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        Desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        Desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        Desc.Texture2D.MipLevels = (UINT)-1;
+        return Desc;
+    }();
+    const D3D12_UNORDERED_ACCESS_VIEW_DESC UavBuffer = []() {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC Desc = {};
+
+        Desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        Desc.Buffer.NumElements = 64;
+        Desc.Buffer.StructureByteStride = 16;
+        return Desc;
+    }();
+    const D3D12_SAMPLER_DESC2 Sampler = []() {
+        D3D12_SAMPLER_DESC2 Desc = {};
+
+        Desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        Desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        Desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        Desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        Desc.MaxLOD = 4.0f;
+        return Desc;
+    }();
+
+    /* Constant buffer views */
+    TcViewCase(Check, "cbv_null", [](R& S) { S.Device->CreateConstantBufferView(nullptr, S.View()); });
+    for (UINT Index = 0; Index < 5; Index++)
+    {
+        static const UINT64 Offsets[] = { 0, 256, 128, 0, 0 };
+        static const UINT Sizes[] = { 256, 65536, 256, 384, 65792 };
+        static const PCSTR Names[] = { "cbv_ok", "cbv_largest", "cbv_offset", "cbv_size", "cbv_too_big" };
+
+        TcViewCase(Check, Names[Index], [Index](R& S) {
+            D3D12_CONSTANT_BUFFER_VIEW_DESC Desc = { S.Upload->GetGPUVirtualAddress() + Offsets[Index], Sizes[Index] };
+
+            S.Device->CreateConstantBufferView(&Desc, S.View());
+        });
+    }
+
+    /* Shader resource views */
+    TcViewCase(Check, "srv_null_null", [](R& S) { S.Device->CreateShaderResourceView(nullptr, nullptr, S.View()); });
+    TcViewCase(Check, "srv_buffer_nulldesc", [](R& S) {
+        S.Device->CreateShaderResourceView(S.Buffer.Get(), nullptr, S.View());
+    });
+    struct SrvEdit
+    {
+        PCSTR Name;
+        UINT Target;
+        VOID (*Edit)(D3D12_SHADER_RESOURCE_VIEW_DESC& Desc);
+    };
+    static const SrvEdit SrvEdits[] =
+    {
+        { "srv_buffer_ok", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {} },
+        { "srv_buffer_end", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Buffer.FirstElement = 16384 - 64; } },
+        { "srv_buffer_past", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Buffer.FirstElement = 16384 - 63; } },
+        { "srv_buffer_zero", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Buffer.NumElements = 0; } },
+        { "srv_buffer_typeless", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R32_TYPELESS; } },
+        { "srv_buffer_unknown", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_UNKNOWN; } },
+        { "srv_buffer_bc1", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_BC1_UNORM; } },
+        { "srv_buffer_mapping", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(3, 2, 1, 0); } },
+        { "srv_structured_ok", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_UNKNOWN; D.Buffer.StructureByteStride = 12; } },
+        { "srv_structured_format", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Buffer.StructureByteStride = 12; } },
+        { "srv_structured_raw", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_UNKNOWN; D.Buffer.StructureByteStride = 12; D.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW; } },
+        { "srv_structured_mapping", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_UNKNOWN; D.Buffer.StructureByteStride = 12;
+            D.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 0); } },
+        { "srv_structured_past", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_UNKNOWN; D.Buffer.StructureByteStride = 1024; } },
+        { "srv_raw_ok", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_TYPELESS; D.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW; } },
+        { "srv_raw_format", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW; } },
+        { "srv_raw_first", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_TYPELESS; D.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW; D.Buffer.FirstElement = 2; } },
+        { "srv_buffer_flags", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Buffer.Flags = (D3D12_BUFFER_SRV_FLAGS)2; } },
+        { "srv_typed_ok", 2, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {} },
+        { "srv_rtas_resource", 0, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_UNKNOWN; D.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE; } },
+        { "srv_texture_ok", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {} },
+        { "srv_texture_unknown", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_UNKNOWN; } },
+        { "srv_typed_unknown", 2, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_UNKNOWN; } },
+        { "srv_texture_srgb", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; } },
+        { "srv_typed_srgb", 2, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; } },
+        { "srv_typed_uint", 2, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R8G8B8A8_UINT; } },
+        { "srv_typed_typeless", 2, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; } },
+        { "srv_typed_other", 2, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_B8G8R8A8_UNORM; } },
+        { "srv_texture_typeless", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS; } },
+        { "srv_texture_r32", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R32_FLOAT; } },
+        { "srv_half_unorm", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R16G16B16A16_UNORM; } },
+        { "srv_half_uint", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R16G16B16A16_UINT; } },
+        { "srv_mip_last", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Texture2D.MostDetailedMip = 6; } },
+        { "srv_mip_past", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Texture2D.MostDetailedMip = 7; } },
+        { "srv_mips_all", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Texture2D.MipLevels = 7; } },
+        { "srv_mips_more", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Texture2D.MipLevels = 8; } },
+        { "srv_mips_zero", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Texture2D.MipLevels = 0; } },
+        { "srv_mips_window", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Texture2D.MostDetailedMip = 3; D.Texture2D.MipLevels = 5; } },
+        { "srv_plane", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Texture2D.PlaneSlice = 1; } },
+        { "srv_mapping_zero", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Shader4ComponentMapping = 0; } },
+        { "srv_mapping_six", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(6, 1, 2, 3); } },
+        { "srv_mapping_high", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING | 0x2000; } },
+        { "srv_mapping_swizzle", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(4, 5, 2, 0); } },
+        { "srv_dimension_3d", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D; } },
+        { "srv_dimension_1d", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D; } },
+        { "srv_dimension_ms", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS; } },
+        { "srv_dimension_zero", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.ViewDimension = D3D12_SRV_DIMENSION_UNKNOWN; } },
+        { "srv_cube_single", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE; } },
+        { "srv_cube_ok", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE; } },
+        { "srv_cubes_ok", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            D.TextureCubeArray.MipLevels = (UINT)-1; D.TextureCubeArray.NumCubes = (UINT)-1; } },
+        { "srv_cubes_two", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            D.TextureCubeArray.MipLevels = 2; D.TextureCubeArray.NumCubes = 2; } },
+        { "srv_cubes_three", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            D.TextureCubeArray.MipLevels = 2; D.TextureCubeArray.NumCubes = 3; } },
+        { "srv_cubes_face", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            D.TextureCubeArray.MipLevels = 2; D.TextureCubeArray.First2DArrayFace = 7; D.TextureCubeArray.NumCubes = 1; } },
+        { "srv_cubes_late", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            D.TextureCubeArray.MipLevels = 2; D.TextureCubeArray.First2DArrayFace = 7; D.TextureCubeArray.NumCubes = (UINT)-1; } },
+        { "srv_array_ok", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            D.Texture2DArray.FirstArraySlice = 4; D.Texture2DArray.ArraySize = (UINT)-1; } },
+        { "srv_array_past", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            D.Texture2DArray.FirstArraySlice = 4; D.Texture2DArray.ArraySize = 9; } },
+        { "srv_array_first", 3, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            D.Texture2DArray.FirstArraySlice = 12; D.Texture2DArray.ArraySize = 1; } },
+        { "srv_depth_r24", 4, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; } },
+        { "srv_depth_g8", 4, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT; } },
+        { "srv_depth_g8_plane", 4, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT; D.Texture2D.PlaneSlice = 1; } },
+        { "srv_depth_d24", 4, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; } },
+        { "srv_depth_r32", 4, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R32_FLOAT; } },
+        { "srv_float_r32", 5, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R32_FLOAT; } },
+        { "srv_float_uint", 5, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R32_UINT; } },
+        { "srv_float_d32", 5, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_D32_FLOAT; } },
+        { "srv_volume_ok", 6, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D; D.Texture3D.MostDetailedMip = 2; } },
+        { "srv_volume_mips", 6, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_FLOAT; D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D; D.Texture3D.MipLevels = 4; } },
+        { "srv_line_ok", 7, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY; D.Texture1DArray.MipLevels = 1;
+            D.Texture1DArray.FirstArraySlice = 1; D.Texture1DArray.ArraySize = 3; } },
+        { "srv_line_past", 7, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) {
+            D.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY; D.Texture1DArray.MipLevels = 1;
+            D.Texture1DArray.FirstArraySlice = 1; D.Texture1DArray.ArraySize = 4; } },
+        { "srv_denied", 8, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R16_UNORM; } },
+        { "srv_unknown_format", 1, [](D3D12_SHADER_RESOURCE_VIEW_DESC& D) { D.Format = (DXGI_FORMAT)120; } },
+    };
+    for (const SrvEdit& Each : SrvEdits)
+    {
+        TcViewCase(Check, Each.Name, [&](R& S) {
+            ID3D12Resource* Targets[] = { S.Buffer.Get(), S.Typeless.Get(), S.Typed.Get(), S.Half.Get(), S.Depth.Get(),
+                                          S.Float.Get(), S.Volume.Get(), S.Line.Get(), S.Hidden.Get() };
+            D3D12_SHADER_RESOURCE_VIEW_DESC Desc = Each.Target == 0 ? SrvBuffer : SrvTexture;
+
+            Each.Edit(Desc);
+            S.Device->CreateShaderResourceView(Targets[Each.Target], &Desc, S.View());
+        });
+    }
+    for (UINT Index = 0; Index < 9; Index++)
+    {
+        char Name[48];
+
+        sprintf_s(Name, "srv_nulldesc_%u", Index);
+        TcViewCase(Check, Name, [Index](R& S) {
+            ID3D12Resource* Targets[] = { S.Buffer.Get(), S.Typeless.Get(), S.Typed.Get(), S.Half.Get(), S.Depth.Get(),
+                                          S.Float.Get(), S.Volume.Get(), S.Line.Get(), S.Hidden.Get() };
+
+            S.Device->CreateShaderResourceView(Targets[Index], nullptr, S.View());
+        });
+    }
+    for (UINT Index = 0; Index < 4; Index++)
+    {
+        static const DXGI_FORMAT Formats[] = { DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS,
+                                               DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_R32_FLOAT };
+        char Name[48];
+
+        sprintf_s(Name, "srv_nullres_%u", Index);
+        TcViewCase(Check, Name, [&, Index](R& S) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC Desc = Index == 3 ? SrvBuffer : SrvTexture;
+
+            Desc.Format = Formats[Index];
+            S.Device->CreateShaderResourceView(nullptr, &Desc, S.View());
+        });
+    }
+    TcViewCase(Check, "srv_rtas_null", [](R& S) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC Desc = {};
+
+        Desc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        Desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        Desc.RaytracingAccelerationStructure.Location = S.Buffer->GetGPUVirtualAddress() + 0x80;
+        S.Device->CreateShaderResourceView(nullptr, &Desc, S.View());
+    });
+
+    /* Unordered access views */
+    TcViewCase(Check, "uav_null_null", [](R& S) {
+        S.Device->CreateUnorderedAccessView(nullptr, nullptr, nullptr, S.View());
+    });
+    TcViewCase(Check, "uav_buffer_nulldesc", [](R& S) {
+        S.Device->CreateUnorderedAccessView(S.Buffer.Get(), nullptr, nullptr, S.View());
+    });
+    struct UavEdit
+    {
+        PCSTR Name;
+        UINT Target;
+        BOOLEAN Counter;
+        VOID (*Edit)(D3D12_UNORDERED_ACCESS_VIEW_DESC& Desc);
+    };
+    static const UavEdit UavEdits[] =
+    {
+        { "uav_structured_ok", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {} },
+        { "uav_counter_ok", 0, TRUE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.CounterOffsetInBytes = 4096; } },
+        { "uav_counter_align", 0, TRUE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.CounterOffsetInBytes = 100; } },
+        { "uav_counter_end", 0, TRUE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.CounterOffsetInBytes = 65536; } },
+        { "uav_counter_typed", 0, TRUE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_UINT; D.Buffer.StructureByteStride = 0; } },
+        { "uav_counter_texture", 2, TRUE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R8G8B8A8_UNORM; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; } },
+        { "uav_offset_nocounter", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.CounterOffsetInBytes = 4096; } },
+        { "uav_structured_format", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Format = DXGI_FORMAT_R32_UINT; } },
+        { "uav_structured_raw", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW; } },
+        { "uav_structured_past", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.NumElements = 4097; } },
+        { "uav_raw_ok", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_TYPELESS; D.Buffer.StructureByteStride = 0; D.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW; } },
+        { "uav_raw_format", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_UINT; D.Buffer.StructureByteStride = 0; D.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW; } },
+        { "uav_raw_first", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_TYPELESS; D.Buffer.StructureByteStride = 0; D.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            D.Buffer.FirstElement = 1; } },
+        { "uav_buffer_flags", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.Flags = (D3D12_BUFFER_UAV_FLAGS)2; } },
+        { "uav_typed_ok", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_UINT; D.Buffer.StructureByteStride = 0; } },
+        { "uav_typed_rgba8", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R8G8B8A8_UNORM; D.Buffer.StructureByteStride = 0; } },
+        { "uav_typed_typeless", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_TYPELESS; D.Buffer.StructureByteStride = 0; } },
+        { "uav_typed_unknown", 0, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) { D.Buffer.StructureByteStride = 0; } },
+        { "uav_texture_ok", 1, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R8G8B8A8_UNORM; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; D.Texture2D.MipSlice = 6; } },
+        { "uav_texture_mip", 1, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R8G8B8A8_UNORM; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; D.Texture2D.MipSlice = 7; } },
+        { "uav_texture_r32", 1, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_UINT; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; } },
+        { "uav_typed_r32", 2, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_UINT; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; } },
+        { "uav_texture_srgb", 1, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; } },
+        { "uav_texture_unknown", 1, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; } },
+        { "uav_texture_plane", 2, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; D.Texture2D.PlaneSlice = 1; } },
+        { "uav_texture_dimension", 2, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D; } },
+        { "uav_no_flag", 3, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY; D.Texture2DArray.ArraySize = 1; } },
+        { "uav_volume_ok", 6, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_FLOAT; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+            D.Texture3D.MipSlice = 2; D.Texture3D.FirstWSlice = 1; D.Texture3D.WSize = (UINT)-1; } },
+        { "uav_volume_w", 6, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_FLOAT; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+            D.Texture3D.MipSlice = 2; D.Texture3D.FirstWSlice = 1; D.Texture3D.WSize = 2; } },
+        { "uav_volume_uint", 6, FALSE, [](D3D12_UNORDERED_ACCESS_VIEW_DESC& D) {
+            D.Format = DXGI_FORMAT_R32_UINT; D.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D; D.Texture3D.WSize = 1; } },
+    };
+    for (const UavEdit& Each : UavEdits)
+    {
+        TcViewCase(Check, Each.Name, [&](R& S) {
+            ID3D12Resource* Targets[] = { S.Buffer.Get(), S.Typeless.Get(), S.Typed.Get(), S.Half.Get(), S.Depth.Get(),
+                                          S.Float.Get(), S.Volume.Get(), S.Line.Get(), S.Hidden.Get() };
+            D3D12_UNORDERED_ACCESS_VIEW_DESC Desc = UavBuffer;
+
+            Each.Edit(Desc);
+            S.Device->CreateUnorderedAccessView(Targets[Each.Target], Each.Counter ? S.Buffer.Get() : nullptr, &Desc,
+                                                S.View());
+        });
+    }
+    for (UINT Index = 0; Index < 4; Index++)
+    {
+        char Name[48];
+
+        sprintf_s(Name, "uav_nulldesc_%u", Index);
+        TcViewCase(Check, Name, [Index](R& S) {
+            ID3D12Resource* Targets[] = { S.Typeless.Get(), S.Typed.Get(), S.Volume.Get(), S.Half.Get() };
+
+            S.Device->CreateUnorderedAccessView(Targets[Index], nullptr, nullptr, S.View());
+        });
+    }
+
+    /* Render target and depth stencil views */
+    TcViewCase(Check, "rtv_null_null", [](R& S) { S.Device->CreateRenderTargetView(nullptr, nullptr, S.Target()); });
+    struct RtvEdit
+    {
+        PCSTR Name;
+        UINT Target;
+        D3D12_RTV_DIMENSION Dimension;
+        DXGI_FORMAT Format;
+        UINT Fields[3];
+    };
+    static const RtvEdit RtvEdits[] =
+    {
+        { "rtv_ok", 2, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, { 0, 0, 0 } },
+        { "rtv_srgb", 2, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, { 0, 0, 0 } },
+        { "rtv_uint", 2, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UINT, { 0, 0, 0 } },
+        { "rtv_unknown", 1, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_UNKNOWN, { 0, 0, 0 } },
+        { "rtv_mip", 1, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, { 7, 0, 0 } },
+        { "rtv_plane", 1, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, { 0, 1, 0 } },
+        { "rtv_array_ok", 3, D3D12_RTV_DIMENSION_TEXTURE2DARRAY, DXGI_FORMAT_R16G16B16A16_FLOAT, { 1, 3, (UINT)-1 } },
+        { "rtv_array_past", 3, D3D12_RTV_DIMENSION_TEXTURE2DARRAY, DXGI_FORMAT_R16G16B16A16_FLOAT, { 0, 3, 10 } },
+        { "rtv_array_zero", 3, D3D12_RTV_DIMENSION_TEXTURE2DARRAY, DXGI_FORMAT_R16G16B16A16_FLOAT, { 0, 3, 0 } },
+        { "rtv_half_uint", 3, D3D12_RTV_DIMENSION_TEXTURE2DARRAY, DXGI_FORMAT_R16G16B16A16_UINT, { 0, 0, 1 } },
+        { "rtv_volume", 6, D3D12_RTV_DIMENSION_TEXTURE3D, DXGI_FORMAT_R32_FLOAT, { 0, 0, 8 } },
+        { "rtv_line_ok", 7, D3D12_RTV_DIMENSION_TEXTURE1DARRAY, DXGI_FORMAT_R8G8B8A8_UNORM, { 0, 2, 2 } },
+        { "rtv_line_past", 7, D3D12_RTV_DIMENSION_TEXTURE1DARRAY, DXGI_FORMAT_R8G8B8A8_UNORM, { 0, 2, 3 } },
+        { "rtv_buffer", 0, D3D12_RTV_DIMENSION_BUFFER, DXGI_FORMAT_R32_FLOAT, { 0, 64, 0 } },
+        { "rtv_dimension", 2, D3D12_RTV_DIMENSION_TEXTURE3D, DXGI_FORMAT_R8G8B8A8_UNORM, { 0, 0, 1 } },
+        { "rtv_depth", 5, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R32_FLOAT, { 0, 0, 0 } },
+        { "rtv_bc1", 2, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_BC1_UNORM, { 0, 0, 0 } },
+        { "rtv_nullres_ok", 9, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, { 0, 0, 0 } },
+        { "rtv_nullres_typeless", 9, D3D12_RTV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_TYPELESS, { 0, 0, 0 } },
+    };
+    for (const RtvEdit& Each : RtvEdits)
+    {
+        TcViewCase(Check, Each.Name, [&](R& S) {
+            ID3D12Resource* Targets[] = { S.Buffer.Get(), S.Typeless.Get(), S.Typed.Get(), S.Half.Get(), S.Depth.Get(),
+                                          S.Float.Get(), S.Volume.Get(), S.Line.Get(), S.Hidden.Get(), nullptr };
+            D3D12_RENDER_TARGET_VIEW_DESC Desc = {};
+
+            Desc.Format = Each.Format;
+            Desc.ViewDimension = Each.Dimension;
+            memcpy(reinterpret_cast<BYTE*>(&Desc) + 8, Each.Fields, sizeof(Each.Fields));
+            if (Each.Dimension == D3D12_RTV_DIMENSION_BUFFER)
+            {
+                Desc.Buffer.FirstElement = Each.Fields[0];
+                Desc.Buffer.NumElements = Each.Fields[1];
+            }
+            S.Device->CreateRenderTargetView(Targets[Each.Target], &Desc, S.Target());
+        });
+    }
+    for (UINT Index = 0; Index < 5; Index++)
+    {
+        char Name[48];
+
+        sprintf_s(Name, "rtv_nulldesc_%u", Index);
+        TcViewCase(Check, Name, [Index](R& S) {
+            ID3D12Resource* Targets[] = { S.Typeless.Get(), S.Typed.Get(), S.Half.Get(), S.Line.Get(), S.Buffer.Get() };
+
+            S.Device->CreateRenderTargetView(Targets[Index], nullptr, S.Target());
+        });
+    }
+
+    TcViewCase(Check, "dsv_null_null", [](R& S) { S.Device->CreateDepthStencilView(nullptr, nullptr, S.DepthView()); });
+    struct DsvEdit
+    {
+        PCSTR Name;
+        UINT Target;
+        D3D12_DSV_DIMENSION Dimension;
+        DXGI_FORMAT Format;
+        UINT Flags;
+        UINT Fields[3];
+    };
+    static const DsvEdit DsvEdits[] =
+    {
+        { "dsv_ok", 4, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D24_UNORM_S8_UINT, 0, { 0, 0, 0 } },
+        { "dsv_readonly", 4, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D24_UNORM_S8_UINT, 3, { 0, 0, 0 } },
+        { "dsv_flags", 4, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D24_UNORM_S8_UINT, 4, { 0, 0, 0 } },
+        { "dsv_stencil_d32", 5, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D32_FLOAT, 2, { 0, 0, 0 } },
+        { "dsv_depth_d32", 5, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D32_FLOAT, 1, { 0, 0, 0 } },
+        { "dsv_unknown", 5, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_UNKNOWN, 0, { 0, 0, 0 } },
+        { "dsv_typeless_unknown", 4, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_UNKNOWN, 0, { 0, 0, 0 } },
+        { "dsv_r32", 5, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R32_FLOAT, 0, { 0, 0, 0 } },
+        { "dsv_r24", 4, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R24_UNORM_X8_TYPELESS, 0, { 0, 0, 0 } },
+        { "dsv_mip", 4, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D24_UNORM_S8_UINT, 0, { 1, 0, 0 } },
+        { "dsv_array_ok", 4, D3D12_DSV_DIMENSION_TEXTURE2DARRAY, DXGI_FORMAT_D24_UNORM_S8_UINT, 0, { 0, 1, (UINT)-1 } },
+        { "dsv_array_past", 4, D3D12_DSV_DIMENSION_TEXTURE2DARRAY, DXGI_FORMAT_D24_UNORM_S8_UINT, 0, { 0, 1, 2 } },
+        { "dsv_no_flag", 2, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 0, { 0, 0, 0 } },
+        { "dsv_volume", 6, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D32_FLOAT, 0, { 0, 0, 0 } },
+        { "dsv_ms_view", 5, D3D12_DSV_DIMENSION_TEXTURE2DMS, DXGI_FORMAT_D32_FLOAT, 0, { 0, 0, 0 } },
+        { "dsv_dimension", 5, D3D12_DSV_DIMENSION_TEXTURE1D, DXGI_FORMAT_D32_FLOAT, 0, { 0, 0, 0 } },
+        { "dsv_denied_ok", 8, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D16_UNORM, 1, { 0, 0, 0 } },
+        { "dsv_nullres_ok", 9, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_D32_FLOAT, 0, { 0, 0, 0 } },
+        { "dsv_nullres_color", 9, D3D12_DSV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8B8A8_UNORM, 0, { 0, 0, 0 } },
+    };
+    for (const DsvEdit& Each : DsvEdits)
+    {
+        TcViewCase(Check, Each.Name, [&](R& S) {
+            ID3D12Resource* Targets[] = { S.Buffer.Get(), S.Typeless.Get(), S.Typed.Get(), S.Half.Get(), S.Depth.Get(),
+                                          S.Float.Get(), S.Volume.Get(), S.Line.Get(), S.Hidden.Get(), nullptr };
+            D3D12_DEPTH_STENCIL_VIEW_DESC Desc = {};
+
+            Desc.Format = Each.Format;
+            Desc.ViewDimension = Each.Dimension;
+            Desc.Flags = (D3D12_DSV_FLAGS)Each.Flags;
+            memcpy(reinterpret_cast<BYTE*>(&Desc) + 12, Each.Fields, sizeof(Each.Fields));
+            S.Device->CreateDepthStencilView(Targets[Each.Target], &Desc, S.DepthView());
+        });
+    }
+    for (UINT Index = 0; Index < 4; Index++)
+    {
+        char Name[48];
+
+        sprintf_s(Name, "dsv_nulldesc_%u", Index);
+        TcViewCase(Check, Name, [Index](R& S) {
+            ID3D12Resource* Targets[] = { S.Depth.Get(), S.Float.Get(), S.Typed.Get(), S.Hidden.Get() };
+
+            S.Device->CreateDepthStencilView(Targets[Index], nullptr, S.DepthView());
+        });
+    }
+
+    /* Samplers */
+    struct SamplerEdit
+    {
+        PCSTR Name;
+        VOID (*Edit)(D3D12_SAMPLER_DESC2& Desc);
+    };
+    static const SamplerEdit SamplerEdits[] =
+    {
+        { "sampler_ok", [](D3D12_SAMPLER_DESC2& D) {} },
+        { "sampler_filter", [](D3D12_SAMPLER_DESC2& D) { D.Filter = (D3D12_FILTER)7; } },
+        { "sampler_filter_high", [](D3D12_SAMPLER_DESC2& D) { D.Filter = (D3D12_FILTER)0x200; } },
+        { "sampler_minimum", [](D3D12_SAMPLER_DESC2& D) { D.Filter = D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR; } },
+        { "sampler_maximum_aniso", [](D3D12_SAMPLER_DESC2& D) { D.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC; } },
+        { "sampler_aniso_point", [](D3D12_SAMPLER_DESC2& D) { D.Filter = D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT; } },
+        { "sampler_address", [](D3D12_SAMPLER_DESC2& D) { D.AddressV = (D3D12_TEXTURE_ADDRESS_MODE)0; } },
+        { "sampler_address_high", [](D3D12_SAMPLER_DESC2& D) { D.AddressW = (D3D12_TEXTURE_ADDRESS_MODE)6; } },
+        { "sampler_bias_low", [](D3D12_SAMPLER_DESC2& D) { D.MipLODBias = -16.0f; } },
+        { "sampler_bias_lower", [](D3D12_SAMPLER_DESC2& D) { D.MipLODBias = -16.5f; } },
+        { "sampler_bias_high", [](D3D12_SAMPLER_DESC2& D) { D.MipLODBias = 15.99f; } },
+        { "sampler_bias_higher", [](D3D12_SAMPLER_DESC2& D) { D.MipLODBias = 16.0f; } },
+        { "sampler_aniso_16", [](D3D12_SAMPLER_DESC2& D) { D.MaxAnisotropy = 16; } },
+        { "sampler_aniso_17", [](D3D12_SAMPLER_DESC2& D) { D.MaxAnisotropy = 17; } },
+        { "sampler_compare_bad", [](D3D12_SAMPLER_DESC2& D) {
+            D.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT; D.ComparisonFunc = (D3D12_COMPARISON_FUNC)9; } },
+        { "sampler_plain_badfunc", [](D3D12_SAMPLER_DESC2& D) { D.ComparisonFunc = (D3D12_COMPARISON_FUNC)9; } },
+        { "sampler_flags", [](D3D12_SAMPLER_DESC2& D) { D.Flags = (D3D12_SAMPLER_FLAGS)4; } },
+        { "sampler_uint_border", [](D3D12_SAMPLER_DESC2& D) { D.Flags = D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR; } },
+        { "sampler_unnormalized", [](D3D12_SAMPLER_DESC2& D) {
+            D.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT; D.MaxLOD = 0.0f;
+            D.Flags = D3D12_SAMPLER_FLAG_NON_NORMALIZED_COORDINATES; } },
+        { "sampler_unnormalized_lod", [](D3D12_SAMPLER_DESC2& D) {
+            D.Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT; D.Flags = D3D12_SAMPLER_FLAG_NON_NORMALIZED_COORDINATES; } },
+        { "sampler_unnormalized_wrap", [](D3D12_SAMPLER_DESC2& D) {
+            D.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT; D.MaxLOD = 0.0f; D.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            D.Flags = D3D12_SAMPLER_FLAG_NON_NORMALIZED_COORDINATES; } },
+        { "sampler_unnormalized_filter", [](D3D12_SAMPLER_DESC2& D) {
+            D.MaxLOD = 0.0f; D.Flags = D3D12_SAMPLER_FLAG_NON_NORMALIZED_COORDINATES; } },
+    };
+    for (const SamplerEdit& Each : SamplerEdits)
+    {
+        char Name[64];
+
+        sprintf_s(Name, "%s_1", Each.Name);
+        TcViewCase(Check, Name, [&](R& S) {
+            D3D12_SAMPLER_DESC2 Desc = Sampler;
+
+            Each.Edit(Desc);
+            S.Device->CreateSampler(reinterpret_cast<const D3D12_SAMPLER_DESC*>(&Desc), S.Sampler());
+        });
+        sprintf_s(Name, "%s_2", Each.Name);
+        TcViewCase(Check, Name, [&](R& S) {
+            ComPtr<ID3D12Device11> Device11;
+            D3D12_SAMPLER_DESC2 Desc = Sampler;
+
+            Each.Edit(Desc);
+            if (SUCCEEDED(S.Device.As(&Device11)))
+                Device11->CreateSampler2(&Desc, S.Sampler());
+        });
+    }
+    TcViewCase(Check, "sampler2_null", [](R& S) {
+        ComPtr<ID3D12Device11> Device11;
+
+        if (SUCCEEDED(S.Device.As(&Device11)))
+            Device11->CreateSampler2(nullptr, S.Sampler());
+    });
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -3939,6 +4571,7 @@ static const CheckInfo Checks[] =
     { "identity", TcCheckIdentity },
     { "placed", TcCheckPlaced },
     { "queries", TcCheckQueries },
+    { "views", TcCheckViews },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
