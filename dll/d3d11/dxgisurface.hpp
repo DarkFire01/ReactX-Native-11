@@ -173,10 +173,27 @@ public:
     ReleaseSync(
         _In_ UINT64 Key) override;
 
+    ~RxDxgiSurface();
+
 private:
+    /* Copies the texture into the DIB behind the DC */
+    HRESULT
+    ReadIntoDc(VOID);
+
+    VOID
+    FreeDc(VOID);
+
     ID3D11Resource* Owner;
     RxDevice& Device;
     IUnknown* Parent = nullptr;
     DXGI_USAGE UsageOverride = 0;
     BOOLEAN HasUsageOverride = FALSE;
+
+    /* The DC GetDC handed out, drawn into a DIB that ReleaseDC copies back */
+    HDC GdiDc = NULL;
+    HBITMAP GdiBitmap = NULL;
+    HGDIOBJ GdiOldBitmap = NULL;
+    BYTE* GdiBits = nullptr;
+    UINT GdiWidth = 0;
+    UINT GdiHeight = 0;
 };

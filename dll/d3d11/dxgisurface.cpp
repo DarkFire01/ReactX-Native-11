@@ -325,27 +325,186 @@ RxDxgiSurface::Unmap(VOID)
     return S_OK;
 }
 
+RxDxgiSurface::~RxDxgiSurface()
+{
+    FreeDc();
+}
+
+VOID
+RxDxgiSurface::FreeDc(VOID)
+{
+    if (GdiDc != NULL)
+    {
+        SelectObject(GdiDc, GdiOldBitmap);
+        DeleteDC(GdiDc);
+    }
+    if (GdiBitmap != NULL)
+        DeleteObject(GdiBitmap);
+
+    GdiDc = NULL;
+    GdiBitmap = NULL;
+    GdiOldBitmap = NULL;
+    GdiBits = nullptr;
+}
+
+HRESULT
+RxDxgiSurface::ReadIntoDc(VOID)
+{
+    D3D11_TEXTURE2D_DESC Desc;
+    D3D11_MAPPED_SUBRESOURCE Mapped;
+    ID3D11Texture2D* Texture;
+    ID3D11Texture2D* Staging = nullptr;
+    ID3D11DeviceContext* Context;
+    HRESULT hr;
+    UINT Row;
+
+    hr = Owner->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&Texture));
+    if (FAILED(hr))
+        return hr;
+
+    Texture->GetDesc(&Desc);
+    Desc.Usage = D3D11_USAGE_STAGING;
+    Desc.BindFlags = 0;
+    Desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    Desc.MiscFlags = 0;
+    hr = Device.CreateTexture2D(&Desc, nullptr, &Staging);
+    if (FAILED(hr))
+    {
+        Texture->Release();
+        return hr;
+    }
+
+    Device.GetImmediateContext(&Context);
+    Context->CopyResource(Staging, Texture);
+    hr = Context->Map(Staging, 0, D3D11_MAP_READ, 0, &Mapped);
+    if (SUCCEEDED(hr))
+    {
+        for (Row = 0; Row < GdiHeight; Row++)
+        {
+            memcpy(GdiBits + (SIZE_T)Row * GdiWidth * 4,
+                   static_cast<BYTE*>(Mapped.pData) + (SIZE_T)Row * Mapped.RowPitch,
+                   (SIZE_T)GdiWidth * 4);
+        }
+        Context->Unmap(Staging, 0);
+    }
+
+    Context->Release();
+    Staging->Release();
+    Texture->Release();
+    return hr;
+}
+
+/**
+ * @brief
+ * Hands out a GDI DC drawing into the texture. Only single subresource BGRA
+ * textures made GDI compatible have one, and only one at a time.
+ */
 HRESULT
 STDMETHODCALLTYPE
 RxDxgiSurface::GetDC(
     _In_ BOOL Discard,
     _Out_ HDC* phdc)
 {
-    UNREFERENCED_PARAMETER(Discard);
+    BITMAPINFO BitmapInfo = {};
+    RxResourceInfo Info;
+    void* Bits = nullptr;
+    HRESULT hr;
 
-    /* GDI interop needs GDI compatible resources, which this runtime does not make yet */
-    if (phdc != nullptr)
-        *phdc = NULL;
-    return DXGI_ERROR_INVALID_CALL;
+    if (phdc == nullptr)
+        return E_INVALIDARG;
+    *phdc = NULL;
+
+    if (GdiDc != NULL ||
+        !RxDescribeResource(Owner, &Info) ||
+        Info.Dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+        !(Info.MiscFlags & D3D11_RESOURCE_MISC_GDI_COMPATIBLE) ||
+        Info.MipLevels != 1 || Info.ArraySize != 1 || Info.SampleCount != 1 ||
+        (Info.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+         Info.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB &&
+         Info.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS))
+    {
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    BitmapInfo.bmiHeader.biSize = sizeof(BitmapInfo.bmiHeader);
+    BitmapInfo.bmiHeader.biWidth = (LONG)Info.Width;
+    BitmapInfo.bmiHeader.biHeight = -(LONG)Info.Height;
+    BitmapInfo.bmiHeader.biPlanes = 1;
+    BitmapInfo.bmiHeader.biBitCount = 32;
+    BitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    GdiBitmap = CreateDIBSection(NULL, &BitmapInfo, DIB_RGB_COLORS, &Bits, NULL, 0);
+    GdiDc = CreateCompatibleDC(NULL);
+    if (GdiBitmap == NULL || GdiDc == NULL || Bits == nullptr)
+    {
+        FreeDc();
+        return E_OUTOFMEMORY;
+    }
+
+    GdiOldBitmap = SelectObject(GdiDc, GdiBitmap);
+    GdiBits = static_cast<BYTE*>(Bits);
+    GdiWidth = Info.Width;
+    GdiHeight = Info.Height;
+
+    /* Without discard the DC starts out with what the texture holds */
+    if (!Discard)
+    {
+        hr = ReadIntoDc();
+        if (FAILED(hr))
+        {
+            FreeDc();
+            return hr;
+        }
+    }
+
+    *phdc = GdiDc;
+    return S_OK;
 }
 
+/**
+ * @brief
+ * Gives the DC back and copies what GDI drew into the texture, all of it when
+ * no dirty rectangle is given.
+ */
 HRESULT
 STDMETHODCALLTYPE
 RxDxgiSurface::ReleaseDC(
     _In_opt_ RECT* pDirtyRect)
 {
-    UNREFERENCED_PARAMETER(pDirtyRect);
-    return DXGI_ERROR_INVALID_CALL;
+    ID3D11DeviceContext* Context;
+    RECT Dirty = { 0, 0, (LONG)GdiWidth, (LONG)GdiHeight };
+    RECT Whole = Dirty;
+    D3D11_BOX Box;
+
+    if (GdiDc == NULL)
+        return DXGI_ERROR_INVALID_CALL;
+
+    GdiFlush();
+
+    if (pDirtyRect != nullptr && !IntersectRect(&Dirty, pDirtyRect, &Whole))
+        SetRectEmpty(&Dirty);
+
+    if (!IsRectEmpty(&Dirty))
+    {
+        Box.left = (UINT)Dirty.left;
+        Box.top = (UINT)Dirty.top;
+        Box.front = 0;
+        Box.right = (UINT)Dirty.right;
+        Box.bottom = (UINT)Dirty.bottom;
+        Box.back = 1;
+
+        Device.GetImmediateContext(&Context);
+        Context->UpdateSubresource(Owner,
+                                   0,
+                                   &Box,
+                                   GdiBits + ((SIZE_T)Dirty.top * GdiWidth + Dirty.left) * 4,
+                                   GdiWidth * 4,
+                                   0);
+        Context->Release();
+    }
+
+    FreeDc();
+    return S_OK;
 }
 
 HRESULT
