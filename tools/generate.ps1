@@ -239,7 +239,9 @@ $Classes = @(
             'GetResourceAllocationInfo', 'GetCustomHeapProperties', 'CreateCommittedResource', 'CreateFence',
             'GetDeviceRemovedReason', 'GetCopyableFootprints', 'GetAdapterLuid', 'CreateCommandList1',
             'CreateCommittedResource1', 'GetResourceAllocationInfo1', 'CreateCommittedResource2',
-            'GetResourceAllocationInfo2', 'GetCopyableFootprints1'
+            'GetResourceAllocationInfo2', 'GetCopyableFootprints1', 'CreateGraphicsPipelineState',
+            'CreateComputePipelineState', 'CreateRootSignature', 'CreateHeap', 'CreatePlacedResource', 'CreateQueryHeap',
+            'CreateCommandSignature', 'CreatePipelineLibrary', 'CreateHeap1', 'CreatePlacedResource1', 'CreateCommandQueue1'
         )
     },
     @{
