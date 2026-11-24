@@ -190,6 +190,7 @@ RxDevice12::CreateConstantBufferView(
 
     Destination.ptr = DestDescriptor.ptr;
     Ddi().pfnCreateConstantBufferView(DriverDevice, View, Destination);
+    CheckDriverError();
 }
 
 /* Filters by reduction: plain, comparison, and minimum or maximum */
@@ -365,6 +366,7 @@ RxWriteSampler(
     Args.pSamplerDesc = &Sampler;
     Destination.ptr = DestDescriptor.ptr;
     Device.Ddi().pfnCreateSampler(Device.Handle(), &Args, Destination);
+    Device.CheckDriverError();
 }
 
 VOID
@@ -420,6 +422,7 @@ RxCopyRtvRun(
     DriverSource.ptr = From->DriverHandle;
     Device.Ddi().pfnCopyDescriptorsSimple(Device.Handle(), Count, DriverDest, DriverSource,
                                           D3D12DDI_DESCRIPTOR_HEAP_TYPE_RTV);
+    Device.CheckDriverError();
 }
 
 VOID
@@ -444,6 +447,7 @@ RxDevice12::CopyDescriptors(
                                  pDestDescriptorRangeSizes, NumSrcDescriptorRanges,
                                  reinterpret_cast<const D3D12DDI_CPU_DESCRIPTOR_HANDLE*>(pSrcDescriptorRangeStarts),
                                  pSrcDescriptorRangeSizes, (D3D12DDI_DESCRIPTOR_HEAP_TYPE)DescriptorHeapsType);
+        CheckDriverError();
         return;
     }
 
@@ -498,4 +502,5 @@ RxDevice12::CopyDescriptorsSimple(
     Source.ptr = SrcDescriptorRangeStart.ptr;
     Ddi().pfnCopyDescriptorsSimple(DriverDevice, NumDescriptors, Dest, Source,
                                    (D3D12DDI_DESCRIPTOR_HEAP_TYPE)DescriptorHeapsType);
+    CheckDriverError();
 }

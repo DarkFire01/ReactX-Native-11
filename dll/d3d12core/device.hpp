@@ -358,6 +358,10 @@ public:
     VOID
     RemoveOnBadView(VOID);
 
+    /* After a DDI call that returns nothing: any error the driver raised during it loses the device */
+    VOID
+    CheckDriverError(VOID);
+
     /* Makes a new pageable resident through the driver, as creation does on Windows */
     HRESULT
     MakePageableResident(

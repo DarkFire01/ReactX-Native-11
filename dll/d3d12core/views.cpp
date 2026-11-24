@@ -1031,6 +1031,7 @@ RxDevice12::CreateShaderResourceView(
     RxBuildDdiSrv(Resource, View, &Args);
     Destination.ptr = DestDescriptor.ptr;
     Ddi().pfnCreateShaderResourceView(DriverDevice, &Args, Destination);
+    CheckDriverError();
 }
 
 /* Unordered access views */
@@ -1647,6 +1648,7 @@ RxDevice12::CreateUnorderedAccessView(
     RxBuildDdiUav(Resource, Counter, View, &Args);
     Destination.ptr = DestDescriptor.ptr;
     Ddi().pfnCreateUnorderedAccessView(DriverDevice, &Args, Destination);
+    CheckDriverError();
 }
 
 /* Depth stencil views */
@@ -1968,6 +1970,7 @@ RxDevice12::CreateDepthStencilView(
     RxBuildDdiDsv(Resource, View, &Args);
     Destination.ptr = DestDescriptor.ptr;
     Ddi().pfnCreateDepthStencilView(DriverDevice, &Args, Destination);
+    CheckDriverError();
 }
 
 /* Render target views */
@@ -2444,4 +2447,5 @@ RxDevice12::CreateRenderTargetView(
 
     RxBuildDdiRtv(Resource, View, &Args);
     Ddi().pfnCreateRenderTargetView(DriverDevice, &Args, Destination);
+    CheckDriverError();
 }

@@ -307,6 +307,23 @@ RxDevice12::MarkRemoved(
 }
 
 VOID
+RxDevice12::CheckDriverError(VOID)
+{
+    HRESULT Error = TakeDriverError();
+
+    if (Error == S_OK)
+        return;
+
+    RX_TRACE(L"driver raised 0x%08lX in a call without a result, removing the device", Error);
+    if (Error == D3DDDIERR_DEVICEREMOVED)
+        MarkRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    else if (Error == D3DDDIERR_APPLICATIONERROR)
+        MarkRemoved(DXGI_ERROR_INVALID_CALL);
+    else
+        MarkRemoved(DXGI_ERROR_DRIVER_INTERNAL_ERROR);
+}
+
+VOID
 RxDevice12::RemoveOnBadView(VOID)
 {
     RX_TRACE(L"invalid view description, removing the device");
