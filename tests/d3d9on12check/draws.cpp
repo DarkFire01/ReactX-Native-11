@@ -443,6 +443,103 @@ CkFixedFunction(
     Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
 }
 
+/*
+ * Fans from an index buffer. The driver keeps the list it made with the buffer and only checks
+ * the start, so a longer fan from the same start reuses the shorter list until the buffer is
+ * written or the start moves.
+ */
+static
+VOID
+CkIndexedFans(
+    _In_ IDirect3DDevice9* Device,
+    _In_ IDirect3DSurface9* Back)
+{
+    static const CkPlainVertex Fan[] =
+    {
+        { 0.0f, 0.0f, 0.5f, 0xFFFFFFFF },
+        { -0.9f, 0.9f, 0.5f, 0xFFFF0000 },
+        { 0.9f, 0.9f, 0.5f, 0xFF00FF00 },
+        { 0.9f, -0.9f, 0.5f, 0xFF0000FF },
+        { -0.9f, -0.9f, 0.5f, 0xFFFFFF00 },
+        { -0.9f, 0.9f, 0.5f, 0xFFFF00FF },
+    };
+    static const WORD Indices[] = { 0, 1, 2, 3, 4, 5 };
+    IDirect3DVertexBuffer9* Vertices = nullptr;
+    IDirect3DIndexBuffer9* IndexBuffer = nullptr;
+    VOID* Data;
+
+    CkRun(Device->CreateVertexBuffer(sizeof(Fan), D3DUSAGE_WRITEONLY, CkPlainFvf, D3DPOOL_DEFAULT, &Vertices, nullptr),
+          "fans", "CreateVertexBuffer");
+    CkRun(Device->CreateIndexBuffer(sizeof(Indices), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &IndexBuffer,
+                                    nullptr),
+          "fans", "CreateIndexBuffer");
+    if (Vertices == nullptr || IndexBuffer == nullptr)
+        goto Done;
+
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, "fans");
+    if (SUCCEEDED(Vertices->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Fan, sizeof(Fan));
+        Vertices->Unlock();
+    }
+    if (SUCCEEDED(IndexBuffer->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Indices, sizeof(Indices));
+        IndexBuffer->Unlock();
+    }
+
+    Device->SetFVF(CkPlainFvf);
+    Device->SetRenderState(D3DRS_LIGHTING, FALSE);
+    Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    Device->SetStreamSource(0, Vertices, 0, sizeof(Fan[0]));
+    Device->SetIndices(IndexBuffer);
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "fans", "Clear");
+    Device->BeginScene();
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLEFAN, 0, 0, 6, 0, 2), "fans", "two");
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLEFAN, 0, 0, 6, 0, 4), "fans", "four from the same start");
+    Device->EndScene();
+    CkReadRows(Device, Back, "fans reused");
+
+    if (SUCCEEDED(IndexBuffer->Lock(0, 0, &Data, D3DLOCK_READONLY)))
+        IndexBuffer->Unlock();
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "fans", "Clear");
+    Device->BeginScene();
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLEFAN, 0, 0, 6, 0, 4), "fans", "four after a read lock");
+    Device->EndScene();
+    CkReadRows(Device, Back, "fans read");
+
+    if (CkDrawFlush != nullptr)
+        CkFlushBatch(Device, CkDrawFlush, "fans");
+    if (SUCCEEDED(IndexBuffer->Lock(0, 0, &Data, 0)))
+    {
+        memcpy(Data, Indices, sizeof(Indices));
+        IndexBuffer->Unlock();
+    }
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "fans", "Clear");
+    Device->BeginScene();
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLEFAN, 0, 0, 6, 0, 4), "fans", "four after a write");
+    Device->EndScene();
+    CkReadRows(Device, Back, "fans written");
+
+    CkRun(Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF000000, 1.0f, 0), "fans", "Clear");
+    Device->BeginScene();
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLEFAN, 0, 0, 6, 1, 2), "fans", "two from the next start");
+    CkRun(Device->DrawIndexedPrimitive(D3DPT_TRIANGLEFAN, 0, 0, 6, 0, 3), "fans", "three from the first start");
+    Device->EndScene();
+    CkReadRows(Device, Back, "fans moved");
+
+Done:
+    Device->SetStreamSource(0, nullptr, 0, 0);
+    Device->SetIndices(nullptr);
+    Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+    if (IndexBuffer != nullptr)
+        IndexBuffer->Release();
+    if (Vertices != nullptr)
+        Vertices->Release();
+}
+
 /* A checkered texture sampled with point and linear filters, wrapped and clamped, then blended */
 static
 VOID
@@ -749,6 +846,7 @@ CkDraws(
     CkPretransformed(Device, Back);
     CkShaderDraws(Device, Back);
     CkFixedFunction(Device, Back);
+    CkIndexedFans(Device, Back);
     CkTextured(Device, Back);
     CkDepthStencilFog(Device, Back);
     CkPointSprites(Device, Back);
