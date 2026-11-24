@@ -620,6 +620,70 @@ TrDescribe(
     TrAppend(Text, "}");
 }
 
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{res %s format %u dim %u map %08X ", TrDriverId(Args->hDrvResource.pDrvPrivate).c_str(),
+             Args->Format, Args->ResourceDimension, Args->Shader4ComponentMapping);
+    TrAppendBytes(Text, &Args->Buffer, sizeof(*Args) - offsetof(D3D12DDIARG_CREATE_SHADER_RESOURCE_VIEW_0002, Buffer));
+    TrAppend(Text, "}");
+}
+
+/* Buffer views name their counter resource, which prints as an id */
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{res %s format %u dim %u ", TrDriverId(Args->hDrvResource.pDrvPrivate).c_str(), Args->Format,
+             Args->ResourceDimension);
+    if (Args->ResourceDimension == D3D12DDI_RD_BUFFER)
+    {
+        TrAppend(Text, "counter %s ", TrDriverId(Args->Buffer.hDrvCounterResource.pDrvPrivate).c_str());
+        TrAppendBytes(Text, &Args->Buffer.FirstElement,
+                      sizeof(Args->Buffer) - offsetof(D3D12DDIARG_BUFFER_UNORDERED_ACCESS_VIEW, FirstElement));
+    }
+    else
+    {
+        TrAppendBytes(Text, &Args->Tex1D, sizeof(*Args) - offsetof(D3D12DDIARG_CREATE_UNORDERED_ACCESS_VIEW_0002, Tex1D));
+    }
+    TrAppend(Text, "}");
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_DEPTH_STENCIL_VIEW* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{res %s format %u dim %u flags %u ", TrDriverId(Args->hDrvResource.pDrvPrivate).c_str(),
+             Args->Format, Args->ResourceDimension, Args->Flags);
+    TrAppendBytes(Text, &Args->Tex1D, sizeof(*Args) - offsetof(D3D12DDIARG_CREATE_DEPTH_STENCIL_VIEW, Tex1D));
+    TrAppend(Text, "}");
+}
+
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_SAMPLER_0096* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{");
+    if (Args->pSamplerDesc == nullptr)
+        TrAppend(Text, "0");
+    else
+        TrAppendBytes(Text, Args->pSamplerDesc, sizeof(*Args->pSamplerDesc));
+    TrAppend(Text, "}");
+}
+
 /* A command signature: its stride, each argument's type and three fields, the root signature and node */
 static
 VOID
@@ -1060,6 +1124,45 @@ struct TrFormat
 
 #define TR_LIST_SLOT(Member) (offsetof(D3D12DDI_COMMAND_LIST_FUNCS_3D_0114, Member) / sizeof(VOID*))
 #define TR_QUEUE_SLOT(Member) (offsetof(D3D12DDI_COMMAND_QUEUE_FUNCS_CORE_0001, Member) / sizeof(VOID*))
+#define TR_DEVICE_SLOT(Member) (offsetof(D3D12DDI_DEVICE_FUNCS_CORE_0119, Member) / sizeof(VOID*))
+
+/* Descriptor range starts print as ids and their sizes as numbers */
+template <>
+struct TrFormat<TrFamilyDevice, TR_DEVICE_SLOT(pfnCopyDescriptors)>
+{
+    static constexpr BOOLEAN Custom = TRUE;
+
+    static
+    VOID
+    Format(
+        _Inout_ std::string* Text,
+        D3D12DDI_HDEVICE Device,
+        UINT DestCount,
+        const D3D12DDI_CPU_DESCRIPTOR_HANDLE* DestStarts,
+        const UINT* DestSizes,
+        UINT SourceCount,
+        const D3D12DDI_CPU_DESCRIPTOR_HANDLE* SourceStarts,
+        const UINT* SourceSizes,
+        D3D12DDI_DESCRIPTOR_HEAP_TYPE Type)
+    {
+        TrArg(Text, Device);
+        TrArg(Text, DestCount);
+        TrArray(Text, DestCount, DestStarts, [Text](const D3D12DDI_CPU_DESCRIPTOR_HANDLE& Each) {
+            Text->append(TrDriverId((const VOID*)Each.ptr));
+        });
+        TrArray(Text, DestCount, DestSizes, [Text](UINT Each) {
+            TrAppend(Text, "%u", Each);
+        });
+        TrArg(Text, SourceCount);
+        TrArray(Text, SourceCount, SourceStarts, [Text](const D3D12DDI_CPU_DESCRIPTOR_HANDLE& Each) {
+            Text->append(TrDriverId((const VOID*)Each.ptr));
+        });
+        TrArray(Text, SourceCount, SourceSizes, [Text](UINT Each) {
+            TrAppend(Text, "%u", Each);
+        });
+        TrArg(Text, Type);
+    }
+};
 
 template <>
 struct TrFormat<TrFamilyList0, TR_LIST_SLOT(pfnSetDescriptorHeaps)>
@@ -2959,6 +3062,315 @@ TrScenarioHeaps(
     Buffers.Reset();
 }
 
+/* A committed resource in the common state, or nothing when the device refuses it */
+static
+ComPtr<ID3D12Resource>
+TrMakeResource(
+    _In_ ID3D12Device* Device,
+    _In_ D3D12_HEAP_TYPE HeapType,
+    _In_ D3D12_RESOURCE_DIMENSION Dimension,
+    _In_ UINT64 Width,
+    _In_ UINT Height,
+    _In_ UINT16 DepthOrArraySize,
+    _In_ UINT16 MipLevels,
+    _In_ DXGI_FORMAT Format,
+    _In_ D3D12_RESOURCE_FLAGS Flags)
+{
+    D3D12_HEAP_PROPERTIES Heap = { HeapType };
+    D3D12_RESOURCE_DESC Desc = {};
+    ComPtr<ID3D12Resource> Resource;
+
+    Desc.Dimension = Dimension;
+    Desc.Width = Width;
+    Desc.Height = Height;
+    Desc.DepthOrArraySize = DepthOrArraySize;
+    Desc.MipLevels = MipLevels;
+    Desc.Format = Format;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? D3D12_TEXTURE_LAYOUT_ROW_MAJOR
+                                                               : D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    Desc.Flags = Flags;
+    Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                    HeapType == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ
+                                                                       : D3D12_RESOURCE_STATE_COMMON,
+                                    nullptr, IID_PPV_ARGS(&Resource));
+    return Resource;
+}
+
+static
+D3D12_CPU_DESCRIPTOR_HANDLE
+TrSlot(
+    _In_ ID3D12Device* Device,
+    _In_ ID3D12DescriptorHeap* Heap,
+    _In_ UINT Index)
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE Handle = Heap->GetCPUDescriptorHandleForHeapStart();
+
+    Handle.ptr += (SIZE_T)Index * Device->GetDescriptorHandleIncrementSize(Heap->GetDesc().Type);
+    return Handle;
+}
+
+/* Every view kind written into heaps and copied between them */
+static
+VOID
+TrScenarioViews(
+    _In_ TrRun& Run)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12DescriptorHeap> Views;
+    ComPtr<ID3D12DescriptorHeap> VisibleViews;
+    ComPtr<ID3D12DescriptorHeap> Samplers;
+    ComPtr<ID3D12DescriptorHeap> VisibleSamplers;
+    ComPtr<ID3D12DescriptorHeap> Targets;
+    ComPtr<ID3D12DescriptorHeap> Depths;
+    ComPtr<ID3D12Resource> Constants;
+    ComPtr<ID3D12Resource> Buffer;
+    ComPtr<ID3D12Resource> Texture;
+    ComPtr<ID3D12Resource> Array;
+    ComPtr<ID3D12Resource> Volume;
+    ComPtr<ID3D12Resource> Depth;
+    D3D12_DESCRIPTOR_HEAP_DESC HeapDesc = {};
+    D3D12_CONSTANT_BUFFER_VIEW_DESC Cbv = {};
+    D3D12_SHADER_RESOURCE_VIEW_DESC Srv = {};
+    D3D12_UNORDERED_ACCESS_VIEW_DESC Uav = {};
+    D3D12_RENDER_TARGET_VIEW_DESC Rtv = {};
+    D3D12_DEPTH_STENCIL_VIEW_DESC Dsv = {};
+    D3D12_SAMPLER_DESC Sampler = {};
+    D3D12_SAMPLER_DESC2 Sampler2 = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE DestStarts[2];
+    D3D12_CPU_DESCRIPTOR_HANDLE SourceStarts[3];
+    UINT DestSizes[2] = { 3, 2 };
+    UINT SourceSizes[3] = { 1, 2, 2 };
+
+    if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))))
+        return;
+
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    HeapDesc.NumDescriptors = 16;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Views));
+    HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&VisibleViews));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    HeapDesc.NumDescriptors = 8;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&VisibleSamplers));
+    HeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Samplers));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Targets));
+    HeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    Device->CreateDescriptorHeap(&HeapDesc, IID_PPV_ARGS(&Depths));
+
+    Constants = TrMakeResource(Device.Get(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_DIMENSION_BUFFER, 65536, 1, 1, 1,
+                               DXGI_FORMAT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE);
+    Buffer = TrMakeResource(Device.Get(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_BUFFER, 65536, 1, 1, 1,
+                            DXGI_FORMAT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Texture = TrMakeResource(Device.Get(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 1, 0,
+                             DXGI_FORMAT_R8G8B8A8_TYPELESS,
+                             D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Array = TrMakeResource(Device.Get(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 32, 32, 6, 2,
+                           DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    Volume = TrMakeResource(Device.Get(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE3D, 16, 16, 8, 3,
+                            DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    Depth = TrMakeResource(Device.Get(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DIMENSION_TEXTURE2D, 64, 64, 2, 1,
+                           DXGI_FORMAT_R24G8_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    if (Views == nullptr || VisibleViews == nullptr || Samplers == nullptr || VisibleSamplers == nullptr ||
+        Targets == nullptr || Depths == nullptr || Constants == nullptr || Buffer == nullptr || Texture == nullptr ||
+        Array == nullptr || Volume == nullptr || Depth == nullptr)
+    {
+        printf("setup failed\n");
+        return;
+    }
+
+    TrPhase("CreateConstantBufferView");
+    Cbv.BufferLocation = Constants->GetGPUVirtualAddress() + 256;
+    Cbv.SizeInBytes = 512;
+    Device->CreateConstantBufferView(&Cbv, TrSlot(Device.Get(), Views.Get(), 0));
+    Device->CreateConstantBufferView(nullptr, TrSlot(Device.Get(), Views.Get(), 1));
+
+    TrPhase("CreateShaderResourceView");
+    Device->CreateShaderResourceView(Buffer.Get(), nullptr, TrSlot(Device.Get(), Views.Get(), 2));
+    Srv.Format = DXGI_FORMAT_R32_FLOAT;
+    Srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    Srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    Srv.Buffer.FirstElement = 16;
+    Srv.Buffer.NumElements = 100;
+    Device->CreateShaderResourceView(Buffer.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 3));
+    Srv.Format = DXGI_FORMAT_UNKNOWN;
+    Srv.Buffer.StructureByteStride = 24;
+    Device->CreateShaderResourceView(Buffer.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 4));
+    Srv.Format = DXGI_FORMAT_R32_TYPELESS;
+    Srv.Buffer.StructureByteStride = 0;
+    Srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    Device->CreateShaderResourceView(Buffer.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 5));
+    Srv = {};
+    Srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    Srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    Srv.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, 4);
+    Srv.Texture2D.MostDetailedMip = 1;
+    Srv.Texture2D.MipLevels = (UINT)-1;
+    Srv.Texture2D.ResourceMinLODClamp = 0.5f;
+    Device->CreateShaderResourceView(Texture.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 6));
+    Device->CreateShaderResourceView(Array.Get(), nullptr, TrSlot(Device.Get(), Views.Get(), 7));
+    Srv = {};
+    Srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    Srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    Srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    Srv.TextureCube.MipLevels = (UINT)-1;
+    Device->CreateShaderResourceView(Array.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 8));
+    Srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    Srv.Texture2DArray.MostDetailedMip = 0;
+    Srv.Texture2DArray.MipLevels = 1;
+    Srv.Texture2DArray.FirstArraySlice = 2;
+    Srv.Texture2DArray.ArraySize = (UINT)-1;
+    Device->CreateShaderResourceView(Array.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 9));
+    Device->CreateShaderResourceView(Volume.Get(), nullptr, TrSlot(Device.Get(), Views.Get(), 10));
+    Srv = {};
+    Srv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    Srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    Srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    Srv.Texture2DArray.MipLevels = 1;
+    Srv.Texture2DArray.ArraySize = 2;
+    Device->CreateShaderResourceView(Depth.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 11));
+    Srv.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+    Srv.Texture2DArray.PlaneSlice = 1;
+    Device->CreateShaderResourceView(Depth.Get(), &Srv, TrSlot(Device.Get(), Views.Get(), 12));
+    Srv = {};
+    Srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    Srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    Srv.Texture2D.MipLevels = 1;
+    Device->CreateShaderResourceView(nullptr, &Srv, TrSlot(Device.Get(), Views.Get(), 13));
+
+    TrPhase("CreateUnorderedAccessView");
+    Uav.Format = DXGI_FORMAT_R32_TYPELESS;
+    Uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    Uav.Buffer.NumElements = 1024;
+    Uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    Device->CreateUnorderedAccessView(Buffer.Get(), nullptr, &Uav, TrSlot(Device.Get(), Views.Get(), 14));
+    Uav = {};
+    Uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    Uav.Buffer.FirstElement = 4;
+    Uav.Buffer.NumElements = 64;
+    Uav.Buffer.StructureByteStride = 16;
+    Uav.Buffer.CounterOffsetInBytes = 4096;
+    Device->CreateUnorderedAccessView(Buffer.Get(), Buffer.Get(), &Uav, TrSlot(Device.Get(), Views.Get(), 15));
+    Uav = {};
+    Uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    Uav.Texture2D.MipSlice = 2;
+    Device->CreateUnorderedAccessView(Texture.Get(), nullptr, &Uav, TrSlot(Device.Get(), Views.Get(), 2));
+    Device->CreateUnorderedAccessView(Volume.Get(), nullptr, nullptr, TrSlot(Device.Get(), Views.Get(), 3));
+    Uav = {};
+    Uav.Format = DXGI_FORMAT_R32_FLOAT;
+    Uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+    Uav.Texture3D.MipSlice = 1;
+    Uav.Texture3D.FirstWSlice = 1;
+    Uav.Texture3D.WSize = (UINT)-1;
+    Device->CreateUnorderedAccessView(Volume.Get(), nullptr, &Uav, TrSlot(Device.Get(), Views.Get(), 4));
+    Uav = {};
+    Uav.Format = DXGI_FORMAT_R32_FLOAT;
+    Uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    Device->CreateUnorderedAccessView(nullptr, nullptr, &Uav, TrSlot(Device.Get(), Views.Get(), 5));
+
+    TrPhase("CreateRenderTargetView");
+    Rtv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    Rtv.Texture2D.MipSlice = 1;
+    Device->CreateRenderTargetView(Texture.Get(), &Rtv, TrSlot(Device.Get(), Targets.Get(), 0));
+    Device->CreateRenderTargetView(Array.Get(), nullptr, TrSlot(Device.Get(), Targets.Get(), 1));
+    Rtv = {};
+    Rtv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    Rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+    Rtv.Texture2DArray.FirstArraySlice = 3;
+    Rtv.Texture2DArray.ArraySize = (UINT)-1;
+    Device->CreateRenderTargetView(Array.Get(), &Rtv, TrSlot(Device.Get(), Targets.Get(), 2));
+    Rtv = {};
+    Rtv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    Device->CreateRenderTargetView(nullptr, &Rtv, TrSlot(Device.Get(), Targets.Get(), 3));
+
+    TrPhase("CreateDepthStencilView");
+    Dsv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    Dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+    Dsv.Texture2DArray.ArraySize = 2;
+    Device->CreateDepthStencilView(Depth.Get(), &Dsv, TrSlot(Device.Get(), Depths.Get(), 0));
+    Dsv.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL;
+    Dsv.Texture2DArray.FirstArraySlice = 1;
+    Dsv.Texture2DArray.ArraySize = (UINT)-1;
+    Device->CreateDepthStencilView(Depth.Get(), &Dsv, TrSlot(Device.Get(), Depths.Get(), 1));
+    Dsv = {};
+    Dsv.Format = DXGI_FORMAT_D32_FLOAT;
+    Dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    Device->CreateDepthStencilView(nullptr, &Dsv, TrSlot(Device.Get(), Depths.Get(), 2));
+
+    TrPhase("CreateSampler");
+    Sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    Sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    Sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+    Sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    Sampler.MipLODBias = 1.5f;
+    Sampler.MaxAnisotropy = 8;
+    Sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS;
+    Sampler.BorderColor[0] = 1.0f;
+    Sampler.BorderColor[3] = 0.5f;
+    Sampler.MinLOD = 1.0f;
+    Sampler.MaxLOD = 8.0f;
+    Device->CreateSampler(&Sampler, TrSlot(Device.Get(), Samplers.Get(), 0));
+    Sampler.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+    Sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    Sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NONE;
+    Device->CreateSampler(&Sampler, TrSlot(Device.Get(), Samplers.Get(), 1));
+    Sampler.Filter = D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_POINT;
+    Sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
+    Device->CreateSampler(&Sampler, TrSlot(Device.Get(), Samplers.Get(), 2));
+    memcpy(&Sampler2, &Sampler, sizeof(Sampler));
+    Sampler2.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    Sampler2.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    Sampler2.UintBorderColor[0] = 7;
+    Sampler2.Flags = D3D12_SAMPLER_FLAG_UINT_BORDER_COLOR;
+    {
+        ComPtr<ID3D12Device11> Device11;
+
+        if (SUCCEEDED(Device.As(&Device11)))
+            Device11->CreateSampler2(&Sampler2, TrSlot(Device.Get(), Samplers.Get(), 3));
+    }
+
+    TrPhase("CopyDescriptorsSimple");
+    Device->CopyDescriptorsSimple(4, TrSlot(Device.Get(), VisibleViews.Get(), 1), TrSlot(Device.Get(), Views.Get(), 2),
+                                  D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    Device->CopyDescriptorsSimple(3, TrSlot(Device.Get(), VisibleSamplers.Get(), 0),
+                                  TrSlot(Device.Get(), Samplers.Get(), 0), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    Device->CopyDescriptorsSimple(2, TrSlot(Device.Get(), Targets.Get(), 4), TrSlot(Device.Get(), Targets.Get(), 0),
+                                  D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    Device->CopyDescriptorsSimple(1, TrSlot(Device.Get(), Depths.Get(), 4), TrSlot(Device.Get(), Depths.Get(), 0),
+                                  D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    Device->CopyDescriptorsSimple(0, TrSlot(Device.Get(), VisibleViews.Get(), 0), TrSlot(Device.Get(), Views.Get(), 0),
+                                  D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    TrPhase("CopyDescriptors");
+    DestStarts[0] = TrSlot(Device.Get(), VisibleViews.Get(), 8);
+    DestStarts[1] = TrSlot(Device.Get(), VisibleViews.Get(), 12);
+    SourceStarts[0] = TrSlot(Device.Get(), Views.Get(), 0);
+    SourceStarts[1] = TrSlot(Device.Get(), Views.Get(), 4);
+    SourceStarts[2] = TrSlot(Device.Get(), Views.Get(), 10);
+    Device->CopyDescriptors(2, DestStarts, DestSizes, 3, SourceStarts, SourceSizes,
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    Device->CopyDescriptors(1, DestStarts, nullptr, 1, SourceStarts, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    DestStarts[0] = TrSlot(Device.Get(), Targets.Get(), 5);
+    DestStarts[1] = TrSlot(Device.Get(), Targets.Get(), 7);
+    SourceStarts[0] = TrSlot(Device.Get(), Targets.Get(), 0);
+    SourceStarts[1] = TrSlot(Device.Get(), Targets.Get(), 1);
+    SourceStarts[2] = TrSlot(Device.Get(), Targets.Get(), 3);
+    DestSizes[0] = 2;
+    DestSizes[1] = 1;
+    SourceSizes[0] = 1;
+    SourceSizes[1] = 1;
+    SourceSizes[2] = 1;
+    Device->CopyDescriptors(2, DestStarts, DestSizes, 3, SourceStarts, SourceSizes, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    printf("removed %08X\n", (UINT)Device->GetDeviceRemovedReason());
+    TrPhase("Release");
+}
+
 struct TrScenario
 {
     PCSTR Name;
@@ -2975,6 +3387,7 @@ static const TrScenario TrScenarios[] =
     { "rootsigs", TrScenarioRootSignatures },
     { "pipelines", TrScenarioPipelines },
     { "heaps", TrScenarioHeaps },
+    { "views", TrScenarioViews },
 };
 
 int
