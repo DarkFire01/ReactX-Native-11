@@ -1518,6 +1518,41 @@ RxPipelineState::AcquireShader(
     return hr;
 }
 
+/*
+ * The rules between the parts of a graphics pipeline, checked once all of them are made: the strip cut
+ * value and topology type, tessellation shaders in pairs, and what the vertex shader reads without a layout.
+ */
+static
+HRESULT
+RxCheckLinkage(
+    _In_ RxDevice12& Device,
+    _In_ const RxPipelineDesc& Desc)
+{
+    BOOLEAN HasHull = Desc.Shaders[RxStageHull].pShaderBytecode != nullptr;
+    BOOLEAN HasDomain = Desc.Shaders[RxStageDomain].pShaderBytecode != nullptr;
+    UINT Errors = 0;
+
+    if ((UINT)Desc.StripCut > D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF)
+        Errors += 1;
+    if (Desc.Topology < D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT || Desc.Topology > D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
+        Errors += 1;
+
+    if (Desc.InputLayout.NumElements == 0 && Desc.Shaders[RxStageVertex].pShaderBytecode != nullptr)
+    {
+        D3D12_INPUT_LAYOUT_DESC None = {};
+
+        if (FAILED(RxCheckLayout(Device, None, Desc.Shaders[RxStageVertex])))
+            Errors += 1;
+    }
+
+    if (HasHull != HasDomain)
+        Errors += 1;
+    else if (HasHull && Desc.Topology != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH)
+        Errors += 1;
+
+    return Errors != 0 ? E_INVALIDARG : S_OK;
+}
+
 /* Equal translated layouts share one element layout */
 HRESULT
 RxPipelineState::AcquireElementLayout(
@@ -1618,15 +1653,9 @@ RxPipelineState::Initialize(
         if (FAILED(hr))
             return hr;
 
-        /* Linkage, once every part is made: without a layout the vertex shader may only read generated ids */
-        if (Desc.InputLayout.NumElements == 0 && Desc.Shaders[RxStageVertex].pShaderBytecode != nullptr)
-        {
-            D3D12_INPUT_LAYOUT_DESC None = {};
-
-            hr = RxCheckLayout(Device, None, Desc.Shaders[RxStageVertex]);
-            if (FAILED(hr))
-                return hr;
-        }
+        hr = RxCheckLinkage(Device, Desc);
+        if (FAILED(hr))
+            return hr;
 
         if (Shaders[RxStageVertex] != nullptr)
             Args.hVertexShader.pDrvPrivate = Shaders[RxStageVertex]->GetDriverHandle();
