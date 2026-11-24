@@ -44,6 +44,8 @@ struct RxFaceDescription
     BYTE Win32Style;
     /* Names came from STAT, so the informational strings report them too */
     BOOLEAN FromStyleTable;
+    /* The face has fvar axes */
+    BOOLEAN HasVariations;
 };
 
 /* Reads every record of a name ID, one per language */

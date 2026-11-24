@@ -164,7 +164,11 @@ RxGdiInterop::FillLogFont(
     LogFont->lfFaceName[Length] = UNICODE_NULL;
 
     /* Bold simulation reads as 151 heavier, which GDI turns back into emboldening */
-    LogFont->lfWeight = Description.Win32Weight + ((Simulations & DWRITE_FONT_SIMULATIONS_BOLD) ? 151 : 0);
+    if (Description.HasVariations)
+        LogFont->lfWeight = (Simulations & DWRITE_FONT_SIMULATIONS_BOLD) ? 700 : Description.Weight;
+    else
+        LogFont->lfWeight = Description.Win32Weight;
+    LogFont->lfWeight += (Simulations & DWRITE_FONT_SIMULATIONS_BOLD) ? 151 : 0;
     LogFont->lfItalic = ((Simulations & DWRITE_FONT_SIMULATIONS_OBLIQUE) || Description.Win32Style != 0) ? TRUE : FALSE;
     LogFont->lfCharSet = IsSymbol ? SYMBOL_CHARSET : DEFAULT_CHARSET;
     LogFont->lfOutPrecision = OUT_OUTLINE_PRECIS;

@@ -844,6 +844,7 @@ RxDescribeFace(
     BOOLEAN HaveCanonical;
 
     Description->FromStyleTable = FALSE;
+    Description->HasVariations = !Coordinates.empty();
     if (Face->Sfnt().HasTable(RxTag('S', 'T', 'A', 'T')))
     {
         RxDescribeStyledFace(Face, Coordinates, Description);
