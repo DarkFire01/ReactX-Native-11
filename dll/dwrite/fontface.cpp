@@ -428,7 +428,16 @@ BOOL
 STDMETHODCALLTYPE
 RxFontFace::IsMonospacedFont(VOID)
 {
-    return Data->Header().IsFixedPitch != 0;
+    const RxFaceHeader& Header = Data->Header();
+    BYTE Kind = Header.HasOs2 ? Header.Panose[0] : 0;
+    BYTE Proportion = Header.HasOs2 ? Header.Panose[3] : 0;
+
+    /* PANOSE proportion says monospaced first: 9 for text and decorative kinds, 3 for script and symbol kinds */
+    if ((Kind == 0 || Kind == 2 || Kind == 4) && Proportion == 9)
+        return TRUE;
+    if ((Kind == 3 || Kind == 5) && Proportion == 3)
+        return TRUE;
+    return Header.IsFixedPitch != 0;
 }
 
 HRESULT
