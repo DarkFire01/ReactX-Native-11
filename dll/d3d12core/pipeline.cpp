@@ -611,6 +611,97 @@ RxElementBytes(
     return Bytes;
 }
 
+/* The elements one vertex buffer slot holds, as far as where the buffer may start goes */
+struct RxSlotPlacement
+{
+    UINT Count;
+    UINT End;
+    UINT Widest;
+    UINT Align[D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT];
+    UINT Offset[D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT];
+};
+
+/*
+ * Whether each slot has some start, modulo 4, that puts all of its elements on their alignment.
+ * Elements past the 32nd of a slot are not looked at.
+ */
+static
+BOOLEAN
+RxSlotsCanAlign(
+    _In_ const D3D12_INPUT_LAYOUT_DESC& Layout)
+{
+    RxSlotPlacement* Slots;
+    BOOLEAN Fits = TRUE;
+    UINT Index;
+
+    Slots = new (std::nothrow) RxSlotPlacement[D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT]();
+    if (Slots == nullptr)
+        return TRUE;
+
+    for (Index = 0; Index < Layout.NumElements; Index++)
+    {
+        const D3D12_INPUT_ELEMENT_DESC& Element = Layout.pInputElementDescs[Index];
+        RxSlotPlacement* Slot;
+        UINT Bytes;
+        UINT Align;
+        UINT Start;
+
+        if (Element.InputSlot >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
+            continue;
+        Slot = &Slots[Element.InputSlot];
+        if (Slot->Count >= D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT)
+            continue;
+
+        Bytes = RxElementBytes(Element.Format, &Align);
+        if (Element.AlignedByteOffset != D3D12_APPEND_ALIGNED_ELEMENT)
+        {
+            Start = Element.AlignedByteOffset;
+        }
+        else if (Slot->End % Align == 0)
+        {
+            Start = Slot->End;
+        }
+        else
+        {
+            UINT64 Rounded = (UINT64)(Slot->End / Align) * Align + Align;
+
+            /* Rounding past the top leaves a start no buffer offset can fix */
+            Start = Rounded > UINT_MAX ? 0xFFFFFFFC : (UINT)Rounded;
+        }
+
+        Slot->Offset[Slot->Count] = Start;
+        Slot->End = Start + Bytes < Start ? UINT_MAX : Start + Bytes;
+        if (Align > Slot->Widest)
+            Slot->Widest = Align;
+        Slot->Align[Slot->Count] = Align;
+        Slot->Count += 1;
+    }
+
+    for (Index = 0; Index < D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT && Fits; Index++)
+    {
+        const RxSlotPlacement& Slot = Slots[Index];
+        UINT Starts = 0xF;
+
+        for (UINT Element = 0; Element < Slot.Count; Element++)
+        {
+            UINT Align = Slot.Align[Element];
+            UINT Needed = (Slot.Widest - Slot.Offset[Element] % Align) % Align;
+
+            for (UINT Residue = 0; Residue < 4; Residue++)
+            {
+                if (Residue % Align != Needed)
+                    Starts &= ~(1u << Residue);
+            }
+        }
+
+        if (Slot.Count != 0 && Starts == 0)
+            Fits = FALSE;
+    }
+
+    delete[] Slots;
+    return Fits;
+}
+
 /*
  * The rules an input layout meets on its own and against the vertex shader: formats vertex buffers
  * take, slots that agree on how they step, unique semantics, and every shader input fed.
@@ -745,8 +836,10 @@ RxCheckLayout(
                 Errors += 1;
         }
     }
+    if (Errors != 0)
+        return E_INVALIDARG;
 
-    return Errors != 0 ? E_INVALIDARG : S_OK;
+    return RxSlotsCanAlign(Layout) ? S_OK : E_INVALIDARG;
 }
 
 /*
