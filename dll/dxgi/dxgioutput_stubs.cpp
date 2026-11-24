@@ -31,6 +31,9 @@ STDMETHODCALLTYPE
 RxDxgiOutput::GetGammaControlCapabilities(
     _Out_ DXGI_GAMMA_CONTROL_CAPABILITIES* pGammaCaps)
 {
+    if (pGammaCaps != nullptr)
+        memset(pGammaCaps, 0, sizeof(*pGammaCaps));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -49,6 +52,9 @@ STDMETHODCALLTYPE
 RxDxgiOutput::GetGammaControl(
     _Out_ DXGI_GAMMA_CONTROL* pArray)
 {
+    if (pArray != nullptr)
+        memset(pArray, 0, sizeof(*pArray));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -76,6 +82,9 @@ STDMETHODCALLTYPE
 RxDxgiOutput::GetFrameStatistics(
     _Out_ DXGI_FRAME_STATISTICS* pStats)
 {
+    if (pStats != nullptr)
+        memset(pStats, 0, sizeof(*pStats));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -95,6 +104,9 @@ RxDxgiOutput::DuplicateOutput(
     _In_ IUnknown* pDevice,
     _COM_Outptr_ IDXGIOutputDuplication** ppOutputDuplication)
 {
+    if (ppOutputDuplication != nullptr)
+        *ppOutputDuplication = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -114,6 +126,9 @@ RxDxgiOutput::CheckOverlaySupport(
     _In_ IUnknown* pConcernedDevice,
     _Out_ UINT* pFlags)
 {
+    if (pFlags != nullptr)
+        memset(pFlags, 0, sizeof(*pFlags));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -126,6 +141,9 @@ RxDxgiOutput::CheckOverlayColorSpaceSupport(
     _In_ IUnknown* pConcernedDevice,
     _Out_ UINT* pFlags)
 {
+    if (pFlags != nullptr)
+        memset(pFlags, 0, sizeof(*pFlags));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -139,6 +157,9 @@ RxDxgiOutput::DuplicateOutput1(
     _In_reads_(SupportedFormatsCount) const DXGI_FORMAT* pSupportedFormats,
     _COM_Outptr_ IDXGIOutputDuplication** ppOutputDuplication)
 {
+    if (ppOutputDuplication != nullptr)
+        *ppOutputDuplication = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -148,6 +169,9 @@ STDMETHODCALLTYPE
 RxDxgiOutput::CheckHardwareCompositionSupport(
     _Out_ UINT* pFlags)
 {
+    if (pFlags != nullptr)
+        memset(pFlags, 0, sizeof(*pFlags));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

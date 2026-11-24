@@ -37,6 +37,9 @@ RxD2DBitmap::Map(
     D2D1_MAP_OPTIONS options,
     _Out_ D2D1_MAPPED_RECT* mappedRect)
 {
+    if (mappedRect != nullptr)
+        memset(mappedRect, 0, sizeof(*mappedRect));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

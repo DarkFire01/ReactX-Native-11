@@ -17,6 +17,9 @@ RxD2DDevice::CreatePrintControl(
     _In_opt_ CONST D2D1_PRINT_CONTROL_PROPERTIES* printControlProperties,
     _COM_Outptr_ ID2D1PrintControl** printControl)
 {
+    if (printControl != nullptr)
+        *printControl = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

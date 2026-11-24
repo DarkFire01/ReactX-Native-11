@@ -15,6 +15,9 @@ RxVideoDevice::CreateAuthenticatedChannel(
     _In_ D3D11_AUTHENTICATED_CHANNEL_TYPE ChannelType,
     _COM_Outptr_ ID3D11AuthenticatedChannel** ppAuthenticatedChannel)
 {
+    if (ppAuthenticatedChannel != nullptr)
+        *ppAuthenticatedChannel = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -27,6 +30,9 @@ RxVideoDevice::CreateCryptoSession(
     _In_ const GUID* pKeyExchangeType,
     _COM_Outptr_ ID3D11CryptoSession** ppCryptoSession)
 {
+    if (ppCryptoSession != nullptr)
+        *ppCryptoSession = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -38,6 +44,9 @@ RxVideoDevice::GetContentProtectionCaps(
     _In_opt_ const GUID* pDecoderProfile,
     _Out_ D3D11_VIDEO_CONTENT_PROTECTION_CAPS* pCaps)
 {
+    if (pCaps != nullptr)
+        memset(pCaps, 0, sizeof(*pCaps));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -50,6 +59,9 @@ RxVideoDevice::CheckCryptoKeyExchange(
     _In_ UINT Index,
     _Out_ GUID* pKeyExchangeType)
 {
+    if (pKeyExchangeType != nullptr)
+        memset(pKeyExchangeType, 0, sizeof(*pKeyExchangeType));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

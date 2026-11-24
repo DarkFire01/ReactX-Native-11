@@ -17,6 +17,9 @@ RxWriteFactory::CreateCustomFontCollection(
     UINT32 collectionKeySize,
     _COM_Outptr_ IDWriteFontCollection** fontCollection)
 {
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -26,6 +29,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::GetGdiInterop(
     _COM_Outptr_ IDWriteGdiInterop** gdiInterop)
 {
+    if (gdiInterop != nullptr)
+        *gdiInterop = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -35,6 +41,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::CreateTextAnalyzer(
     _COM_Outptr_ IDWriteTextAnalyzer** textAnalyzer)
 {
+    if (textAnalyzer != nullptr)
+        *textAnalyzer = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -47,6 +56,9 @@ RxWriteFactory::CreateNumberSubstitution(
     _In_ BOOL ignoreUserOverride,
     _COM_Outptr_ IDWriteNumberSubstitution** numberSubstitution)
 {
+    if (numberSubstitution != nullptr)
+        *numberSubstitution = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -57,6 +69,9 @@ RxWriteFactory::GetEudcFontCollection(
     _COM_Outptr_ IDWriteFontCollection** fontCollection,
     BOOL checkForUpdates)
 {
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -66,6 +81,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::GetSystemFontFallback(
     _COM_Outptr_ IDWriteFontFallback** fontFallback)
 {
+    if (fontFallback != nullptr)
+        *fontFallback = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -75,6 +93,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::CreateFontFallbackBuilder(
     _COM_Outptr_ IDWriteFontFallbackBuilder** fontFallbackBuilder)
 {
+    if (fontFallbackBuilder != nullptr)
+        *fontFallbackBuilder = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -91,6 +112,9 @@ RxWriteFactory::TranslateColorGlyphRun(
     UINT32 colorPaletteIndex,
     _COM_Outptr_ IDWriteColorGlyphRunEnumerator** colorLayers)
 {
+    if (colorLayers != nullptr)
+        *colorLayers = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -104,6 +128,9 @@ RxWriteFactory::CreateFontFaceReference(
     DWRITE_FONT_SIMULATIONS fontSimulations,
     _COM_Outptr_ IDWriteFontFaceReference** fontFaceReference)
 {
+    if (fontFaceReference != nullptr)
+        *fontFaceReference = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -116,6 +143,9 @@ RxWriteFactory::CreateFontFaceReference(
     DWRITE_FONT_SIMULATIONS fontSimulations,
     _COM_Outptr_ IDWriteFontFaceReference** fontFaceReference)
 {
+    if (fontFaceReference != nullptr)
+        *fontFaceReference = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -125,6 +155,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::GetSystemFontSet(
     _COM_Outptr_ IDWriteFontSet** fontSet)
 {
+    if (fontSet != nullptr)
+        *fontSet = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -134,6 +167,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::CreateFontSetBuilder(
     _COM_Outptr_ IDWriteFontSetBuilder** fontSetBuilder)
 {
+    if (fontSetBuilder != nullptr)
+        *fontSetBuilder = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -144,6 +180,9 @@ RxWriteFactory::CreateFontCollectionFromFontSet(
     IDWriteFontSet* fontSet,
     _COM_Outptr_ IDWriteFontCollection1** fontCollection)
 {
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -153,6 +192,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::GetFontDownloadQueue(
     _COM_Outptr_ IDWriteFontDownloadQueue** fontDownloadQueue)
 {
+    if (fontDownloadQueue != nullptr)
+        *fontDownloadQueue = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -169,6 +211,9 @@ RxWriteFactory::TranslateColorGlyphRun(
     UINT32 colorPaletteIndex,
     _COM_Outptr_ IDWriteColorGlyphRunEnumerator1** colorLayers)
 {
+    if (colorLayers != nullptr)
+        *colorLayers = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -202,6 +247,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::CreateFontSetBuilder(
     _COM_Outptr_ IDWriteFontSetBuilder1** fontSetBuilder)
 {
+    if (fontSetBuilder != nullptr)
+        *fontSetBuilder = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -211,6 +259,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::CreateInMemoryFontFileLoader(
     _COM_Outptr_ IDWriteInMemoryFontFileLoader** newLoader)
 {
+    if (newLoader != nullptr)
+        *newLoader = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -222,6 +273,9 @@ RxWriteFactory::CreateHttpFontFileLoader(
     _In_opt_z_ wchar_t const* extraHeaders,
     _COM_Outptr_ IDWriteRemoteFontFileLoader** newLoader)
 {
+    if (newLoader != nullptr)
+        *newLoader = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -244,6 +298,9 @@ RxWriteFactory::UnpackFontFile(
     UINT32 fileDataSize,
     _COM_Outptr_ IDWriteFontFileStream** unpackedFontStream)
 {
+    if (unpackedFontStream != nullptr)
+        *unpackedFontStream = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -258,6 +315,9 @@ RxWriteFactory::CreateFontFaceReference(
     UINT32 fontAxisValueCount,
     _COM_Outptr_ IDWriteFontFaceReference1** fontFaceReference)
 {
+    if (fontFaceReference != nullptr)
+        *fontFaceReference = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -269,6 +329,9 @@ RxWriteFactory::CreateFontResource(
     UINT32 faceIndex,
     _COM_Outptr_ IDWriteFontResource** fontResource)
 {
+    if (fontResource != nullptr)
+        *fontResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -279,6 +342,9 @@ RxWriteFactory::GetSystemFontSet(
     BOOL includeDownloadableFonts,
     _COM_Outptr_ IDWriteFontSet1** fontSet)
 {
+    if (fontSet != nullptr)
+        *fontSet = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -290,6 +356,9 @@ RxWriteFactory::CreateFontCollectionFromFontSet(
     DWRITE_FONT_FAMILY_MODEL fontFamilyModel,
     _COM_Outptr_ IDWriteFontCollection2** fontCollection)
 {
+    if (fontCollection != nullptr)
+        *fontCollection = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -299,6 +368,9 @@ STDMETHODCALLTYPE
 RxWriteFactory::CreateFontSetBuilder(
     _COM_Outptr_ IDWriteFontSetBuilder2** fontSetBuilder)
 {
+    if (fontSetBuilder != nullptr)
+        *fontSetBuilder = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -309,6 +381,9 @@ RxWriteFactory::GetSystemFontSet(
     BOOL includeDownloadableFonts,
     _COM_Outptr_ IDWriteFontSet2** fontSet)
 {
+    if (fontSet != nullptr)
+        *fontSet = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

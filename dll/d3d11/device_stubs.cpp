@@ -14,6 +14,9 @@ STDMETHODCALLTYPE
 RxDevice::CreateClassLinkage(
     _COM_Outptr_ ID3D11ClassLinkage** ppLinkage)
 {
+    if (ppLinkage != nullptr)
+        *ppLinkage = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -24,6 +27,9 @@ RxDevice::CreateCounter(
     _In_ const D3D11_COUNTER_DESC* pCounterDesc,
     _COM_Outptr_opt_ ID3D11Counter** ppCounter)
 {
+    if (ppCounter != nullptr)
+        *ppCounter = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -34,6 +40,9 @@ RxDevice::CreateDeferredContext(
     UINT ContextFlags,
     _COM_Outptr_opt_ ID3D11DeviceContext** ppDeferredContext)
 {
+    if (ppDeferredContext != nullptr)
+        *ppDeferredContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -43,6 +52,9 @@ STDMETHODCALLTYPE
 RxDevice::CheckCounterInfo(
     _Out_ D3D11_COUNTER_INFO* pCounterInfo)
 {
+    if (pCounterInfo != nullptr)
+        memset(pCounterInfo, 0, sizeof(*pCounterInfo));
+
     RX_UNIMPLEMENTED();
 }
 
@@ -59,6 +71,11 @@ RxDevice::CheckCounter(
     _Out_writes_opt_(*pDescriptionLength) LPSTR szDescription,
     _Inout_opt_ UINT* pDescriptionLength)
 {
+    if (pType != nullptr)
+        memset(pType, 0, sizeof(*pType));
+    if (pActiveCounters != nullptr)
+        memset(pActiveCounters, 0, sizeof(*pActiveCounters));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -69,6 +86,9 @@ RxDevice::CreateDeferredContext1(
     UINT ContextFlags,
     _COM_Outptr_opt_ ID3D11DeviceContext1** ppDeferredContext)
 {
+    if (ppDeferredContext != nullptr)
+        *ppDeferredContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -81,6 +101,9 @@ RxDevice::OpenSharedResourceByName(
     _In_ REFIID returnedInterface,
     _COM_Outptr_ void** ppResource)
 {
+    if (ppResource != nullptr)
+        *ppResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -91,6 +114,9 @@ RxDevice::CreateDeferredContext2(
     UINT ContextFlags,
     _COM_Outptr_opt_ ID3D11DeviceContext2** ppDeferredContext)
 {
+    if (ppDeferredContext != nullptr)
+        *ppDeferredContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

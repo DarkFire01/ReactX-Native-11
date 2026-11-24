@@ -17,6 +17,9 @@ RxD2DContext::CreateSharedBitmap(
     _In_opt_ CONST D2D1_BITMAP_PROPERTIES* bitmapProperties,
     _COM_Outptr_ ID2D1Bitmap** bitmap)
 {
+    if (bitmap != nullptr)
+        *bitmap = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -29,6 +32,9 @@ RxD2DContext::CreateBitmapBrush(
     _In_opt_ CONST D2D1_BRUSH_PROPERTIES* brushProperties,
     _COM_Outptr_ ID2D1BitmapBrush** bitmapBrush)
 {
+    if (bitmapBrush != nullptr)
+        *bitmapBrush = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -41,6 +47,9 @@ RxD2DContext::CreateRadialGradientBrush(
     _In_ ID2D1GradientStopCollection* gradientStopCollection,
     _COM_Outptr_ ID2D1RadialGradientBrush** radialGradientBrush)
 {
+    if (radialGradientBrush != nullptr)
+        *radialGradientBrush = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -54,6 +63,9 @@ RxD2DContext::CreateCompatibleRenderTarget(
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS options,
     _COM_Outptr_ ID2D1BitmapRenderTarget** bitmapRenderTarget)
 {
+    if (bitmapRenderTarget != nullptr)
+        *bitmapRenderTarget = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -64,6 +76,9 @@ RxD2DContext::CreateLayer(
     _In_opt_ CONST D2D1_SIZE_F* size,
     _COM_Outptr_ ID2D1Layer** layer)
 {
+    if (layer != nullptr)
+        *layer = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -73,6 +88,9 @@ STDMETHODCALLTYPE
 RxD2DContext::CreateMesh(
     _COM_Outptr_ ID2D1Mesh** mesh)
 {
+    if (mesh != nullptr)
+        *mesh = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -143,6 +161,9 @@ RxD2DContext::CreateColorContext(
     UINT32 profileSize,
     _COM_Outptr_ ID2D1ColorContext** colorContext)
 {
+    if (colorContext != nullptr)
+        *colorContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -153,6 +174,9 @@ RxD2DContext::CreateColorContextFromFilename(
     _In_ PCWSTR filename,
     _COM_Outptr_ ID2D1ColorContext** colorContext)
 {
+    if (colorContext != nullptr)
+        *colorContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -163,6 +187,9 @@ RxD2DContext::CreateColorContextFromWicColorContext(
     _In_ IWICColorContext* wicColorContext,
     _COM_Outptr_ ID2D1ColorContext** colorContext)
 {
+    if (colorContext != nullptr)
+        *colorContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -173,6 +200,9 @@ RxD2DContext::CreateEffect(
     _In_ REFCLSID effectId,
     _COM_Outptr_ ID2D1Effect** effect)
 {
+    if (effect != nullptr)
+        *effect = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -185,6 +215,9 @@ RxD2DContext::CreateImageBrush(
     _In_opt_ CONST D2D1_BRUSH_PROPERTIES* brushProperties,
     _COM_Outptr_ ID2D1ImageBrush** imageBrush)
 {
+    if (imageBrush != nullptr)
+        *imageBrush = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -197,6 +230,9 @@ RxD2DContext::CreateBitmapBrush(
     _In_opt_ CONST D2D1_BRUSH_PROPERTIES* brushProperties,
     _COM_Outptr_ ID2D1BitmapBrush1** bitmapBrush)
 {
+    if (bitmapBrush != nullptr)
+        *bitmapBrush = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -206,6 +242,9 @@ STDMETHODCALLTYPE
 RxD2DContext::CreateCommandList(
     _COM_Outptr_ ID2D1CommandList** commandList)
 {
+    if (commandList != nullptr)
+        *commandList = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -216,6 +255,9 @@ RxD2DContext::GetImageLocalBounds(
     _In_ ID2D1Image* image,
     _Out_ D2D1_RECT_F* localBounds) const
 {
+    if (localBounds != nullptr)
+        memset(localBounds, 0, sizeof(*localBounds));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -226,6 +268,9 @@ RxD2DContext::GetImageWorldBounds(
     _In_ ID2D1Image* image,
     _Out_ D2D1_RECT_F* worldBounds) const
 {
+    if (worldBounds != nullptr)
+        memset(worldBounds, 0, sizeof(*worldBounds));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -238,6 +283,9 @@ RxD2DContext::GetGlyphRunWorldBounds(
     DWRITE_MEASURING_MODE measuringMode,
     _Out_ D2D1_RECT_F* bounds) const
 {
+    if (bounds != nullptr)
+        memset(bounds, 0, sizeof(*bounds));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -255,6 +303,9 @@ STDMETHODCALLTYPE
 RxD2DContext::GetRenderingControls(
     _Out_ D2D1_RENDERING_CONTROLS* renderingControls) const
 {
+    if (renderingControls != nullptr)
+        memset(renderingControls, 0, sizeof(*renderingControls));
+
     RX_UNIMPLEMENTED();
 }
 
@@ -305,6 +356,9 @@ RxD2DContext::GetEffectInvalidRectangleCount(
     _In_ ID2D1Effect* effect,
     _Out_ UINT32* rectangleCount)
 {
+    if (rectangleCount != nullptr)
+        memset(rectangleCount, 0, sizeof(*rectangleCount));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

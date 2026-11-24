@@ -24,6 +24,9 @@ RxImmediateContext::FinishCommandList(
     BOOL RestoreDeferredContextState,
     _COM_Outptr_opt_ ID3D11CommandList** ppCommandList)
 {
+    if (ppCommandList != nullptr)
+        *ppCommandList = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

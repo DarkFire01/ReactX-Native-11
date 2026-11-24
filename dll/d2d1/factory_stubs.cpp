@@ -15,6 +15,9 @@ RxD2DFactory::CreateRectangleGeometry(
     _In_ CONST D2D1_RECT_F* rectangle,
     _COM_Outptr_ ID2D1RectangleGeometry** rectangleGeometry)
 {
+    if (rectangleGeometry != nullptr)
+        *rectangleGeometry = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -25,6 +28,9 @@ RxD2DFactory::CreateRoundedRectangleGeometry(
     _In_ CONST D2D1_ROUNDED_RECT* roundedRectangle,
     _COM_Outptr_ ID2D1RoundedRectangleGeometry** roundedRectangleGeometry)
 {
+    if (roundedRectangleGeometry != nullptr)
+        *roundedRectangleGeometry = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -35,6 +41,9 @@ RxD2DFactory::CreateEllipseGeometry(
     _In_ CONST D2D1_ELLIPSE* ellipse,
     _COM_Outptr_ ID2D1EllipseGeometry** ellipseGeometry)
 {
+    if (ellipseGeometry != nullptr)
+        *ellipseGeometry = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -47,6 +56,9 @@ RxD2DFactory::CreateGeometryGroup(
     UINT32 geometriesCount,
     _COM_Outptr_ ID2D1GeometryGroup** geometryGroup)
 {
+    if (geometryGroup != nullptr)
+        *geometryGroup = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -58,6 +70,9 @@ RxD2DFactory::CreateTransformedGeometry(
     _In_ CONST D2D1_MATRIX_3X2_F* transform,
     _COM_Outptr_ ID2D1TransformedGeometry** transformedGeometry)
 {
+    if (transformedGeometry != nullptr)
+        *transformedGeometry = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -67,6 +82,9 @@ STDMETHODCALLTYPE
 RxD2DFactory::CreatePathGeometry(
     _COM_Outptr_ ID2D1PathGeometry** pathGeometry)
 {
+    if (pathGeometry != nullptr)
+        *pathGeometry = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -79,6 +97,9 @@ RxD2DFactory::CreateStrokeStyle(
     UINT32 dashesCount,
     _COM_Outptr_ ID2D1StrokeStyle** strokeStyle)
 {
+    if (strokeStyle != nullptr)
+        *strokeStyle = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -90,6 +111,9 @@ RxD2DFactory::CreateDrawingStateBlock(
     _In_opt_ IDWriteRenderingParams* textRenderingParams,
     _COM_Outptr_ ID2D1DrawingStateBlock** drawingStateBlock)
 {
+    if (drawingStateBlock != nullptr)
+        *drawingStateBlock = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -101,6 +125,9 @@ RxD2DFactory::CreateWicBitmapRenderTarget(
     _In_ CONST D2D1_RENDER_TARGET_PROPERTIES* renderTargetProperties,
     _COM_Outptr_ ID2D1RenderTarget** renderTarget)
 {
+    if (renderTarget != nullptr)
+        *renderTarget = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -112,6 +139,9 @@ RxD2DFactory::CreateHwndRenderTarget(
     _In_ CONST D2D1_HWND_RENDER_TARGET_PROPERTIES* hwndRenderTargetProperties,
     _COM_Outptr_ ID2D1HwndRenderTarget** hwndRenderTarget)
 {
+    if (hwndRenderTarget != nullptr)
+        *hwndRenderTarget = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -123,6 +153,9 @@ RxD2DFactory::CreateDxgiSurfaceRenderTarget(
     _In_ CONST D2D1_RENDER_TARGET_PROPERTIES* renderTargetProperties,
     _COM_Outptr_ ID2D1RenderTarget** renderTarget)
 {
+    if (renderTarget != nullptr)
+        *renderTarget = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -133,6 +166,9 @@ RxD2DFactory::CreateDCRenderTarget(
     _In_ CONST D2D1_RENDER_TARGET_PROPERTIES* renderTargetProperties,
     _COM_Outptr_ ID2D1DCRenderTarget** dcRenderTarget)
 {
+    if (dcRenderTarget != nullptr)
+        *dcRenderTarget = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -145,6 +181,9 @@ RxD2DFactory::CreateStrokeStyle(
     UINT32 dashesCount,
     _COM_Outptr_ ID2D1StrokeStyle1** strokeStyle)
 {
+    if (strokeStyle != nullptr)
+        *strokeStyle = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -154,6 +193,9 @@ STDMETHODCALLTYPE
 RxD2DFactory::CreatePathGeometry(
     _COM_Outptr_ ID2D1PathGeometry1** pathGeometry)
 {
+    if (pathGeometry != nullptr)
+        *pathGeometry = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -165,6 +207,9 @@ RxD2DFactory::CreateDrawingStateBlock(
     _In_opt_ IDWriteRenderingParams* textRenderingParams,
     _COM_Outptr_ ID2D1DrawingStateBlock1** drawingStateBlock)
 {
+    if (drawingStateBlock != nullptr)
+        *drawingStateBlock = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -175,6 +220,9 @@ RxD2DFactory::CreateGdiMetafile(
     _In_ IStream* metafileStream,
     _COM_Outptr_ ID2D1GdiMetafile** metafile)
 {
+    if (metafile != nullptr)
+        *metafile = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -222,6 +270,11 @@ RxD2DFactory::GetRegisteredEffects(
     _Out_opt_ UINT32* effectsReturned,
     _Out_opt_ UINT32* effectsRegistered) const
 {
+    if (effectsReturned != nullptr)
+        memset(effectsReturned, 0, sizeof(*effectsReturned));
+    if (effectsRegistered != nullptr)
+        memset(effectsRegistered, 0, sizeof(*effectsRegistered));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -232,6 +285,9 @@ RxD2DFactory::GetEffectProperties(
     _In_ REFCLSID effectId,
     _COM_Outptr_ ID2D1Properties** properties) const
 {
+    if (properties != nullptr)
+        *properties = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

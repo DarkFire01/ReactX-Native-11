@@ -33,6 +33,9 @@ RxFontFace::GetGdiCompatibleMetrics(
     _In_opt_ DWRITE_MATRIX const* transform,
     _Out_ DWRITE_FONT_METRICS* fontFaceMetrics)
 {
+    if (fontFaceMetrics != nullptr)
+        memset(fontFaceMetrics, 0, sizeof(*fontFaceMetrics));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -61,6 +64,9 @@ RxFontFace::GetGdiCompatibleMetrics(
     _In_opt_ DWRITE_MATRIX const* transform,
     _Out_ DWRITE_FONT_METRICS1* fontMetrics)
 {
+    if (fontMetrics != nullptr)
+        memset(fontMetrics, 0, sizeof(*fontMetrics));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -72,6 +78,9 @@ RxFontFace::GetUnicodeRanges(
     _Out_writes_to_opt_(maxRangeCount,*actualRangeCount) DWRITE_UNICODE_RANGE* unicodeRanges,
     _Out_ UINT32* actualRangeCount)
 {
+    if (actualRangeCount != nullptr)
+        memset(actualRangeCount, 0, sizeof(*actualRangeCount));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -128,6 +137,9 @@ STDMETHODCALLTYPE
 RxFontFace::GetFontFaceReference(
     _COM_Outptr_ IDWriteFontFaceReference** fontFaceReference)
 {
+    if (fontFaceReference != nullptr)
+        *fontFaceReference = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -137,6 +149,9 @@ STDMETHODCALLTYPE
 RxFontFace::GetFamilyNames(
     _COM_Outptr_ IDWriteLocalizedStrings** names)
 {
+    if (names != nullptr)
+        *names = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -146,6 +161,9 @@ STDMETHODCALLTYPE
 RxFontFace::GetFaceNames(
     _COM_Outptr_ IDWriteLocalizedStrings** names)
 {
+    if (names != nullptr)
+        *names = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -157,6 +175,11 @@ RxFontFace::GetInformationalStrings(
     _COM_Outptr_result_maybenull_ IDWriteLocalizedStrings** informationalStrings,
     _Out_ BOOL* exists)
 {
+    if (informationalStrings != nullptr)
+        *informationalStrings = nullptr;
+    if (exists != nullptr)
+        memset(exists, 0, sizeof(*exists));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -170,6 +193,11 @@ RxFontFace::GetGlyphImageData(
     _Out_ DWRITE_GLYPH_IMAGE_DATA* glyphData,
     _Outptr_result_maybenull_ void** glyphDataContext)
 {
+    if (glyphData != nullptr)
+        memset(glyphData, 0, sizeof(*glyphData));
+    if (glyphDataContext != nullptr)
+        *glyphDataContext = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -197,6 +225,9 @@ STDMETHODCALLTYPE
 RxFontFace::GetFontResource(
     _COM_Outptr_ IDWriteFontResource** fontResource)
 {
+    if (fontResource != nullptr)
+        *fontResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

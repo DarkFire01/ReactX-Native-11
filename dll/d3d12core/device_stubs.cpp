@@ -18,6 +18,9 @@ RxDevice12::CreateReservedResource(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    if (ppvResource != nullptr)
+        *ppvResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -31,6 +34,9 @@ RxDevice12::CreateSharedHandle(
     _In_opt_ LPCWSTR Name,
     _Out_ HANDLE* pHandle)
 {
+    if (pHandle != nullptr)
+        memset(pHandle, 0, sizeof(*pHandle));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -42,6 +48,9 @@ RxDevice12::OpenSharedHandle(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvObj)
 {
+    if (ppvObj != nullptr)
+        *ppvObj = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -53,6 +62,9 @@ RxDevice12::OpenSharedHandleByName(
     DWORD Access,
     _Out_ HANDLE* pNTHandle)
 {
+    if (pNTHandle != nullptr)
+        memset(pNTHandle, 0, sizeof(*pNTHandle));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -97,6 +109,13 @@ RxDevice12::GetResourceTiling(
     _In_ UINT FirstSubresourceTilingToGet,
     _Out_writes_(*pNumSubresourceTilings) D3D12_SUBRESOURCE_TILING* pSubresourceTilingsForNonPackedMips)
 {
+    if (pNumTilesForEntireResource != nullptr)
+        memset(pNumTilesForEntireResource, 0, sizeof(*pNumTilesForEntireResource));
+    if (pPackedMipDesc != nullptr)
+        memset(pPackedMipDesc, 0, sizeof(*pPackedMipDesc));
+    if (pStandardTileShapeForNonPackedMips != nullptr)
+        memset(pStandardTileShapeForNonPackedMips, 0, sizeof(*pStandardTileShapeForNonPackedMips));
+
     RX_UNIMPLEMENTED();
 }
 
@@ -131,6 +150,9 @@ RxDevice12::CreatePipelineState(
     REFIID riid,
     _COM_Outptr_ void** ppPipelineState)
 {
+    if (ppPipelineState != nullptr)
+        *ppPipelineState = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -142,6 +164,9 @@ RxDevice12::OpenExistingHeapFromAddress(
     REFIID riid,
     _COM_Outptr_ void** ppvHeap)
 {
+    if (ppvHeap != nullptr)
+        *ppvHeap = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -153,6 +178,9 @@ RxDevice12::OpenExistingHeapFromFileMapping(
     REFIID riid,
     _COM_Outptr_ void** ppvHeap)
 {
+    if (ppvHeap != nullptr)
+        *ppvHeap = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -177,6 +205,9 @@ RxDevice12::CreateProtectedResourceSession(
     _In_ REFIID riid,
     _COM_Outptr_ void** ppSession)
 {
+    if (ppSession != nullptr)
+        *ppSession = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -191,6 +222,9 @@ RxDevice12::CreateReservedResource1(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    if (ppvResource != nullptr)
+        *ppvResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -202,6 +236,9 @@ RxDevice12::CreateLifetimeTracker(
     REFIID riid,
     _COM_Outptr_ void** ppvTracker)
 {
+    if (ppvTracker != nullptr)
+        *ppvTracker = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -232,6 +269,9 @@ RxDevice12::EnumerateMetaCommandParameters(
     _Inout_ UINT* pParameterCount,
     _Out_writes_opt_(*pParameterCount) D3D12_META_COMMAND_PARAMETER_DESC* pParameterDescs)
 {
+    if (pTotalStructureSizeInBytes != nullptr)
+        memset(pTotalStructureSizeInBytes, 0, sizeof(*pTotalStructureSizeInBytes));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -246,6 +286,9 @@ RxDevice12::CreateMetaCommand(
     REFIID riid,
     _COM_Outptr_ void** ppMetaCommand)
 {
+    if (ppMetaCommand != nullptr)
+        *ppMetaCommand = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -257,6 +300,9 @@ RxDevice12::CreateStateObject(
     REFIID riid,
     _COM_Outptr_ void** ppStateObject)
 {
+    if (ppStateObject != nullptr)
+        *ppStateObject = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -267,6 +313,9 @@ RxDevice12::GetRaytracingAccelerationStructurePrebuildInfo(
     _In_ const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS* pDesc,
     _Out_ D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO* pInfo)
 {
+    if (pInfo != nullptr)
+        memset(pInfo, 0, sizeof(*pInfo));
+
     RX_UNIMPLEMENTED();
 }
 
@@ -288,6 +337,9 @@ RxDevice12::SetBackgroundProcessingMode(
     _In_opt_ HANDLE hEventToSignalUponCompletion,
     _Out_opt_ BOOL* pbFurtherMeasurementsDesired)
 {
+    if (pbFurtherMeasurementsDesired != nullptr)
+        memset(pbFurtherMeasurementsDesired, 0, sizeof(*pbFurtherMeasurementsDesired));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -300,6 +352,9 @@ RxDevice12::AddToStateObject(
     REFIID riid,
     _COM_Outptr_ void** ppNewStateObject)
 {
+    if (ppNewStateObject != nullptr)
+        *ppNewStateObject = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -311,6 +366,9 @@ RxDevice12::CreateProtectedResourceSession1(
     _In_ REFIID riid,
     _COM_Outptr_ void** ppSession)
 {
+    if (ppSession != nullptr)
+        *ppSession = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -332,6 +390,9 @@ RxDevice12::CreateShaderCacheSession(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvSession)
 {
+    if (ppvSession != nullptr)
+        *ppvSession = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -360,6 +421,9 @@ RxDevice12::CreateCommittedResource3(
     REFIID riidResource,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    if (ppvResource != nullptr)
+        *ppvResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -377,6 +441,9 @@ RxDevice12::CreatePlacedResource2(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    if (ppvResource != nullptr)
+        *ppvResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -393,6 +460,9 @@ RxDevice12::CreateReservedResource2(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    if (ppvResource != nullptr)
+        *ppvResource = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -419,6 +489,9 @@ RxDevice12::OpenExistingHeapFromAddress1(
     REFIID riid,
     _COM_Outptr_ void** ppvHeap)
 {
+    if (ppvHeap != nullptr)
+        *ppvHeap = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
@@ -433,6 +506,9 @@ RxDevice12::CreateRootSignatureFromSubobjectInLibrary(
     REFIID riid,
     _COM_Outptr_ void** ppvRootSignature)
 {
+    if (ppvRootSignature != nullptr)
+        *ppvRootSignature = nullptr;
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }

@@ -108,6 +108,9 @@ RxVideoContext::ConfigureAuthenticatedChannel(
     _In_reads_bytes_(InputSize) const void* pInput,
     _Out_ D3D11_AUTHENTICATED_CONFIGURE_OUTPUT* pOutput)
 {
+    if (pOutput != nullptr)
+        memset(pOutput, 0, sizeof(*pOutput));
+
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
 }
