@@ -35,6 +35,7 @@ RxAdapter12::Open(
     D3DKMT_UMDFILENAMEINFO FileName = {};
     D3D12DDIARG_OPENADAPTER OpenArgs = {};
     D3D12DDI_3DPIPELINESUPPORT1_DATA_0081 Pipeline = {};
+    D3DKMT_ADAPTERTYPE Type = {};
     D3D12DDI_3DPIPELINELEVEL Level;
     PFND3D12DDI_OPENADAPTER OpenAdapter;
     NTSTATUS Status;
@@ -72,6 +73,10 @@ RxAdapter12::Open(
     OpenAdapter = reinterpret_cast<PFND3D12DDI_OPENADAPTER>(GetProcAddress(Driver, "OpenAdapter12"));
     if (OpenAdapter == nullptr)
         return DXGI_ERROR_UNSUPPORTED;
+
+    /* Only a software adapter is asked for the WARP export */
+    if (SUCCEEDED(QueryKernel(KMTQAITYPE_ADAPTERTYPE, &Type, sizeof(Type))) && Type.SoftwareDevice)
+        WarpExtension = GetProcAddress(Driver, MAKEINTRESOURCEA(199)) != nullptr;
 
     Callbacks.pfnQueryAdapterInfoCb = QueryAdapterInfoCb;
     Callbacks.pfnGetMultisampleMethodListCb = GetMultisampleMethodListCb;

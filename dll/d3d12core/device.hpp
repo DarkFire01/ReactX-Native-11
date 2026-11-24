@@ -152,6 +152,13 @@ public:
         _Inout_updates_bytes_(Size) VOID* Data,
         _In_ UINT Size) const;
 
+    /* WARP marks itself with an export at ordinal 199; it then takes some resources hardware does not */
+    BOOLEAN
+    HasWarpExtension() const
+    {
+        return WarpExtension;
+    }
+
     const LUID&
     GetLuid() const
     {
@@ -217,6 +224,7 @@ private:
     const KmtThunks* Kmt = nullptr;
     D3DKMT_HANDLE KmtAdapter = 0;
     LUID Luid = {};
+    BOOLEAN WarpExtension = FALSE;
     HMODULE Driver = NULL;
     D3DDDI_ADAPTERCALLBACKS Callbacks = {};
     D3D12DDI_ADAPTERFUNCS_0109 Functions = {};
@@ -394,6 +402,12 @@ public:
     BOOLEAN
     TakesListType(
         _In_ D3D12_COMMAND_LIST_TYPE Type) const;
+
+    BOOLEAN
+    HasWarpExtension() const
+    {
+        return Adapter->HasWarpExtension();
+    }
 
     D3D12DDI_EXECUTE_INDIRECT_TIER
     GetExecuteIndirectTier() const

@@ -22,6 +22,7 @@ constexpr UINT64 RxMsaaAlignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNME
 constexpr UINT RxTargetOrDepth = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 constexpr UINT RxVideoReference = D3D12_RESOURCE_FLAG_VIDEO_DECODE_REFERENCE_ONLY |
                                   D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY;
+constexpr UINT RxLargeTextureLimit = 0x800000;
 constexpr UINT RxDenyKinds = D3D12_HEAP_FLAG_DENY_BUFFERS | D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES |
                              D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES;
 
@@ -638,6 +639,7 @@ RxValidateResourceDesc(
     UINT DimensionSupport;
     UINT64 WidthLimit;
     UINT64 Largest;
+    BOOLEAN Large = FALSE;
     UINT HeightLimit;
     UINT DepthLimit;
     UINT Mips;
@@ -698,6 +700,15 @@ RxValidateResourceDesc(
         case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
             HeightLimit = (UINT)WidthLimit;
             DimensionSupport = D3D12_FORMAT_SUPPORT1_TEXTURE2D;
+
+            /* WARP takes single 2D textures far past the usual size, without mips */
+            if (Device.HasWarpExtension() && (Desc.Width > WidthLimit || Desc.Height > HeightLimit))
+            {
+                Large = TRUE;
+                WidthLimit = RxLargeTextureLimit;
+                HeightLimit = RxLargeTextureLimit;
+                DepthLimit = 1;
+            }
             break;
         default:
             WidthLimit = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
@@ -715,7 +726,9 @@ RxValidateResourceDesc(
         Largest = Desc.Height;
     if (RxLayoutDepth(Desc) > Largest)
         Largest = RxLayoutDepth(Desc);
-    Mips = Desc.MipLevels != 0 ? Desc.MipLevels : RxFullMipCount(Largest);
+    Mips = Desc.MipLevels != 0 ? Desc.MipLevels : (Large ? 1 : RxFullMipCount(Largest));
+    if (Large && Mips > 1)
+        return E_INVALIDARG;
 
     if (RxIsFeedbackFormat(Desc.Format) && Caps.SamplerFeedbackTier == 0)
         return E_INVALIDARG;
