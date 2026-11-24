@@ -1087,6 +1087,13 @@ static const char TcOpsPixelSource[] =
     "    Out.Store4(At, uint4(Coverage | (Front ? 0x100 : 0) | (Sample << 12), asuint(i.Pos.x), asuint(i.Pos.y), asuint(i.Color.y)));\n"
     "    Out.Store4(At + 16, uint4(WaveActiveCountBits(true), asuint(WavePrefixSum(i.Color.x)), WaveActiveBallot(true).x, QuadReadAcrossX(Sample)));\n"
     "    return i.Color;\n"
+    "}\n"
+    "float4 centroids(centroid float4 Pos : SV_Position, centroid float4 Color : COLOR, uint Coverage : SV_Coverage) : SV_Target\n"
+    "{\n"
+    "    uint At = Record(Pos, 0);\n"
+    "    Out.Store4(At, uint4(Coverage, asuint(Pos.x), asuint(Pos.y), asuint(Pos.w)));\n"
+    "    Out.Store4(At + 16, asuint(float4(Color.xy, ddx(Color.x), ddy_fine(Color.y))));\n"
+    "    return Color;\n"
     "}\n";
 
 /* Pixel shader system values and waves over four samples, per pixel and per sample */
@@ -1105,7 +1112,7 @@ SceneOpsPixel(
         { { 0.7f, 0.45f }, { 0.0f, 1.0f, 1.0f, 1.0f } },
         { { -0.2f, -0.95f }, { 1.0f, 0.0f, 1.0f, 0.6f } },
     };
-    static const PCSTR Entries[] = { "pixels", "samples" };
+    static const PCSTR Entries[] = { "pixels", "samples", "centroids" };
     static const UINT Size = 16 * 16 * 4 * 32;
     SIZE_T LogStart = TcLogMark();
     D3D12_ROOT_PARAMETER Parameter = {};
