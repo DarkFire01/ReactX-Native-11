@@ -136,6 +136,9 @@ static CkHookState CkHooks = { {}, {}, {}, 0, 0, FALSE, SRWLOCK_INIT };
 /* How deep in wrapped calls the current thread is, for indenting the calls a call makes */
 static thread_local UINT CkDepth;
 
+/* The device DDI entry the current thread is inside, or none */
+static thread_local UINT CkDdiSlot = ~0u;
+
 /* A name for a pointer: the order it first appeared in */
 static
 std::string
@@ -442,6 +445,25 @@ CkDescribeDeviceCall(
 }
 
 static constexpr UINT CkDeviceCreateCommandAllocator = 9;
+static constexpr UINT CkDeviceCreateCommittedResource = 27;
+
+/*
+ * The translation layer's upload heap grows by 64 KB buffers only while the ones it has are still
+ * in flight, which depends on GPU timing. Outside resource creation such a buffer is one of those.
+ */
+static
+BOOLEAN
+CkIsUploadChunk(
+    _In_reads_(CkArgumentCount) const UINT_PTR* A)
+{
+    const D3D12_HEAP_PROPERTIES* Heap = reinterpret_cast<const D3D12_HEAP_PROPERTIES*>(A[1]);
+    const D3D12_RESOURCE_DESC* Desc = reinterpret_cast<const D3D12_RESOURCE_DESC*>(A[3]);
+
+    if (CkDdiSlot == 37 || CkDdiSlot == 128 || Heap == nullptr || Desc == nullptr)
+        return FALSE;
+    return Desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && Desc->Width == 65536 &&
+           Heap->Type == D3D12_HEAP_TYPE_CUSTOM && static_cast<UINT>(A[4]) == D3D12_RESOURCE_STATE_GENERIC_READ;
+}
 
 /* The object a Direct3D 12 device method made, read from its out pointer */
 static
@@ -855,7 +877,18 @@ CkDispatch(
     }
 
     CkDepth += 1;
-    Result = CkHooks.Originals[Family][Slot](A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[8], A[9], A[10], A[11]);
+    if (Family == CkFamilyDdi)
+    {
+        UINT Outer = CkDdiSlot;
+
+        CkDdiSlot = Slot;
+        Result = CkHooks.Originals[Family][Slot](A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[8], A[9], A[10], A[11]);
+        CkDdiSlot = Outer;
+    }
+    else
+    {
+        Result = CkHooks.Originals[Family][Slot](A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[8], A[9], A[10], A[11]);
+    }
     CkDepth -= 1;
 
     if (Family == CkFamilyDdi && SUCCEEDED(static_cast<HRESULT>(Result)))
@@ -874,6 +907,16 @@ CkDispatch(
         {
             AcquireSRWLockExclusive(&CkHooks.Lock);
             CkHooks.Ids[*reinterpret_cast<VOID**>(A[3])] = "allocator";
+            ReleaseSRWLockExclusive(&CkHooks.Lock);
+        }
+        return Result;
+    }
+    if (Family == CkFamilyDevice && Slot == CkDeviceCreateCommittedResource && CkIsUploadChunk(A))
+    {
+        if (SUCCEEDED(static_cast<HRESULT>(Result)) && A[7] != 0 && *reinterpret_cast<VOID**>(A[7]) != nullptr)
+        {
+            AcquireSRWLockExclusive(&CkHooks.Lock);
+            CkHooks.Ids[*reinterpret_cast<VOID**>(A[7])] = "upload";
             ReleaseSRWLockExclusive(&CkHooks.Lock);
         }
         return Result;
