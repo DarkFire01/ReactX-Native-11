@@ -21,6 +21,7 @@ nt_add_usermode_dll(d3d12core
         formattable12.cpp
         fence.cpp
         heap.cpp
+        indirect.cpp
         fence_stubs.cpp
         queue.cpp
         queue_stubs.cpp

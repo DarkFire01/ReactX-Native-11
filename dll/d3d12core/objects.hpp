@@ -645,6 +645,132 @@ private:
     BYTE* MappedBase = nullptr;
 };
 
+/* Queries the driver keeps results of until they are resolved */
+class RxQueryHeap final : public RxDeviceChild12<ID3D12QueryHeap>
+{
+public:
+    static constexpr GUID PrivateId = {0x5c09e3a4, 0x7d21, 0x4b6f, {0x90, 0x3a, 0xe8, 0x14, 0x6b, 0xc2, 0x5f, 0x07}};
+
+    /* The desc is checked */
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_QUERY_HEAP_DESC& Desc,
+        _In_ UINT DriverNodeMask,
+        _Outptr_ RxQueryHeap** Heap);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    D3D12DDI_HQUERYHEAP
+    GetDriverHandle() const
+    {
+        return DriverHeap;
+    }
+
+    D3D12_QUERY_HEAP_TYPE
+    GetType() const
+    {
+        return Type;
+    }
+
+    UINT
+    GetCount() const
+    {
+        return Count;
+    }
+
+    /* Bytes one resolved query takes */
+    UINT
+    GetResultSize() const
+    {
+        return ResultSize;
+    }
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxQueryHeap() override;
+
+    HRESULT
+    Initialize(
+        _In_ const D3D12_QUERY_HEAP_DESC& HeapDesc,
+        _In_ UINT DriverNodeMask);
+
+    D3D12_QUERY_HEAP_TYPE Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+    UINT Count = 0;
+    UINT ResultSize = 0;
+    RxDriverMemory12 Memory;
+    D3D12DDI_HQUERYHEAP DriverHeap = {};
+    BOOLEAN IsDriverHeapCreated = FALSE;
+};
+
+class RxRootSignature;
+
+/* The layout of the arguments ExecuteIndirect reads from a buffer */
+class RxCommandSignature final : public RxDeviceChild12<ID3D12CommandSignature>
+{
+public:
+    static constexpr GUID PrivateId = {0xa17f6b28, 0x94c3, 0x4e5d, {0x8b, 0x02, 0x3f, 0xd6, 0x71, 0x9e, 0x24, 0xb5}};
+
+    /* The desc is checked; the root signature gets a reference */
+    static
+    HRESULT
+    Create(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_COMMAND_SIGNATURE_DESC& Desc,
+        _In_opt_ RxRootSignature* Root,
+        _In_ UINT DriverNodeMask,
+        _Outptr_ RxCommandSignature** Signature);
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    D3D12DDI_HCOMMANDSIGNATURE
+    GetDriverHandle() const
+    {
+        return DriverSignature;
+    }
+
+    UINT
+    GetByteStride() const
+    {
+        return ByteStride;
+    }
+
+    /* The draw or dispatch every command ends with */
+    D3D12_INDIRECT_ARGUMENT_TYPE
+    GetCommandType() const
+    {
+        return CommandType;
+    }
+
+private:
+    using RxDeviceChild12::RxDeviceChild12;
+    ~RxCommandSignature() override;
+
+    HRESULT
+    Initialize(
+        _In_ const D3D12_COMMAND_SIGNATURE_DESC& Desc,
+        _In_opt_ RxRootSignature* RootSignature,
+        _In_ UINT DriverNodeMask);
+
+    UINT ByteStride = 0;
+    D3D12_INDIRECT_ARGUMENT_DESC* Arguments = nullptr;
+    UINT ArgumentCount = 0;
+    D3D12_INDIRECT_ARGUMENT_TYPE CommandType = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    RxRootSignature* Root = nullptr;
+    RxDriverMemory12 Memory;
+    D3D12DDI_HCOMMANDSIGNATURE DriverSignature = {};
+    BOOLEAN IsDriverSignatureCreated = FALSE;
+};
+
 /* A root signature as the driver holds it; one per RTS0 part and node mask */
 class RxRootSignature final : public RxDeviceChild12<ID3D12RootSignature>
 {

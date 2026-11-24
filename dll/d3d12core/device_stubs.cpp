@@ -153,31 +153,8 @@ RxDevice12::Evict(
 
 HRESULT
 STDMETHODCALLTYPE
-RxDevice12::CreateQueryHeap(
-    _In_ const D3D12_QUERY_HEAP_DESC* pDesc,
-    REFIID riid,
-    _COM_Outptr_opt_ void** ppvHeap)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxDevice12::SetStablePowerState(
     BOOL Enable)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxDevice12::CreateCommandSignature(
-    _In_ const D3D12_COMMAND_SIGNATURE_DESC* pDesc,
-    _In_opt_ ID3D12RootSignature* pRootSignature,
-    REFIID riid,
-    _COM_Outptr_opt_ void** ppvCommandSignature)
 {
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;

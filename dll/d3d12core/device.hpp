@@ -390,6 +390,12 @@ public:
         return ShaderCaps;
     }
 
+    D3D12DDI_EXECUTE_INDIRECT_TIER
+    GetExecuteIndirectTier() const
+    {
+        return ExecuteIndirect.ExecuteIndirectTier;
+    }
+
     /* The highest released shader model the driver lists, in API form */
     D3D_SHADER_MODEL
     GetHighestShaderModel() const

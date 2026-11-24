@@ -211,6 +211,7 @@ RxCreateHeapCommon(
     _COM_Outptr_opt_ void** ppvHeap)
 {
     RxHeap* Heap;
+    UINT DriverMask;
     HRESULT hr;
 
     if (ppvHeap != nullptr)
@@ -218,9 +219,10 @@ RxCreateHeapCommon(
     if (pDesc == nullptr)
         return E_INVALIDARG;
 
-    /* The heap is made on one node that exists; the single node is node 0 */
-    if (pDesc->Properties.CreationNodeMask > 1)
-        return E_INVALIDARG;
+    /* The heap is made on one node that exists */
+    hr = Device.TranslateNodeMask(pDesc->Properties.CreationNodeMask, TRUE, &DriverMask);
+    if (FAILED(hr))
+        return hr;
 
     hr = RxValidateHeapDesc(Device, *pDesc, 0);
     if (FAILED(hr))
@@ -229,8 +231,9 @@ RxCreateHeapCommon(
         return S_FALSE;
 
     /* Visibility on nodes that do not exist only fails once the heap is really made */
-    if (pDesc->Properties.VisibleNodeMask > 1)
-        return E_INVALIDARG;
+    hr = Device.TranslateNodeMask(pDesc->Properties.VisibleNodeMask, FALSE, &DriverMask);
+    if (FAILED(hr))
+        return hr;
 
     /* Sharing and protected sessions need kernel support this runtime does not have yet */
     if (pProtectedSession != nullptr || (pDesc->Flags & D3D12_HEAP_FLAG_SHARED) != 0)
