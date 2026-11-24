@@ -172,8 +172,15 @@ def main():
     header_name = ", ".join(header.replace("\\", "/").split("/")[-1] for header in args.header)
 
     methods = []
+    # Sibling interfaces can declare the same method; one override serves both
+    signatures = set()
     for interface in args.interface:
-        methods.extend(read_interface(text, interface))
+        for method in read_interface(text, interface):
+            key = (method[1], tuple(re.sub(r"\s*\w+$", "", param) for param in method[2]), method[3])
+            if key in signatures:
+                continue
+            signatures.add(key)
+            methods.append(method)
 
     seen = {method[1] for method in methods}
     missing = implemented - seen
