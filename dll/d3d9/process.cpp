@@ -363,10 +363,20 @@ D9Device::PrepareFixedProcessing(
     D9VmProgram* Made;
     DWORD* Tokens;
     UINT Count = 0;
+    BYTE* Saved = nullptr;
     HRESULT hr;
 
     *Program = nullptr;
     *Outputs = 0;
+
+    /* A hardware device's own pipeline runs this, so its converter is left as it was */
+    if (!SoftwareVertices)
+    {
+        Saved = new (std::nothrow) BYTE[sizeof(VertexShaders)];
+        if (Saved == nullptr)
+            return E_OUTOFMEMORY;
+        CopyMemory(Saved, &VertexShaders, sizeof(VertexShaders));
+    }
 
     /* The converter takes the current input and states; the draws still see them as waiting */
     if (Declaration != nullptr && !Declaration->Transformed)
@@ -384,6 +394,19 @@ D9Device::PrepareFixedProcessing(
     VertexShaders.Stale |= Waiting;
 
     Key = VertexShaders.Key;
+
+    /* Only the converter's registers and light loops reach the bank */
+    ZeroMemory(FixedMachine->FloatConstants, D9PvFloatRegisters * sizeof(*FixedMachine->FloatConstants));
+    ZeroMemory(FixedMachine->IntConstants, D9PvIntRegisters * sizeof(*FixedMachine->IntConstants));
+    ZeroMemory(FixedMachine->BoolConstants, D9PvIntRegisters * sizeof(*FixedMachine->BoolConstants));
+    CopyMemory(FixedMachine->FloatConstants, VertexShaders.Registers, sizeof(VertexShaders.Registers));
+    CopyMemory(FixedMachine->IntConstants, VertexShaders.Loops, sizeof(VertexShaders.Loops));
+    if (Saved != nullptr)
+    {
+        CopyMemory(static_cast<VOID*>(&VertexShaders), Saved, sizeof(VertexShaders));
+        delete[] Saved;
+    }
+
     Tokens = new (std::nothrow) DWORD[D9FixedVertexTokenLimit];
     if (Tokens == nullptr)
         return E_OUTOFMEMORY;
@@ -407,13 +430,6 @@ D9Device::PrepareFixedProcessing(
         delete Made;
         return hr;
     }
-
-    /* Only the converter's registers and light loops reach the bank */
-    ZeroMemory(FixedMachine->FloatConstants, D9PvFloatRegisters * sizeof(*FixedMachine->FloatConstants));
-    ZeroMemory(FixedMachine->IntConstants, D9PvIntRegisters * sizeof(*FixedMachine->IntConstants));
-    ZeroMemory(FixedMachine->BoolConstants, D9PvIntRegisters * sizeof(*FixedMachine->BoolConstants));
-    CopyMemory(FixedMachine->FloatConstants, VertexShaders.Registers, sizeof(VertexShaders.Registers));
-    CopyMemory(FixedMachine->IntConstants, VertexShaders.Loops, sizeof(VertexShaders.Loops));
     *Program = Made;
     *Outputs = Key.Outputs;
     return S_OK;
