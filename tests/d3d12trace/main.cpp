@@ -618,6 +618,24 @@ TrDescribe(
     TrAppend(Text, "}");
 }
 
+/* A command signature: its stride, each argument's type and three fields, the root signature and node */
+static
+VOID
+TrDescribe(
+    _Inout_ std::string* Text,
+    _In_ const D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001* Args,
+    _In_ SIZE_T Size)
+{
+    TrAppend(Text, "{stride %u args %u [", Args->ByteStride, Args->NumArgumentDescs);
+    for (UINT Index = 0; Args->pArgumentDescs != nullptr && Index < Args->NumArgumentDescs; Index++)
+    {
+        const UINT* Fields = reinterpret_cast<const UINT*>(&Args->pArgumentDescs[Index]);
+
+        TrAppend(Text, "%s%u:%u:%u:%u", Index != 0 ? " " : "", Fields[0], Fields[1], Fields[2], Fields[3]);
+    }
+    TrAppend(Text, "] root %s node %u}", TrDriverId(Args->hRootSignature.pDrvPrivate).c_str(), Args->NodeMask);
+}
+
 /* Where a texture copy reads or writes: a subresource index or a footprint */
 static
 VOID
@@ -2822,12 +2840,73 @@ TrScenarioHeaps(
     QueryDesc.Count = 8;
     printf("result %08X\n", (UINT)Device->CreateQueryHeap(&QueryDesc, IID_PPV_ARGS(&Timestamps)));
 
+    /* Video decode statistics are left out: they bring up the driver's whole video support first */
+    for (D3D12_QUERY_HEAP_TYPE Type : { D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, D3D12_QUERY_HEAP_TYPE_SO_STATISTICS,
+                                        D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP, (D3D12_QUERY_HEAP_TYPE)6,
+                                        D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS1 })
+    {
+        ComPtr<ID3D12QueryHeap> Other;
+        CHAR Name[64];
+
+        sprintf_s(Name, "CreateQueryHeap type %u", Type);
+        TrPhase(Name);
+        QueryDesc.Type = Type;
+        QueryDesc.Count = 3;
+        printf("result %08X\n", (UINT)Device->CreateQueryHeap(&QueryDesc, IID_PPV_ARGS(&Other)));
+    }
+    TrPhase("CreateQueryHeap without output");
+    printf("result %08X\n", (UINT)Device->CreateQueryHeap(&QueryDesc, __uuidof(ID3D12QueryHeap), nullptr));
+
     TrPhase("CreateCommandSignature draw");
     Argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
     SignatureDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
     SignatureDesc.NumArgumentDescs = 1;
     SignatureDesc.pArgumentDescs = &Argument;
     printf("result %08X\n", (UINT)Device->CreateCommandSignature(&SignatureDesc, nullptr, IID_PPV_ARGS(&Signature)));
+    TrPhase("CreateCommandSignature without output");
+    printf("result %08X\n", (UINT)Device->CreateCommandSignature(&SignatureDesc, nullptr, __uuidof(ID3D12CommandSignature),
+                                                                 nullptr));
+    if (Run.SerializeVersioned != nullptr)
+    {
+        D3D12_ROOT_PARAMETER1 Parameters[2] = {};
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+        D3D12_INDIRECT_ARGUMENT_DESC Arguments[4] = {};
+        ComPtr<ID3D12RootSignature> Root;
+        ComPtr<ID3D12CommandSignature> Rooted;
+        ComPtr<ID3DBlob> Blob;
+        ComPtr<ID3DBlob> Errors;
+
+        Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        Parameters[0].Constants.Num32BitValues = 4;
+        Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        RootDesc.Desc_1_1.NumParameters = _countof(Parameters);
+        RootDesc.Desc_1_1.pParameters = Parameters;
+        if (SUCCEEDED(Run.SerializeVersioned(&RootDesc, &Blob, &Errors)))
+        {
+            TrPhase("CreateRootSignature for a command signature");
+            printf("result %08X\n", (UINT)Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(),
+                                                                      IID_PPV_ARGS(&Root)));
+        }
+        Arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        Arguments[0].Constant.DestOffsetIn32BitValues = 1;
+        Arguments[0].Constant.Num32BitValuesToSet = 2;
+        Arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW;
+        Arguments[1].UnorderedAccessView.RootParameterIndex = 1;
+        Arguments[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW;
+        Arguments[3].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+        SignatureDesc.ByteStride = 64;
+        SignatureDesc.NumArgumentDescs = _countof(Arguments);
+        SignatureDesc.pArgumentDescs = Arguments;
+        TrPhase("CreateCommandSignature with root arguments");
+        if (Root != nullptr)
+        {
+            printf("result %08X\n", (UINT)Device->CreateCommandSignature(&SignatureDesc, Root.Get(),
+                                                                         IID_PPV_ARGS(&Rooted)));
+        }
+        Rooted.Reset();
+        Root.Reset();
+    }
 
     TrPhase("Release");
     Signature.Reset();

@@ -3615,6 +3615,239 @@ TcCheckPlaced(
     }
 }
 
+/* One indirect argument as a command signature lists it */
+struct TcArgument
+{
+    D3D12_INDIRECT_ARGUMENT_TYPE Type;
+    UINT First;
+    UINT Second;
+    UINT Third;
+};
+
+/* queries: query heaps and command signatures */
+static
+VOID
+TcCheckQueries(
+    _In_ TwelveCheck& Check)
+{
+    static const struct
+    {
+        PCSTR Name;
+        UINT Type;
+        UINT Count;
+        UINT NodeMask;
+    } Heaps[] =
+    {
+        { "occlusion", D3D12_QUERY_HEAP_TYPE_OCCLUSION, 16, 0 },
+        { "timestamp", D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 8, 0 },
+        { "pipeline_statistics", D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS, 4, 0 },
+        { "so_statistics", D3D12_QUERY_HEAP_TYPE_SO_STATISTICS, 4, 0 },
+        { "video_decode_statistics", D3D12_QUERY_HEAP_TYPE_VIDEO_DECODE_STATISTICS, 4, 0 },
+        { "copy_queue_timestamp", D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP, 4, 0 },
+        { "type_6", 6, 4, 0 },
+        { "pipeline_statistics1", D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS1, 4, 0 },
+        { "type_8", 8, 4, 0 },
+        { "count_zero", D3D12_QUERY_HEAP_TYPE_OCCLUSION, 0, 0 },
+        { "count_large", D3D12_QUERY_HEAP_TYPE_OCCLUSION, 65536, 0 },
+        { "node_1", D3D12_QUERY_HEAP_TYPE_OCCLUSION, 4, 1 },
+        { "node_2", D3D12_QUERY_HEAP_TYPE_OCCLUSION, 4, 2 },
+        { "node_3", D3D12_QUERY_HEAP_TYPE_OCCLUSION, 4, 3 },
+    };
+    static const TcArgument Draw[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument DrawIndexed[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED } };
+    static const TcArgument Dispatch[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument Mesh[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH } };
+    static const TcArgument Rays[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS } };
+    static const TcArgument None[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 0 } };
+    static const TcArgument TwoDraws[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument DrawFirst[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW }, { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 0 } };
+    static const TcArgument Vertex[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument VertexTwice[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument VertexSlot32[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 32 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument VertexDispatch[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 0 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument Index[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED } };
+    static const TcArgument IndexDraw[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument IndexTwice[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW }, { D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED } };
+    static const TcArgument Constants[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 0, 4 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument ConstantsZero[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 0, 0 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument ConstantsTooMany[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 2, 3 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument ConstantsSplit[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 0, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 2, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument ConstantsOverlap[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 0, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 1, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument ConstantsBackward[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 2, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 0, 0, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument ConstantsWrongSlot[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT, 1, 0, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument Views[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW, 3 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument ViewsBackward[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW, 2 }, { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument ViewWrongType[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument ViewTable[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW, 4 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument ViewPastEnd[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW, 9 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH } };
+    static const TcArgument Incrementing[] = { { D3D12_INDIRECT_ARGUMENT_TYPE_INCREMENTING_CONSTANT, 0, 1 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const TcArgument UnknownType[] = { { (D3D12_INDIRECT_ARGUMENT_TYPE)12 }, { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW } };
+    static const struct
+    {
+        PCSTR Name;
+        const TcArgument* Arguments;
+        UINT Count;
+        UINT Stride;
+        BOOLEAN Root;
+        UINT NodeMask;
+    } Signatures[] =
+    {
+        { "draw", Draw, 1, 16, FALSE, 0 },
+        { "draw_root", Draw, 1, 16, TRUE, 0 },
+        { "draw_stride_12", Draw, 1, 12, FALSE, 0 },
+        { "draw_stride_18", Draw, 1, 18, FALSE, 0 },
+        { "draw_stride_64", Draw, 1, 64, FALSE, 0 },
+        { "draw_stride_0", Draw, 1, 0, FALSE, 0 },
+        { "draw_node_1", Draw, 1, 16, FALSE, 1 },
+        { "draw_node_2", Draw, 1, 16, FALSE, 2 },
+        { "draw_node_3", Draw, 1, 16, FALSE, 3 },
+        { "draw_indexed", DrawIndexed, 1, 20, FALSE, 0 },
+        { "draw_indexed_16", DrawIndexed, 1, 16, FALSE, 0 },
+        { "dispatch", Dispatch, 1, 12, FALSE, 0 },
+        { "dispatch_mesh", Mesh, 1, 12, FALSE, 0 },
+        { "dispatch_rays", Rays, 1, 104, FALSE, 0 },
+        { "empty", Draw, 0, 16, FALSE, 0 },
+        { "no_draw", None, 1, 16, FALSE, 0 },
+        { "two_draws", TwoDraws, 2, 32, FALSE, 0 },
+        { "draw_first", DrawFirst, 2, 32, FALSE, 0 },
+        { "vertex", Vertex, 2, 32, FALSE, 0 },
+        { "vertex_short", Vertex, 2, 28, FALSE, 0 },
+        { "vertex_twice", VertexTwice, 3, 48, FALSE, 0 },
+        { "vertex_slot_32", VertexSlot32, 2, 32, FALSE, 0 },
+        { "vertex_dispatch", VertexDispatch, 2, 28, FALSE, 0 },
+        { "index", Index, 2, 36, FALSE, 0 },
+        { "index_draw", IndexDraw, 2, 32, FALSE, 0 },
+        { "index_twice", IndexTwice, 3, 52, FALSE, 0 },
+        { "constants", Constants, 2, 32, TRUE, 0 },
+        { "constants_no_root", Constants, 2, 32, FALSE, 0 },
+        { "constants_zero", ConstantsZero, 2, 32, TRUE, 0 },
+        { "constants_too_many", ConstantsTooMany, 2, 32, TRUE, 0 },
+        { "constants_split", ConstantsSplit, 3, 32, TRUE, 0 },
+        { "constants_overlap", ConstantsOverlap, 3, 32, TRUE, 0 },
+        { "constants_backward", ConstantsBackward, 3, 32, TRUE, 0 },
+        { "constants_wrong_slot", ConstantsWrongSlot, 2, 32, TRUE, 0 },
+        { "views", Views, 4, 36, TRUE, 0 },
+        { "views_backward", ViewsBackward, 3, 28, TRUE, 0 },
+        { "view_wrong_type", ViewWrongType, 2, 20, TRUE, 0 },
+        { "view_table", ViewTable, 2, 20, TRUE, 0 },
+        { "view_past_end", ViewPastEnd, 2, 20, TRUE, 0 },
+        { "incrementing", Incrementing, 2, 20, TRUE, 0 },
+        { "unknown_type", UnknownType, 2, 32, FALSE, 0 },
+    };
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12RootSignature> Root;
+    ComPtr<ID3DBlob> Blob;
+    ComPtr<ID3DBlob> Errors;
+    D3D12_ROOT_PARAMETER1 Parameters[5] = {};
+    D3D12_DESCRIPTOR_RANGE1 Range = {};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    HRESULT hr;
+
+    if (FAILED(Check.MakeDevice(&Device)))
+    {
+        Check.Report("device", "none");
+        return;
+    }
+
+    /* A NULL query heap desc is left out: the system reads the type before checking it */
+    for (const auto& Each : Heaps)
+    {
+        ComPtr<ID3D12QueryHeap> Heap;
+        D3D12_QUERY_HEAP_DESC Desc = {};
+        CHAR Key[96];
+
+        Desc.Type = (D3D12_QUERY_HEAP_TYPE)Each.Type;
+        Desc.Count = Each.Count;
+        Desc.NodeMask = Each.NodeMask;
+        sprintf_s(Key, "heap_%s_check", Each.Name);
+        Check.Report(Key, "0x%08lX", Device->CreateQueryHeap(&Desc, __uuidof(ID3D12QueryHeap), nullptr));
+        hr = Device->CreateQueryHeap(&Desc, IID_PPV_ARGS(&Heap));
+        sprintf_s(Key, "heap_%s", Each.Name);
+        Check.Report(Key, "0x%08lX", hr);
+    }
+
+    Parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    Parameters[0].Constants.Num32BitValues = 4;
+    Parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    Parameters[1].Descriptor.ShaderRegister = 1;
+    Parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    Parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    Range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    Range.NumDescriptors = 1;
+    Range.BaseShaderRegister = 1;
+    Parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    Parameters[4].DescriptorTable.NumDescriptorRanges = 1;
+    Parameters[4].DescriptorTable.pDescriptorRanges = &Range;
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    RootDesc.Desc_1_1.NumParameters = _countof(Parameters);
+    RootDesc.Desc_1_1.pParameters = Parameters;
+    if (Check.SerializeVersioned == nullptr || FAILED(Check.SerializeVersioned(&RootDesc, &Blob, &Errors)))
+    {
+        Check.Report("root", "none");
+        return;
+    }
+    hr = Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_PPV_ARGS(&Root));
+    Check.Report("root", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+
+    /* A NULL command signature desc is left out: the system reads its arguments before checking it */
+    for (const auto& Each : Signatures)
+    {
+        ComPtr<ID3D12CommandSignature> Signature;
+        D3D12_INDIRECT_ARGUMENT_DESC Arguments[4] = {};
+        D3D12_COMMAND_SIGNATURE_DESC Desc = {};
+        CHAR Key[96];
+
+        for (UINT Index = 0; Index < Each.Count; Index++)
+        {
+            Arguments[Index].Type = Each.Arguments[Index].Type;
+            switch (Arguments[Index].Type)
+            {
+                case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW:
+                    Arguments[Index].VertexBuffer.Slot = Each.Arguments[Index].First;
+                    break;
+                case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
+                    Arguments[Index].Constant.RootParameterIndex = Each.Arguments[Index].First;
+                    Arguments[Index].Constant.DestOffsetIn32BitValues = Each.Arguments[Index].Second;
+                    Arguments[Index].Constant.Num32BitValuesToSet = Each.Arguments[Index].Third;
+                    break;
+                case D3D12_INDIRECT_ARGUMENT_TYPE_INCREMENTING_CONSTANT:
+                    Arguments[Index].IncrementingConstant.RootParameterIndex = Each.Arguments[Index].First;
+                    Arguments[Index].IncrementingConstant.DestOffsetIn32BitValues = Each.Arguments[Index].Second;
+                    break;
+                case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW:
+                case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW:
+                case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW:
+                    Arguments[Index].ConstantBufferView.RootParameterIndex = Each.Arguments[Index].First;
+                    break;
+                default:
+                    break;
+            }
+        }
+        Desc.ByteStride = Each.Stride;
+        Desc.NumArgumentDescs = Each.Count;
+        Desc.pArgumentDescs = Arguments;
+        Desc.NodeMask = Each.NodeMask;
+
+        sprintf_s(Key, "signature_%s_check", Each.Name);
+        Check.Report(Key, "0x%08lX", Device->CreateCommandSignature(&Desc, Each.Root ? Root.Get() : nullptr,
+                                                                    __uuidof(ID3D12CommandSignature), nullptr));
+        hr = Device->CreateCommandSignature(&Desc, Each.Root ? Root.Get() : nullptr, IID_PPV_ARGS(&Signature));
+        sprintf_s(Key, "signature_%s", Each.Name);
+        if (Signature != nullptr && Each.Root)
+        {
+            Check.Report(Key, "0x%08lX root refs %lu", hr, (Root->AddRef(), Root->Release()));
+            Signature.Reset();
+            Check.Report("root_refs_after", "%lu", (Root->AddRef(), Root->Release()));
+        }
+        else
+        {
+            Check.Report(Key, "0x%08lX", hr);
+        }
+    }
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -3643,6 +3876,7 @@ static const CheckInfo Checks[] =
     { "pipelines", TcCheckPipelines },
     { "identity", TcCheckIdentity },
     { "placed", TcCheckPlaced },
+    { "queries", TcCheckQueries },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */
