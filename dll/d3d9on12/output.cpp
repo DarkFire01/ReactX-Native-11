@@ -134,7 +134,17 @@ NineSetRenderTarget(
                 Bound.erase(Found);
         }
         if (Resource != nullptr)
+        {
+            UINT Bit = 1U << Args->RenderTargetIndex;
+
+            /* Only a newly bound target changes which outputs swap red and blue */
             Resource->TargetSlots.push_back(Args->RenderTargetIndex);
+            if (Resource->Format == D3DDDIFMT_A2R10G10B10)
+                State->SwappedTargets |= Bit;
+            else
+                State->SwappedTargets &= ~Bit;
+            State->PixelDirty = TRUE;
+        }
     }
 
     Slot->Resource = Resource;

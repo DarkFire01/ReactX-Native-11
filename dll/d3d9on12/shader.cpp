@@ -132,8 +132,13 @@ NineBindShader(
     if (Device == nullptr || hShader == nullptr)
         return E_INVALIDARG;
 
-    if (Device->State.Shaders[Stage] != hShader && Stage == NineVertexStage)
-        Device->State.VertexKeyDirty = TRUE;
+    if (Device->State.Shaders[Stage] != hShader)
+    {
+        if (Stage == NineVertexStage)
+            Device->State.VertexKeyDirty = TRUE;
+        else
+            Device->State.PixelDirty = TRUE;
+    }
     Device->State.Shaders[Stage] = static_cast<NineShader*>(hShader);
     return NineDxgiResult(S_OK);
 }

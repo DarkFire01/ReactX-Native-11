@@ -41,9 +41,6 @@ static constexpr UINT NineRasterClipPlanes = 0x3F00;
 static constexpr UINT NineOutputClip = 16;
 static constexpr UINT NineOutputPointSize = 0x100000;
 
-/* Alpha to coverage switches hidden in render states */
-static constexpr DWORD NineAtocOn = 0x434F5441;
-
 /* Where a draw's vertices or indices start: a byte offset, a vertex or an element */
 enum NineOffsetKind
 {
@@ -239,14 +236,33 @@ NineBuildRaster(
         Words2 |= 2;
     Words2 |= State->ShadowSamplers;
     Raster->Words[2] = Words2;
+    Raster->Words[3] = State->SwappedTargets;
+}
 
-    for (UINT Slot = 0; Slot < NineTargetCount; Slot += 1)
-    {
-        const NineResource* Target = State->Targets[Slot].Resource;
+/* Compares the pixel part of a raster key with the one seen last; the point size bit marks nothing */
+static
+VOID
+NineComparePixelKey(
+    _Inout_ NineDeviceState* State,
+    _In_ const NineScRasterStates* Raster)
+{
+    NineScRasterStates Seen = *Raster;
 
-        if (Target != nullptr && Target->Format == D3DDDIFMT_A2R10G10B10)
-            Raster->Words[3] |= 1u << Slot;
-    }
+    Seen.Words[1] &= ~NineRasterPointLarge;
+    if (!State->HavePixelKey || memcmp(&Seen, &State->LastPixelKey, sizeof(Seen)) != 0)
+        State->PixelDirty = TRUE;
+    State->LastPixelKey = Seen;
+    State->HavePixelKey = TRUE;
+}
+
+VOID
+NineNotePixelKey(
+    _Inout_ NineDevice* Device)
+{
+    NineScRasterStates Raster;
+
+    NineBuildRaster(Device, &Raster);
+    NineComparePixelKey(&Device->State, &Raster);
 }
 
 /* The declaration part of a vertex shader key */
@@ -550,17 +566,13 @@ NineResolvePixelShader(
     std::vector<BYTE> Key;
     NineConverted* Converted;
     BOOLEAN DroppedClip = FALSE;
-    UINT Alpha;
 
+    State->PixelDirty = FALSE;
     if (Owner == nullptr)
         return E_FAIL;
 
-    /* Alpha to coverage takes over from the alpha test */
-    if ((Raster.Words[1] & NineRasterAlphaTest) != 0 && State->RenderStates[D3DDDIRS_ADAPTIVETESS_Y] == NineAtocOn)
-    {
-        Alpha = 8 << 21;
-        Raster.Words[1] = (Raster.Words[1] & ~(NineRasterAlphaFunc | NineRasterAlphaTest)) | Alpha;
-    }
+    /* The alpha test the key carries is the one kept for it, which alpha to coverage replaces */
+    Raster.Words[1] = (Raster.Words[1] & ~(NineRasterAlphaFunc | NineRasterAlphaTest)) | State->PixelAlpha;
 
     for (UINT Index = 0; Index < Before->Outputs.Count; Index += 1)
     {
@@ -789,7 +801,7 @@ NineBuildBlend(
     UINT Op;
 
     ZeroMemory(Blend, sizeof(*Blend));
-    Blend->AlphaToCoverageEnable = Rs[D3DDDIRS_ADAPTIVETESS_Y] == NineAtocOn;
+    Blend->AlphaToCoverageEnable = State->AlphaToCoverage;
     Blend->IndependentBlendEnable = TRUE;
     First->BlendEnable = NineClampBlend(Rs[D3DDDIRS_ALPHABLENDENABLE], 2, 1) != 0;
 
@@ -1517,6 +1529,7 @@ NinePrepareDraw(
     const NineResource* Output;
     NineScRasterStates Raster;
     NinePipelineKey Key = {};
+    NineConverted* Geometry;
     BOOLEAN HasDepth;
     BOOLEAN Multisampled;
     HRESULT hr;
@@ -1548,15 +1561,18 @@ NinePrepareDraw(
         State->ExtensionDirty = FALSE;
     }
     NineBuildRaster(Device, &Raster);
+    NineComparePixelKey(State, &Raster);
 
     if (State->VertexKeyDirty || State->Vertex == nullptr || (State->Dirty & (NineDirtyInputLayout | NineDirtyPretransformed)))
     {
         State->Dirty &= ~(NineDirtyInputLayout | NineDirtyPretransformed);
+        State->PixelDirty = TRUE;
         hr = NineResolveVertexShader(Device, &Raster);
         if (FAILED(hr))
             return hr;
     }
 
+    Geometry = State->Geometry;
     State->Geometry = nullptr;
     if (NineNeedsGeometry(&Raster, &State->Vertex->Outputs))
     {
@@ -1566,12 +1582,35 @@ NinePrepareDraw(
         NineVersionSlot(&Device->GeometryExtension, Device->Extension, NineExtensionSize);
         Device->GeometryExtension.Dirty = TRUE;
     }
+    if (State->Geometry != Geometry)
+        State->PixelDirty = TRUE;
 
     NineApplyPixelExtensions(Device);
     NineApplySamplers(Device);
-    hr = NineResolvePixelShader(Device, &Raster);
-    if (FAILED(hr))
-        return hr;
+
+    /* A blend change looks again at the alpha test the pixel shader was keyed with */
+    if (State->PixelDirty || State->BlendDirty)
+    {
+        UINT Alpha = Raster.Words[1] & (NineRasterAlphaFunc | NineRasterAlphaTest);
+
+        if ((Alpha & NineRasterAlphaTest) != 0 && State->AlphaToCoverage)
+        {
+            State->PixelAlpha = 8 << 21;
+            State->PixelDirty = TRUE;
+        }
+        else if (Alpha != State->PixelAlpha)
+        {
+            State->PixelAlpha = Alpha;
+            State->PixelDirty = TRUE;
+        }
+    }
+    State->BlendDirty = FALSE;
+    if (State->PixelDirty || State->Pixel == nullptr || State->Pixel->Shader == nullptr)
+    {
+        hr = NineResolvePixelShader(Device, &Raster);
+        if (FAILED(hr))
+            return hr;
+    }
     NineApplyTextures(Device);
 
     Output = NineFirstOutput(State);
@@ -2091,5 +2130,6 @@ NineSetTexture(
         if (Index < 16)
             State->TextureKinds[Index] = static_cast<BYTE>(Texture != nullptr ? Texture->TextureType : 1);
     }
+    NineNotePixelKey(Device);
     return NineDxgiResult(S_OK);
 }

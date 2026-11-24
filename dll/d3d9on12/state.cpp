@@ -22,6 +22,8 @@ static constexpr UINT NineAddressV = 14;
 /* Render state values that ask for something other than the state */
 static constexpr DWORD NineResolveDepthCode = 0x7FA05000;
 static constexpr DWORD NineAtocCode = 0x434F5441;
+static constexpr DWORD NineAtocPointOff = 0x304D3241;
+static constexpr DWORD NineAtocPointOn = 0x314D3241;
 
 /* Bump mapping stage states and where they go in the bump constants */
 static constexpr UINT NineBumpMatrixFirst = 7;
@@ -107,6 +109,13 @@ NineNoteRenderState(
                 NINE_TRACE_ONCE(L"the depth resolve render state is not handled yet");
                 return;
             }
+
+            /* The alpha to coverage codes switch it and still land as the size */
+            if (Value == NineAtocPointOff || Value == NineAtocPointOn)
+            {
+                Draw->AlphaToCoverage = Value == NineAtocPointOn;
+                Draw->BlendDirty = TRUE;
+            }
             Point[0] = NineStateFloat(Value);
             Draw->PointSizeDirty = TRUE;
             Draw->ExtensionDirty = TRUE;
@@ -125,6 +134,24 @@ NineNoteRenderState(
             /* Only the alpha to coverage codes are kept */
             if (Value != NineAtocCode && Value != 0)
                 return;
+            Draw->AlphaToCoverage = Value == NineAtocCode;
+            Draw->BlendDirty = TRUE;
+            break;
+        case D3DDDIRS_SRCBLEND:
+        case D3DDDIRS_DESTBLEND:
+        case D3DDDIRS_ALPHABLENDENABLE:
+        case D3DDDIRS_COLORWRITEENABLE:
+        case D3DDDIRS_BLENDOP:
+        case D3DDDIRS_COLORWRITEENABLE1:
+        case D3DDDIRS_COLORWRITEENABLE2:
+        case D3DDDIRS_COLORWRITEENABLE3:
+        case D3DDDIRS_BLENDFACTOR:
+        case D3DDDIRS_SEPARATEALPHABLENDENABLE:
+        case D3DDDIRS_SRCBLENDALPHA:
+        case D3DDDIRS_DESTBLENDALPHA:
+        case D3DDDIRS_BLENDOPALPHA:
+        case D3DDDIRS_MULTISAMPLEMASK:
+            Draw->BlendDirty = TRUE;
             break;
         case D3DDDIRS_CLIPPLANEENABLE:
             if (((Previous ^ Value) & 0x3F) != 0)
@@ -142,6 +169,7 @@ NineNoteRenderState(
             break;
     }
     Draw->RenderStates[State] = Value;
+    NineNotePixelKey(Device);
 }
 
 HRESULT
@@ -170,6 +198,7 @@ NineUpdateWInfo(
         return E_INVALIDARG;
 
     NineDeviceFrom(hDevice)->State.WInfo = *Args;
+    NineNotePixelKey(NineDeviceFrom(hDevice));
     return NineDxgiResult(S_OK);
 }
 
@@ -224,6 +253,7 @@ NineSetTextureStageState(
     {
         States[Stage][Args->State] = Args->Value;
     }
+    NineNotePixelKey(NineDeviceFrom(hDevice));
     return NineDxgiResult(S_OK);
 }
 

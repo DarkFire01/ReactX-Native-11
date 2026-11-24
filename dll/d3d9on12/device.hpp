@@ -222,6 +222,13 @@ struct NineDeviceState
     NineScRasterStates LastPixelKey;
     BOOLEAN HavePixelKey;
 
+    /* The pixel shader is converted again only when marked, and the blend marking can mark it */
+    BOOLEAN PixelDirty;
+    BOOLEAN BlendDirty;
+    BOOLEAN AlphaToCoverage;
+    UINT SwappedTargets;
+    UINT PixelAlpha;
+
     /* The converted shaders and pipeline last drawn with */
     NineConverted* Vertex;
     NineConverted* Geometry;
@@ -906,6 +913,11 @@ NineDropConverted(
 /* Frees the converter and every pipeline before the context goes */
 VOID
 NineFreeDrawState(
+    _Inout_ NineDevice* Device);
+
+/* Marks the pixel shader for conversion when a state it is keyed on changed since the last look */
+VOID
+NineNotePixelKey(
     _Inout_ NineDevice* Device);
 
 /* state.cpp */
