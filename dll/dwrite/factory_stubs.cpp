@@ -11,54 +11,11 @@
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::CreateCustomFontCollection(
-    _In_ IDWriteFontCollectionLoader* collectionLoader,
-    _In_reads_bytes_(collectionKeySize) void const* collectionKey,
-    UINT32 collectionKeySize,
-    _COM_Outptr_ IDWriteFontCollection** fontCollection)
-{
-    if (fontCollection != nullptr)
-        *fontCollection = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateTextAnalyzer(
     _COM_Outptr_ IDWriteTextAnalyzer** textAnalyzer)
 {
     if (textAnalyzer != nullptr)
         *textAnalyzer = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::CreateNumberSubstitution(
-    _In_ DWRITE_NUMBER_SUBSTITUTION_METHOD substitutionMethod,
-    _In_z_ WCHAR const* localeName,
-    _In_ BOOL ignoreUserOverride,
-    _COM_Outptr_ IDWriteNumberSubstitution** numberSubstitution)
-{
-    if (numberSubstitution != nullptr)
-        *numberSubstitution = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::GetEudcFontCollection(
-    _COM_Outptr_ IDWriteFontCollection** fontCollection,
-    BOOL checkForUpdates)
-{
-    if (fontCollection != nullptr)
-        *fontCollection = nullptr;
 
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
@@ -83,25 +40,6 @@ RxWriteFactory::CreateFontFallbackBuilder(
 {
     if (fontFallbackBuilder != nullptr)
         *fontFallbackBuilder = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxWriteFactory::TranslateColorGlyphRun(
-    FLOAT baselineOriginX,
-    FLOAT baselineOriginY,
-    _In_ DWRITE_GLYPH_RUN const* glyphRun,
-    _In_opt_ DWRITE_GLYPH_RUN_DESCRIPTION const* glyphRunDescription,
-    DWRITE_MEASURING_MODE measuringMode,
-    _In_opt_ DWRITE_MATRIX const* worldToDeviceTransform,
-    UINT32 colorPaletteIndex,
-    _COM_Outptr_ IDWriteColorGlyphRunEnumerator** colorLayers)
-{
-    if (colorLayers != nullptr)
-        *colorLayers = nullptr;
 
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
@@ -189,25 +127,6 @@ RxWriteFactory::GetFontDownloadQueue(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::TranslateColorGlyphRun(
-    D2D1_POINT_2F baselineOrigin,
-    _In_ DWRITE_GLYPH_RUN const* glyphRun,
-    _In_opt_ DWRITE_GLYPH_RUN_DESCRIPTION const* glyphRunDescription,
-    DWRITE_GLYPH_IMAGE_FORMATS desiredGlyphImageFormats,
-    DWRITE_MEASURING_MODE measuringMode,
-    _In_opt_ DWRITE_MATRIX const* worldAndDpiTransform,
-    UINT32 colorPaletteIndex,
-    _COM_Outptr_ IDWriteColorGlyphRunEnumerator1** colorLayers)
-{
-    if (colorLayers != nullptr)
-        *colorLayers = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::ComputeGlyphOrigins(
     DWRITE_GLYPH_RUN const* glyphRun,
     DWRITE_MEASURING_MODE measuringMode,
@@ -244,18 +163,6 @@ RxWriteFactory::CreateFontSetBuilder(
 
 HRESULT
 STDMETHODCALLTYPE
-RxWriteFactory::CreateInMemoryFontFileLoader(
-    _COM_Outptr_ IDWriteInMemoryFontFileLoader** newLoader)
-{
-    if (newLoader != nullptr)
-        *newLoader = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxWriteFactory::CreateHttpFontFileLoader(
     _In_opt_z_ wchar_t const* referrerUrl,
     _In_opt_z_ wchar_t const* extraHeaders,
@@ -266,16 +173,6 @@ RxWriteFactory::CreateHttpFontFileLoader(
 
     RX_UNIMPLEMENTED();
     return E_NOTIMPL;
-}
-
-DWRITE_CONTAINER_TYPE
-STDMETHODCALLTYPE
-RxWriteFactory::AnalyzeContainerType(
-    _In_reads_bytes_(fileDataSize) void const* fileData,
-    UINT32 fileDataSize)
-{
-    RX_UNIMPLEMENTED();
-    return {};
 }
 
 HRESULT

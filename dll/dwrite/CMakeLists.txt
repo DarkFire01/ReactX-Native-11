@@ -4,6 +4,7 @@ nt_add_usermode_dll(dwrite
         dwmain.cpp
         facetables.cpp
         factory.cpp
+        factorymisc.cpp
         factory_stubs.cpp
         fontface.cpp
         fontface_stubs.cpp
