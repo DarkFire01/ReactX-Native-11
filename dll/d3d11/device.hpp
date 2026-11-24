@@ -487,7 +487,7 @@ private:
 };
 
 /* The device's IDXGIDevice face; a tear-off sharing the device's lifetime and private data */
-class RxDxgiDevice final : public IDXGIDevice3
+class RxDxgiDevice final : public IDXGIDevice4
 {
 public:
     explicit RxDxgiDevice(

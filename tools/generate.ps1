@@ -185,15 +185,16 @@ $Classes = @(
     },
     @{
         Class       = 'RxDxgiDevice'
-        Interfaces  = @('IDXGIObject', 'IDXGIDevice', 'IDXGIDevice1', 'IDXGIDevice2', 'IDXGIDevice3')
-        Headers     = @('shared\dxgi.h', 'shared\dxgi1_2.h', 'shared\dxgi1_3.h')
+        Interfaces  = @('IDXGIObject', 'IDXGIDevice', 'IDXGIDevice1', 'IDXGIDevice2', 'IDXGIDevice3', 'IDXGIDevice4')
+        Headers     = @('shared\dxgi.h', 'shared\dxgi1_2.h', 'shared\dxgi1_3.h', 'shared\dxgi1_5.h')
         Include     = 'device.hpp'
         Name        = 'dxgidevice'
         Purpose     = 'IDXGIDevice methods'
         Implemented = @(
             'SetPrivateData', 'SetPrivateDataInterface', 'GetPrivateData', 'GetParent', 'GetAdapter',
             'SetGPUThreadPriority', 'GetGPUThreadPriority', 'SetMaximumFrameLatency', 'GetMaximumFrameLatency',
-            'QueryResourceResidency', 'OfferResources', 'ReclaimResources', 'EnqueueSetEvent', 'Trim'
+            'QueryResourceResidency', 'OfferResources', 'ReclaimResources', 'EnqueueSetEvent', 'Trim', 'OfferResources1',
+            'ReclaimResources1'
         )
     },
     @{

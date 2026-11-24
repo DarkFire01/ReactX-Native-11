@@ -531,6 +531,39 @@ RxDxgiDevice::ReclaimResources(
 
 HRESULT
 STDMETHODCALLTYPE
+RxDxgiDevice::OfferResources1(
+    _In_ UINT NumResources,
+    _In_reads_(NumResources) IDXGIResource* const* ppResources,
+    _In_ DXGI_OFFER_RESOURCE_PRIORITY Priority,
+    _In_ UINT Flags)
+{
+    if ((Flags & ~DXGI_OFFER_RESOURCE_FLAG_ALLOW_DECOMMIT) != 0)
+        return E_INVALIDARG;
+
+    return OfferResources(NumResources, ppResources, Priority);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDxgiDevice::ReclaimResources1(
+    _In_ UINT NumResources,
+    _In_reads_(NumResources) IDXGIResource* const* ppResources,
+    _Out_writes_all_(NumResources) DXGI_RECLAIM_RESOURCE_RESULTS* pResults)
+{
+    HRESULT hr;
+
+    hr = ReclaimResources(NumResources, ppResources, nullptr);
+    if (FAILED(hr) || pResults == nullptr)
+        return hr;
+
+    /* Offered memory is kept, so every resource comes back intact */
+    for (UINT Index = 0; Index < NumResources; Index++)
+        pResults[Index] = DXGI_RECLAIM_RESOURCE_RESULT_OK;
+    return S_OK;
+}
+
+HRESULT
+STDMETHODCALLTYPE
 RxDxgiDevice::EnqueueSetEvent(
     _In_ HANDLE hEvent)
 {

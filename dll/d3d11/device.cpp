@@ -363,9 +363,9 @@ RxDevice::QueryInterface(
     }
 
     if (riid == __uuidof(IDXGIObject) || riid == __uuidof(IDXGIDevice) || riid == __uuidof(IDXGIDevice1) ||
-        riid == __uuidof(IDXGIDevice2) || riid == __uuidof(IDXGIDevice3))
+        riid == __uuidof(IDXGIDevice2) || riid == __uuidof(IDXGIDevice3) || riid == __uuidof(IDXGIDevice4))
     {
-        *ppvObject = static_cast<IDXGIDevice3*>(&DxgiDevice);
+        *ppvObject = static_cast<IDXGIDevice4*>(&DxgiDevice);
         AddRef();
         return S_OK;
     }
