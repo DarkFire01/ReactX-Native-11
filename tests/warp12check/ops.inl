@@ -940,6 +940,24 @@ static const TcOpsBuild TcOpsShortBuilds[] =
     { NULL, L"cs_6_6", L"-enable-16bit-types", L"SHORT_KNOBS" },
 };
 
+/* Texture loads and samples returning minimum precision and native 16 bit floats */
+static const char TcOpsHalfReadSource[] =
+    "[numthreads(64, 1, 1)] void halfreads(uint t : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint Base = t * 64;\n"
+    "    float2 Uv = float2((t % 8) * 0.137 - 0.2, (t / 8) * 0.161 - 0.3);\n"
+    "    Out.Store4(Base, asuint((float4)Image.Load(int3(t % 8, t / 8, 0))));\n"
+    "    Out.Store4(Base + 16, asuint((float4)Image.SampleLevel(Smooth, Uv, (t % 5) * 0.3)));\n"
+    "    Out.Store4(Base + 32, asuint((float4)Image.GatherGreen(Smooth, Uv)));\n"
+    "    Out.Store4(Base + 48, uint4(asuint((float)Floats.SampleLevel(Smooth, Uv, 0)), asuint((float)Floats.Load(int3(t % 4, t / 16, 0))),\n"
+    "                                asuint((float)(Image.Load(int3(t % 8, 1, 0)).x * (min16float)3.0)), asuint((float)Floats.Gather(Point, Uv).w)));\n"
+    "}\n";
+
+static const TcOpsBuild TcOpsHalfReadBuilds[] =
+{
+    { NULL, L"cs_6_0", NULL, L"HALF_IMAGES" },
+    { NULL, L"cs_6_2", L"-enable-16bit-types", L"HALF_IMAGES" },
+};
 static
 HRESULT
 SceneOpsHalf(
@@ -950,6 +968,8 @@ SceneOpsHalf(
 
     if (SUCCEEDED(hr))
         hr = TcOpsRun(Device, Result, TcOpsShortSource, "shorts", TcOpsShortBuilds, ARRAYSIZE(TcOpsShortBuilds), 1);
+    if (SUCCEEDED(hr))
+        hr = TcOpsRun(Device, Result, TcOpsHalfReadSource, "halfreads", TcOpsHalfReadBuilds, ARRAYSIZE(TcOpsHalfReadBuilds), 1);
     return hr;
 }
 
