@@ -196,7 +196,8 @@ RxDevice::WaitForFenceOnGpu(
             Status = Kmt->SubmitWaitForSyncObjectsToHwQueue(&QueueWait);
         }
 
-        if (!HasQueues && NT_SUCCESS(Status))
+        /* As with signals, a queue device's contexts without a queue take no wait packets */
+        if (!HasQueues && NT_SUCCESS(Status) && KmQueues.empty())
         {
             Wait.hContext = KmContext;
             Status = Kmt->WaitForSynchronizationObjectFromGpu(&Wait);
@@ -219,7 +220,11 @@ RxDevice::SignalFenceOnGpu(
 {
     const KmtThunks* Kmt = RxGetKmtThunks();
     D3DKMT_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 Signal = {};
-    NTSTATUS Status;
+    D3DKMT_SUBMITSIGNALSYNCOBJECTSTOHWQUEUE QueueSignal = {};
+    std::vector<D3DKMT_HANDLE> Broadcast;
+    std::vector<D3DKMT_HANDLE> Queues;
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN HasQueues;
 
     if (Kmt->SignalSynchronizationObjectFromGpu2 == nullptr)
         return DXGI_ERROR_UNSUPPORTED;
@@ -231,12 +236,43 @@ RxDevice::SignalFenceOnGpu(
         return S_FALSE;
     }
 
-    Signal.ObjectCount = 1;
-    Signal.ObjectHandleArray = &SyncObject;
-    Signal.BroadcastContextCount = (ULONG)KmContexts.size();
-    Signal.BroadcastContextArray = KmContexts.data();
-    Signal.FenceValue = FenceValue;
-    Status = Kmt->SignalSynchronizationObjectFromGpu2(&Signal);
+    /* A context that runs hardware queues takes its signals on those queues instead */
+    for (D3DKMT_HANDLE KmContext : KmContexts)
+    {
+        HasQueues = FALSE;
+        for (const KernelQueue& Each : KmQueues)
+        {
+            if (Each.Context == KmContext)
+            {
+                Queues.push_back(Each.Queue);
+                HasQueues = TRUE;
+            }
+        }
+
+        if (!HasQueues)
+            Broadcast.push_back(KmContext);
+    }
+
+    if (!Queues.empty() && Kmt->SubmitSignalSyncObjectsToHwQueue != nullptr)
+    {
+        QueueSignal.BroadcastHwQueueCount = (ULONG)Queues.size();
+        QueueSignal.BroadcastHwQueueArray = Queues.data();
+        QueueSignal.ObjectCount = 1;
+        QueueSignal.ObjectHandleArray = &SyncObject;
+        QueueSignal.FenceValueArray = &FenceValue;
+        Status = Kmt->SubmitSignalSyncObjectsToHwQueue(&QueueSignal);
+    }
+
+    /* On a device that runs hardware queues, contexts without one take no packets */
+    if (Queues.empty() && !Broadcast.empty())
+    {
+        Signal.ObjectCount = 1;
+        Signal.ObjectHandleArray = &SyncObject;
+        Signal.BroadcastContextCount = (ULONG)Broadcast.size();
+        Signal.BroadcastContextArray = Broadcast.data();
+        Signal.FenceValue = FenceValue;
+        Status = Kmt->SignalSynchronizationObjectFromGpu2(&Signal);
+    }
     ReleaseSRWLockShared(&ContextLock);
 
     if (!NT_SUCCESS(Status))
