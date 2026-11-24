@@ -352,28 +352,6 @@ D9PvFetch(
     }
 }
 
-/* Whether any of the six frustum tests of a position in the half space form fails, by sign bit like the
-   system tests them */
-static
-BOOLEAN
-D9PvOutside(
-    _In_ FLOAT X,
-    _In_ FLOAT Y,
-    _In_ FLOAT Z,
-    _In_ FLOAT W)
-{
-    const FLOAT Tests[] = { X, W - X, Y, W - Y, Z, W - Z };
-    DWORD Signs = 0;
-
-    for (FLOAT Test : Tests)
-    {
-        DWORD Bits;
-
-        CopyMemory(&Bits, &Test, sizeof(Bits));
-        Signs |= Bits;
-    }
-    return (Signs & 0x80000000) != 0;
-}
 
 static
 FLOAT
@@ -696,7 +674,7 @@ D9PvRunVertices(
                         Reciprocal = 1.0f / W;
                     }
                 }
-                else if (Run->Clipping && !D9PvOutside(SumX * 0.5f, SumY * 0.5f, Z, W))
+                else if (Run->Clipping && D9PvClipCode(Run, SumX * 0.5f, SumY * 0.5f, Z, W) == 0)
                 {
                     /* Inside the frustum the system divides without looking at w */
                     Reciprocal = 1.0f / W;
@@ -750,6 +728,29 @@ D9PvRunVertices(
         }
     }
     return S_OK;
+}
+
+/* The first six enabled user clip planes, taken into the half space form the pipeline tests positions in */
+VOID
+D9Device::LoadClipPlanes(
+    _Inout_ D9PvRun* Run)
+{
+    DWORD Enabled = RenderStates[D3DRS_CLIPPLANEENABLE];
+
+    Run->PlaneCount = 0;
+    for (UINT Plane = 0; Plane < 6; Plane++)
+    {
+        const FLOAT* Given = ClipPlanes[Plane];
+        FLOAT* Taken = Run->Planes[Run->PlaneCount];
+
+        if ((Enabled & (1u << Plane)) == 0)
+            continue;
+        Taken[0] = Given[0] + Given[0];
+        Taken[1] = Given[1] + Given[1];
+        Taken[2] = Given[2];
+        Taken[3] = (Given[3] - Given[0]) - Given[1];
+        Run->PlaneCount += 1;
+    }
 }
 
 HRESULT
@@ -1132,6 +1133,7 @@ D9Device::ProcessVertices(
     Run.Stride = Stride;
     Run.Keep = Keep;
     Run.Clipping = Clipping;
+    LoadClipPlanes(&Run);
     CopyMemory(Run.Scale, Scale, sizeof(Scale));
     CopyMemory(Run.Offset, Offset, sizeof(Offset));
     for (UINT Index = 0; Index < D9StreamCount; Index++)
@@ -2190,6 +2192,7 @@ D9Device::DrawSoftware(
     Run.ClampColors = PixelShader == nullptr;
     Run.Clipping = RenderStates[D3DRS_CLIPPING] != FALSE;
     Run.Drawing = TRUE;
+    LoadClipPlanes(&Run);
     Run.ClipIntersection = 0xFFFFFFFF;
     Run.Scale[0] = static_cast<FLOAT>(CurrentViewport.Width);
     Run.Scale[1] = -static_cast<FLOAT>(CurrentViewport.Height);

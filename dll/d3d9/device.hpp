@@ -3505,6 +3505,10 @@ private:
     ProcessesInSoftware(VOID) const;
 
     VOID
+    LoadClipPlanes(
+        _Inout_ D9PvRun* Run);
+
+    VOID
     DrawTransformedRun(
         _In_ D3DPRIMITIVETYPE Type,
         _In_ UINT Vertices,
