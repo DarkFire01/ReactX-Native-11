@@ -2766,6 +2766,34 @@ TcCheckInputLayouts(
         TcReportGraphics(Check, Device, Case.Name, Desc);
     }
 
+    /* Some start for the slot has to suit every element of it at once */
+    {
+        static const struct
+        {
+            PCSTR Name;
+            UINT ColorOffset;
+            DXGI_FORMAT IdFormat;
+            UINT IdOffset;
+        } Slots[] =
+        {
+            { "layout_slot_conflict", 5, DXGI_FORMAT_R16_UINT, 6 },
+            { "layout_slot_agree", 5, DXGI_FORMAT_R16_UINT, 9 },
+            { "layout_slot_append_odd", 5, DXGI_FORMAT_R16_UINT, D3D12_APPEND_ALIGNED_ELEMENT },
+            { "layout_slot_wide_conflict", 2, DXGI_FORMAT_R32_UINT, 8 },
+            { "layout_slot_wide_agree", 2, DXGI_FORMAT_R32_UINT, 10 },
+        };
+
+        for (const auto& Each : Slots)
+        {
+            memcpy(Elements, TcLayout, sizeof(TcLayout));
+            Elements[3].AlignedByteOffset = Each.ColorOffset;
+            Elements[4].Format = Each.IdFormat;
+            Elements[4].AlignedByteOffset = Each.IdOffset;
+            Desc.InputLayout = { Elements, _countof(TcLayout) };
+            TcReportGraphics(Check, Device, Each.Name, Desc);
+        }
+    }
+
     /* Every shader input must be fed; elements the shader does not read are allowed */
     Desc.InputLayout = { TcLayout, 3 };
     TcReportGraphics(Check, Device, "layout_unfed", Desc);
