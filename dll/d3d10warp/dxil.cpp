@@ -159,6 +159,32 @@ RxImmediate(
              ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_1_COMPONENT), Value };
 }
 
+/* Doubles and 64 bit integers take two neighboring components, low word first */
+BOOLEAN
+RxIsWide(
+    _In_ llvm::Type *Type)
+{
+    return Type->isDoubleTy() || Type->isIntegerTy(64);
+}
+
+/* A 64 bit constant as both pairs of a four component immediate */
+RxTokens
+RxWideImmediate(
+    _In_ UINT64 Value)
+{
+    return { ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_IMMEDIATE32) |
+             ENCODE_D3D10_SB_OPERAND_INDEX_DIMENSION(D3D10_SB_OPERAND_INDEX_0D) | RxFourComponents(RxSwizzleMode, RxXyzw),
+             (UINT)Value, (UINT)(Value >> 32), (UINT)Value, (UINT)(Value >> 32) };
+}
+
+/* Reads the pair at First into both halves of a register: first, next, first, next */
+UINT
+RxPairSwizzle(
+    _In_ UINT First)
+{
+    return First | (First + 1) << 2 | First << 4 | (First + 1) << 6;
+}
+
 RxTokens
 RxModified(
     _In_ RxTokens Tokens,
@@ -233,6 +259,22 @@ private:
         return NextSlot / 4 - 1;
     }
 
+    /* Two components that start at x or z */
+    UINT
+    Fresh2(VOID)
+    {
+        NextSlot = (NextSlot + 1) & ~1u;
+        NextSlot += 2;
+        return NextSlot - 2;
+    }
+
+    UINT
+    FreshFor(
+        _In_ llvm::Type *Type)
+    {
+        return RxIsWide(Type) ? Fresh2() : Fresh();
+    }
+
     UINT
     SlotOf(
         _In_ const llvm::Value *Value);
@@ -241,14 +283,63 @@ private:
     Source(
         _In_ llvm::Value *Value);
 
+    /* A slot as a destination, both components of a pair when Wide */
+    RxTokens
+    SlotDest(
+        _In_ UINT Slot,
+        _In_ BOOLEAN Wide)
+    {
+        return RxRegister(D3D10_SB_OPERAND_TYPE_TEMP, RxMaskMode, (Wide ? 3u : 1u) << (Slot & 3), { Slot / 4 });
+    }
+
+    RxTokens
+    SlotSource(
+        _In_ UINT Slot,
+        _In_ BOOLEAN Wide)
+    {
+        if (Wide)
+            return Temp(Slot / 4, RxSwizzleMode, RxPairSwizzle(Slot & 3));
+        return Temp(Slot / 4, RxSelectMode, Slot & 3);
+    }
+
     RxTokens
     Dest(
         _In_ const llvm::Value *Value)
     {
-        UINT Slot = SlotOf(Value);
-
-        return RxRegister(D3D10_SB_OPERAND_TYPE_TEMP, RxMaskMode, 1u << (Slot & 3), { Slot / 4 });
+        return SlotDest(SlotOf(Value), RxIsWide(Value->getType()));
     }
+
+    /* One word of a 64 bit value: the low one, or the high one when High */
+    RxTokens
+    Half(
+        _In_ llvm::Value *Value,
+        _In_ BOOLEAN High);
+
+    BOOLEAN
+    LowerWide(
+        _In_ llvm::Instruction *Instruction);
+
+    BOOLEAN
+    LowerWideCall(
+        _In_ llvm::CallInst *Call,
+        _In_ OpCode Code);
+
+    VOID
+    EmitLong(
+        _In_ llvm::Value *Target,
+        _In_ UINT Kind,
+        _In_ RxTokens First,
+        _In_ RxTokens Second = RxImmediate(0),
+        _In_ RxTokens Third = RxImmediate(0))
+    {
+        Emit(RxWarpOpcodeLong, { Dest(Target), First, Second, Third, RxImmediate(Kind) });
+    }
+
+    BOOLEAN
+    WideAccess(
+        _In_ llvm::CallInst *Call,
+        _In_ OpCode Code,
+        _In_ const RX_HANDLE &Handle);
 
     RxTokens
     Temp(
@@ -486,33 +577,53 @@ RxLowering::SlotOf(
 
     if (Found != Slots.end())
         return Found->second;
-    UINT Slot = Fresh();
+    UINT Slot = FreshFor(Value->getType());
 
     Slots[Value] = Slot;
     return Slot;
 }
 
-/* Constants become immediates; anything else reads its temp component */
+/* Constants become immediates; anything else reads its temp component, or its pair */
 RxTokens
 RxLowering::Source(
     _In_ llvm::Value *Value)
 {
-    UINT Slot;
-
     if (llvm::ConstantInt *Integer = llvm::dyn_cast<llvm::ConstantInt>(Value))
+    {
+        if (Integer->getBitWidth() == 64)
+            return RxWideImmediate(Integer->getZExtValue());
         return RxImmediate(Integer->getBitWidth() == 1 ? (Integer->isZero() ? 0u : ~0u) : (UINT)Integer->getZExtValue());
+    }
     if (llvm::ConstantFP *Float = llvm::dyn_cast<llvm::ConstantFP>(Value))
     {
         llvm::APFloat Single = Float->getValueAPF();
         bool Lost;
 
+        if (Float->getType()->isDoubleTy())
+            return RxWideImmediate(Single.bitcastToAPInt().getZExtValue());
         Single.convert(llvm::APFloat::IEEEsingle, llvm::APFloat::rmNearestTiesToEven, &Lost);
         return RxImmediate((UINT)Single.bitcastToAPInt().getZExtValue());
     }
     if (llvm::isa<llvm::UndefValue>(Value) || llvm::isa<llvm::ConstantAggregateZero>(Value))
         return RxImmediate(0);
+    return SlotSource(SlotOf(Value), RxIsWide(Value->getType()));
+}
+
+RxTokens
+RxLowering::Half(
+    _In_ llvm::Value *Value,
+    _In_ BOOLEAN High)
+{
+    UINT Slot;
+
+    if (llvm::isa<llvm::Constant>(Value) && !llvm::isa<llvm::GlobalValue>(Value))
+    {
+        RxTokens Wide = Source(Value);
+
+        return RxImmediate((Wide.size() == 5) ? Wide[High ? 2 : 1] : Wide[1]);
+    }
     Slot = SlotOf(Value);
-    return Temp(Slot / 4, RxSelectMode, Slot & 3);
+    return Temp(Slot / 4, RxSelectMode, (Slot & 3) + (High ? 1 : 0));
 }
 
 VOID
@@ -1203,7 +1314,7 @@ RxLowering::Lower(
     }
     if (!Instruction->getType()->isVoidTy() && !Instruction->getType()->isFloatTy() && !Instruction->getType()->isIntegerTy(32) &&
         !Instruction->getType()->isIntegerTy(1) && !Instruction->getType()->isStructTy() && !Instruction->getType()->isPointerTy() &&
-        !Instruction->getType()->isHalfTy() && !Instruction->getType()->isIntegerTy(16))
+        !Instruction->getType()->isHalfTy() && !Instruction->getType()->isIntegerTy(16) && !RxIsWide(Instruction->getType()))
     {
         return FALSE;
     }
@@ -1253,12 +1364,249 @@ RxLowering::SignedSource(
     return Temp(Wide / 4, RxSelectMode, Wide & 3);
 }
 
+/*
+ * Doubles run on the executor's double operations and 64 bit integers on its long operation;
+ * bitwise logic and moves work on both words at once.
+ */
+BOOLEAN
+RxLowering::LowerWide(
+    _In_ llvm::Instruction *Instruction)
+{
+    llvm::Value *First = Instruction->getOperand(0);
+    llvm::Value *Second = (Instruction->getNumOperands() > 1) ? Instruction->getOperand(1) : nullptr;
+    BOOLEAN Real = First->getType()->isDoubleTy();
+    UINT Opcode = Instruction->getOpcode();
+    UINT Kind = UINT_MAX;
+
+    switch (Opcode)
+    {
+        case llvm::Instruction::FAdd:
+        case llvm::Instruction::FSub:
+            Emit(D3D11_SB_OPCODE_DADD, { Dest(Instruction), Source(First), (Opcode == llvm::Instruction::FSub) ?
+                                         RxModified(Source(Second), D3D10_SB_OPERAND_MODIFIER_NEG) : Source(Second) });
+            return TRUE;
+        case llvm::Instruction::FMul:
+            Emit(D3D11_SB_OPCODE_DMUL, { Dest(Instruction), Source(First), Source(Second) });
+            return TRUE;
+        case llvm::Instruction::FDiv:
+            Emit(D3D11_1_SB_OPCODE_DDIV, { Dest(Instruction), Source(First), Source(Second) });
+            return TRUE;
+        case llvm::Instruction::And:
+        case llvm::Instruction::Or:
+        case llvm::Instruction::Xor:
+            Emit((Opcode == llvm::Instruction::And) ? D3D10_SB_OPCODE_AND : (Opcode == llvm::Instruction::Or) ? D3D10_SB_OPCODE_OR :
+                                                                                                              D3D10_SB_OPCODE_XOR,
+                 { Dest(Instruction), Source(First), Source(Second) });
+            return TRUE;
+        case llvm::Instruction::Add: Kind = RxWarpLongAdd; break;
+        case llvm::Instruction::Sub: Kind = RxWarpLongSubtract; break;
+        case llvm::Instruction::Mul: Kind = RxWarpLongMultiply; break;
+        case llvm::Instruction::UDiv: Kind = RxWarpLongDivide; break;
+        case llvm::Instruction::URem: Kind = RxWarpLongRemainder; break;
+        case llvm::Instruction::SDiv: Kind = RxWarpLongSignedDivide; break;
+        case llvm::Instruction::SRem: Kind = RxWarpLongSignedRemainder; break;
+        case llvm::Instruction::Shl: Kind = RxWarpLongShiftLeft; break;
+        case llvm::Instruction::LShr: Kind = RxWarpLongShiftRight; break;
+        case llvm::Instruction::AShr: Kind = RxWarpLongSignedShiftRight; break;
+        case llvm::Instruction::Select:
+            Emit(D3D10_SB_OPCODE_MOVC, { Dest(Instruction), Source(First), Source(Second), Source(Instruction->getOperand(2)) });
+            return TRUE;
+        case llvm::Instruction::BitCast:
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Source(First) });
+            return TRUE;
+        case llvm::Instruction::FPExt:
+            Emit(D3D11_SB_OPCODE_FTOD, { Dest(Instruction), Source(First) });
+            return TRUE;
+        case llvm::Instruction::FPTrunc:
+            Emit(D3D11_SB_OPCODE_DTOF, { Dest(Instruction), Source(First) });
+            return TRUE;
+        case llvm::Instruction::Trunc:
+            if (Instruction->getType()->isIntegerTy(1))
+            {
+                UINT Low = Fresh();
+
+                Emit(D3D10_SB_OPCODE_AND, { SlotDest(Low, FALSE), Half(First, FALSE), RxImmediate(1) });
+                Emit(D3D10_SB_OPCODE_INE, { Dest(Instruction), SlotSource(Low, FALSE), RxImmediate(0) });
+                return TRUE;
+            }
+            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Half(First, FALSE) });
+            return TRUE;
+        case llvm::Instruction::ZExt:
+        case llvm::Instruction::SExt:
+        {
+            RxTokens Narrow = (Opcode == llvm::Instruction::SExt) ? SignedSource(First) : Source(First);
+
+            if (First->getType()->isIntegerTy(1) && Opcode == llvm::Instruction::ZExt)
+            {
+                UINT Low = Fresh();
+
+                Emit(D3D10_SB_OPCODE_AND, { SlotDest(Low, FALSE), Source(First), RxImmediate(1) });
+                Narrow = SlotSource(Low, FALSE);
+            }
+            EmitLong(Instruction, (Opcode == llvm::Instruction::SExt) ? RxWarpLongSignExtend : RxWarpLongZeroExtend, Narrow);
+            return TRUE;
+        }
+        case llvm::Instruction::SIToFP:
+        case llvm::Instruction::UIToFP:
+        {
+            BOOLEAN Signed = Opcode == llvm::Instruction::SIToFP;
+
+            if (RxIsWide(First->getType()))
+            {
+                if (Instruction->getType()->isDoubleTy())
+                    EmitLong(Instruction, Signed ? RxWarpLongSignedToDouble : RxWarpLongToDouble, Source(First));
+                else
+                    EmitLong(Instruction, Signed ? RxWarpLongSignedToFloat : RxWarpLongToFloat, Source(First));
+                return TRUE;
+            }
+            if (First->getType()->isIntegerTy(1))
+            {
+                UINT Low = Fresh();
+
+                Emit(D3D10_SB_OPCODE_AND, { SlotDest(Low, FALSE), Source(First), RxImmediate(1) });
+                Emit(D3D11_1_SB_OPCODE_UTOD, { Dest(Instruction), SlotSource(Low, FALSE) });
+                return TRUE;
+            }
+            Emit(Signed ? D3D11_1_SB_OPCODE_ITOD : D3D11_1_SB_OPCODE_UTOD, { Dest(Instruction), Signed ? SignedSource(First) : Source(First) });
+            return TRUE;
+        }
+        case llvm::Instruction::FPToSI:
+        case llvm::Instruction::FPToUI:
+        {
+            BOOLEAN Signed = Opcode == llvm::Instruction::FPToSI;
+
+            if (RxIsWide(Instruction->getType()))
+            {
+                if (Real)
+                    EmitLong(Instruction, Signed ? RxWarpLongSignedFromDouble : RxWarpLongFromDouble, Source(First));
+                else
+                    EmitLong(Instruction, Signed ? RxWarpLongSignedFromFloat : RxWarpLongFromFloat, Source(First));
+                return TRUE;
+            }
+            Emit(Signed ? D3D11_1_SB_OPCODE_DTOI : D3D11_1_SB_OPCODE_DTOU, { Dest(Instruction), Source(First) });
+            return TRUE;
+        }
+        default:
+            break;
+    }
+
+    if (llvm::FCmpInst *Compare = llvm::dyn_cast<llvm::FCmpInst>(Instruction))
+    {
+        BOOLEAN Swap = FALSE;
+        UINT Test;
+
+        switch (Compare->getPredicate())
+        {
+            case llvm::CmpInst::FCMP_OEQ:
+            case llvm::CmpInst::FCMP_UEQ: Test = D3D11_SB_OPCODE_DEQ; break;
+            case llvm::CmpInst::FCMP_ONE:
+            case llvm::CmpInst::FCMP_UNE: Test = D3D11_SB_OPCODE_DNE; break;
+            case llvm::CmpInst::FCMP_OLT:
+            case llvm::CmpInst::FCMP_ULT: Test = D3D11_SB_OPCODE_DLT; break;
+            case llvm::CmpInst::FCMP_OGE:
+            case llvm::CmpInst::FCMP_UGE: Test = D3D11_SB_OPCODE_DGE; break;
+            case llvm::CmpInst::FCMP_OGT:
+            case llvm::CmpInst::FCMP_UGT: Test = D3D11_SB_OPCODE_DLT; Swap = TRUE; break;
+            case llvm::CmpInst::FCMP_OLE:
+            case llvm::CmpInst::FCMP_ULE: Test = D3D11_SB_OPCODE_DGE; Swap = TRUE; break;
+            default: return FALSE;
+        }
+        Emit(Test, { Dest(Instruction), Source(Swap ? Second : First), Source(Swap ? First : Second) });
+        return TRUE;
+    }
+    if (llvm::ICmpInst *Compare = llvm::dyn_cast<llvm::ICmpInst>(Instruction))
+    {
+        BOOLEAN Swap = FALSE;
+
+        switch (Compare->getPredicate())
+        {
+            case llvm::CmpInst::ICMP_EQ: Kind = RxWarpLongEqual; break;
+            case llvm::CmpInst::ICMP_NE: Kind = RxWarpLongNotEqual; break;
+            case llvm::CmpInst::ICMP_SLT: Kind = RxWarpLongSignedLess; break;
+            case llvm::CmpInst::ICMP_SGE: Kind = RxWarpLongSignedGreaterEqual; break;
+            case llvm::CmpInst::ICMP_SGT: Kind = RxWarpLongSignedLess; Swap = TRUE; break;
+            case llvm::CmpInst::ICMP_SLE: Kind = RxWarpLongSignedGreaterEqual; Swap = TRUE; break;
+            case llvm::CmpInst::ICMP_ULT: Kind = RxWarpLongLess; break;
+            case llvm::CmpInst::ICMP_UGE: Kind = RxWarpLongGreaterEqual; break;
+            case llvm::CmpInst::ICMP_UGT: Kind = RxWarpLongLess; Swap = TRUE; break;
+            case llvm::CmpInst::ICMP_ULE: Kind = RxWarpLongGreaterEqual; Swap = TRUE; break;
+            default: return FALSE;
+        }
+        EmitLong(Instruction, Kind, Source(Swap ? Second : First), Source(Swap ? First : Second));
+        return TRUE;
+    }
+    if (Kind == UINT_MAX)
+        return FALSE;
+    EmitLong(Instruction, Kind, Source(First), Source(Second));
+    return TRUE;
+}
+
+/* DXIL operations on doubles and 64 bit integers, and the calls that build and split doubles */
+BOOLEAN
+RxLowering::LowerWideCall(
+    _In_ llvm::CallInst *Call,
+    _In_ OpCode Code)
+{
+    UINT Kind;
+
+    switch (Code)
+    {
+        case OpCode::MakeDouble:
+        {
+            UINT Slot = SlotOf(Call);
+
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Slot / 4, RxMaskMode, 1u << (Slot & 3)), Source(Call->getArgOperand(1)) });
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Slot / 4, RxMaskMode, 2u << (Slot & 3)), Source(Call->getArgOperand(2)) });
+            return TRUE;
+        }
+        case OpCode::SplitDouble:
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(ResultRegister(Call), RxMaskMode, 3), Source(Call->getArgOperand(1)) });
+            return TRUE;
+        case OpCode::FAbs:
+            Emit(D3D11_SB_OPCODE_DMOV, { Dest(Call), RxModified(Source(Call->getArgOperand(1)), D3D10_SB_OPERAND_MODIFIER_ABS) });
+            return TRUE;
+        case OpCode::FMax:
+        case OpCode::FMin:
+            Emit((Code == OpCode::FMax) ? D3D11_SB_OPCODE_DMAX : D3D11_SB_OPCODE_DMIN,
+                 { Dest(Call), Source(Call->getArgOperand(1)), Source(Call->getArgOperand(2)) });
+            return TRUE;
+        case OpCode::FMad:
+            EmitLong(Call, RxWarpLongFusedDouble, Source(Call->getArgOperand(1)), Source(Call->getArgOperand(2)), Source(Call->getArgOperand(3)));
+            return TRUE;
+        case OpCode::Fma:
+            /* The reference's fma shares dfma's quirk of computing only the first two lanes */
+            Emit(D3D11_1_SB_OPCODE_DFMA, { Dest(Call), Source(Call->getArgOperand(1)), Source(Call->getArgOperand(2)), Source(Call->getArgOperand(3)) });
+            return TRUE;
+        case OpCode::Saturate: Kind = RxWarpLongSaturateDouble; break;
+        case OpCode::IMax: Kind = RxWarpLongSignedMax; break;
+        case OpCode::IMin: Kind = RxWarpLongSignedMin; break;
+        case OpCode::UMax: Kind = RxWarpLongMax; break;
+        case OpCode::UMin: Kind = RxWarpLongMin; break;
+        case OpCode::Countbits: Kind = RxWarpLongCountBits; break;
+        case OpCode::FirstbitHi: Kind = RxWarpLongFirstHigh; break;
+        case OpCode::FirstbitLo: Kind = RxWarpLongFirstLow; break;
+        case OpCode::FirstbitSHi: Kind = RxWarpLongSignedFirstHigh; break;
+        default:
+            return FALSE;
+    }
+    EmitLong(Call, Kind, Source(Call->getArgOperand(1)), (Call->getNumArgOperands() > 2) ? Source(Call->getArgOperand(2)) : RxImmediate(0));
+    return TRUE;
+}
+
 BOOLEAN
 RxLowering::LowerPlain(
     _In_ llvm::Instruction *Instruction)
 {
     RX_BINARY Binary;
+    UINT Opcode = Instruction->getOpcode();
 
+    /* Arithmetic on or making 64 bit values; memory and aggregates take the common paths */
+    if (Opcode != llvm::Instruction::ExtractValue && Opcode != llvm::Instruction::GetElementPtr && Opcode != llvm::Instruction::Alloca &&
+        Opcode != llvm::Instruction::Load && Opcode != llvm::Instruction::Store && Instruction->getNumOperands() != 0 &&
+        (RxIsWide(Instruction->getType()) || RxIsWide(Instruction->getOperand(0)->getType())))
+    {
+        return LowerWide(Instruction);
+    }
     if (Instruction->getOpcode() == llvm::Instruction::Mul)
     {
         Emit(D3D10_SB_OPCODE_IMUL, { RxBare(D3D10_SB_OPERAND_TYPE_NULL, {}), Dest(Instruction), Source(Instruction->getOperand(0)),
@@ -1369,7 +1717,7 @@ RxLowering::LowerPlain(
                 Slots[Instruction] = Status->second;
                 return TRUE;
             }
-            Slots[Instruction] = SlotOf(Extract->getAggregateOperand()) + Extract->getIndices()[0];
+            Slots[Instruction] = SlotOf(Extract->getAggregateOperand()) + Extract->getIndices()[0] * (RxIsWide(Instruction->getType()) ? 2 : 1);
             return TRUE;
         }
         case llvm::Instruction::GetElementPtr:
@@ -1493,10 +1841,12 @@ RxLowering::Memory(
     BOOLEAN Loading = Instruction->getOpcode() == llvm::Instruction::Load;
     llvm::Value *Pointer = Loading ? Instruction->getOperand(0) : Instruction->getOperand(1);
     llvm::Type *Element = llvm::cast<llvm::PointerType>(Pointer->getType())->getElementType();
+    UINT64 Size = Dxil.GetModule()->getDataLayout().getTypeAllocSize(Element);
+    llvm::Value *Value = Loading ? Instruction : Instruction->getOperand(0);
     RX_POINTER Place;
     RxTokens Address;
 
-    if (!Resolve(Pointer, &Place) || Dxil.GetModule()->getDataLayout().getTypeAllocSize(Element) != 4)
+    if (!Resolve(Pointer, &Place) || (Size != 4 && Size != 8))
         return FALSE;
 
     auto Array = Arrays.find(Place.Base);
@@ -1505,7 +1855,6 @@ RxLowering::Memory(
     {
         UINT Mode = Loading ? RxSelectMode : RxMaskMode;
         UINT Bits = Loading ? 0 : 1;
-        RxTokens Cell;
 
         if ((Place.Bytes & 3) != 0)
             return FALSE;
@@ -1515,20 +1864,47 @@ RxLowering::Memory(
                 return FALSE;
         }
         Address = Offset(Place, 4);
-        if (Place.Terms.empty())
+
+        /* A 64 bit element spans two cells, low word first */
+        RxTokens Cells[2];
+
+        for (UINT Word = 0; Word < Size / 4; Word++)
         {
-            Cell = RxRegister(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, Mode, Bits, { Array->second, Place.Bytes / 4 });
+            if (Place.Terms.empty())
+            {
+                Cells[Word] = RxRegister(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, Mode, Bits, { Array->second, Place.Bytes / 4 + Word });
+            }
+            else
+            {
+                Cells[Word] = { RxOperandHead(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, 2) | RxFourComponents(Mode, Bits) |
+                                ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(1, D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE), Array->second, Word };
+                Cells[Word].insert(Cells[Word].end(), Address.begin(), Address.end());
+            }
         }
-        else
+        if (Size == 4)
         {
-            Cell = { RxOperandHead(D3D10_SB_OPERAND_TYPE_INDEXABLE_TEMP, 2) | RxFourComponents(Mode, Bits) |
-                     ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(1, D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE), Array->second, 0 };
-            Cell.insert(Cell.end(), Address.begin(), Address.end());
+            if (Loading)
+                Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Cells[0] });
+            else
+                Emit(D3D10_SB_OPCODE_MOV, { Cells[0], Source(Value) });
+            return TRUE;
         }
         if (Loading)
-            Emit(D3D10_SB_OPCODE_MOV, { Dest(Instruction), Cell });
+        {
+            UINT Slot = SlotOf(Value);
+
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Slot / 4, RxMaskMode, 1u << (Slot & 3)), Cells[0] });
+            Emit(D3D10_SB_OPCODE_MOV, { Temp(Slot / 4, RxMaskMode, 2u << (Slot & 3)), Cells[1] });
+        }
+        else if (!Place.Terms.empty())
+        {
+            Emit(RxWarpOpcodePairScatter, { Cells[0], Cells[1], Source(Value) });
+        }
         else
-            Emit(D3D10_SB_OPCODE_MOV, { Cell, Source(Instruction->getOperand(0)) });
+        {
+            Emit(D3D10_SB_OPCODE_MOV, { Cells[0], Half(Value, FALSE) });
+            Emit(D3D10_SB_OPCODE_MOV, { Cells[1], Half(Value, TRUE) });
+        }
         return TRUE;
     }
 
@@ -1540,12 +1916,15 @@ RxLowering::Memory(
     if (Loading)
     {
         Emit(D3D11_SB_OPCODE_LD_RAW, { Dest(Instruction), Address,
-                                       RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxSelectMode, 0, { Shared->second }) });
+                                       (Size == 8) ? RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxSwizzleMode, RxPairSwizzle(0),
+                                                                { Shared->second }) :
+                                                     RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxSelectMode, 0, { Shared->second }) });
     }
     else
     {
-        Emit(D3D11_SB_OPCODE_STORE_RAW, { RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, 1, { Shared->second }),
-                                          Address, Source(Instruction->getOperand(0)) });
+        Emit(D3D11_SB_OPCODE_STORE_RAW, { RxRegister(D3D11_SB_OPERAND_TYPE_THREAD_GROUP_SHARED_MEMORY, RxMaskMode, (Size == 8) ? 3 : 1,
+                                                     { Shared->second }),
+                                          Address, Source(Value) });
     }
     return TRUE;
 }
@@ -1699,6 +2078,13 @@ RxLowering::LowerCall(
         }
     }
 
+    if (Code == OpCode::MakeDouble || Code == OpCode::SplitDouble ||
+        (Call->getNumArgOperands() > 1 && RxIsWide(Call->getArgOperand(1)->getType()) && Code != OpCode::WaveActiveAllEqual &&
+         Code != OpCode::WaveReadLaneAt && Code != OpCode::WaveReadLaneFirst && Code != OpCode::WaveActiveOp &&
+         Code != OpCode::WaveActiveBit && Code != OpCode::WavePrefixOp && Code != OpCode::QuadReadLaneAt && Code != OpCode::QuadOp))
+    {
+        return LowerWideCall(Call, Code);
+    }
     if ((Code == OpCode::IMax || Code == OpCode::IMin) && Call->getType()->isIntegerTy(16))
     {
         Emit((Code == OpCode::IMax) ? D3D10_SB_OPCODE_IMAX : D3D10_SB_OPCODE_IMIN,
@@ -1900,15 +2286,18 @@ RxLowering::LowerWave(
     UINT Kind;
     UINT Variant = 0;
     UINT Type = RxWarpWaveUnsigned;
+    UINT Wide = 0;
 
+    /* Halves sit in floats and 16 bit integers in 32 bit words, so only signed ones need widening */
     if (Value != nullptr)
     {
         llvm::Type *Scalar = Value->getType();
 
-        if (Scalar->isFloatTy())
+        if (Scalar->isFloatTy() || Scalar->isHalfTy() || Scalar->isDoubleTy())
             Type = RxWarpWaveFloat;
-        else if (!Scalar->isIntegerTy(32) && !Scalar->isIntegerTy(1))
+        else if (!Scalar->isIntegerTy(32) && !Scalar->isIntegerTy(1) && !Scalar->isIntegerTy(16) && !Scalar->isIntegerTy(64))
             return FALSE;
+        Wide = RxIsWide(Scalar) ? RxWarpWaveWide : 0;
     }
 
     switch (Code)
@@ -1956,8 +2345,8 @@ RxLowering::LowerWave(
         Target = Temp(ResultRegister(Call), RxMaskMode, 0xF);
     else
         Target = Dest(Call);
-    Emit(RxWarpOpcodeWave, { Target, (Value != nullptr) ? Source(Value) : RxImmediate(0), Lane,
-                             RxImmediate(Kind | Variant << 8 | Type << 16) });
+    Emit(RxWarpOpcodeWave, { Target, (Value == nullptr) ? RxImmediate(0) : (Type == RxWarpWaveSigned) ? SignedSource(Value) : Source(Value),
+                             Lane, RxImmediate(Kind | Variant << 8 | Type << 16 | Wide) });
     return TRUE;
 }
 
@@ -2059,6 +2448,11 @@ RxLowering::LowerResource(
 
     if (Call->getNumArgOperands() < 2 || !HandleOf(Call->getArgOperand(1), &Handle))
         return FALSE;
+    if ((Code == OpCode::RawBufferLoad && RxIsWide(llvm::cast<llvm::StructType>(Call->getType())->getElementType(0))) ||
+        (Code == OpCode::RawBufferStore && RxIsWide(Call->getArgOperand(4)->getType())))
+    {
+        return WideAccess(Call, Code, Handle);
+    }
     switch (Code)
     {
         case OpCode::Sample:
@@ -2345,13 +2739,78 @@ RxLowering::LowerResource(
     }
 }
 
+/*
+ * Raw and structured accesses of 64 bit elements: the mask counts elements, two words each,
+ * so four elements take two registers and a second access 16 bytes on.
+ */
+BOOLEAN
+RxLowering::WideAccess(
+    _In_ llvm::CallInst *Call,
+    _In_ OpCode Code,
+    _In_ const RX_HANDLE &Handle)
+{
+    BOOLEAN Structured = Handle.Kind == (UINT)hlsl::DXIL::ResourceKind::StructuredBuffer;
+    BOOLEAN Loading = Code == OpCode::RawBufferLoad;
+    llvm::ConstantInt *Bits = llvm::dyn_cast<llvm::ConstantInt>(Call->getArgOperand(Loading ? 4 : 8));
+    llvm::Value *Place = Call->getArgOperand(Structured ? 3 : 2);
+    UINT Mask;
+    UINT Register[2];
+
+    if (Bits == nullptr || (!Structured && Handle.Kind != (UINT)hlsl::DXIL::ResourceKind::RawBuffer))
+        return FALSE;
+    Mask = (UINT)Bits->getZExtValue() & 0xF;
+    Register[0] = Fresh4();
+    Register[1] = Fresh4();
+    if (Loading)
+        Slots[Call] = Register[0] * 4;
+
+    for (UINT Part = 0; Part < 2; Part++)
+    {
+        UINT Elements = (Mask >> (Part * 2)) & 3;
+        UINT Words = ((Elements & 1) ? 3 : 0) | ((Elements & 2) ? 0xC : 0);
+        RxTokens Offset = Source(Place);
+
+        if (Elements == 0)
+            continue;
+        if (Part != 0)
+        {
+            UINT Moved = Fresh();
+
+            Emit(D3D10_SB_OPCODE_IADD, { SlotDest(Moved, FALSE), Source(Place), RxImmediate(16) });
+            Offset = SlotSource(Moved, FALSE);
+        }
+        if (Loading)
+        {
+            RxTokens Target = Temp(Register[Part], RxMaskMode, (Elements & 2) ? 0xF : 3);
+
+            if (Structured)
+                Emit(D3D11_SB_OPCODE_LD_STRUCTURED, { Target, Source(Call->getArgOperand(2)), Offset, ResourceOperand(Handle) });
+            else
+                Emit(D3D11_SB_OPCODE_LD_RAW, { Target, Offset, ResourceOperand(Handle) });
+            continue;
+        }
+        for (UINT Element = 0; Element < 2; Element++)
+        {
+            if (Elements & (1u << Element))
+                Emit(D3D10_SB_OPCODE_MOV, { Temp(Register[Part], RxMaskMode, 3u << (Element * 2)),
+                                            Source(Call->getArgOperand(4 + Part * 2 + Element)) });
+        }
+        if (Structured)
+            Emit(D3D11_SB_OPCODE_STORE_STRUCTURED, { ResourceOperand(Handle, RxMaskMode, Words), Source(Call->getArgOperand(2)), Offset,
+                                                     Temp(Register[Part], RxSwizzleMode, RxXyzw) });
+        else
+            Emit(D3D11_SB_OPCODE_STORE_RAW, { ResourceOperand(Handle, RxMaskMode, Words), Offset, Temp(Register[Part], RxSwizzleMode, RxXyzw) });
+    }
+    return TRUE;
+}
+
 /* Phi values for the edge From to To; copied through fresh temps so swaps stay right */
 VOID
 RxLowering::Edge(
     _In_ llvm::BasicBlock *From,
     _In_ llvm::BasicBlock *To)
 {
-    std::vector<std::pair<UINT, UINT>> Moves;
+    std::vector<std::pair<llvm::PHINode *, UINT>> Moves;
 
     for (llvm::Instruction &Instruction : *To)
     {
@@ -2360,12 +2819,12 @@ RxLowering::Edge(
 
         if (Phi == nullptr)
             break;
-        Staging = Fresh();
-        Emit(D3D10_SB_OPCODE_MOV, { Temp(Staging / 4, RxMaskMode, 1u << (Staging & 3)), Source(Phi->getIncomingValueForBlock(From)) });
-        Moves.push_back({ SlotOf(Phi), Staging });
+        Staging = FreshFor(Phi->getType());
+        Emit(D3D10_SB_OPCODE_MOV, { SlotDest(Staging, RxIsWide(Phi->getType())), Source(Phi->getIncomingValueForBlock(From)) });
+        Moves.push_back({ Phi, Staging });
     }
-    for (const std::pair<UINT, UINT> &Move : Moves)
-        Emit(D3D10_SB_OPCODE_MOV, { Temp(Move.first / 4, RxMaskMode, 1u << (Move.first & 3)), Temp(Move.second / 4, RxSelectMode, Move.second & 3) });
+    for (const std::pair<llvm::PHINode *, UINT> &Move : Moves)
+        Emit(D3D10_SB_OPCODE_MOV, { Dest(Move.first), SlotSource(Move.second, RxIsWide(Move.first->getType())) });
 }
 
 /* Branching to the open loop's header continues it, to its exit breaks out */

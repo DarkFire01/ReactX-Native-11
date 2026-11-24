@@ -242,6 +242,14 @@ private:
         _In_ const RX_WARP_INSTRUCTION &Instruction);
 
     VOID
+    Long(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
+    PairScatter(
+        _In_ const RX_WARP_INSTRUCTION &Instruction);
+
+    VOID
     Grouped(
         _In_ const RX_WARP_INSTRUCTION &Prefix,
         _In_ const RX_WARP_INSTRUCTION &Instruction);
@@ -879,6 +887,12 @@ RxWarpMachine::Operate(
         case RxWarpOpcodeWave:
             Wave(Instruction);
             break;
+        case RxWarpOpcodeLong:
+            Long(Instruction);
+            break;
+        case RxWarpOpcodePairScatter:
+            PairScatter(Instruction);
+            break;
         default:
             Arithmetic(Instruction);
             break;
@@ -1238,6 +1252,199 @@ RxWarpMachine::Doubles(
         }
     }
     Store(Instruction, 0, Result, FALSE);
+}
+
+/* Float to 64 bit integer, saturating, with NaN as zero */
+static
+UINT64
+RxWarpLongFromReal(
+    _In_ double Value,
+    _In_ BOOLEAN Signed)
+{
+    if (Value != Value)
+        return 0;
+    if (Signed)
+    {
+        if (Value >= 9223372036854775808.0)
+            return (UINT64)INT64_MAX;
+        if (Value <= -9223372036854775808.0)
+            return (UINT64)INT64_MIN;
+        return (UINT64)(INT64)Value;
+    }
+    if (!(Value > 0.0))
+        return 0;
+    if (Value >= 18446744073709551616.0)
+        return UINT64_MAX;
+    return (UINT64)Value;
+}
+
+static
+UINT
+RxWarpLongFirst(
+    _In_ UINT Kind,
+    _In_ UINT64 Value)
+{
+    if (Kind == RxWarpLongSignedFirstHigh && (INT64)Value < 0)
+        Value = ~Value;
+    for (UINT Bit = 0; Bit < 64; Bit++)
+    {
+        UINT64 Probe = (Kind == RxWarpLongFirstLow) ? (1ull << Bit) : (0x8000000000000000ull >> Bit);
+
+        if (Value & Probe)
+            return Bit;
+    }
+    return UINT_MAX;
+}
+
+static
+UINT64
+RxWarpLongApply(
+    _In_ UINT Kind,
+    _In_ UINT64 A,
+    _In_ UINT64 B,
+    _In_ UINT64 C)
+{
+    INT64 SignedA = (INT64)A;
+    INT64 SignedB = (INT64)B;
+    double Real;
+    double Other;
+    double Third;
+
+    memcpy(&Real, &A, sizeof(Real));
+    memcpy(&Other, &B, sizeof(Other));
+    memcpy(&Third, &C, sizeof(Third));
+    switch (Kind)
+    {
+        case RxWarpLongAdd: return A + B;
+        case RxWarpLongSubtract: return A - B;
+        case RxWarpLongMultiply: return A * B;
+        case RxWarpLongDivide: return (B != 0) ? A / B : UINT64_MAX;
+        case RxWarpLongRemainder: return (B != 0) ? A % B : UINT64_MAX;
+        case RxWarpLongSignedDivide:
+            if (B == 0)
+                return (UINT64)INT64_MAX;
+            if (SignedA == INT64_MIN && SignedB == -1)
+                return A;
+            return (UINT64)(SignedA / SignedB);
+        case RxWarpLongSignedRemainder:
+            if (B == 0)
+                return (UINT64)INT64_MAX;
+            if (SignedB == -1)
+                return 0;
+            return (UINT64)(SignedA % SignedB);
+        case RxWarpLongShiftLeft: return A << (B & 63);
+        case RxWarpLongShiftRight: return A >> (B & 63);
+        case RxWarpLongSignedShiftRight: return (UINT64)(SignedA >> (B & 63));
+        case RxWarpLongMax: return (A > B) ? A : B;
+        case RxWarpLongMin: return (A < B) ? A : B;
+        case RxWarpLongSignedMax: return (SignedA > SignedB) ? A : B;
+        case RxWarpLongSignedMin: return (SignedA < SignedB) ? A : B;
+        case RxWarpLongZeroExtend: return (UINT)A;
+        case RxWarpLongSignExtend: return (UINT64)(INT64)(INT)(UINT)A;
+        case RxWarpLongToFloat: return RxWarpAsUint((FLOAT)A);
+        case RxWarpLongSignedToFloat: return RxWarpAsUint((FLOAT)SignedA);
+        case RxWarpLongFromFloat: return RxWarpLongFromReal(RxWarpAsFloat((UINT)A), FALSE);
+        case RxWarpLongSignedFromFloat: return RxWarpLongFromReal(RxWarpAsFloat((UINT)A), TRUE);
+        case RxWarpLongFromDouble: return RxWarpLongFromReal(Real, FALSE);
+        case RxWarpLongSignedFromDouble: return RxWarpLongFromReal(Real, TRUE);
+        case RxWarpLongEqual: return (A == B) ? UINT_MAX : 0;
+        case RxWarpLongNotEqual: return (A != B) ? UINT_MAX : 0;
+        case RxWarpLongLess: return (A < B) ? UINT_MAX : 0;
+        case RxWarpLongGreaterEqual: return (A >= B) ? UINT_MAX : 0;
+        case RxWarpLongSignedLess: return (SignedA < SignedB) ? UINT_MAX : 0;
+        case RxWarpLongSignedGreaterEqual: return (SignedA >= SignedB) ? UINT_MAX : 0;
+        case RxWarpLongCountBits: return RxWarpCountBits((UINT)A) + RxWarpCountBits((UINT)(A >> 32));
+        case RxWarpLongFirstHigh:
+        case RxWarpLongFirstLow:
+        case RxWarpLongSignedFirstHigh:
+            return RxWarpLongFirst(Kind, A);
+        default:
+            break;
+    }
+
+    /* The rest make doubles */
+    switch (Kind)
+    {
+        case RxWarpLongToDouble: Real = (double)A; break;
+        case RxWarpLongSignedToDouble: Real = (double)SignedA; break;
+        case RxWarpLongSaturateDouble: Real = !(Real > 0.0) ? 0.0 : (Real < 1.0) ? Real : 1.0; break;
+        case RxWarpLongFusedDouble: Real = fma(Real, Other, Third); break;
+        default: Real = 0.0; break;
+    }
+    memcpy(&A, &Real, sizeof(A));
+    return A;
+}
+
+VOID
+RxWarpMachine::Long(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Words[3] = {};
+    RX_WARP_LANE_VALUES Result = {};
+    UINT Kind;
+
+    if (Instruction.OperandCount < 5)
+        return;
+    Kind = Instruction.Operands[4].Immediate[0];
+    for (UINT Index = 0; Index < 3; Index++)
+        FetchAll(Instruction.Operands[1 + Index], TRUE, Words[Index]);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        UINT64 A = Words[0][Lane][0] | ((UINT64)Words[0][Lane][1] << 32);
+        UINT64 B = Words[1][Lane][0] | ((UINT64)Words[1][Lane][1] << 32);
+        UINT64 C = Words[2][Lane][0] | ((UINT64)Words[2][Lane][1] << 32);
+        UINT64 Value = RxWarpLongApply(Kind, A, B, C);
+        BOOLEAN Narrow = Kind >= RxWarpLongFirstNarrow || Kind == RxWarpLongToFloat || Kind == RxWarpLongSignedToFloat;
+
+        Result[Lane][0] = Result[Lane][2] = (UINT)Value;
+        Result[Lane][1] = Result[Lane][3] = Narrow ? (UINT)Value : (UINT)(Value >> 32);
+    }
+    Store(Instruction, 0, Result, FALSE);
+}
+
+/* Lanes that agree on the element store their own words; otherwise the first two store the last two's */
+VOID
+RxWarpMachine::PairScatter(
+    _In_ const RX_WARP_INSTRUCTION &Instruction)
+{
+    RX_WARP_LANE_VALUES Value = {};
+    RX_WARP_LANE_VALUES Words[2] = {};
+    UINT Saved = Active;
+    UINT Writers = Active;
+    INT Element = 0;
+    BOOLEAN Seen = FALSE;
+    BOOLEAN Uniform = TRUE;
+
+    if (Instruction.OperandCount < 3)
+        return;
+    FetchAll(Instruction.Operands[2], TRUE, Value);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        INT Index;
+
+        if (!(Active & (1u << Lane)))
+            continue;
+        Index = ResolveIndex(Instruction.Operands[0].Index[1], Lane);
+        Uniform &= !Seen || Index == Element;
+        Element = Index;
+        Seen = TRUE;
+    }
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+    {
+        UINT From = Uniform ? Lane : (Lane + 2) & (RxWarpLanes - 1);
+
+        for (UINT Component = 0; Component < 4; Component++)
+        {
+            Words[0][Lane][Component] = Value[From][0];
+            Words[1][Lane][Component] = Value[From][1];
+        }
+    }
+    if (!Uniform)
+        Writers &= 3;
+    Active = Writers;
+    Store(Instruction, 0, Words[0], FALSE);
+    Store(Instruction, 1, Words[1], FALSE);
+    Active = Saved;
 }
 
 /* eval_snapped, eval_sample_index and eval_centroid: the draw evaluates the input, the swizzle and modifiers apply after */
@@ -1831,22 +2038,45 @@ RxWarpMachine::FullyMapped(
 
 /* One step of a wave reduction or prefix: sum, product, min or max, then and, or, xor at four and up */
 static
-UINT
+UINT64
 RxWarpWaveCombine(
     _In_ UINT Variant,
     _In_ UINT Type,
-    _In_ UINT A,
-    _In_ UINT B)
+    _In_ UINT64 A,
+    _In_ UINT64 B)
 {
-    FLOAT Left = RxWarpAsFloat(A);
-    FLOAT Right = RxWarpAsFloat(B);
+    FLOAT Left = RxWarpAsFloat((UINT)A);
+    FLOAT Right = RxWarpAsFloat((UINT)B);
+
+    /* 64 bit values: doubles, or integers compared signed or unsigned */
+    if (Type & RxWarpWaveWide)
+    {
+        UINT Base = Type & 0xFF;
+        double Wide[2];
+        UINT64 Bits;
+
+        if (Variant >= 4)
+            return (Variant == 4) ? (A & B) : (Variant == 5) ? (A | B) : (A ^ B);
+        if (Base != RxWarpWaveFloat)
+        {
+            BOOLEAN Below = (Base == RxWarpWaveSigned) ? ((INT64)A < (INT64)B) : (A < B);
+
+            return (Variant == 0) ? A + B : (Variant == 1) ? A * B : ((Variant == 2) == Below) ? A : B;
+        }
+        memcpy(&Wide[0], &A, sizeof(Wide[0]));
+        memcpy(&Wide[1], &B, sizeof(Wide[1]));
+        Wide[0] = (Variant == 0) ? Wide[0] + Wide[1] : (Variant == 1) ? Wide[0] * Wide[1] :
+                  (Variant == 2) ? fmin(Wide[0], Wide[1]) : fmax(Wide[0], Wide[1]);
+        memcpy(&Bits, &Wide[0], sizeof(Bits));
+        return Bits;
+    }
 
     switch (Variant)
     {
         case 0:
-            return (Type == RxWarpWaveFloat) ? RxWarpAsUint(Left + Right) : A + B;
+            return (Type == RxWarpWaveFloat) ? RxWarpAsUint(Left + Right) : (UINT)(A + B);
         case 1:
-            return (Type == RxWarpWaveFloat) ? RxWarpAsUint(Left * Right) : A * B;
+            return (Type == RxWarpWaveFloat) ? RxWarpAsUint(Left * Right) : (UINT)A * (UINT)B;
         case 2:
             if (Type == RxWarpWaveFloat)
                 return RxWarpAsUint(fminf(Left, Right));
@@ -1910,14 +2140,16 @@ RxWarpMachine::HalfTowardZero(
 
 /* The identity a prefix starts from */
 static
-UINT
+UINT64
 RxWarpWaveIdentity(
     _In_ UINT Variant,
     _In_ UINT Type)
 {
-    if (Variant == 1)
-        return (Type == RxWarpWaveFloat) ? 0x3F800000 : 1;
-    return 0;
+    if (Variant != 1)
+        return 0;
+    if ((Type & 0xFF) != RxWarpWaveFloat)
+        return 1;
+    return (Type & RxWarpWaveWide) ? 0x3FF0000000000000ull : 0x3F800000;
 }
 
 /*
@@ -1928,23 +2160,27 @@ VOID
 RxWarpMachine::Wave(
     _In_ const RX_WARP_INSTRUCTION &Instruction)
 {
-    RX_WARP_LANE_VALUES Value = {};
+    RX_WARP_LANE_VALUES Words = {};
     RX_WARP_LANE_VALUES Where = {};
     RX_WARP_LANE_VALUES Result = {};
+    UINT64 Value[RxWarpLanes];
     UINT Lanes = Active & Invocation->Live & ~Invocation->Helper;
     UINT Kind;
     UINT Variant;
     UINT Type;
+    BOOLEAN Wide;
     UINT First;
-    UINT Total;
 
     if (Instruction.OperandCount < 4)
         return;
     Kind = Instruction.Operands[3].Immediate[0] & 0xFF;
     Variant = (Instruction.Operands[3].Immediate[0] >> 8) & 0xFF;
-    Type = Instruction.Operands[3].Immediate[0] >> 16;
-    FetchAll(Instruction.Operands[1], TRUE, Value);
+    Wide = (Instruction.Operands[3].Immediate[0] & RxWarpWaveWide) != 0;
+    Type = ((Instruction.Operands[3].Immediate[0] >> 16) & 0xFF) | (Wide ? RxWarpWaveWide : 0);
+    FetchAll(Instruction.Operands[1], TRUE, Words);
     FetchAll(Instruction.Operands[2], TRUE, Where);
+    for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+        Value[Lane] = Words[Lane][0] | (Wide ? ((UINT64)Words[Lane][1] << 32) : 0);
     if (Lanes == 0)
         return;
     First = 0;
@@ -1952,11 +2188,12 @@ RxWarpMachine::Wave(
         First++;
 
     /* Pairs of lanes 0 and 2, 1 and 3, then the two pair results */
-    Total = 0;
+    UINT64 Totals[2] = {};
+
     if (Kind == RxWarpWaveReduce || Kind == RxWarpWaveBits)
     {
         UINT Code = (Kind == RxWarpWaveBits) ? Variant + 4 : Variant;
-        UINT Pair[2] = {};
+        UINT64 Pair[2] = {};
         UINT Filled = 0;
 
         for (UINT Half = 0; Half < 2; Half++)
@@ -1965,16 +2202,36 @@ RxWarpMachine::Wave(
             UINT High = Half + 2;
 
             if ((Lanes & (1u << Low)) && (Lanes & (1u << High)))
-                Pair[Half] = RxWarpWaveCombine(Code, Type, Value[Low][0], Value[High][0]);
+                Pair[Half] = RxWarpWaveCombine(Code, Type, Value[Low], Value[High]);
             else if (Lanes & (1u << Low))
-                Pair[Half] = Value[Low][0];
+                Pair[Half] = Value[Low];
             else if (Lanes & (1u << High))
-                Pair[Half] = Value[High][0];
+                Pair[Half] = Value[High];
             else
                 continue;
             Filled |= 1u << Half;
         }
-        Total = (Filled == 3) ? RxWarpWaveCombine(Code, Type, Pair[0], Pair[1]) : Pair[(Filled == 2) ? 1 : 0];
+        Totals[0] = (Filled == 3) ? RxWarpWaveCombine(Code, Type, Pair[0], Pair[1]) : Pair[(Filled == 2) ? 1 : 0];
+        Totals[1] = Totals[0];
+    }
+
+    /*
+     * Double sums and products run on lane pairs: lanes 0 and 1 against each other, then lanes
+     * 2 and 3 added in, and then 3 and 2; even lanes take the first result and odd lanes the
+     * second. Lanes not running count as the identity. Fitted to the reference's outputs.
+     */
+    if (Kind == RxWarpWaveReduce && Variant <= 1 && Type == (RxWarpWaveFloat | RxWarpWaveWide))
+    {
+        UINT64 Held[RxWarpLanes];
+
+        for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
+            Held[Lane] = (Lanes & (1u << Lane)) ? Value[Lane] : RxWarpWaveIdentity(Variant, Type);
+        for (UINT Side = 0; Side < 2; Side++)
+        {
+            Totals[Side] = RxWarpWaveCombine(Variant, Type, Held[Side], Held[Side ^ 1]);
+            Totals[Side] = RxWarpWaveCombine(Variant, Type, Totals[Side], Held[2 + Side]);
+            Totals[Side] = RxWarpWaveCombine(Variant, Type, Totals[Side], Held[3 - Side]);
+        }
     }
 
     for (UINT Lane = 0; Lane < RxWarpLanes; Lane++)
@@ -1982,14 +2239,15 @@ RxWarpMachine::Wave(
         UINT *Out = Result[Lane];
         UINT Below = Lanes & ((1u << Lane) - 1);
         UINT Matches = 1;
+        UINT64 Scalar = 0;
 
         switch (Kind)
         {
             case RxWarpWaveLaneIndex:
-                Out[0] = Lane;
+                Scalar = Lane;
                 break;
             case RxWarpWaveFirstLane:
-                Out[0] = (Lane == First) ? UINT_MAX : 0;
+                Scalar = (Lane == First) ? UINT_MAX : 0;
                 break;
             case RxWarpWaveAnyTrue:
             case RxWarpWaveAllTrue:
@@ -2001,62 +2259,83 @@ RxWarpMachine::Wave(
 
                 for (UINT Other = 0; Other < RxWarpLanes; Other++)
                 {
-                    if ((Lanes & (1u << Other)) && Value[Other][0] != 0)
+                    if ((Lanes & (1u << Other)) && Value[Other] != 0)
                         Set |= 1u << Other;
                 }
                 if (Kind == RxWarpWaveAnyTrue)
-                    Out[0] = (Set != 0) ? UINT_MAX : 0;
+                    Scalar = (Set != 0) ? UINT_MAX : 0;
                 else if (Kind == RxWarpWaveAllTrue)
-                    Out[0] = (Set == Lanes) ? UINT_MAX : 0;
+                    Scalar = (Set == Lanes) ? UINT_MAX : 0;
                 else if (Kind == RxWarpWaveBallot)
-                    Out[0] = Set;
+                    Scalar = Set;
                 else if (Kind == RxWarpWaveCount)
-                    Out[0] = RxWarpCountBits(Set);
+                    Scalar = RxWarpCountBits(Set);
                 else
-                    Out[0] = RxWarpCountBits(Set & Below);
+                    Scalar = RxWarpCountBits(Set & Below);
                 break;
             }
             case RxWarpWaveAllEqual:
                 for (UINT Other = 0; Other < RxWarpLanes; Other++)
                 {
+                    double Left;
+                    double Right;
+
                     if (!(Lanes & (1u << Other)))
                         continue;
-                    if (Type == RxWarpWaveFloat)
-                        Matches &= (RxWarpAsFloat(Value[Other][0]) == RxWarpAsFloat(Value[First][0]));
+                    if (Type == (RxWarpWaveFloat | RxWarpWaveWide))
+                    {
+                        memcpy(&Left, &Value[Other], sizeof(Left));
+                        memcpy(&Right, &Value[First], sizeof(Right));
+                        Matches &= (Left == Right);
+                    }
+                    else if (Type == RxWarpWaveFloat)
+                    {
+                        Matches &= (RxWarpAsFloat((UINT)Value[Other]) == RxWarpAsFloat((UINT)Value[First]));
+                    }
                     else
-                        Matches &= (Value[Other][0] == Value[First][0]);
+                    {
+                        Matches &= (Value[Other] == Value[First]);
+                    }
                 }
-                Out[0] = Matches ? UINT_MAX : 0;
+                Scalar = Matches ? UINT_MAX : 0;
                 break;
             case RxWarpWaveReadLane:
             case RxWarpWaveQuadRead:
-                Out[0] = Value[Where[Lane][0] & (RxWarpLanes - 1)][0];
+                Scalar = Value[Where[Lane][0] & (RxWarpLanes - 1)];
                 break;
             case RxWarpWaveReadFirst:
-                Out[0] = Value[First][0];
+                /* The reference's 64 bit form merges every running lane's bits instead of picking the first */
+                Scalar = Value[First];
+                for (UINT Other = 0; Other < RxWarpLanes && Wide; Other++)
+                {
+                    if (Lanes & (1u << Other))
+                        Scalar |= Value[Other];
+                }
                 break;
             case RxWarpWaveReduce:
             case RxWarpWaveBits:
-                Out[0] = Total;
+                Scalar = Totals[Lane & 1];
                 break;
             case RxWarpWavePrefix:
-                Out[0] = RxWarpWaveIdentity(Variant, Type);
+                Scalar = RxWarpWaveIdentity(Variant, Type);
                 for (UINT Other = 0; Other < Lane; Other++)
                 {
                     if (Below & (1u << Other))
-                        Out[0] = RxWarpWaveCombine(Variant, Type, Out[0], Value[Other][0]);
+                        Scalar = RxWarpWaveCombine(Variant, Type, Scalar, Value[Other]);
                 }
                 break;
             case RxWarpWaveQuadSwap:
-                Out[0] = Value[Lane ^ (Variant + 1)][0];
+                Scalar = Value[Lane ^ (Variant + 1)];
                 break;
             default:
                 break;
         }
 
-        /* Scalars land in whichever component the destination masks; a ballot fills x to w */
-        if (Kind != RxWarpWaveBallot)
-            Out[1] = Out[2] = Out[3] = Out[0];
+        /* Scalars land in whichever component the destination masks, 64 bit ones as pairs; a ballot fills x to w */
+        Out[0] = Out[2] = (UINT)Scalar;
+        Out[1] = Out[3] = (Wide && Kind != RxWarpWaveAllEqual) ? (UINT)(Scalar >> 32) : (UINT)Scalar;
+        if (Kind == RxWarpWaveBallot)
+            Out[1] = Out[2] = Out[3] = 0;
     }
     Store(Instruction, 0, Result, FALSE);
 }
