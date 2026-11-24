@@ -1935,8 +1935,12 @@ RxWarpDraw::ShadePass(
 
                 if (Name == D3D10_SB_NAME_POSITION)
                 {
-                    Input[0] = RxWarpFloatAsBits(AtSample ? Sx + PassX : Sx);
-                    Input[1] = RxWarpFloatAsBits(AtSample ? Sy + PassY : Sy);
+                    BOOLEAN Centroid = (Mode == D3D10_SB_INTERPOLATION_LINEAR_CENTROID ||
+                                        Mode == D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_CENTROID);
+
+                    /* A centroid position sits where centroid attributes are taken */
+                    Input[0] = RxWarpFloatAsBits(AtSample ? Sx + PassX : Centroid ? CentroidAt[Lane][0] : Sx);
+                    Input[1] = RxWarpFloatAsBits(AtSample ? Sy + PassY : Centroid ? CentroidAt[Lane][1] : Sy);
                     Input[2] = RxWarpFloatAsBits(Depth[Lane]);
                     Input[3] = RxWarpFloatAsBits(W);
                     continue;
