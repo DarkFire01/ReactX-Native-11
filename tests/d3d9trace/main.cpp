@@ -200,6 +200,9 @@ struct TrState
     std::map<ULONG_PTR, ULONG_PTR> RuntimeOfDriver;
     ULONG_PTR PendingRuntime;
     SRWLOCK IdLock;
+    std::map<ULONG_PTR, const BYTE*> Mapped;
+    ULONG_PTR FirstStream;
+    UINT FirstStride;
 };
 
 static TrState Tr;
@@ -551,6 +554,61 @@ TrDescribeResource(
 }
 
 /* Inputs of a device DDI */
+/* Vertices a primitive count of a type reads */
+static
+UINT
+TrPrimitiveVertices(
+    _In_ UINT Type,
+    _In_ UINT Count)
+{
+    switch (Type)
+    {
+    case D3DPT_POINTLIST:
+        return Count;
+    case D3DPT_LINELIST:
+        return Count * 2;
+    case D3DPT_LINESTRIP:
+        return Count + 1;
+    case D3DPT_TRIANGLELIST:
+        return Count * 3;
+    case D3DPT_TRIANGLESTRIP:
+    case D3DPT_TRIANGLEFAN:
+        return Count + 2;
+    default:
+        return 0;
+    }
+}
+
+/* A hash of the vertices a draw reads from the buffer on stream 0, where the last lock of it mapped it; with
+   -tokens the vertices go to stderr as well */
+static
+VOID
+TrAppendVertices(
+    _Inout_ std::string* Text,
+    _In_ UINT Offset,
+    _In_ UINT Count)
+{
+    std::map<ULONG_PTR, const BYTE*>::const_iterator Found = Tr.Mapped.find(Tr.FirstStream);
+    const BYTE* Data;
+    UINT Size = Count * Tr.FirstStride;
+
+    if (Found == Tr.Mapped.end() || Found->second == nullptr)
+        return;
+    Data = Found->second + Offset;
+    TrAppend(Text, " vertices %08X", TrHash(Data, Size));
+    if (!Tr.Tokens)
+        return;
+    fprintf(stderr, "vertices %u %u:", Offset, Tr.FirstStride);
+    for (UINT Index = 0; Index < Size / sizeof(DWORD); Index++)
+    {
+        DWORD Value;
+
+        CopyMemory(&Value, Data + Index * sizeof(Value), sizeof(Value));
+        fprintf(stderr, "%s%08lX", Index % (Tr.FirstStride / sizeof(DWORD)) == 0 ? " | " : " ", Value);
+    }
+    fprintf(stderr, "\n");
+}
+
 static
 VOID
 TrDeviceInputs(
@@ -628,6 +686,11 @@ TrDeviceInputs(
         const D3DDDIARG_SETSTREAMSOURCE* Stream = static_cast<const D3DDDIARG_SETSTREAMSOURCE*>(Args);
         TrAppend(Text, " %u %s %u %u", Stream->Stream, TrDriver(Stream->hVertexBuffer).c_str(), Stream->Offset,
                  Stream->Stride);
+        if (Stream->Stream == 0)
+        {
+            Tr.FirstStream = reinterpret_cast<ULONG_PTR>(Stream->hVertexBuffer);
+            Tr.FirstStride = Stream->Stride;
+        }
         break;
     }
     case TR_DEVICE_SLOT(pfnSetStreamSourceUm):
@@ -646,18 +709,35 @@ TrDeviceInputs(
         TrAppend(Text, " %u", static_cast<UINT>(A[1]));
         break;
     case TR_DEVICE_SLOT(pfnDrawPrimitive):
-    case TR_DEVICE_SLOT(pfnDrawPrimitive2):
     {
         const D3DDDIARG_DRAWPRIMITIVE* Draw = static_cast<const D3DDDIARG_DRAWPRIMITIVE*>(Args);
         TrAppend(Text, " %u %u %u", Draw->PrimitiveType, Draw->VStart, Draw->PrimitiveCount);
         break;
     }
+    case TR_DEVICE_SLOT(pfnDrawPrimitive2):
+    {
+        const D3DDDIARG_DRAWPRIMITIVE2* Draw = static_cast<const D3DDDIARG_DRAWPRIMITIVE2*>(Args);
+        TrAppend(Text, " %u %u %u", Draw->PrimitiveType, Draw->FirstVertexOffset, Draw->PrimitiveCount);
+        TrAppendVertices(Text, Draw->FirstVertexOffset, TrPrimitiveVertices(Draw->PrimitiveType,
+                                                                             Draw->PrimitiveCount));
+        break;
+    }
     case TR_DEVICE_SLOT(pfnDrawIndexedPrimitive):
-    case TR_DEVICE_SLOT(pfnDrawIndexedPrimitive2):
     {
         const D3DDDIARG_DRAWINDEXEDPRIMITIVE* Draw = static_cast<const D3DDDIARG_DRAWINDEXEDPRIMITIVE*>(Args);
         TrAppend(Text, " %u %d %u %u %u %u", Draw->PrimitiveType, Draw->BaseVertexIndex, Draw->MinIndex,
                  Draw->NumVertices, Draw->StartIndex, Draw->PrimitiveCount);
+        break;
+    }
+    case TR_DEVICE_SLOT(pfnDrawIndexedPrimitive2):
+    {
+        const D3DDDIARG_DRAWINDEXEDPRIMITIVE2* Draw = static_cast<const D3DDDIARG_DRAWINDEXEDPRIMITIVE2*>(Args);
+        UINT Size = static_cast<UINT>(A[2]);
+
+        TrAppend(Text, " %u %d %u %u %u %u", Draw->PrimitiveType, Draw->BaseVertexOffset, Draw->MinIndex,
+                 Draw->NumVertices, Draw->StartIndexOffset, Draw->PrimitiveCount);
+        TrAppend(Text, " indices %u %08X", Size, TrHash(reinterpret_cast<const VOID*>(A[3]), Size));
+        TrAppendVertices(Text, Draw->BaseVertexOffset + Draw->MinIndex * Tr.FirstStride, Draw->NumVertices);
         break;
     }
     case TR_DEVICE_SLOT(pfnClear):
@@ -816,6 +896,7 @@ TrDeviceInputs(
         const D3DDDIARG_CREATEVERTEXSHADERDECL* Decl = static_cast<const D3DDDIARG_CREATEVERTEXSHADERDECL*>(Args);
         TrAppend(Text, " %u %08X", Decl->NumVertexElements,
                  TrHash(reinterpret_cast<VOID*>(A[2]), Decl->NumVertexElements * sizeof(D3DDDIVERTEXELEMENT)));
+        TrDumpTokens(reinterpret_cast<const DWORD*>(A[2]), Decl->NumVertexElements * sizeof(D3DDDIVERTEXELEMENT));
         break;
     }
     case TR_DEVICE_SLOT(pfnCreatePixelShader):
@@ -991,16 +1072,22 @@ TrDeviceOutputs(
     {
         const D3DDDIARG_LOCK* Lock = static_cast<const D3DDDIARG_LOCK*>(Args);
         if (SUCCEEDED(Result))
+        {
             TrAppend(Text, " %s pitch %u %u", Lock->pSurfData != nullptr ? "mem" : "nomem", Lock->Pitch,
                      Lock->SlicePitch);
+            Tr.Mapped[reinterpret_cast<ULONG_PTR>(Lock->hResource)] = static_cast<const BYTE*>(Lock->pSurfData);
+        }
         break;
     }
     case TR_DEVICE_SLOT(pfnLockAsync):
     {
         const D3DDDIARG_LOCKASYNC* Lock = static_cast<const D3DDDIARG_LOCKASYNC*>(Args);
         if (SUCCEEDED(Result))
+        {
             TrAppend(Text, " %s pitch %u %u cookie %s", Lock->pSurfData != nullptr ? "mem" : "nomem", Lock->Pitch,
                      Lock->SlicePitch, Lock->hCookie != NULL ? "set" : "none");
+            Tr.Mapped[reinterpret_cast<ULONG_PTR>(Lock->hResource)] = static_cast<const BYTE*>(Lock->pSurfData);
+        }
         break;
     }
     case TR_DEVICE_SLOT(pfnCreateResource):
@@ -6449,6 +6536,191 @@ TrScenarioDrawsMixedSwitch(
     Plain->Release();
 }
 
+/* Untransformed vertices with a color for the fixed function draws of the software pipeline */
+static const FLOAT TrSoftwarePositions[] = { -1.0f, -1.0f, 0.5f, -1.0f, 1.0f, 0.5f, 1.0f, -1.0f, 0.5f, 1.0f, 1.0f, 0.5f,
+                                             -0.5f, -0.5f, 0.25f, -0.5f, 0.5f, 0.75f, 0.5f, -0.5f, 0.5f };
+static const DWORD TrSoftwareColors[] = { 0xFF0000FF, 0xFF00FF00, 0xFFFF0000, 0xFFFFFFFF, 0x80808080, 0xFF102030,
+                                          0x40C0A080 };
+static constexpr DWORD TrSoftwareFvf = D3DFVF_XYZ | D3DFVF_DIFFUSE;
+static constexpr UINT TrSoftwareStride = 16;
+
+/* Draws from buffers and memory through the runtime's vertex pipeline, fixed function and with a vs_1_1 shader */
+static
+VOID
+TrSoftwareDrawWork(
+    _In_ IDirect3DDevice9* Device,
+    _In_ DWORD Usage)
+{
+    IDirect3DVertexShader9* Vertex = nullptr;
+    IDirect3DVertexDeclaration9* Declaration = nullptr;
+    IDirect3DVertexBuffer9* Colored = nullptr;
+    IDirect3DVertexBuffer9* Buffer = nullptr;
+    IDirect3DIndexBuffer9* IndexBuffer = nullptr;
+    IDirect3DSurface9* Target = nullptr;
+    IDirect3DSurface9* Original = nullptr;
+    BYTE Memory[7 * TrSoftwareStride];
+    VOID* Data = nullptr;
+
+    for (UINT Index = 0; Index < 7; Index++)
+    {
+        CopyMemory(Memory + Index * TrSoftwareStride, &TrSoftwarePositions[Index * 3], 12);
+        CopyMemory(Memory + Index * TrSoftwareStride + 12, &TrSoftwareColors[Index], 4);
+    }
+
+    TrPhase("software create");
+    TrApi("CreateVertexShader", Device->CreateVertexShader(TrDrawVertexCode, &Vertex));
+    TrApi("CreateVertexDeclaration", Device->CreateVertexDeclaration(TrDrawElements, &Declaration));
+    TrApi("CreateVertexBuffer colored", Device->CreateVertexBuffer(sizeof(Memory), Usage, 0, D3DPOOL_DEFAULT,
+                                                                   &Colored, nullptr));
+    TrApi("CreateVertexBuffer", Device->CreateVertexBuffer(sizeof(TrDrawVertices), Usage, 0, D3DPOOL_DEFAULT,
+                                                           &Buffer, nullptr));
+    TrApi("CreateIndexBuffer", Device->CreateIndexBuffer(sizeof(TrDrawIndices16), Usage, D3DFMT_INDEX16,
+                                                         D3DPOOL_DEFAULT, &IndexBuffer, nullptr));
+    TrApi("CreateRenderTarget", Device->CreateRenderTarget(16, 8, D3DFMT_X8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                                           &Target, nullptr));
+    TrApi("GetRenderTarget", Device->GetRenderTarget(0, &Original));
+    if (Vertex == nullptr || Declaration == nullptr || Colored == nullptr || Buffer == nullptr ||
+        IndexBuffer == nullptr || Target == nullptr)
+    {
+        TrRelease(Vertex);
+        TrRelease(Declaration);
+        TrRelease(Colored);
+        TrRelease(Buffer);
+        TrRelease(IndexBuffer);
+        TrRelease(Target);
+        TrRelease(Original);
+        return;
+    }
+    if (SUCCEEDED(Colored->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, Memory, sizeof(Memory));
+        Colored->Unlock();
+    }
+    if (SUCCEEDED(Buffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawVertices, sizeof(TrDrawVertices));
+        Buffer->Unlock();
+    }
+    if (SUCCEEDED(IndexBuffer->Lock(0, 0, &Data, 0)))
+    {
+        CopyMemory(Data, TrDrawIndices16, sizeof(TrDrawIndices16));
+        IndexBuffer->Unlock();
+    }
+    TrApi("SetRenderTarget", Device->SetRenderTarget(0, Target));
+    TrApi("SetRenderState lighting", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
+    TrApi("SetFVF", Device->SetFVF(TrSoftwareFvf));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Colored, 0, TrSoftwareStride));
+    TrApi("SetIndices", Device->SetIndices(IndexBuffer));
+    TrSettle(Device);
+
+    TrPhase("software fixed");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive list", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("DrawPrimitive strip", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("DrawPrimitive offset", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 4, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "software fixed");
+    TrSettle(Device);
+
+    TrPhase("software fixed indexed");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawIndexedPrimitive", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2));
+    TrApi("DrawIndexedPrimitive least", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 4, 3, 6, 1));
+    TrApi("DrawIndexedPrimitive based", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 2, 0, 3, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "software fixed indexed");
+    TrSettle(Device);
+
+    TrPhase("software fixed memory");
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, Memory, TrSoftwareStride));
+    TrApi("DrawIndexedPrimitiveUP", Device->DrawIndexedPrimitiveUP(D3DPT_TRIANGLELIST, 0, 7, 3, TrDrawIndices16,
+                                                                   D3DFMT_INDEX16, Memory, TrSoftwareStride));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "software fixed memory");
+    TrSettle(Device);
+
+    TrPhase("software shader");
+    TrApi("SetVertexDeclaration", Device->SetVertexDeclaration(Declaration));
+    TrApi("SetVertexShader", Device->SetVertexShader(Vertex));
+    TrApi("SetStreamSource", Device->SetStreamSource(0, Buffer, 0, TrDrawStride));
+    TrApi("SetIndices", Device->SetIndices(IndexBuffer));
+    TrApi("Clear", Device->Clear(0, nullptr, D3DCLEAR_TARGET, 0xFF102030, 1.0f, 0));
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive strip", Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2));
+    TrApi("DrawIndexedPrimitive", Device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2));
+    TrApi("DrawPrimitiveUP", Device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, TrDrawVertices, TrDrawStride));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+    TrReadTarget(Device, Target, "software shader");
+    TrSettle(Device);
+
+    TrPhase("software release");
+    TrApi("SetRenderTarget back", Device->SetRenderTarget(0, Original));
+    TrApi("SetVertexShader null", Device->SetVertexShader(nullptr));
+    TrApi("SetStreamSource null", Device->SetStreamSource(0, nullptr, 0, 0));
+    TrApi("SetIndices null", Device->SetIndices(nullptr));
+    TrApi("SetVertexDeclaration null", Device->SetVertexDeclaration(nullptr));
+    TrRelease(Vertex);
+    TrRelease(Declaration);
+    TrRelease(Colored);
+    TrRelease(Buffer);
+    TrRelease(IndexBuffer);
+    TrRelease(Target);
+    TrRelease(Original);
+    TrSettle(Device);
+}
+
+/* Draws through the runtime's vertex pipeline on a software device and a mixed device processing in software */
+static
+VOID
+TrScenarioDrawsSoftware(
+    _In_ TrContext* Context)
+{
+    static const DWORD Behaviors[] =
+    {
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING,
+        D3DCREATE_MIXED_VERTEXPROCESSING,
+    };
+    IDirect3D9* Plain = Context->Create(D3D_SDK_VERSION);
+    HWND Window = TrCreateWindow();
+    D3DPRESENT_PARAMETERS Parameters = {};
+    D3DPRESENT_PARAMETERS Made;
+
+    Parameters.Windowed = TRUE;
+    Parameters.SwapEffect = D3DSWAPEFFECT_COPY;
+    Parameters.hDeviceWindow = Window;
+    Parameters.BackBufferWidth = 40;
+    Parameters.BackBufferHeight = 30;
+    for (DWORD Behavior : Behaviors)
+    {
+        IDirect3DDevice9* Device = nullptr;
+        char Name[64];
+
+        sprintf_s(Name, "draws software create %08lX", Behavior);
+        TrPhase(Name);
+        Made = Parameters;
+        TrApi("CreateDevice", Plain->CreateDevice(0, D3DDEVTYPE_HAL, Window, Behavior, &Made, &Device));
+        if (Device != nullptr)
+        {
+            TrSettle(Device);
+            if (Behavior == D3DCREATE_MIXED_VERTEXPROCESSING)
+                TrApi("SetSoftwareVertexProcessing", Device->SetSoftwareVertexProcessing(TRUE));
+            TrSoftwareDrawWork(Device, Behavior == D3DCREATE_MIXED_VERTEXPROCESSING ? D3DUSAGE_SOFTWAREPROCESSING : 0);
+            TrPhase("draws software release");
+            TrRelease(Device);
+        }
+    }
+    DestroyWindow(Window);
+    Plain->Release();
+}
+
 /* Asynchronous locks and draws from memory on a mixed vertex processing device of the plain object */
 static
 VOID
@@ -8029,6 +8301,12 @@ TrProcessWork(
     TrApi("SetRenderState lighting off", Device->SetRenderState(D3DRS_LIGHTING, FALSE));
     TrSettle(Device);
 
+    TrPhase("process fixed draw");
+    TrApi("BeginScene", Device->BeginScene());
+    TrApi("DrawPrimitive fixed", Device->DrawPrimitive(D3DPT_TRIANGLELIST, 0, 1));
+    TrApi("EndScene", Device->EndScene());
+    TrSettle(Device);
+
     TrPhase("process draw");
     TrApi("SetFVF processed", Device->SetFVF(TrProcessFvf));
     TrApi("SetStreamSource processed", Device->SetStreamSource(0, Dest, 0, 32));
@@ -8185,6 +8463,7 @@ static const TrScenario TrScenarios[] =
     { "draws_mixed_async", TrScenarioDrawsMixedAsync },
     { "draws_mixed_switch", TrScenarioDrawsMixedSwitch },
     { "draws_mixed_release", TrScenarioDrawsMixedRelease },
+    { "draws_software", TrScenarioDrawsSoftware },
     { "fixed_pixel", TrScenarioFixedPixel },
     { "fixed_pixel_plain", TrScenarioFixedPixelPlain },
     { "fixed_reset", TrScenarioFixedReset },
