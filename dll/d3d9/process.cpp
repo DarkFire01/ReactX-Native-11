@@ -67,6 +67,7 @@ struct D9PvRun
     BOOLEAN Keep;
     BOOLEAN Clipping;
     BOOLEAN Drawing;
+    BOOLEAN ClampColors;
     FLOAT Scale[3];
     FLOAT Offset[3];
     const BYTE* Streams[D9StreamCount];
@@ -418,6 +419,56 @@ D9PvClipCode(
     return Code;
 }
 
+/* The transformed vertex a version 3 shader's declared outputs make, packed in the order they are declared:
+   the first position becomes the transformed one, a first point size takes one float and every other output
+   as many floats as its highest written component */
+static
+UINT
+D9PvModelThreeLayout(
+    _In_ const D9VmProgram* Program,
+    _Out_writes_(D9VmDeclaredLimit + 1) D3DVERTEXELEMENT9* Elements,
+    _Out_writes_(D9VmDeclaredLimit) D9PvTarget* Targets,
+    _Out_ UINT* Stride)
+{
+    static const D3DVERTEXELEMENT9 End = D3DDECL_END();
+    UINT Offset = 0;
+    UINT Count = 0;
+
+    for (UINT Index = 0; Index < Program->OutputCount; Index++)
+    {
+        const D9VmDeclared* Declared = &Program->Outputs[Index];
+        BYTE Usage = Declared->Usage & 0xF;
+        UINT Width = (Declared->Mask & 8) != 0 ? 4 : (Declared->Mask & 4) != 0 ? 3 : (Declared->Mask & 2) != 0 ? 2 :
+                     (Declared->Mask & 1) != 0 ? 1 : 0;
+        D3DVERTEXELEMENT9* Element = &Elements[Count];
+        D9PvTarget* Target = &Targets[Count];
+
+        if (Usage == D3DDECLUSAGE_PSIZE && Declared->Index == 0)
+            Width = 1;
+        else if (Usage == D3DDECLUSAGE_POSITION && Declared->Index == 0)
+            Usage = D3DDECLUSAGE_POSITIONT;
+        if (Width == 0)
+            Width = 1;
+        Element->Stream = 0;
+        Element->Offset = static_cast<WORD>(Offset);
+        Element->Type = static_cast<BYTE>(D3DDECLTYPE_FLOAT1 + Width - 1);
+        Element->Method = D3DDECLMETHOD_DEFAULT;
+        Element->Usage = Usage;
+        Element->UsageIndex = Declared->Index;
+        Target->Register = Declared->Register;
+        Target->Mask = (1u << Width) - 1;
+        Target->Offset = Offset;
+        Target->Type = Element->Type;
+        Target->Usage = Usage;
+        Target->Index = Declared->Index;
+        Offset += Width * sizeof(FLOAT);
+        Count += 1;
+    }
+    Elements[Count] = End;
+    *Stride = Offset;
+    return Count;
+}
+
 /* The guard band outcodes of a position the frustum test put outside, by sign bits like the frustum's */
 static
 DWORD
@@ -506,11 +557,42 @@ D9PvRunVertices(
                     FLOAT HalfX = (W + Raw[0].Float) * 0.5f;
                     FLOAT HalfY = (W + Raw[1].Float) * 0.5f;
                     FLOAT Reciprocal = D9PvReciprocal(W);
+                    DWORD Code = 0;
 
-                    Values[0].Float = ((Reciprocal * HalfX) * Run->Scale[0]) + Run->Offset[0];
-                    Values[1].Float = ((Reciprocal * HalfY) * Run->Scale[1]) + Run->Offset[1];
-                    Values[2].Float = ((Raw[2].Float * Reciprocal) * Run->Scale[2]) + Run->Offset[2];
-                    Values[3].Float = Reciprocal;
+                    /* A draw keeps what the clipper takes in clip space */
+                    if (Run->Drawing && Run->Clipping)
+                    {
+                        Code = D9PvClipCode(Run, HalfX, HalfY, Raw[2].Float, W);
+                        if (Code != 0 && Run->GuardBand)
+                            Code |= D9PvBandCode(Run, HalfX, HalfY, W);
+                        Codes[Number] = static_cast<WORD>(Code);
+                        Run->ClipIntersection &= Code;
+                        Run->ClipUnion |= Code;
+                        if (Run->GuardBand)
+                            Code &= ~D9PvSidePlanes;
+                    }
+                    if (Code != 0)
+                    {
+                        Values[0].Float = HalfX;
+                        Values[1].Float = HalfY;
+                    }
+                    else
+                    {
+                        Values[0].Float = ((Reciprocal * HalfX) * Run->Scale[0]) + Run->Offset[0];
+                        Values[1].Float = ((Reciprocal * HalfY) * Run->Scale[1]) + Run->Offset[1];
+                        Values[2].Float = ((Raw[2].Float * Reciprocal) * Run->Scale[2]) + Run->Offset[2];
+                        Values[3].Float = Reciprocal;
+                    }
+                }
+                else if (Run->ClampColors && Usage == D3DDECLUSAGE_COLOR && UsageIndex < 2)
+                {
+                    /* Colors reach the fixed function pixel shaders within the unit range */
+                    for (UINT Part = 0; Part < 4; Part++)
+                    {
+                        FLOAT Value = Values[Part].Float <= 1.0f ? Values[Part].Float : 1.0f;
+
+                        Values[Part].Float = Value < 0.0f ? 0.0f : Value;
+                    }
                 }
 
                 if (Target != nullptr)
@@ -1147,33 +1229,50 @@ D9Device::PrepareSoftwareProgram(
     return S_OK;
 }
 
-/* Room for a draw's vertices in the transformed vertex buffer: after the last draw's without overwriting
-   them while they fit, from the start of a discarded buffer otherwise */
+/* Room for a draw's vertices in a transformed vertex buffer: after the last draw's without overwriting
+   them while they fit, from the start of a discarded buffer otherwise, which a draw too large for it
+   replaces with one of its own size first */
 HRESULT
 D9Device::LockTransformed(
+    _In_ UINT Buffer,
     _In_ UINT Size,
     _Outptr_ BYTE** Data)
 {
-    D9Resource* Buffer = &StagingBuffers[0];
+    D9Resource* Resource = &StagingBuffers[Buffer];
     DWORD Flags = D3DLOCK_NOOVERWRITE | D3DLOCK_NOSYSLOCK;
+    UINT* Used = &TransformedUsed[Buffer];
     VOID* Mapped = nullptr;
     HRESULT hr;
 
     *Data = nullptr;
-    if (Size > D9TransformedBufferSize - TransformedUsed || TransformedUsed == 0)
+    if (Size > Resource->Width - *Used || *Used == 0)
     {
+        if (Size > Resource->Width)
+        {
+            D9Resource Larger;
+
+            hr = CreateDriverBuffer(Resource->Format, Size, Resource->Flags.Value, &Larger);
+            if (FAILED(hr))
+            {
+                D9Trace(L"a transformed vertex buffer of %u bytes cannot be made, %08lX", Size, hr);
+                return hr;
+            }
+            DestroyDriverSurface(Resource);
+            *Resource = Larger;
+        }
         Flags = D3DLOCK_DISCARD | D3DLOCK_NOSYSLOCK;
-        TransformedUsed = 0;
+        *Used = 0;
     }
     TransformedAsync = TRUE;
-    hr = LockDriverBuffer(Buffer, 0, D9TransformedBufferSize, TRUE, Flags, 0, &TransformedAsync, &Mapped);
+    hr = LockDriverBuffer(Resource, 0, Resource->Width, TRUE, Flags, 0, &TransformedAsync, &Mapped);
     if (FAILED(hr))
     {
         D9Trace(L"the transformed vertex buffer cannot be locked, %08lX", hr);
         return hr;
     }
-    TransformedStart = TransformedUsed;
-    *Data = static_cast<BYTE*>(Mapped) + TransformedUsed;
+    TransformedBuffer = Buffer;
+    TransformedStart = *Used;
+    *Data = static_cast<BYTE*>(Mapped) + *Used;
     return S_OK;
 }
 
@@ -1184,10 +1283,12 @@ D9Device::BindTransformed(VOID)
 {
     D3DDDIARG_SETSTREAMSOURCE Args = {};
 
-    if (DriverStreamZero == StagingBuffers[0].DriverResource && DriverStrideZero == TransformedStride)
+    HANDLE Resource = StagingBuffers[TransformedBuffer].DriverResource;
+
+    if (DriverStreamZero == Resource && DriverStrideZero == TransformedStride)
         return;
     Args.Stream = 0;
-    Args.hVertexBuffer = StagingBuffers[0].DriverResource;
+    Args.hVertexBuffer = Resource;
     Args.Stride = TransformedStride;
     DdiStreamSource(&Args);
     StreamDirty |= 1;
@@ -1209,6 +1310,7 @@ D9Device::DrawSoftware(
     D9VertexMachine* Vm;
     D9Declaration* Output;
     D9PvRun Run = {};
+    D9PvTarget Targets[D9VmDeclaredLimit];
     DWORD Format;
     WORD* Codes = nullptr;
     BYTE* Data;
@@ -1217,16 +1319,50 @@ D9Device::DrawSoftware(
     hr = PrepareSoftwareProgram(&Program, &Owned, &Vm);
     if (FAILED(hr))
         return hr;
-    Format = Program->OutputFormat();
-    if (Format == 0)
+
+    /* A version 3 shader's declared outputs lay out a declaration of the shader's own, the others a format */
+    if (Program->Version >= D3DVS_VERSION(3, 0))
     {
-        D9_TRACE_ONCE(L"a vertex shader without a position drew under software vertex processing");
-        delete Owned;
-        return D3DERR_INVALIDCALL;
+        D3DVERTEXELEMENT9 Elements[D9VmDeclaredLimit + 1];
+        UINT Count = D9PvModelThreeLayout(Program, Elements, Targets, &Run.Stride);
+
+        Run.Targets = Targets;
+        Run.TargetCount = Count;
+        Output = VertexShader->Transformed;
+        hr = S_OK;
+        if (Output == nullptr)
+        {
+            Output = new (std::nothrow) D9Declaration(this);
+            if (Output == nullptr)
+                return E_OUTOFMEMORY;
+            hr = Output->Initialize(Elements, Count, 0);
+            if (FAILED(hr))
+            {
+                delete Output;
+                return hr;
+            }
+            Output->Bind();
+            Output->Orphaned = TRUE;
+            VertexShader->Transformed = Output;
+        }
+    }
+    else
+    {
+        Format = Program->OutputFormat();
+        if (Format == 0)
+        {
+            D9_TRACE_ONCE(L"a vertex shader without a position drew under software vertex processing");
+            delete Owned;
+            return D3DERR_INVALIDCALL;
+        }
+        D9PvMakeLayout(Format, &Run.Layout);
+        Run.Parts = Format;
+        Run.Position = D3DFVF_XYZRHW;
+        Run.Stride = Run.Layout.Stride;
+        hr = KeepFvfDeclaration(Format, &Output);
     }
 
     /* The declaration of the transformed vertices reaches the driver when it changes */
-    hr = KeepFvfDeclaration(Format, &Output);
     if (SUCCEEDED(hr) && Output->DriverHandle == NULL)
         hr = DriverDeclaration(Output, &Output->DriverHandle);
     if (FAILED(hr))
@@ -1237,12 +1373,9 @@ D9Device::DrawSoftware(
     if (Switch.InputDeclaration != Output->DriverHandle)
         SwitchDeclaration(Output);
 
-    D9PvMakeLayout(Format, &Run.Layout);
     Run.Program = Program;
     Run.Vm = Vm;
-    Run.Parts = Format;
-    Run.Position = D3DFVF_XYZRHW;
-    Run.Stride = Run.Layout.Stride;
+    Run.ClampColors = PixelShader == nullptr;
     Run.Clipping = RenderStates[D3DRS_CLIPPING] != FALSE;
     Run.Drawing = TRUE;
     Run.ClipIntersection = 0xFFFFFFFF;
@@ -1293,7 +1426,7 @@ D9Device::DrawSoftware(
         }
     }
     TransformedStride = Run.Stride;
-    hr = LockTransformed(VertexCount * Run.Stride, &Data);
+    hr = LockTransformed(Run.Clipping ? 0 : 1, VertexCount * Run.Stride, &Data);
     if (SUCCEEDED(hr))
     {
         hr = D9PvRunVertices(&Run, Declaration, First, VertexCount, Data, Codes);
@@ -1326,9 +1459,9 @@ D9Device::DrawSoftware(
                 Draw.PrimitiveCount = PrimitiveCount;
                 DdiDrawIndexedPrimitive2(&Draw, IndexSize, IndexData);
             }
-            TransformedUsed = TransformedStart + VertexCount * Run.Stride;
+            TransformedUsed[TransformedBuffer] = TransformedStart + VertexCount * Run.Stride;
         }
-        UnlockDriverBuffer(&StagingBuffers[0], TransformedAsync);
+        UnlockDriverBuffer(&StagingBuffers[TransformedBuffer], TransformedAsync);
     }
     delete[] Codes;
     delete Owned;

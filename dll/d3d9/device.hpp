@@ -51,8 +51,6 @@ static constexpr UINT D9TransformCount = 2 + 8 + 256;
 /* Vertex streams a device binds */
 static constexpr UINT D9StreamCount = 16;
 
-/* Bytes of the buffer software processed draws write their transformed vertices to */
-static constexpr UINT D9TransformedBufferSize = 0x10000;
 
 /* A light the application set, and whether it is on */
 struct D9Light
@@ -165,6 +163,8 @@ public:
 
     D9ManagedResource* NextManaged = nullptr;
 };
+
+class D9Declaration;
 
 /* Driver calls a batch records instead of making them */
 enum class D9BatchCall : UINT
@@ -1607,8 +1607,10 @@ public:
 
     HANDLE DriverHandle = NULL;
 
-    /* The vertex shader as the software vertex pipeline runs it, made on first use */
+    /* The vertex shader as the software vertex pipeline runs it, made on first use, and for a version 3
+       shader the declaration of the transformed vertices its outputs make */
     D9VmProgram* Program = nullptr;
+    D9Declaration* Transformed = nullptr;
 
 private:
     DWORD* Function = nullptr;
@@ -3498,6 +3500,7 @@ private:
 
     HRESULT
     LockTransformed(
+        _In_ UINT Buffer,
         _In_ UINT Size,
         _Outptr_ BYTE** Data);
 
@@ -3822,9 +3825,11 @@ private:
     /* The interpreter the fixed function shaders of ProcessVertices run on */
     D9VertexMachine* FixedMachine = nullptr;
 
-    /* The buffer software processed draws write their vertices to: where the free space starts, where the
-       last draw's vertices start, their size and how the buffer is locked */
-    UINT TransformedUsed = 0;
+    /* The buffers software processed draws write their vertices to, the first while they clip and the
+       second while they do not: where each one's free space starts, then which one the current draw uses,
+       where its vertices start, their size and how the buffer is locked */
+    UINT TransformedUsed[2] = {};
+    UINT TransformedBuffer = 0;
     UINT TransformedStart = 0;
     UINT TransformedStride = 0;
     BOOLEAN TransformedAsync = FALSE;

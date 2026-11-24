@@ -927,9 +927,7 @@ D9Device::RestoreShaderDefs(
 BOOLEAN
 D9Device::ProcessesInSoftware(VOID) const
 {
-    if (!SoftwareVertices || Declaration == nullptr || Declaration->Transformed)
-        return FALSE;
-    return VertexShader == nullptr || VertexShader->Tokens()[0] < D3DVS_VERSION(3, 0);
+    return SoftwareVertices && Declaration != nullptr && !Declaration->Transformed;
 }
 
 STDMETHODIMP

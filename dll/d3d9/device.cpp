@@ -757,6 +757,8 @@ D9Device::CreateStagingBuffers(VOID)
     };
     HRESULT hr;
 
+    TransformedUsed[0] = 0;
+    TransformedUsed[1] = 0;
     for (UINT Index = 0; Index < D9StagingBufferCount; Index++)
     {
         hr = CreateDriverBuffer(Buffers[Index].Format, Buffers[Index].Size, Buffers[Index].Flags,

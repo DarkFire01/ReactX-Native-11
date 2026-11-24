@@ -437,6 +437,8 @@ D9Shader<Interface>::~D9Shader()
 
     if (DriverHandle != NULL)
         Device->DestroyDriverShader(Pixel, DriverHandle);
+    if (Transformed != nullptr)
+        Transformed->Unbind();
     delete Program;
     delete[] Function;
     delete[] Code;
