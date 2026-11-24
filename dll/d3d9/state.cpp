@@ -108,7 +108,7 @@ D9Device::SendStateValue(
         if (Fogged != VertexFogged)
         {
             VertexFogged = Fogged;
-            DrawDirty |= D9DrawVertexInput;
+            DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
         }
     }
 
@@ -935,7 +935,7 @@ D9Device::SetFVF(
         return S_OK;
     ApiFvf = FVF;
     LastFvf = FVF;
-    DrawDirty |= D9DrawVertexInput;
+    DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
     return BindFvfDeclaration(FVF);
 }
 

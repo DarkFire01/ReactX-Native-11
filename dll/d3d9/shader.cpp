@@ -662,17 +662,17 @@ D9Device::SetVertexShader(
     /* Without a driver copy the shader runs in the runtime's pipeline, which picks it up at the next draw; a
        mixed device hands the driver its shaders only when it draws */
     if (Next != nullptr && (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0)
-        DrawDirty |= D9DrawVertexInput;
+        DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
     else if (Next != nullptr && Next->DriverHandle != NULL)
         SwitchVertexShader(Next->DriverHandle, Next->Shape()->Outputs);
     else if (Next != nullptr)
-        DrawDirty |= D9DrawVertexInput;
+        DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
     else if (DriverHasVertexShaders())
         SwitchVertexShader(NULL, 0);
     else if ((BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0 && !SoftwareVertices)
         SwitchVertexShader(NULL, 0);
     if (Next == nullptr && !DriverHasVertexShaders())
-        DrawDirty |= D9DrawVertexInput;
+        DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
     if (Previous != nullptr)
         Previous->Unbind();
     return S_OK;

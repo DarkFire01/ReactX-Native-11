@@ -1985,6 +1985,9 @@ static constexpr UINT D9DrawTextures = 0x0002;
 static constexpr UINT D9DrawVertexInput = 0x0200;
 static constexpr UINT D9DrawStreams = 0x0800;
 
+/* What the software pipeline draws from changed, so the declaration of its output reaches the driver again */
+static constexpr UINT D9DrawTransformedInput = 0x1000;
+
 /* The stream dirty bit of the index binding */
 static constexpr UINT D9IndexStreamBit = 0x10000;
 

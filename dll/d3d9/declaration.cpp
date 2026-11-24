@@ -486,7 +486,7 @@ D9Device::ForgetDriverDeclarations(VOID)
         Live->DriverHandle = NULL;
         DestroyDriverDeclaration(Handle);
     }
-    DrawDirty |= D9DrawVertexInput;
+    DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
 }
 
 STDMETHODIMP
@@ -558,7 +558,7 @@ D9Device::SetVertexDeclaration(
     Declaration = Next;
     CurrentFvf = Next != nullptr ? Next->Fvf : 0;
     ApiFvf = 0;
-    DrawDirty |= D9DrawVertexInput;
+    DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
     if (Previous != nullptr)
         Previous->Unbind();
     return S_OK;

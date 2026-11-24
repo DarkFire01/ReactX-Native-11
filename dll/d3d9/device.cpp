@@ -1222,7 +1222,7 @@ D9Device::ResetCommon(
         ReleaseFvfDeclarations();
         ApiFvf = 0;
         LastFvf = 0;
-        DrawDirty |= D9DrawVertexInput;
+        DrawDirty |= D9DrawVertexInput | D9DrawTransformedInput;
     }
     ImplicitChain->ReleaseBuffers();
     if (!IsEx)

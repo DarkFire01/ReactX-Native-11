@@ -2117,8 +2117,9 @@ D9Device::DrawSoftware(
         delete Owned;
         return hr;
     }
-    if (Switch.InputDeclaration != Output->DriverHandle)
+    if ((DrawDirty & D9DrawTransformedInput) != 0 || Switch.InputDeclaration != Output->DriverHandle)
         SwitchDeclaration(Output);
+    DrawDirty &= ~D9DrawTransformedInput;
 
     Run.Program = Program;
     Run.Vm = Vm;
