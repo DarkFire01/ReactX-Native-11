@@ -74,20 +74,23 @@ D9Buffer<Interface, Description>::Create(
     _In_ D3DDDI_POOL Placement,
     _In_opt_ const D9ShareRequest* Share)
 {
+    UINT Bytes = Length;
+    HRESULT hr;
+
+    /* The runtime's own memory holds whole dwords, and the driver hears of all of it */
     if (Placement == D3DDDIPOOL_SYSTEMMEM)
     {
-        Memory = static_cast<BYTE*>(_aligned_malloc(Length, 32));
+        Bytes = (Length + 3) & ~3u;
+        Memory = static_cast<BYTE*>(_aligned_malloc(Bytes, 32));
         if (Memory == nullptr)
             return E_OUTOFMEMORY;
-        ZeroMemory(Memory, Length);
+        ZeroMemory(Memory, Bytes);
     }
-
-    HRESULT hr;
 
     Resource = new (std::nothrow) D9Resource();
     if (Resource == nullptr)
         return E_OUTOFMEMORY;
-    hr = Device->CreateBufferResource(Format, Length, D9BufferFlags(IsVertex(), Usage), Fvf, Placement, Memory,
+    hr = Device->CreateBufferResource(Format, Bytes, D9BufferFlags(IsVertex(), Usage), Fvf, Placement, Memory,
                                       Share, Resource);
     if (SUCCEEDED(hr) && IsManaged())
     {
