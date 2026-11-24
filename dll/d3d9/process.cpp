@@ -2245,6 +2245,11 @@ D9Device::DrawSoftware(
     if (SUCCEEDED(hr))
     {
         hr = D9PvRunVertices(&Run, Declaration, First, VertexCount, Data, Codes);
+        if (SUCCEEDED(hr) && Run.Clipping)
+        {
+            CurrentClipStatus.ClipUnion |= Run.ClipUnion;
+            CurrentClipStatus.ClipIntersection &= Run.ClipIntersection;
+        }
 
         /* A primitive wholly outside one plane draws nothing */
         if (SUCCEEDED(hr) && Run.Clipping && Run.ClipIntersection == 0 && Run.Targets == nullptr &&
