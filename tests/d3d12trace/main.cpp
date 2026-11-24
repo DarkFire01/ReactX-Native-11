@@ -2588,6 +2588,7 @@ TrScenarioPipelines(
     D3D12_GRAPHICS_PIPELINE_STATE_DESC Valid = {};
     D3D12_INPUT_ELEMENT_DESC Mixed[_countof(TrLayout)];
     ComPtr<ID3DBlob> Vertex;
+    ComPtr<ID3DBlob> Unlaid;
 
     if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))) ||
         Run.SerializeVersioned == nullptr)
@@ -2698,6 +2699,16 @@ TrScenarioPipelines(
         Graphics.VS = { RxInternalVertexDxil, sizeof(RxInternalVertexDxil) };
         TrPhase("CreateGraphicsPipelineState input layout the shader does not read");
         printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[3])));
+        /* A shader not made before, so its creation shows */
+        if (SUCCEEDED(D3DCompile(TrLayoutShader, strlen(TrLayoutShader), "layout", nullptr, nullptr, "main", "vs_5_0",
+                                 D3DCOMPILE_SKIP_OPTIMIZATION, 0, &Unlaid, &Errors)))
+        {
+            Graphics = Valid;
+            Graphics.VS = { Unlaid->GetBufferPointer(), Unlaid->GetBufferSize() };
+            Graphics.InputLayout = { nullptr, 0 };
+            TrPhase("CreateGraphicsPipelineState vertex shader reading inputs without a layout");
+            printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Layouts[2])));
+        }
         TrPhase("Release input layouts");
         for (ComPtr<ID3D12PipelineState>& State : Layouts)
             State.Reset();
