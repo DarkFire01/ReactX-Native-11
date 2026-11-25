@@ -366,7 +366,7 @@ RxSwapChain::PresentFlip(
     }
     Flip->Flags.CompSurfaceNotifiedEarly = 1;
 
-    hr = Device->PresentFlip(Buffers[0], Context);
+    hr = PresenterOf(BackBufferIndex())->PresentFlip(Buffers[BackBufferIndex()], Context);
     if (FAILED(hr))
     {
         RX_TRACE(L"flip present failed 0x%08lX", hr);
@@ -381,8 +381,14 @@ RxSwapChain::PresentFlip(
     if (!IsSequenced)
         return hr;
 
-    /* Buffer 0 always stays the one to draw to: identities move along with the index */
+    /* D3D11 keeps buffer 0 the one to draw to by moving identities along with the index */
     FenceValue++;
+    if (IsDirect3D12())
+    {
+        AdvanceBackBuffer();
+        return hr;
+    }
+
     PresentedIndex = CurrentIndex;
     CurrentIndex = (CurrentIndex + 1) % (UINT)Buffers.size();
     Device->RotateBuffers(Buffers.data(), (UINT)Buffers.size());

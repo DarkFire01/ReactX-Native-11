@@ -90,9 +90,6 @@ private:
     std::unique_ptr<DdiResource> Resource;
 };
 
-/* The record's constants as Windows writes them for a single sample swapchain buffer */
-constexpr UINT RxSharedRecordConstants[9] = { 1, 0, 0, 0, 0, 1, 1, 0, 1 };
-
 /* Initial and largest count of the device's present limit semaphore */
 constexpr UINT RxPresentLimitMaximum = 16;
 

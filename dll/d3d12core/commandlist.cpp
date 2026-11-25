@@ -454,6 +454,21 @@ RxCommandList::Close(VOID)
     return FAILED(hr) ? hr : S_OK;
 }
 
+VOID
+RxCommandList::RecordPresent(
+    _In_ D3D12DDI_HCOMMANDQUEUE Queue,
+    _In_ const D3D12DDIARG_PRESENT_0001& Args,
+    _Out_ D3D12DDI_PRESENT_0051* Result,
+    _Out_opt_ D3D12DDI_PRESENT_CONTEXTS_0051* Contexts,
+    _Out_opt_ D3D12DDI_PRESENT_HWQUEUES_0051* HwQueues)
+{
+    ZeroMemory(Result, sizeof(*Result));
+    if (!Records())
+        return;
+
+    DriverTable->pfnPresent(DriverList, Queue, &Args, Result, Contexts, HwQueues);
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxCommandList::Reset(

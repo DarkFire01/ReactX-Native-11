@@ -165,6 +165,9 @@ RxCommandQueue::~RxCommandQueue()
     D3DKMT_DESTROYCONTEXT DestroyContext;
     UINT Index;
 
+    /* Present recordings go before the driver queue they ran on */
+    ReleasePresentObjects();
+
     if (IsDriverQueueCreated)
         Device.Ddi().pfnDestroyCommandQueue(Device.Handle(), DriverQueue);
 
@@ -205,6 +208,14 @@ RxCommandQueue::QueryInterface(
         riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12CommandQueue) || riid == PrivateId)
     {
         *ppvObject = static_cast<ID3D12CommandQueue*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    /* The ReactX dxgi.dll presents swapchains on the queue through this */
+    if (riid == __uuidof(IRxPresentQueue) || riid == __uuidof(IRxPresentDevice))
+    {
+        *ppvObject = static_cast<IRxPresentQueue*>(&PresentFace);
         AddRef();
         return S_OK;
     }

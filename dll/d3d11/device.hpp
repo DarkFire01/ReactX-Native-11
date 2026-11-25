@@ -14,38 +14,9 @@
 #include "kmcallbacks.hpp"
 #include "partner.hpp"
 #include "d3d10face.hpp"
+#include "sharedrecord.hpp"
 
 class RxDevice;
-
-/*
- * What a D3D11 runtime records with a shared texture so another process can open it,
- * laid out as Windows writes it for a single sample swapchain buffer.
- */
-struct RxSharedTextureRecord
-{
-    UINT Size;
-    UINT Version;
-    UINT Width;
-    UINT Height;
-    DXGI_FORMAT Format;
-    UINT Constants[9];          /* The first is the array size; the rest are fixed for swapchain buffers */
-    D3D11_RESOURCE_DIMENSION Dimension;
-    D3D11_TEXTURE2D_DESC Desc;
-};
-
-static_assert(sizeof(RxSharedTextureRecord) == 0x68);
-
-/* The only record version this runtime writes and reads */
-constexpr UINT RxSharedRecordVersion = 4;
-
-/* Record constants: the array size, the keyed mutex with its fence, then NT handle and displayable flags */
-constexpr UINT RxSharedRecordArraySizeIndex = 0;
-constexpr UINT RxSharedRecordKeyedMutexIndex = 2;
-constexpr UINT RxSharedRecordKeyedMutexShareIndex = 3;
-constexpr UINT RxSharedRecordSyncObjectShareIndex = 4;
-constexpr UINT RxSharedRecordNtHandleIndex = 5;
-constexpr UINT RxSharedRecordDisplayableIndex = 6;
-constexpr UINT RxSharedRecordDisplayableAgainIndex = 8;
 
 /* How a resource is shared, which picks the flags its kernel resource is created with */
 enum class RxShareKind : UCHAR

@@ -7,6 +7,7 @@
 
 #include "swapchain.hpp"
 
+#include <d3d12.h>
 #include <algorithm>
 
 /* dwmapi hands out the surface DWM composes this window from */
@@ -41,6 +42,26 @@ constexpr UINT RxMaximumSyncInterval = 4;
 constexpr UINT RxDefaultFrameLatency = 1;
 constexpr UINT RxMaximumFrameLatency = 40;
 constexpr UINT RxMaximumBufferCount = DXGI_MAX_SWAP_CHAIN_BUFFERS;
+
+/* What Direct3D 12 swapchains may be made with: no GDI, protected or restricted content buffers */
+constexpr UINT RxD3D12SwapChainFlags = DXGI_SWAP_CHAIN_FLAG_NONPREROTATED | DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH |
+                                       DXGI_SWAP_CHAIN_FLAG_DISPLAY_ONLY |
+                                       DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT |
+                                       DXGI_SWAP_CHAIN_FLAG_FOREGROUND_LAYER | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                                       DXGI_SWAP_CHAIN_FLAG_RESTRICTED_TO_ALL_HOLOGRAPHIC_DISPLAYS;
+
+/* Direct3D 12 buffers can be drawn to and read by shaders, nothing else */
+constexpr DXGI_USAGE RxD3D12BufferUsage = DXGI_USAGE_SHADER_INPUT | DXGI_USAGE_RENDER_TARGET_OUTPUT |
+                                          DXGI_USAGE_BACK_BUFFER;
+
+/* Flags a Direct3D 12 resize may not turn on or off, and the ones it may pass at all */
+constexpr UINT RxResizeFixedFlags = 0x2000 | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT |
+                                    DXGI_SWAP_CHAIN_FLAG_YUV_VIDEO | DXGI_SWAP_CHAIN_FLAG_FOREGROUND_LAYER |
+                                    DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+constexpr UINT RxResizeFlags = 0x3FFF & ~(UINT)DXGI_SWAP_CHAIN_FLAG_FULLSCREEN_VIDEO;
+
+/* A GDI DC can not be had on a buffer the application rotates itself */
+constexpr UINT RxRotatedGdiFlags = DXGI_SWAP_CHAIN_FLAG_NONPREROTATED | DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
 
 static
 PFN_RX_GET_WINDOW_SHARED_SURFACE
@@ -161,6 +182,98 @@ RxIsBackBufferFormat(
     }
 }
 
+/* Whether a present device is a ReactX Direct3D 12 command queue */
+static
+BOOLEAN
+RxIsDirect3D12Queue(
+    _In_ IUnknown* Device)
+{
+    IRxPresentQueue* Queue;
+
+    if (FAILED(Device->QueryInterface(IID_PPV_ARGS(&Queue))))
+        return FALSE;
+
+    Queue->Release();
+    return TRUE;
+}
+
+/* Swapchains present on direct queues only */
+static
+BOOLEAN
+RxIsDirectQueue(
+    _In_ IUnknown* Device)
+{
+    ID3D12CommandQueue* Queue;
+    BOOLEAN IsDirect;
+
+    if (FAILED(Device->QueryInterface(IID_PPV_ARGS(&Queue))))
+        return FALSE;
+
+    IsDirect = Queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT;
+    Queue->Release();
+    return IsDirect;
+}
+
+/* Whether two command queues belong to the same Direct3D 12 device */
+static
+BOOLEAN
+RxIsSameDevice(
+    _In_ IUnknown* First,
+    _In_ IUnknown* Second)
+{
+    ID3D12DeviceChild* Children[2] = {};
+    IUnknown* Devices[2] = {};
+    BOOLEAN IsSame = FALSE;
+    UINT Index;
+
+    if (SUCCEEDED(First->QueryInterface(IID_PPV_ARGS(&Children[0]))) &&
+        SUCCEEDED(Second->QueryInterface(IID_PPV_ARGS(&Children[1]))) &&
+        SUCCEEDED(Children[0]->GetDevice(IID_PPV_ARGS(&Devices[0]))) &&
+        SUCCEEDED(Children[1]->GetDevice(IID_PPV_ARGS(&Devices[1]))))
+    {
+        IsSame = Devices[0] == Devices[1];
+    }
+
+    for (Index = 0; Index < 2; Index++)
+    {
+        if (Devices[Index] != nullptr)
+            Devices[Index]->Release();
+        if (Children[Index] != nullptr)
+            Children[Index]->Release();
+    }
+
+    return IsSame;
+}
+
+/* A queue ResizeBuffers1 names for a buffer: direct, on the buffer's node and of the swapchain's device */
+static
+HRESULT
+RxTakeBufferQueue(
+    _In_opt_ IUnknown* Candidate,
+    _In_ UINT NodeMask,
+    _In_ IUnknown* Device,
+    _Outptr_ IRxPresentDevice** Presenter)
+{
+    ID3D12CommandQueue* Queue;
+    D3D12_COMMAND_QUEUE_DESC QueueDesc;
+
+    *Presenter = nullptr;
+    if (Candidate == nullptr || FAILED(Candidate->QueryInterface(IID_PPV_ARGS(&Queue))))
+        return DXGI_ERROR_INVALID_CALL;
+
+    QueueDesc = Queue->GetDesc();
+    Queue->Release();
+
+    /* A zero mask means the first node */
+    if (QueueDesc.NodeMask != (NodeMask ? NodeMask : 1) || QueueDesc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
+        !RxIsSameDevice(Candidate, Device))
+    {
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    return SUCCEEDED(Candidate->QueryInterface(IID_PPV_ARGS(Presenter))) ? S_OK : DXGI_ERROR_INVALID_CALL;
+}
+
 RxSwapChain::RxSwapChain(
     _In_ RxDxgiFactory& Owner,
     _In_ IRxPresentDevice* BackingDevice,
@@ -179,6 +292,10 @@ RxSwapChain::RxSwapChain(
     Factory.AddRef();
     Device->AddRef();
     Device->GetAdapterLuid(&AdapterLuid);
+
+    /* A Direct3D 12 queue is held through Device */
+    if (SUCCEEDED(Device->QueryInterface(IID_PPV_ARGS(&Queue))))
+        Queue->Release();
 
     /* Basic Render only counts when it stands in as the discrete half of a hybrid pair */
     if (SUCCEEDED(RxOpenKernelAdapter(AdapterLuid, &Query.hAdapter)))
@@ -222,7 +339,9 @@ RxSwapChain::~RxSwapChain()
         UnhookWindowsHookEx(WindowHook);
 
     LeaveFullscreen();
+    WaitForPresentQueues();
     ReleaseBuffers();
+    ReleaseBufferQueues();
     if (CompositionSurface != NULL)
         CloseHandle(CompositionSurface);
     if (RedirectionSurface != nullptr)
@@ -270,6 +389,16 @@ RxSwapChain::Create(
     /* Without a window there is nothing but composition to show the buffers */
     if (Window == NULL && !IsFlipModel)
         return DXGI_ERROR_INVALID_CALL;
+
+    /* Direct3D 12 presents only flip model buffers from a direct queue, and has no GDI or protected buffers */
+    if (RxIsDirect3D12Queue(Device))
+    {
+        if (!IsFlipModel || Desc.SampleDesc.Quality != 0 || (Desc.BufferUsage & ~RxD3D12BufferUsage) != 0 ||
+            (Desc.Flags & ~RxD3D12SwapChainFlags) != 0 || !RxIsDirectQueue(Device))
+        {
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
 
     NewSwapChain = new (std::nothrow) RxSwapChain(Factory, Device, Window);
     if (NewSwapChain == nullptr)
@@ -394,8 +523,13 @@ RxSwapChain::AllocateBuffers()
     UINT Index;
     HRESULT hr;
 
-    /* New buffers hold nothing a partial present could build on */
+    /* New buffers hold nothing a partial present could build on, and the first one is drawn first */
     IsPreviousFrameValid = FALSE;
+    if (IsDirect3D12())
+    {
+        CurrentIndex = 0;
+        PresentedIndex = 0;
+    }
 
     for (Index = 0; Index < Desc.BufferCount; Index++)
     {
@@ -459,6 +593,43 @@ RxSwapChain::AreBuffersReleased()
     }
 
     return TRUE;
+}
+
+VOID
+RxSwapChain::AdvanceBackBuffer()
+{
+    if (!IsDirect3D12() || Buffers.empty())
+        return;
+
+    PresentedIndex = CurrentIndex;
+    CurrentIndex = (CurrentIndex + 1) % (UINT)Buffers.size();
+}
+
+VOID
+RxSwapChain::WaitForPresentQueues()
+{
+    IRxPresentQueue* Other;
+
+    if (!IsDirect3D12())
+        return;
+
+    Queue->WaitForIdle();
+    for (IRxPresentDevice* Presenter : BufferQueues)
+    {
+        if (Presenter != Device && SUCCEEDED(Presenter->QueryInterface(IID_PPV_ARGS(&Other))))
+        {
+            Other->WaitForIdle();
+            Other->Release();
+        }
+    }
+}
+
+VOID
+RxSwapChain::ReleaseBufferQueues()
+{
+    for (IRxPresentDevice* Presenter : BufferQueues)
+        Presenter->Release();
+    BufferQueues.clear();
 }
 
 RxSwapChain::Redirection
@@ -565,7 +736,7 @@ RxSwapChain::PresentToWindow(
     /* A blt has no interval of its own, so the wait for the blank happens first */
     RxWaitForInterval(this, SyncInterval);
 
-    hr = Device->SubmitPresent(Buffers[0], nullptr, Context);
+    hr = PresenterOf(BackBufferIndex())->SubmitPresent(Buffers[BackBufferIndex()], nullptr, Context);
     if (FAILED(hr))
     {
         RX_TRACE(L"window present failed 0x%08lX, drawing with GDI instead", hr);
@@ -575,6 +746,7 @@ RxSwapChain::PresentToWindow(
     if (Context->KernelStatus == STATUS_GRAPHICS_PRESENT_OCCLUDED)
         hr = DXGI_STATUS_OCCLUDED;
 
+    AdvanceBackBuffer();
     PresentCount++;
     if (LatencySemaphore != NULL)
         ReleaseSemaphore(LatencySemaphore, 1, nullptr);
@@ -599,7 +771,9 @@ RxSwapChain::PresentByCopy(
 
     if (RxGetPresentOverride() == RxPresentOverride::Gdi)
         return PresentGdi(SyncInterval);
-    if (RxGetPresentOverride() == RxPresentOverride::Window)
+
+    /* Direct3D 12 buffers are never copied into a DWM surface; the kernel takes them to the window */
+    if (RxGetPresentOverride() == RxPresentOverride::Window || IsDirect3D12())
         return PresentToWindow(SyncInterval);
 
     /* A window DWM does not compose, as on a desktop without DWM, is presented to directly */
@@ -740,8 +914,24 @@ RxSwapChain::GetDevice(
     _In_ REFIID riid,
     _COM_Outptr_ void** ppDevice)
 {
+    ID3D12DeviceChild* Child;
+    HRESULT hr;
+
     if (ppDevice == nullptr)
         return E_INVALIDARG;
+
+    /* A Direct3D 12 swapchain answers for the device its queue belongs to, not the queue */
+    if (IsDirect3D12())
+    {
+        *ppDevice = nullptr;
+        hr = Device->QueryInterface(IID_PPV_ARGS(&Child));
+        if (FAILED(hr))
+            return hr;
+
+        hr = Child->GetDevice(riid, ppDevice);
+        Child->Release();
+        return hr;
+    }
 
     return Device->QueryInterface(riid, ppDevice);
 }
@@ -768,7 +958,10 @@ RxSwapChain::Present(
     if (Flags & DXGI_PRESENT_TEST)
         return S_OK;
 
-    RxDumpFrame(Buffers[0], PresentCount + 1);
+    if (IsDirect3D12())
+        RxDumpFrame12(PresenterOf(BackBufferIndex()), Buffers[BackBufferIndex()], PresentCount + 1);
+    else
+        RxDumpFrame(Buffers[0], PresentCount + 1);
     if (((PresentCount + 1) % 600) == 0)
         RX_TRACE(L"present %u", PresentCount + 1);
 
@@ -794,6 +987,10 @@ RxSwapChain::GetBuffer(
     if (ppSurface == nullptr)
         return DXGI_ERROR_INVALID_CALL;
     *ppSurface = nullptr;
+
+    /* Direct3D 12 buffers are all reachable, each by its own index */
+    if (IsDirect3D12())
+        return (Buffer < Buffers.size()) ? Buffers[Buffer]->QueryInterface(riid, ppSurface) : DXGI_ERROR_INVALID_CALL;
 
     /* Only the current back buffer can be written in flip model, and that is always buffer 0 */
     if (Buffer >= Buffers.size() || (RxIsFlipModel(Desc.SwapEffect) && Buffer != 0 &&
@@ -830,8 +1027,11 @@ RxSwapChain::SetFullscreenState(
         return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
 
     /* Composition and CoreWindow swapchains have no fullscreen; waitable ones only on Direct3D 12 */
-    if (Window == NULL || CoreWindow != nullptr || (Desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+    if (Window == NULL || CoreWindow != nullptr ||
+        ((Desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) && !IsDirect3D12()))
+    {
         return DXGI_ERROR_INVALID_CALL;
+    }
 
     if (!Fullscreen)
     {
@@ -1158,22 +1358,73 @@ RxSwapChain::ResizeBuffers(
     _In_ DXGI_FORMAT NewFormat,
     _In_ UINT SwapChainFlags)
 {
+    return Resize(BufferCount, Width, Height, NewFormat, SwapChainFlags, FALSE, nullptr, nullptr);
+}
+
+HRESULT
+RxSwapChain::Resize(
+    _In_ UINT BufferCount,
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ DXGI_FORMAT NewFormat,
+    _In_ UINT SwapChainFlags,
+    _In_ BOOLEAN IsPerQueue,
+    _In_reads_opt_(BufferCount) const UINT* NodeMasks,
+    _In_reads_opt_(BufferCount) IUnknown* const* Queues)
+{
     DXGI_SWAP_CHAIN_DESC1 Previous = Desc;
+    std::vector<IRxPresentDevice*> NewQueues;
+    IRxPresentDevice* Presenter;
     RECT Client;
     HRESULT hr;
+    UINT Count;
+    UINT Index;
+
+    /* Direct3D 12 checks the arguments first; some flags have to stay as the swapchain was made */
+    if (IsDirect3D12())
+    {
+        if (BufferCount > RxMaximumBufferCount || ((Desc.Flags ^ SwapChainFlags) & RxResizeFixedFlags) != 0 ||
+            BufferCount == 1 || (NewFormat != DXGI_FORMAT_UNKNOWN && !RxIsBackBufferFormat(NewFormat, TRUE)))
+        {
+            return E_INVALIDARG;
+        }
+    }
 
     /* Every buffer reference the app took has to be gone first */
     if (!AreBuffersReleased())
     {
         if (RxIsTraceEnabled())
         {
-            for (UINT Index = 0; Index < Buffers.size(); Index++)
+            for (Index = 0; Index < Buffers.size(); Index++)
             {
                 Buffers[Index]->AddRef();
                 RxTrace(L"ResizeBuffers refused: buffer %u holds %lu references", Index, Buffers[Index]->Release());
             }
         }
         return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (IsDirect3D12() && ((SwapChainFlags & ~RxResizeFlags) != 0 ||
+                           (SwapChainFlags & RxRotatedGdiFlags) == RxRotatedGdiFlags))
+    {
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    /* ResizeBuffers1 gives each buffer its own queue */
+    if (IsPerQueue && (NodeMasks == nullptr || Queues == nullptr))
+        return DXGI_ERROR_INVALID_CALL;
+
+    Count = BufferCount ? BufferCount : Desc.BufferCount;
+    for (Index = 0; IsPerQueue && Index < Count; Index++)
+    {
+        hr = RxTakeBufferQueue(Queues[Index], NodeMasks[Index], Device, &Presenter);
+        if (FAILED(hr))
+        {
+            for (IRxPresentDevice* Taken : NewQueues)
+                Taken->Release();
+            return hr;
+        }
+        NewQueues.push_back(Presenter);
     }
 
     if (BufferCount != 0)
@@ -1188,17 +1439,29 @@ RxSwapChain::ResizeBuffers(
 
     if (Desc.BufferCount > RxMaximumBufferCount || !RxIsBackBufferFormat(Desc.Format, RxIsFlipModel(Desc.SwapEffect)))
     {
+        for (IRxPresentDevice* Taken : NewQueues)
+            Taken->Release();
         Desc = Previous;
         return DXGI_ERROR_INVALID_CALL;
     }
 
+    /* The GPU and the compositor let go of the old buffers before they are destroyed */
+    WaitForPresentQueues();
     ReleaseBuffers();
     hr = AllocateBuffers();
     if (FAILED(hr))
     {
-        /* Try to leave the swapchain usable at its old size */
+        /* Try to leave the swapchain usable at its old size, on the queues it had */
+        for (IRxPresentDevice* Taken : NewQueues)
+            Taken->Release();
         Desc = Previous;
         AllocateBuffers();
+    }
+    else
+    {
+        /* A resize without queues puts every buffer back on the queue the swapchain was made with */
+        ReleaseBufferQueues();
+        BufferQueues = std::move(NewQueues);
     }
 
     SourceWidth = Desc.Width;
@@ -1239,9 +1502,17 @@ RxSwapChain::GetContainingOutput(
     Monitor.cbSize = sizeof(Monitor);
     GetMonitorInfoW(MonitorFromWindow(Window, MONITOR_DEFAULTTONEAREST), &Monitor);
 
-    hr = Device->QueryInterface(IID_PPV_ARGS(&DxgiDevice));
-    if (SUCCEEDED(hr))
-        hr = DxgiDevice->GetAdapter(&Adapter);
+    /* A Direct3D 12 queue has no DXGI device; its adapter is found by LUID */
+    if (IsDirect3D12())
+    {
+        hr = Factory.EnumAdapterByLuid(AdapterLuid, IID_PPV_ARGS(&Adapter));
+    }
+    else
+    {
+        hr = Device->QueryInterface(IID_PPV_ARGS(&DxgiDevice));
+        if (SUCCEEDED(hr))
+            hr = DxgiDevice->GetAdapter(&Adapter);
+    }
 
     for (Index = 0; SUCCEEDED(hr) && SUCCEEDED(Adapter->EnumOutputs(Index, &Output)); Index++)
     {
@@ -1335,9 +1606,9 @@ RxSwapChain::Present1(
 {
     /*
      * A sequential flip swapchain only redraws what the rects name; the rest of the frame
-     * comes from the buffer presented last, like on Windows.
+     * comes from the buffer presented last, like on Windows. Direct3D 12 copies nothing.
      */
-    if (pPresentParameters != nullptr && Desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL &&
+    if (pPresentParameters != nullptr && Desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL && !IsDirect3D12() &&
         (PresentFlags & DXGI_PRESENT_TEST) == 0 && IsPreviousFrameValid && Buffers.size() > 1 &&
         (pPresentParameters->DirtyRectsCount != 0 || pPresentParameters->pScrollRect != nullptr))
     {
@@ -1661,17 +1932,15 @@ RxSwapChain::ResizeBuffers1(
     _In_reads_(BufferCount) const UINT* pCreationNodeMask,
     _In_reads_(BufferCount) IUnknown* const* ppPresentQueue)
 {
-    UNREFERENCED_PARAMETER(Width);
-    UNREFERENCED_PARAMETER(Height);
-    UNREFERENCED_PARAMETER(Format);
-    UNREFERENCED_PARAMETER(SwapChainFlags);
-    UNREFERENCED_PARAMETER(pCreationNodeMask);
-    UNREFERENCED_PARAMETER(ppPresentQueue);
-
     /* Per node queues are a Direct3D 12 feature; D3D11 swapchains always refuse */
-    if (BufferCount > DXGI_MAX_SWAP_CHAIN_BUFFERS)
-        return E_INVALIDARG;
-    return DXGI_ERROR_INVALID_CALL;
+    if (!IsDirect3D12())
+    {
+        if (BufferCount > DXGI_MAX_SWAP_CHAIN_BUFFERS)
+            return E_INVALIDARG;
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    return Resize(BufferCount, Width, Height, Format, SwapChainFlags, TRUE, pCreationNodeMask, ppPresentQueue);
 }
 
 HRESULT
@@ -1762,8 +2031,8 @@ UINT
 STDMETHODCALLTYPE
 RxSwapChain::GetCurrentBackBufferIndex(VOID)
 {
-    /* D3D11 buffers trade identities on present, so buffer 0 is always the one to draw to */
-    return 0;
+    /* D3D11 buffers trade identities on present, so buffer 0 is always the one to draw to; D3D12 ones do not */
+    return BackBufferIndex();
 }
 
 /* The composition face */

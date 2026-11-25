@@ -63,6 +63,10 @@ private:
 struct RxRuntimeResource12
 {
     D3DKMT_HANDLE KmResource;
+
+    /* Set while a swapchain buffer is created: its kernel resource is made shared with this record */
+    const VOID* SharedRecord;
+    UINT SharedRecordSize;
 };
 
 /* What the driver gets as a runtime paging queue handle */

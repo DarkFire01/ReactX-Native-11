@@ -30,6 +30,7 @@ nt_add_usermode_dll(d3d12core
         indirect.cpp
         library.cpp
         fence_stubs.cpp
+        present.cpp
         queue.cpp
         queue_stubs.cpp
         raytracing.cpp

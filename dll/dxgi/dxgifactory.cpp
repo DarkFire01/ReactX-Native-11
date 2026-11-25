@@ -654,6 +654,7 @@ RxGetSystemFactory(VOID)
     {
         WCHAR Path[MAX_PATH];
         HMODULE System;
+        HMODULE Self = NULL;
         decltype(&CreateDXGIFactory2) Create;
         IDXGIFactory2* Created = nullptr;
         UINT Length;
@@ -665,6 +666,16 @@ RxGetSystemFactory(VOID)
         System = LoadLibraryExW(Path, NULL, 0);
         if (System == NULL)
             return (IDXGIFactory2*)nullptr;
+
+        /* Where this runtime is the system DXGI, as on ReactOS, forwarding would only come back here */
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&RxGetSystemFactory), &Self);
+        if (System == Self)
+        {
+            RX_TRACE(L"the system DXGI is this runtime; devices from other runtimes get no swapchain");
+            FreeLibrary(System);
+            return (IDXGIFactory2*)nullptr;
+        }
 
         Create = reinterpret_cast<decltype(&CreateDXGIFactory2)>(GetProcAddress(System, "CreateDXGIFactory2"));
         if (Create == nullptr || FAILED(Create(0, IID_PPV_ARGS(&Created))))

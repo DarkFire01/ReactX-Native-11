@@ -155,8 +155,10 @@ RxWaitForInterval(
 }
 
 HRESULT
-RxSwapChain::PresentGdi(
-    _In_ UINT SyncInterval)
+RxSwapChain::ReadBackBuffer11(
+    _Out_ std::vector<UINT>* Pixels,
+    _Out_ UINT* Width,
+    _Out_ UINT* Height)
 {
     ID3D11Texture2D* Source = nullptr;
     ID3D11Device* D3dDevice = nullptr;
@@ -164,16 +166,12 @@ RxSwapChain::PresentGdi(
     ID3D11Resource* Readable;
     D3D11_TEXTURE2D_DESC TextureDesc;
     D3D11_TEXTURE2D_DESC CopyDesc;
-    D3D11_MAPPED_SUBRESOURCE Mapped;
-    BITMAPINFO Info = {};
-    std::vector<UINT> Pixels;
-    RECT Client;
+    D3D11_MAPPED_SUBRESOURCE Mapped = {};
     HRESULT hr;
-    HDC Dc;
     UINT Y;
 
-    if (IsIconic(Window) || !IsWindowVisible(Window))
-        return DXGI_STATUS_OCCLUDED;
+    *Width = 0;
+    *Height = 0;
 
     hr = Buffers[0]->QueryInterface(IID_PPV_ARGS(&Source));
     if (FAILED(hr))
@@ -220,11 +218,11 @@ RxSwapChain::PresentGdi(
 
     if (SUCCEEDED(hr))
     {
-        Pixels.resize((SIZE_T)TextureDesc.Width * TextureDesc.Height);
+        Pixels->resize((SIZE_T)TextureDesc.Width * TextureDesc.Height);
         for (Y = 0; Y < TextureDesc.Height; Y++)
         {
             if (!RxConvertRowToBgra(TextureDesc.Format, static_cast<const BYTE*>(Mapped.pData) + (SIZE_T)Y * Mapped.RowPitch,
-                                    &Pixels[(SIZE_T)Y * TextureDesc.Width], TextureDesc.Width))
+                                    &(*Pixels)[(SIZE_T)Y * TextureDesc.Width], TextureDesc.Width))
             {
                 hr = DXGI_ERROR_UNSUPPORTED;
                 break;
@@ -242,10 +240,43 @@ RxSwapChain::PresentGdi(
         return hr;
     }
 
+    *Width = TextureDesc.Width;
+    *Height = TextureDesc.Height;
+    return S_OK;
+}
+
+HRESULT
+RxSwapChain::PresentGdi(
+    _In_ UINT SyncInterval)
+{
+    BITMAPINFO Info = {};
+    std::vector<UINT> Pixels;
+    RECT Client;
+    UINT Width;
+    UINT Height;
+    HRESULT hr;
+    HDC Dc;
+
+    if (IsIconic(Window) || !IsWindowVisible(Window))
+        return DXGI_STATUS_OCCLUDED;
+
+    if (IsDirect3D12())
+    {
+        hr = RxReadBuffer12(PresenterOf(BackBufferIndex()), Buffers[BackBufferIndex()], &Pixels, &Width, &Height);
+        if (FAILED(hr))
+            RX_TRACE(L"GDI present of a Direct3D 12 buffer failed 0x%08lX", hr);
+    }
+    else
+    {
+        hr = ReadBackBuffer11(&Pixels, &Width, &Height);
+    }
+    if (FAILED(hr))
+        return hr;
+
     /* The window's client area takes the frame, stretched as the swapchain's scaling would */
     Info.bmiHeader.biSize = sizeof(Info.bmiHeader);
-    Info.bmiHeader.biWidth = TextureDesc.Width;
-    Info.bmiHeader.biHeight = -(LONG)TextureDesc.Height;
+    Info.bmiHeader.biWidth = Width;
+    Info.bmiHeader.biHeight = -(LONG)Height;
     Info.bmiHeader.biPlanes = 1;
     Info.bmiHeader.biBitCount = 32;
     Info.bmiHeader.biCompression = BI_RGB;
@@ -258,17 +289,17 @@ RxSwapChain::PresentGdi(
     RxWaitForInterval(this, SyncInterval);
     if (Desc.Scaling == DXGI_SCALING_NONE)
     {
-        SetDIBitsToDevice(Dc, 0, 0, TextureDesc.Width, TextureDesc.Height, 0, 0, 0, TextureDesc.Height, Pixels.data(),
-                          &Info, DIB_RGB_COLORS);
+        SetDIBitsToDevice(Dc, 0, 0, Width, Height, 0, 0, 0, Height, Pixels.data(), &Info, DIB_RGB_COLORS);
     }
     else
     {
         SetStretchBltMode(Dc, COLORONCOLOR);
-        StretchDIBits(Dc, 0, 0, Client.right - Client.left, Client.bottom - Client.top, 0, 0, TextureDesc.Width,
-                      TextureDesc.Height, Pixels.data(), &Info, DIB_RGB_COLORS, SRCCOPY);
+        StretchDIBits(Dc, 0, 0, Client.right - Client.left, Client.bottom - Client.top, 0, 0, Width, Height,
+                      Pixels.data(), &Info, DIB_RGB_COLORS, SRCCOPY);
     }
     ReleaseDC(Window, Dc);
 
+    AdvanceBackBuffer();
     PresentCount++;
     if (LatencySemaphore != NULL)
         ReleaseSemaphore(LatencySemaphore, 1, nullptr);

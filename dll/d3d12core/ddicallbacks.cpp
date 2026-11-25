@@ -191,6 +191,18 @@ RxAllocateCb0022(
             Create.hResource = Resource->KmResource;
     }
 
+    /* A swapchain buffer is shared by NT handle with the compositor, which reads its record */
+    if (Resource != nullptr && Resource->SharedRecord != nullptr && Create.Flags.CreateResource)
+    {
+        Create.Flags.CreateShared = TRUE;
+        Create.Flags.NtSecuritySharing = TRUE;
+        Create.Flags.NonSecure = TRUE;
+        Create.Flags.RestrictSharedAccess = TRUE;
+        Create.Flags.SwapChainBackBuffer = TRUE;
+        Create.pPrivateRuntimeData = Resource->SharedRecord;
+        Create.PrivateRuntimeDataSize = Resource->SharedRecordSize;
+    }
+
     Status = Kmt->CreateAllocation2(&Create);
     if (!NT_SUCCESS(Status))
     {

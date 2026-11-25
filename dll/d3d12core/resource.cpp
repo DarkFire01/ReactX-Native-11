@@ -585,9 +585,14 @@ RxResource::Initialize(
     if (DriverHeap.pDrvPrivate == nullptr || DriverResource.pDrvPrivate == nullptr)
         return E_OUTOFMEMORY;
 
+    /* The kernel resource is made with the first allocation, so the record is only needed during the call */
     RuntimeHandle.handle = &Runtime;
+    Runtime.SharedRecord = Start.SharedRecord;
+    Runtime.SharedRecordSize = Start.SharedRecordSize;
     hr = Ddi.pfnCreateHeapAndResource(Device.Handle(), &DdiHeap, DriverHeap, RuntimeHandle, &DdiResource,
                                       ClearValue != nullptr ? &DdiClear : nullptr, NoSession, DriverResource);
+    Runtime.SharedRecord = nullptr;
+    Runtime.SharedRecordSize = 0;
     if (FAILED(hr))
     {
         RX_TRACE(L"driver CreateHeapAndResource failed 0x%08lX", hr);

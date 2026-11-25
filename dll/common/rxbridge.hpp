@@ -191,3 +191,18 @@ struct __declspec(uuid("3c8a5e71-94d2-4f06-b1e8-6d27a0c45f93")) IRxPresentDevice
     IsBufferDcHeld(
         _In_ IUnknown* Buffer) = 0;
 };
+
+/*
+ * A ReactX Direct3D 12 command queue answers QueryInterface for this and for IRxPresentDevice.
+ * Buffers are ID3D12Resource objects that keep their identities; PresentFlip and SubmitPresent
+ * run the driver's present on the queue after the work already submitted to it, and
+ * RotateBuffers, CopyBufferRegions and the primary buffer calls are not supported.
+ */
+struct __declspec(uuid("b6e0d2a4-5f17-4c83-9e3b-71a4c8d20e95")) IRxPresentQueue : public IRxPresentDevice
+{
+    /* Blocks until the GPU finished everything submitted to the queue so far */
+    virtual
+    HRESULT
+    STDMETHODCALLTYPE
+    WaitForIdle() = 0;
+};

@@ -104,6 +104,38 @@ RxSampleMapped(
     return Center;
 }
 
+/* Creates reactx-frame-<n>.bmp with its headers written; the caller writes the rows, top first */
+static
+HANDLE
+RxCreateBitmap(
+    _In_ UINT Width,
+    _In_ UINT Height,
+    _In_ UINT PresentNumber)
+{
+    BITMAPFILEHEADER FileHeader = {};
+    BITMAPINFOHEADER InfoHeader = {};
+    WCHAR Path[MAX_PATH];
+    HANDLE File;
+    DWORD Written;
+
+    swprintf_s(Path, L"%sreactx-frame-%u.bmp", DumpDirectory, PresentNumber);
+    File = CreateFileW(Path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (File == INVALID_HANDLE_VALUE)
+        return File;
+
+    InfoHeader.biSize = sizeof(InfoHeader);
+    InfoHeader.biWidth = Width;
+    InfoHeader.biHeight = -(LONG)Height;
+    InfoHeader.biPlanes = 1;
+    InfoHeader.biBitCount = 32;
+    FileHeader.bfType = 0x4D42;
+    FileHeader.bfOffBits = sizeof(FileHeader) + sizeof(InfoHeader);
+    FileHeader.bfSize = FileHeader.bfOffBits + Width * Height * 4;
+    WriteFile(File, &FileHeader, sizeof(FileHeader), &Written, nullptr);
+    WriteFile(File, &InfoHeader, sizeof(InfoHeader), &Written, nullptr);
+    return File;
+}
+
 static
 VOID
 RxWriteBitmap(
@@ -111,29 +143,14 @@ RxWriteBitmap(
     _In_ const D3D11_TEXTURE2D_DESC& Desc,
     _In_ UINT PresentNumber)
 {
-    BITMAPFILEHEADER FileHeader = {};
-    BITMAPINFOHEADER InfoHeader = {};
     std::vector<UINT> Row(Desc.Width);
-    WCHAR Path[MAX_PATH];
     HANDLE File;
     DWORD Written;
     UINT Y;
 
-    swprintf_s(Path, L"%sreactx-frame-%u.bmp", DumpDirectory, PresentNumber);
-    File = CreateFileW(Path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    File = RxCreateBitmap(Desc.Width, Desc.Height, PresentNumber);
     if (File == INVALID_HANDLE_VALUE)
         return;
-
-    InfoHeader.biSize = sizeof(InfoHeader);
-    InfoHeader.biWidth = Desc.Width;
-    InfoHeader.biHeight = -(LONG)Desc.Height;
-    InfoHeader.biPlanes = 1;
-    InfoHeader.biBitCount = 32;
-    FileHeader.bfType = 0x4D42;
-    FileHeader.bfOffBits = sizeof(FileHeader) + sizeof(InfoHeader);
-    FileHeader.bfSize = FileHeader.bfOffBits + Desc.Width * Desc.Height * 4;
-    WriteFile(File, &FileHeader, sizeof(FileHeader), &Written, nullptr);
-    WriteFile(File, &InfoHeader, sizeof(InfoHeader), &Written, nullptr);
 
     for (Y = 0; Y < Desc.Height; Y++)
     {
@@ -399,4 +416,46 @@ Done:
     Context->Release();
     Device->Release();
     Source->Release();
+}
+
+VOID
+RxDumpFrame12(
+    _In_ IUnknown* Queue,
+    _In_ IUnknown* Buffer,
+    _In_ UINT PresentNumber)
+{
+    std::vector<UINT> Pixels;
+    BOOLEAN Wanted = FALSE;
+    HANDLE File;
+    DWORD Written;
+    UINT Width;
+    UINT Height;
+    UINT Lit = 0;
+    HRESULT hr;
+
+    InitOnceExecuteOnce(&DumpOnce, RxReadDumpSettings, nullptr, nullptr);
+    for (UINT Frame : DumpFrames)
+        Wanted |= Frame == PresentNumber;
+    if (!Wanted)
+        return;
+
+    /* The copy runs on the queue after the frame's own work, so it sees the finished frame */
+    hr = RxReadBuffer12(Queue, Buffer, &Pixels, &Width, &Height);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"dump %u: Direct3D 12 buffer could not be read 0x%08lX", PresentNumber, hr);
+        return;
+    }
+
+    File = RxCreateBitmap(Width, Height, PresentNumber);
+    if (File == INVALID_HANDLE_VALUE)
+        return;
+
+    WriteFile(File, Pixels.data(), Width * Height * 4, &Written, nullptr);
+    CloseHandle(File);
+
+    for (UINT Pixel : Pixels)
+        Lit += (Pixel & 0x00FFFFFF) != 0;
+    RX_TRACE(L"dumped Direct3D 12 present %u (%ux%u, center 0x%08X, %u lit)", PresentNumber, Width, Height,
+             Pixels[(SIZE_T)(Height / 2) * Width + Width / 2], Lit);
 }

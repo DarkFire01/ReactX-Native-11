@@ -243,6 +243,51 @@ private:
     BOOLEAN
     AreBuffersReleased();
 
+    /* Direct3D 12: buffers keep their identities and the back buffer index moves on each present */
+    BOOLEAN
+    IsDirect3D12() const
+    {
+        return Queue != nullptr;
+    }
+
+    /* The buffer the application draws the next frame into */
+    UINT
+    BackBufferIndex() const
+    {
+        return IsDirect3D12() ? CurrentIndex : 0;
+    }
+
+    /* The device or queue a buffer is presented through */
+    IRxPresentDevice*
+    PresenterOf(
+        _In_ UINT Index) const
+    {
+        return Index < BufferQueues.size() ? BufferQueues[Index] : Device;
+    }
+
+    /* A Direct3D 12 present moves the back buffer index the way flip model rotation would */
+    VOID
+    AdvanceBackBuffer();
+
+    /* Waits for the GPU to be done with the buffers on every queue they were presented on */
+    VOID
+    WaitForPresentQueues();
+
+    VOID
+    ReleaseBufferQueues();
+
+    /* ResizeBuffers, and ResizeBuffers1 when IsPerQueue names a queue and node for each buffer */
+    HRESULT
+    Resize(
+        _In_ UINT BufferCount,
+        _In_ UINT Width,
+        _In_ UINT Height,
+        _In_ DXGI_FORMAT NewFormat,
+        _In_ UINT SwapChainFlags,
+        _In_ BOOLEAN IsPerQueue,
+        _In_reads_opt_(BufferCount) const UINT* NodeMasks,
+        _In_reads_opt_(BufferCount) IUnknown* const* Queues);
+
     /* Asks DWM for the window's surface and opens it when it changed */
     Redirection
     PrepareRedirection(
@@ -284,10 +329,23 @@ private:
     VOID
     ReleaseGdiCopies();
 
+    /* The D3D11 back buffer as BGRA rows, through copies kept until the buffers change */
+    HRESULT
+    ReadBackBuffer11(
+        _Out_ std::vector<UINT>* Pixels,
+        _Out_ UINT* Width,
+        _Out_ UINT* Height);
+
     LONG RefCount = 1;
     RxDxgiFactory& Factory;
     IRxPresentDevice* Device;
     LUID AdapterLuid = {};
+
+    /* The Direct3D 12 queue the swapchain was made with, held through Device; NULL for D3D11 */
+    IRxPresentQueue* Queue = nullptr;
+
+    /* The queue each Direct3D 12 buffer presents on after ResizeBuffers1, referenced; empty means Device */
+    std::vector<IRxPresentDevice*> BufferQueues;
 
     /* Blt presents are marked cross adapter when the adapter can share resources that way */
     BOOLEAN IsCrossAdapter = FALSE;
@@ -359,6 +417,25 @@ VOID
 RxDumpFrame(
     _In_ IUnknown* Buffer,
     _In_ UINT PresentNumber);
+
+/* The same for a Direct3D 12 buffer, read back on the queue it is presented on */
+VOID
+RxDumpFrame12(
+    _In_ IUnknown* Queue,
+    _In_ IUnknown* Buffer,
+    _In_ UINT PresentNumber);
+
+/*
+ * Copies a Direct3D 12 buffer to memory as 32 bit BGRA rows, after the work already on the queue.
+ * Pixels gets Width * Height values.
+ */
+HRESULT
+RxReadBuffer12(
+    _In_ IUnknown* Queue,
+    _In_ IUnknown* Buffer,
+    _Out_ std::vector<UINT>* Pixels,
+    _Out_ UINT* Width,
+    _Out_ UINT* Height);
 
 /* How present=window or present=gdi in reactx.ini overrides the normal choice */
 enum class RxPresentOverride

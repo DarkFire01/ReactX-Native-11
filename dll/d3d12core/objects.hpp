@@ -9,6 +9,7 @@
 
 #include "device.hpp"
 #include "rootsignature.hpp"
+#include "rxbridge.hpp"
 
 class RxCommandAllocator;
 class RxResource;
@@ -121,6 +122,164 @@ private:
     UINT ContextCount = 0;
 };
 
+class RxCommandQueue;
+class RxCommandList;
+class RxFence;
+
+/* Recordings a queue keeps for driver presents, each reused once the GPU has run it */
+constexpr UINT RxPresentRecordings12 = 4;
+
+/* The queue as the ReactX dxgi.dll sees it; lifetime and QueryInterface stay with the queue */
+class RxQueuePresent final : public IRxPresentQueue
+{
+public:
+    explicit RxQueuePresent(
+        _In_ RxCommandQueue& Owner)
+        : Queue(Owner)
+    {
+    }
+
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override;
+
+    ULONG
+    STDMETHODCALLTYPE
+    AddRef(VOID) override;
+
+    ULONG
+    STDMETHODCALLTYPE
+    Release(VOID) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetAdapterLuid(
+        _Out_ LUID* Luid) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    CreatePresentBuffer(
+        _In_ const DXGI_SWAP_CHAIN_DESC1* Desc,
+        _In_ IUnknown* Parent,
+        _COM_Outptr_ IUnknown** Buffer) override;
+
+    VOID
+    STDMETHODCALLTYPE
+    DetachPresentBuffer(
+        _In_ IUnknown* Buffer) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    OpenPresentTarget(
+        _In_ HANDLE SharedHandle,
+        _COM_Outptr_ IUnknown** Target) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    ShareBuffer(
+        _In_ IUnknown* Buffer,
+        _Out_ HANDLE* SharedHandle) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    CreateFlipFence(
+        _Out_ UINT* Fence,
+        _Out_ HANDLE* SharedHandle) override;
+
+    VOID
+    STDMETHODCALLTYPE
+    DestroyFlipFence(
+        _In_ UINT Fence) override;
+
+    HANDLE
+    STDMETHODCALLTYPE
+    GetPresentLimitSemaphore() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    PresentFlip(
+        _In_ IUnknown* Buffer,
+        _In_ RxPresentContext* Context) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    RotateBuffers(
+        _In_reads_(Count) IUnknown* const* Buffers,
+        _In_ UINT Count) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    SubmitPresent(
+        _In_ IUnknown* Buffer,
+        _In_opt_ IUnknown* Target,
+        _In_ RxPresentContext* Context) override;
+
+    D3DKMT_HANDLE
+    STDMETHODCALLTYPE
+    GetKernelDevice() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    CreatePrimaryBuffer(
+        _In_ const DXGI_SWAP_CHAIN_DESC1* Desc,
+        _In_ const DXGI_DDI_PRIMARY_DESC* PrimaryDesc,
+        _In_ IUnknown* Parent,
+        _COM_Outptr_ IUnknown** Buffer) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    SetDisplaySurface(
+        _In_ IUnknown* Buffer) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    PresentPrimary(
+        _In_ IUnknown* Buffer,
+        _In_ UINT FlipInterval,
+        _In_ RxPresentContext* Context) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    CopyBufferRegions(
+        _In_ IUnknown* Destination,
+        _In_ IUnknown* Source,
+        _In_reads_(Count) const RECT* Rects,
+        _In_ UINT Count,
+        _In_ POINT Offset) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetRemovedReason() override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    BltToTarget(
+        _In_ IUnknown* Buffer,
+        _In_ IUnknown* Target,
+        _In_ const RECT* DestRect) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    GetTargetSize(
+        _In_ IUnknown* Target,
+        _Out_ UINT* Width,
+        _Out_ UINT* Height) override;
+
+    BOOL
+    STDMETHODCALLTYPE
+    IsBufferDcHeld(
+        _In_ IUnknown* Buffer) override;
+
+    HRESULT
+    STDMETHODCALLTYPE
+    WaitForIdle() override;
+
+private:
+    RxCommandQueue& Queue;
+};
+
 class RxCommandQueue final : public RxDeviceChild12<ID3D12CommandQueue>
 {
 public:
@@ -177,9 +336,57 @@ public:
         _In_ D3D12DDI_HRTCOMMANDQUEUE hRTCommandQueue,
         _Inout_ D3DDDICB_CREATEHWQUEUE* Args);
 
+    /* Swapchain presents, see present.cpp */
+    HRESULT
+    SubmitSwapChainPresent(
+        _In_ RxResource& Buffer,
+        _Inout_ RxPresentContext& Context);
+
+    HRESULT
+    WaitForIdle();
+
+    HANDLE
+    GetPresentLimitSemaphore();
+
 private:
+    /* One recording of a driver present and the fence value its GPU work finishes at */
+    struct PresentRecording
+    {
+        RxCommandAllocator* Allocator;
+        UINT64 FenceValue;
+    };
+
     using RxDeviceChild12::RxDeviceChild12;
     ~RxCommandQueue() override;
+
+    /* The objects presents record and wait with, made on the first present */
+    HRESULT
+    PreparePresentObjects();
+
+    /* Opens the present list on a recording the GPU is done with */
+    HRESULT
+    BeginPresentRecording(
+        _Outptr_ PresentRecording** Recording);
+
+    HRESULT
+    SubmitKernelPresent(
+        _Inout_ RxPresentContext& Context,
+        _In_ const D3D12DDIARG_PRESENT_0001& Args,
+        _In_ const D3D12DDI_PRESENT_0051& Result,
+        _In_ const D3D12DDI_PRESENT_CONTEXTS_0051& Engines,
+        _In_ const D3D12DDI_PRESENT_HWQUEUES_0051& Queues);
+
+    /* Signals the present fence after the work queued so far and returns the value */
+    HRESULT
+    SignalPresentFence(
+        _Out_ UINT64* Value);
+
+    HRESULT
+    WaitForPresentFence(
+        _In_ UINT64 Value);
+
+    VOID
+    ReleasePresentObjects();
 
     HRESULT
     Initialize(
@@ -209,6 +416,21 @@ private:
     D3DKMT_HANDLE HwQueues[RxMaxQueueEngines12] = {};
     UINT HwQueueCount = 0;
     SRWLOCK Lock = SRWLOCK_INIT;
+
+    /* Swapchain presents: the list the driver records them into and what it waits on */
+    RxQueuePresent PresentFace{ *this };
+    SRWLOCK PresentLock = SRWLOCK_INIT;
+    RxCommandList* PresentList = nullptr;
+    RxFence* PresentFence = nullptr;
+    UINT64 PresentFenceValue = 0;
+    PresentRecording Recordings[RxPresentRecordings12] = {};
+    UINT NextRecording = 0;
+    BYTE* PresentDriverData = nullptr;
+    UINT PresentDriverDataSize = 0;
+
+    /* What the kernel said about composition at the last present; the driver hears it with the next */
+    BOOLEAN OptimizeForComposition = TRUE;
+    HANDLE LimitSemaphore = NULL;
 };
 
 class RxCommandAllocator final : public RxDeviceChild12<ID3D12CommandAllocator>
@@ -332,6 +554,15 @@ public:
     {
         return Error;
     }
+
+    /* Has the driver record a swapchain present for a queue into this open list */
+    VOID
+    RecordPresent(
+        _In_ D3D12DDI_HCOMMANDQUEUE Queue,
+        _In_ const D3D12DDIARG_PRESENT_0001& Args,
+        _Out_ D3D12DDI_PRESENT_0051* Result,
+        _Out_opt_ D3D12DDI_PRESENT_CONTEXTS_0051* Contexts,
+        _Out_opt_ D3D12DDI_PRESENT_HWQUEUES_0051* HwQueues);
 
     static
     VOID
@@ -633,6 +864,10 @@ struct RxResourceStart12
     D3D12DDI_BARRIER_LAYOUT Layout;
     UINT32 NumCastableFormats;
     const DXGI_FORMAT* CastableFormats;
+
+    /* Swapchain buffers only: the record their kernel resource is shared with */
+    const VOID* SharedRecord;
+    UINT SharedRecordSize;
 };
 
 /* The layout a resource made with an API state starts in */
