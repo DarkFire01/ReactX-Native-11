@@ -7,6 +7,7 @@ nt_add_usermode_dll(d3d12core
         commandlist.cpp
         commandlist_draw.cpp
         commandlist_pass.cpp
+        commandlist_program.cpp
         commandlist_state.cpp
         commandlist_stubs.cpp
         coremain.cpp
@@ -20,6 +21,7 @@ nt_add_usermode_dll(d3d12core
         devicecreate.cpp
         devicefactory.cpp
         dxillibrary.cpp
+        existingheap.cpp
         feedbackview.cpp
         features.cpp
         formatlayout12.cpp
@@ -37,6 +39,7 @@ nt_add_usermode_dll(d3d12core
         residency.cpp
         resource.cpp
         resource_stubs.cpp
+        resourcedata.cpp
         resourcevalidate.cpp
         pipeline.cpp
         pipelinestream.cpp
@@ -44,10 +47,20 @@ nt_add_usermode_dll(d3d12core
         rootsigobject.cpp
         schedulinggroup.cpp
         shadercache.cpp
+        shadersession.cpp
         session.cpp
+        sharedopen.cpp
         sharing.cpp
         tiles.cpp
+        video.cpp
+        videocaps.cpp
+        videodecode.cpp
+        videoencode.cpp
+        videolist.cpp
+        videoprocess.cpp
         stateobject.cpp
+        swizzle12.cpp
+        workgraph.cpp
         views.cpp)
 target_link_libraries(d3d12core PRIVATE rxcommon ole32 advapi32 dxguid synchronization)
 target_include_directories(d3d12core PRIVATE "${RX_INTERNAL_SHADERS_DIR}")

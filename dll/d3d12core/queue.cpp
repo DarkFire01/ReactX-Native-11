@@ -6,6 +6,7 @@
  */
 
 #include "objects.hpp"
+#include "video.hpp"
 
 /* Context flags a driver may ask for; anything at or above this is reserved */
 constexpr UINT RxReservedContextFlags = 0x80;
@@ -426,6 +427,10 @@ RxCommandQueue::ExecuteCommandLists(
     {
         RxCommandList* List = RxUnwrap12<RxCommandList>(ppCommandLists[Index]);
 
+        /* Video lists are their own objects */
+        if (List == nullptr && RxVideoListForQueue12(ppCommandLists[Index], Desc.Type, &Handles[Index]))
+            continue;
+
         if (List == nullptr || List->IsRecording() || FAILED(List->GetError()) || List->GetType() != Desc.Type)
         {
             RX_TRACE(L"ExecuteCommandLists: list %u can not run on this queue", Index);
@@ -438,7 +443,7 @@ RxCommandQueue::ExecuteCommandLists(
     }
 
     AcquireSRWLockExclusive(&Lock);
-    Device.QueueDdi().pfnExecuteCommandLists(DriverQueue, NumCommandLists, Handles);
+    RxExecuteEntry12(Device, Desc.Type)(DriverQueue, NumCommandLists, Handles);
     ReleaseSRWLockExclusive(&Lock);
 
     if (Handles != Stack)

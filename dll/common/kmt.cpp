@@ -80,6 +80,8 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTQueryResourceInfoFromNtHandle", Kmt.QueryResourceInfoFromNtHandle);
     RxResolve(Gdi32, "D3DKMTOpenResourceFromNtHandle", Kmt.OpenResourceFromNtHandle);
     RxResolve(Gdi32, "D3DKMTOpenSyncObjectFromNtHandle2", Kmt.OpenSyncObjectFromNtHandle2);
+    RxResolve(Gdi32, "D3DKMTOpenNtHandleFromName", Kmt.OpenNtHandleFromName);
+    RxResolve(Gdi32, "D3DKMTOpenSyncObjectNtHandleFromName", Kmt.OpenSyncObjectNtHandleFromName);
     RxResolve(Gdi32, "D3DKMTCreateKeyedMutex2", Kmt.CreateKeyedMutex2);
     RxResolve(Gdi32, "D3DKMTOpenKeyedMutex2", Kmt.OpenKeyedMutex2);
     RxResolve(Gdi32, "D3DKMTDestroyKeyedMutex", Kmt.DestroyKeyedMutex);

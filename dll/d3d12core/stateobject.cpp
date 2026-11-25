@@ -18,38 +18,6 @@ constexpr UINT RxSkipFlags = D3D12_RAYTRACING_PIPELINE_FLAG_SKIP_TRIANGLES |
 /* What stack size queries answer when the driver is not asked */
 constexpr UINT64 RxNoStackSize = 0xFFFFFFFF;
 
-/* An array that grows inside an arena; the old storage stays until the arena goes */
-template <typename Type>
-class RxGrowList
-{
-public:
-    HRESULT
-    Push(
-        _In_ RxArena& Arena,
-        _In_ const Type& Value)
-    {
-        if (Count == Capacity)
-        {
-            UINT Larger = Capacity != 0 ? Capacity * 2 : 8;
-            Type* Wider = Arena.AllocateArray<Type>(Larger);
-
-            if (Wider == nullptr)
-                return E_OUTOFMEMORY;
-            if (Count != 0)
-                CopyMemory(Wider, Items, sizeof(*Items) * Count);
-            Items = Wider;
-            Capacity = Larger;
-        }
-
-        Items[Count++] = Value;
-        return S_OK;
-    }
-
-    Type* Items = nullptr;
-    UINT Count = 0;
-    UINT Capacity = 0;
-};
-
 /* Two associated subobjects that would mean the same to a shader */
 static
 BOOLEAN
@@ -208,6 +176,129 @@ RxRootsBind(
             break;
     }
     return TRUE;
+}
+
+/* One register range a root signature binds */
+struct RxRegisterSpan
+{
+    UINT Class;
+    UINT Space;
+    UINT First;
+    UINT64 Last;
+};
+
+static
+HRESULT
+RxAddSpan(
+    _In_ RxArena& Arena,
+    _Inout_ RxGrowList<RxRegisterSpan>* Spans,
+    _In_ UINT Class,
+    _In_ UINT Space,
+    _In_ UINT First,
+    _In_ UINT Count)
+{
+    RxRegisterSpan Span;
+
+    Span.Class = Class;
+    Span.Space = Space;
+    Span.First = First;
+    Span.Last = Count == UINT_MAX ? UINT64_MAX : (UINT64)First + Count - 1;
+    return Count == 0 ? S_OK : Spans->Push(Arena, Span);
+}
+
+static
+HRESULT
+RxListSpans(
+    _In_ RxArena& Arena,
+    _In_ const D3D12_ROOT_SIGNATURE_DESC2& Layout,
+    _Inout_ RxGrowList<RxRegisterSpan>* Spans)
+{
+    HRESULT hr = S_OK;
+
+    for (UINT Index = 0; Index < Layout.NumParameters && SUCCEEDED(hr); Index++)
+    {
+        const D3D12_ROOT_PARAMETER1& Parameter = Layout.pParameters[Index];
+
+        switch (Parameter.ParameterType)
+        {
+            case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+                for (UINT Range = 0; Range < Parameter.DescriptorTable.NumDescriptorRanges && SUCCEEDED(hr); Range++)
+                {
+                    const D3D12_DESCRIPTOR_RANGE1& Each = Parameter.DescriptorTable.pDescriptorRanges[Range];
+
+                    hr = RxAddSpan(Arena, Spans, (UINT)Each.RangeType, Each.RegisterSpace, Each.BaseShaderRegister,
+                                   Each.NumDescriptors);
+                }
+                break;
+
+            case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+                hr = RxAddSpan(Arena, Spans, RxDxilClassCbv, Parameter.Constants.RegisterSpace,
+                               Parameter.Constants.ShaderRegister, 1);
+                break;
+
+            case D3D12_ROOT_PARAMETER_TYPE_CBV:
+                hr = RxAddSpan(Arena, Spans, RxDxilClassCbv, Parameter.Descriptor.RegisterSpace,
+                               Parameter.Descriptor.ShaderRegister, 1);
+                break;
+
+            case D3D12_ROOT_PARAMETER_TYPE_SRV:
+                hr = RxAddSpan(Arena, Spans, RxDxilClassSrv, Parameter.Descriptor.RegisterSpace,
+                               Parameter.Descriptor.ShaderRegister, 1);
+                break;
+
+            case D3D12_ROOT_PARAMETER_TYPE_UAV:
+                hr = RxAddSpan(Arena, Spans, RxDxilClassUav, Parameter.Descriptor.RegisterSpace,
+                               Parameter.Descriptor.ShaderRegister, 1);
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    for (UINT Index = 0; Index < Layout.NumStaticSamplers && SUCCEEDED(hr); Index++)
+    {
+        hr = RxAddSpan(Arena, Spans, RxDxilClassSampler, Layout.pStaticSamplers[Index].RegisterSpace,
+                       Layout.pStaticSamplers[Index].ShaderRegister, 1);
+    }
+    return hr;
+}
+
+/* Local root signatures bind for every stage, so any register both bind is a conflict */
+static
+HRESULT
+RxCheckRootsCombine(
+    _In_ RxArena& Arena,
+    _In_ const RxRootSignature& Global,
+    _In_ const RxRootSignature& Local)
+{
+    RxGrowList<RxRegisterSpan> GlobalSpans;
+    RxGrowList<RxRegisterSpan> LocalSpans;
+    HRESULT hr;
+
+    hr = RxListSpans(Arena, Global.GetLayout(), &GlobalSpans);
+    if (SUCCEEDED(hr))
+        hr = RxListSpans(Arena, Local.GetLayout(), &LocalSpans);
+    if (FAILED(hr))
+        return hr;
+
+    for (UINT First = 0; First < GlobalSpans.Count; First++)
+    {
+        const RxRegisterSpan& One = GlobalSpans.Items[First];
+
+        for (UINT Second = 0; Second < LocalSpans.Count; Second++)
+        {
+            const RxRegisterSpan& Other = LocalSpans.Items[Second];
+
+            if (One.Class == Other.Class && One.Space == Other.Space && One.First <= Other.Last && Other.First <= One.Last)
+            {
+                RX_TRACE(L"state object: local and global root signatures both bind class %u register %u space %u",
+                         One.Class, Other.First > One.First ? Other.First : One.First, One.Space);
+                return E_INVALIDARG;
+            }
+        }
+    }
+    return S_OK;
 }
 
 /* A root signature for an RTS0 part, shared through the device cache; the reference is the caller's */
@@ -415,6 +506,13 @@ private:
     CheckShared();
 
     HRESULT
+    BuildWorkGraphs();
+
+    VOID
+    EmitApiEntry(
+        _In_ UINT Index);
+
+    HRESULT
     Emit();
 
     _Ret_maybenull_
@@ -468,6 +566,8 @@ private:
     RxGrowList<RxPendingAssociation> Pending;
     RxGrowList<RxRootSignature*> Roots;
     RxGrowList<RxStateObject*> Collections;
+    RxGrowList<UINT> GraphSubobjects;
+    RxGrowList<RxWorkGraph> Graphs;
 
     D3D12DDI_STATE_SUBOBJECT_0054* Entries = nullptr;
     UINT EntryCount = 0;
@@ -768,8 +868,9 @@ RxStateBuilder::AddFunction(
     _In_ UINT LibraryIndex)
 {
     RxFunctionExport Function = {};
+    BOOLEAN NodeShader = Source.Kind == RxDxilKindNode && Target.Type != D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
 
-    if (Source.Kind != RxDxilKindLibrary && !RxIsRaytracingShader(Source.Kind))
+    if (Source.Kind != RxDxilKindLibrary && !RxIsRaytracingShader(Source.Kind) && !NodeShader)
     {
         RX_TRACE(L"state object: export %ls is a kind %u shader, which raytracing state objects do not take", Name,
                  Source.Kind);
@@ -952,6 +1053,13 @@ RxStateBuilder::AddLibrary(
     {
         RX_TRACE(L"state object: DXIL library in subobject %u could not be read", Index);
         return hr == E_OUTOFMEMORY ? hr : E_INVALIDARG;
+    }
+
+    /* Preview shaders are never enabled here, so unsigned libraries fail like altered ones */
+    if (!Library->Code.IsSigned())
+    {
+        RX_TRACE(L"state object: DXIL library in subobject %u fails its hash check", Index);
+        return E_INVALIDARG;
     }
 
     /* Only library targets from 6.3 up to what the driver compiles */
@@ -1274,6 +1382,38 @@ RxStateBuilder::ReadSubobject(
         /* Associations wait until every export and subobject is known */
         case D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION:
         case D3D12_STATE_SUBOBJECT_TYPE_DXIL_SUBOBJECT_TO_EXPORTS_ASSOCIATION:
+            return S_OK;
+
+        /* Graphs are built once every node shader is known and resolved */
+        case D3D12_STATE_SUBOBJECT_TYPE_WORK_GRAPH:
+            if (Target.Type != D3D12_STATE_OBJECT_TYPE_EXECUTABLE)
+            {
+                RX_TRACE(L"state object: work graphs belong only in executable state objects");
+                return E_INVALIDARG;
+            }
+            return GraphSubobjects.Push(Scratch, Index);
+
+        /* Graphics state only a generic program would use; executable objects take it and leave it out */
+        case D3D12_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT:
+        case D3D12_STATE_SUBOBJECT_TYPE_BLEND:
+        case D3D12_STATE_SUBOBJECT_TYPE_SAMPLE_MASK:
+        case D3D12_STATE_SUBOBJECT_TYPE_RASTERIZER:
+        case D3D12_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL:
+        case D3D12_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT:
+        case D3D12_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE:
+        case D3D12_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY:
+        case D3D12_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS:
+        case D3D12_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT:
+        case D3D12_STATE_SUBOBJECT_TYPE_SAMPLE_DESC:
+        case D3D12_STATE_SUBOBJECT_TYPE_FLAGS:
+        case D3D12_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1:
+        case D3D12_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING:
+        case D3D12_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL2:
+            if (Target.Type != D3D12_STATE_OBJECT_TYPE_EXECUTABLE)
+            {
+                RX_TRACE(L"state object: subobject %u is graphics state outside an executable state object", Index);
+                return E_INVALIDARG;
+            }
             return S_OK;
 
         case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG:
@@ -1727,6 +1867,13 @@ RxStateBuilder::ResolveFunction(
 
     Global = RxFirstInSlot(Function, RxSlotGlobalRoot);
     Local = RxFirstInSlot(Function, RxSlotLocalRoot);
+    if (Global != nullptr && Global->Root != nullptr && Local != nullptr && Local->Root != nullptr)
+    {
+        hr = RxCheckRootsCombine(Scratch, *Global->Root, *Local->Root);
+        if (FAILED(hr))
+            return hr;
+    }
+
     for (UINT Index = 0; Index < Function.Source->BindingCount; Index++)
     {
         if (RxRootsBind(Global != nullptr ? Global->Root : nullptr, Local != nullptr ? Local->Root : nullptr,
@@ -1853,6 +2000,62 @@ RxStateBuilder::CheckShared()
     return S_OK;
 }
 
+/* Program names are unique within the object */
+HRESULT
+RxStateBuilder::BuildWorkGraphs()
+{
+    HRESULT hr;
+
+    for (UINT Each = 0; Each < GraphSubobjects.Count; Each++)
+    {
+        const D3D12_WORK_GRAPH_DESC* Api =
+            static_cast<const D3D12_WORK_GRAPH_DESC*>(Desc.pSubobjects[GraphSubobjects.Items[Each]].pDesc);
+        RxWorkGraph Graph;
+
+        hr = RxBuildWorkGraph(Arena, *Api, Functions.Count, Functions.Items, &Graph);
+        if (FAILED(hr))
+            return hr;
+
+        for (UINT Other = 0; Other < Graphs.Count; Other++)
+        {
+            if (wcscmp(Graphs.Items[Other].Name, Graph.Name) == 0)
+            {
+                RX_TRACE(L"state object: program %ls is defined twice", Graph.Name);
+                return E_INVALIDARG;
+            }
+        }
+
+        hr = Graphs.Push(Arena, Graph);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    Target.WorkGraphs = Graphs.Items;
+    Target.WorkGraphCount = Graphs.Count;
+    return S_OK;
+}
+
+/* A library, collection or hit group the desc gave, with the hit groups a library defines after it */
+VOID
+RxStateBuilder::EmitApiEntry(
+    _In_ UINT Index)
+{
+    Entries[EntryCount++] = ApiEntries[Index];
+    if (ApiEntries[Index].Type != D3D12DDI_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY)
+        return;
+
+    for (UINT Group = 0; Group < HitGroups.Count; Group++)
+    {
+        const RxHitGroupExport& Each = HitGroups.Items[Group];
+
+        if (Each.Owner == &Target && Each.LibraryIndex == ApiLibrary[Index])
+        {
+            Entries[EntryCount].Type = D3D12DDI_STATE_SUBOBJECT_TYPE_HIT_GROUP;
+            Entries[EntryCount++].pDesc = Each.Ddi;
+        }
+    }
+}
+
 _Ret_maybenull_
 const D3D12DDI_STATE_SUBOBJECT_0054*
 RxStateBuilder::EntryFor(
@@ -1889,7 +2092,7 @@ RxStateBuilder::Emit()
     D3D12DDI_FUNCTION_SUMMARY_0054* Summary;
     UINT Overall = 0;
 
-    EntryCapacity = Desc.NumSubobjects + HitGroups.Count + Records.Count + 1;
+    EntryCapacity = Desc.NumSubobjects + HitGroups.Count + Records.Count + Graphs.Count + 1;
     for (UINT Index = 0; Index < Functions.Count; Index++)
         EntryCapacity += Functions.Items[Index].AssociationCount;
 
@@ -1898,6 +2101,26 @@ RxStateBuilder::Emit()
     Summary = Arena.AllocateArray<D3D12DDI_FUNCTION_SUMMARY_0054>(1);
     if (Entries == nullptr || Nodes == nullptr || Summary == nullptr)
         return E_OUTOFMEMORY;
+
+    /* Executable objects lead with their code, then their programs, wherever the desc put them */
+    if (Target.Type == D3D12_STATE_OBJECT_TYPE_EXECUTABLE)
+    {
+        for (UINT Index = 0; Index < Desc.NumSubobjects; Index++)
+        {
+            if (ApiEntries[Index].Type == D3D12DDI_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY ||
+                ApiEntries[Index].Type == D3D12DDI_STATE_SUBOBJECT_TYPE_EXISTING_COLLECTION)
+            {
+                if (ApiEntries[Index].pDesc != nullptr)
+                    EmitApiEntry(Index);
+            }
+        }
+
+        for (UINT Graph = 0; Graph < Graphs.Count; Graph++)
+        {
+            Entries[EntryCount].Type = D3D12DDI_STATE_SUBOBJECT_TYPE_WORK_GRAPH;
+            Entries[EntryCount++].pDesc = Graphs.Items[Graph].Ddi;
+        }
+    }
 
     for (UINT Position = 0; Position < Desc.NumSubobjects; Position++)
     {
@@ -1911,21 +2134,14 @@ RxStateBuilder::Emit()
         }
         if (ApiEntries[Index].pDesc == nullptr)
             continue;
-
-        Entries[EntryCount++] = ApiEntries[Index];
-        if (ApiEntries[Index].Type != D3D12DDI_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY)
-            continue;
-
-        for (UINT Group = 0; Group < HitGroups.Count; Group++)
+        if (Target.Type == D3D12_STATE_OBJECT_TYPE_EXECUTABLE &&
+            (ApiEntries[Index].Type == D3D12DDI_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY ||
+             ApiEntries[Index].Type == D3D12DDI_STATE_SUBOBJECT_TYPE_EXISTING_COLLECTION))
         {
-            const RxHitGroupExport& Each = HitGroups.Items[Group];
-
-            if (Each.Owner == &Target && Each.LibraryIndex == ApiLibrary[Index])
-            {
-                Entries[EntryCount].Type = D3D12DDI_STATE_SUBOBJECT_TYPE_HIT_GROUP;
-                Entries[EntryCount++].pDesc = Each.Ddi;
-            }
+            continue;
         }
+
+        EmitApiEntry(Index);
     }
 
     for (UINT Index = 0; Index < Functions.Count; Index++)
@@ -2085,6 +2301,8 @@ RxStateBuilder::Build()
     if (SUCCEEDED(hr))
         hr = CheckShared();
     if (SUCCEEDED(hr))
+        hr = BuildWorkGraphs();
+    if (SUCCEEDED(hr))
         hr = Emit();
     if (SUCCEEDED(hr))
         hr = CreateDriverObject();
@@ -2105,12 +2323,8 @@ RxStateObject::Create(
 
     *Object = nullptr;
 
-    if (Desc.Type == D3D12_STATE_OBJECT_TYPE_EXECUTABLE)
-    {
-        RX_TRACE(L"state object: executable state objects are not implemented");
-        return E_NOTIMPL;
-    }
-    if (Desc.Type != D3D12_STATE_OBJECT_TYPE_COLLECTION && Desc.Type != D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE)
+    if (Desc.Type != D3D12_STATE_OBJECT_TYPE_COLLECTION && Desc.Type != D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE &&
+        Desc.Type != D3D12_STATE_OBJECT_TYPE_EXECUTABLE)
     {
         RX_TRACE(L"state object: type %d is not valid", Desc.Type);
         return E_INVALIDARG;
@@ -2188,6 +2402,13 @@ RxStateObject::QueryInterface(
     if (riid == __uuidof(ID3D12StateObjectProperties) || riid == __uuidof(ID3D12StateObjectProperties1))
     {
         *ppvObject = static_cast<ID3D12StateObjectProperties1*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    if (riid == __uuidof(ID3D12WorkGraphProperties))
+    {
+        *ppvObject = static_cast<ID3D12WorkGraphProperties*>(this);
         AddRef();
         return S_OK;
     }
@@ -2358,18 +2579,6 @@ RxStateObject::SetPipelineStackSize(
     if (PipelineStackSizeInBytes >= RxNoStackSize || Type != D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE)
         return;
     Device.Ddi().pfnSetPipelineStackSize(DriverObject, (UINT)PipelineStackSizeInBytes);
-}
-
-/* Programs exist only in executable state objects */
-D3D12_PROGRAM_IDENTIFIER
-STDMETHODCALLTYPE
-RxStateObject::GetProgramIdentifier(
-    LPCWSTR pProgramName)
-{
-    D3D12_PROGRAM_IDENTIFIER Identifier = {};
-
-    UNREFERENCED_PARAMETER(pProgramName);
-    return Identifier;
 }
 
 /* Device entry points */

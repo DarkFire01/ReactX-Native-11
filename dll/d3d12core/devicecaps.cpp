@@ -17,7 +17,7 @@ constexpr UINT RxFeatureVideo12 = D3D12DDI_FEATURE_0020_VIDEO;
 constexpr UINT RxFeatureSessions12 = D3D12DDI_FEATURE_0030_CONTENT_PROTECTION_RESOURCES;
 
 /* The newest versions this runtime knows of the features it drives */
-constexpr UINT RxNewestVideoVersion12 = D3D12DDI_FEATURE_VERSION_VIDEO_0113_0;
+constexpr UINT RxNewestVideoVersion12 = D3D12DDI_FEATURE_VERSION_VIDEO_0112_0;
 constexpr UINT RxNewestSessionVersion12 = D3D12DDI_FEATURE_VERSION_CONTENT_PROTECTION_RESOURCES_0074_0;
 
 /* A shader model as the DDI lists it: major in the high word, minor and a release nibble below */
@@ -392,6 +392,8 @@ RxDevice12::EnableExtendedFeatures()
         /* Drivers compile state objects through the runtime's shader cache; a driver that refuses it still works */
         if (Feature == D3D12DDI_FEATURE_0021_SHADERCACHING)
         {
+            if (DriverShaderCache == nullptr && FAILED(RxOpenDriverShaderCache12(*this, &DriverShaderCache)))
+                RX_TRACE(L"driver shader cache store could not be opened");
             if (FAILED(RxEnableShaderCache12(ExtendedFunctions, DriverDevice)))
                 RX_TRACE(L"driver shader cache could not be turned on");
             continue;

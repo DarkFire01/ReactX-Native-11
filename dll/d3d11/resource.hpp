@@ -10,6 +10,8 @@
 #include "devicechild.hpp"
 #include "dxgisurface.hpp"
 
+struct RxSharedRecord12;
+
 /* Private interface id: QueryInterface with it yields the DdiResource behind an API resource */
 DEFINE_GUID(IID_RxDdiResource, 0xf5c24dbd, 0x0949, 0x4fd0, 0xac, 0xb7, 0x7e, 0xb9, 0x9b, 0xd9, 0xbc, 0x22);
 
@@ -186,11 +188,12 @@ public:
         _In_ D3DKMT_HANDLE GlobalShare,
         _Out_opt_ RxSharedTextureRecord* Record = nullptr);
 
-    /* Opens a resource another process shared through an NT handle */
+    /* Opens a resource another process shared through an NT handle; Direct3D 12 parts of its record are optional */
     HRESULT
     OpenSharedNt(
         _In_ HANDLE NtHandle,
-        _Out_opt_ RxSharedTextureRecord* Record);
+        _Out_opt_ RxSharedTextureRecord* Record,
+        _Out_opt_ RxSharedRecord12* Record12 = nullptr);
 
     HRESULT
     CreateBuffer(

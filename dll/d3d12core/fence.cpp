@@ -54,17 +54,42 @@ RxFence::Create(
 }
 
 HRESULT
+RxFence::Open(
+    _In_ RxDevice12& Device,
+    _In_ HANDLE SharedHandle,
+    _Outptr_ RxFence** Fence)
+{
+    RxFence* Opened;
+    HRESULT hr;
+
+    *Fence = nullptr;
+
+    hr = Device.CheckUsable();
+    if (FAILED(hr))
+        return hr;
+
+    Opened = new (std::nothrow) RxFence(Device);
+    if (Opened == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Opened->InitializeOpened(SharedHandle);
+    if (FAILED(hr))
+    {
+        Opened->Release();
+        return hr;
+    }
+
+    *Fence = Opened;
+    return S_OK;
+}
+
+HRESULT
 RxFence::Initialize(
     _In_ UINT64 InitialValue,
     _In_ D3D12_FENCE_FLAGS FenceFlags)
 {
-    const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3DKMT_CREATESYNCHRONIZATIONOBJECT2 Create = {};
-    D3D12DDIARG_CREATE_FENCE_0116 Args = {};
-    D3D12DDIARG_CREATE_FENCE_0116 Sizing = {};
-    D3D12DDI_HRTFENCE Runtime;
     NTSTATUS Status;
-    HRESULT hr;
 
     Flags = FenceFlags;
 
@@ -89,8 +114,49 @@ RxFence::Initialize(
     SyncObject = Create.hSyncObject;
     CompletedValue = static_cast<volatile UINT64*>(Create.Info.MonitoredFence.FenceValueCPUVirtualAddress);
 
+    return CreateDriverFence(Create.Info.MonitoredFence.FenceValueGPUVirtualAddress);
+}
+
+/* An opened fence is a monitored fence mapped into this process, flagged shared like its creator */
+HRESULT
+RxFence::InitializeOpened(
+    _In_ HANDLE SharedHandle)
+{
+    D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 Open = {};
+    const KmtThunks* Kmt = RxGetKmtThunks();
+    NTSTATUS Status;
+
+    Flags = D3D12_FENCE_FLAG_SHARED;
+    if (Kmt->OpenSyncObjectFromNtHandle2 == nullptr)
+        return E_NOTIMPL;
+
+    Open.hNtHandle = SharedHandle;
+    Open.hDevice = Device.KernelDevice();
+    Open.Flags.NoGPUAccess = TRUE;
+    Status = Kmt->OpenSyncObjectFromNtHandle2(&Open);
+    if (!NT_SUCCESS(Status))
+        return RxApiResult12(Device, Status, "D3DKMTOpenSyncObjectFromNtHandle2");
+
+    SyncObject = Open.hSyncObject;
+    CompletedValue = static_cast<volatile UINT64*>(Open.MonitoredFence.FenceValueCPUVirtualAddress);
+    if (CompletedValue == nullptr)
+        return E_INVALIDARG;
+
+    return CreateDriverFence(Open.MonitoredFence.FenceValueGPUVirtualAddress);
+}
+
+HRESULT
+RxFence::CreateDriverFence(
+    _In_ D3D12_GPU_VIRTUAL_ADDRESS FenceAddress)
+{
+    const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
+    D3D12DDIARG_CREATE_FENCE_0116 Args = {};
+    D3D12DDIARG_CREATE_FENCE_0116 Sizing = {};
+    D3D12DDI_HRTFENCE Runtime;
+    HRESULT hr;
+
     Args.FenceType = D3D12DDI_FENCE_TYPE_MONITORED;
-    Args.MonitoredFenceArgs.FenceValue.BaseAddress = Create.Info.MonitoredFence.FenceValueGPUVirtualAddress;
+    Args.MonitoredFenceArgs.FenceValue.BaseAddress = FenceAddress;
     Args.MonitoredFenceArgs.Flags = D3D12DDI_FENCE_FLAG_BOTTOM_OF_PIPE;
 
     /* Sizing only names the fence type */

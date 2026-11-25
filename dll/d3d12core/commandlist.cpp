@@ -8,6 +8,7 @@
 #include "pipeline.hpp"
 #include "formatlayout12.hpp"
 #include "formatsupport12.hpp"
+#include "commandlist_internal.hpp"
 
 /* Values the API defines denormals away from before they reach the driver */
 static
@@ -144,7 +145,7 @@ RxCommandList::Initialize(
     Bypass.pDriverObject = DriverList.pDrvPrivate;
 
     /* The driver names the table this list dispatches through from inside the call */
-    Runtime.handle = this;
+    Runtime.handle = static_cast<RxListCallbacks12*>(this);
     hr = Ddi.pfnCreateCommandList(Device.Handle(), &Args, DriverList, Runtime);
     if (FAILED(hr))
     {
@@ -327,25 +328,8 @@ RxCommandList::SetCommandListErrorCb(
     _In_ D3D12DDI_HRTCOMMANDLIST hRTCommandList,
     _In_ HRESULT hr)
 {
-    RxCommandList* Self = static_cast<RxCommandList*>(hRTCommandList.handle);
-
-    RX_TRACE(L"driver failed a command list with 0x%08lX", hr);
-
-    /* Running out of memory fails only the list; any other failure loses the device */
-    if (hr == D3DDDIERR_OUTOFVIDEOMEMORY)
-        hr = E_OUTOFMEMORY;
-    if (FAILED(hr) && hr != E_OUTOFMEMORY)
-    {
-        if (hr == D3DDDIERR_DEVICEREMOVED)
-            Self->Device.MarkRemoved(DXGI_ERROR_DEVICE_REMOVED);
-        else if (hr == D3DDDIERR_APPLICATIONERROR)
-            Self->Device.MarkRemoved(DXGI_ERROR_INVALID_CALL);
-        else
-            Self->Device.MarkRemoved(DXGI_ERROR_DRIVER_INTERNAL_ERROR);
-        hr = DXGI_ERROR_DEVICE_REMOVED;
-    }
-
-    Self->Fail(hr);
+    /* Video lists share these callbacks; the runtime handle names whichever list it is */
+    static_cast<RxListCallbacks12*>(hRTCommandList.handle)->OnDriverError(hr);
 }
 
 VOID
@@ -354,9 +338,37 @@ RxCommandList::SetCommandListDdiTableCb(
     _In_ D3D12DDI_HRTCOMMANDLIST hRTCommandList,
     _In_ D3D12DDI_HRTTABLE hRTTable)
 {
-    RxCommandList* Self = static_cast<RxCommandList*>(hRTCommandList.handle);
+    static_cast<RxListCallbacks12*>(hRTCommandList.handle)->OnDriverTable(hRTTable);
+}
 
-    Self->DriverTable = Self->Device.ListTable(hRTTable);
+VOID
+RxCommandList::OnDriverError(
+    _In_ HRESULT hr)
+{
+    RX_TRACE(L"driver failed a command list with 0x%08lX", hr);
+
+    /* Running out of memory fails only the list; any other failure loses the device */
+    if (hr == D3DDDIERR_OUTOFVIDEOMEMORY)
+        hr = E_OUTOFMEMORY;
+    if (FAILED(hr) && hr != E_OUTOFMEMORY)
+    {
+        if (hr == D3DDDIERR_DEVICEREMOVED)
+            Device.MarkRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        else if (hr == D3DDDIERR_APPLICATIONERROR)
+            Device.MarkRemoved(DXGI_ERROR_INVALID_CALL);
+        else
+            Device.MarkRemoved(DXGI_ERROR_DRIVER_INTERNAL_ERROR);
+        hr = DXGI_ERROR_DEVICE_REMOVED;
+    }
+
+    Fail(hr);
+}
+
+VOID
+RxCommandList::OnDriverTable(
+    _In_ D3D12DDI_HRTTABLE Table)
+{
+    DriverTable = Device.ListTable(Table);
 }
 
 VOID
@@ -1045,35 +1057,49 @@ RxCommandList::ResourceBarrier(
     _In_ UINT NumBarriers,
     _In_reads_(NumBarriers) const D3D12_RESOURCE_BARRIER* pBarriers)
 {
+    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(TRUE))
+        return;
+
+    RxRecordResourceBarriers(Device, Type, DriverList, DriverTable->pfnResourceBarrier, DriverTable->pfnBarrier,
+                             NumBarriers, pBarriers);
+}
+
+VOID
+RxRecordResourceBarriers(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE Type,
+    _In_ D3D12DDI_HCOMMANDLIST DriverList,
+    _In_ PFND3D12DDI_RESOURCEBARRIER_0022 Legacy,
+    _In_opt_ PFND3D12DDI_BARRIER_0094 Enhanced,
+    _In_ UINT NumBarriers,
+    _In_reads_(NumBarriers) const D3D12_RESOURCE_BARRIER* pBarriers)
+{
     D3D12DDIARG_RESOURCE_BARRIER_0022 Stack[16];
     D3D12DDIARG_RESOURCE_BARRIER_0022* Barriers = Stack;
     UINT Count = 0;
     UINT Index;
 
-    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(TRUE))
-        return;
-
     if (NumBarriers == 0 || pBarriers == nullptr)
         return;
 
-    if (Device.GetOptions().EnhancedBarriersSupported && DriverTable->pfnBarrier != nullptr)
+    if (Device.GetOptions().EnhancedBarriersSupported && Enhanced != nullptr)
     {
         D3D12DDIARG_BARRIER_0094 EnhancedStack[8];
-        D3D12DDIARG_BARRIER_0094* Enhanced = EnhancedStack;
+        D3D12DDIARG_BARRIER_0094* Converted = EnhancedStack;
 
         if (NumBarriers > _countof(EnhancedStack))
         {
-            Enhanced = new (std::nothrow) D3D12DDIARG_BARRIER_0094[NumBarriers];
-            if (Enhanced == nullptr)
+            Converted = new (std::nothrow) D3D12DDIARG_BARRIER_0094[NumBarriers];
+            if (Converted == nullptr)
                 return;
         }
 
         for (Index = 0; Index < NumBarriers; Index++)
-            RxToEnhancedBarrier(pBarriers[Index], Type, Enhanced[Index]);
-        DriverTable->pfnBarrier(DriverList, NumBarriers, Enhanced);
+            RxToEnhancedBarrier(pBarriers[Index], Type, Converted[Index]);
+        Enhanced(DriverList, NumBarriers, Converted);
 
-        if (Enhanced != EnhancedStack)
-            delete[] Enhanced;
+        if (Converted != EnhancedStack)
+            delete[] Converted;
         return;
     }
 
@@ -1142,7 +1168,7 @@ RxCommandList::ResourceBarrier(
     }
 
     if (Count != 0)
-        DriverTable->pfnResourceBarrier(DriverList, Count, Barriers);
+        Legacy(DriverList, Count, Barriers);
 
     if (Barriers != Stack)
         delete[] Barriers;

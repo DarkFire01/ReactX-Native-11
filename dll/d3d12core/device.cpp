@@ -6,6 +6,7 @@
  */
 
 #include "pipeline.hpp"
+#include "shadercache.hpp"
 
 /* Direct3D 12 keeps one device per adapter; a second D3D12CreateDevice hands back the first */
 struct RxDeviceSlot
@@ -261,6 +262,8 @@ RxDevice12::~RxDevice12()
     if (DefaultRoot != nullptr)
         DefaultRoot->Release();
 
+    RxDestroyVideoState12(Video);
+
     if (IsDriverDeviceCreated)
         Adapter->GetFunctions().pfnDestroyDevice(DriverDevice);
 
@@ -278,6 +281,10 @@ RxDevice12::~RxDevice12()
         DestroyKm.hDevice = KmDevice;
         Kmt->DestroyDevice(&DestroyKm);
     }
+
+    /* Released after the driver device, which may still store values while it goes */
+    if (DriverShaderCache != nullptr)
+        DriverShaderCache->Release();
 
     delete Adapter;
 }
@@ -422,8 +429,7 @@ RxDevice12::QueryInterface(
         }
     }
 
-    *ppvObject = nullptr;
-    return E_NOINTERFACE;
+    return QueryVideoDevice(riid, ppvObject);
 }
 
 ULONG
@@ -626,7 +632,7 @@ RxDevice12::TakesListType(
     if (Type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || Type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
         Type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
     {
-        return VideoVersion != 0;
+        return VideoVersion >= D3D12DDI_FEATURE_VERSION_VIDEO_0033_0;
     }
     return TRUE;
 }
@@ -635,8 +641,6 @@ HRESULT
 RxDevice12::EnsureVideoEnabled(
     _In_ D3D12_COMMAND_LIST_TYPE Type)
 {
-    HRESULT hr;
-
     if (Type != D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE && Type != D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS &&
         Type != D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
     {
@@ -644,18 +648,9 @@ RxDevice12::EnsureVideoEnabled(
     }
 
     /* The driver sets up its video state here; queues made before it read state that is not there */
-    AcquireSRWLockExclusive(&VideoLock);
-    if (VideoEnableResult == S_FALSE)
-    {
-        hr = ExtendedFunctions.pfnEnableExtendedFeature(DriverDevice, D3D12DDI_FEATURE_0020_VIDEO, VideoVersion);
-        VideoEnableResult = FAILED(hr) ? hr : S_OK;
-        if (FAILED(hr))
-            RX_TRACE(L"driver refused to enable video version %u: 0x%08lX", VideoVersion, hr);
-    }
-    hr = VideoEnableResult;
-    ReleaseSRWLockExclusive(&VideoLock);
-
-    return hr;
+    if (EnsureVideoSupported())
+        return S_OK;
+    return FAILED(VideoEnableResult) ? VideoEnableResult : E_INVALIDARG;
 }
 
 HRESULT
@@ -707,14 +702,15 @@ RxDevice12::CreateCommandList(
         return E_INVALIDARG;
     }
 
+    if (ppCommandList == nullptr)
+        return E_UNEXPECTED;
+
     /* Video lists are their own objects, which no graphics list interface reaches */
     if (type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
         type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
     {
-        return E_NOINTERFACE;
+        return CreateVideoCommandList(type, Allocator, riid, ppCommandList);
     }
-    if (ppCommandList == nullptr)
-        return E_UNEXPECTED;
 
     hr = RxCommandList::Create(*this, type, Allocator, pInitialState, &List);
     if (FAILED(hr))
@@ -739,13 +735,13 @@ RxDevice12::CreateCommandList1(
         *ppCommandList = nullptr;
     if (nodeMask > 1 || !TakesListType(type))
         return E_INVALIDARG;
+    if (ppCommandList == nullptr)
+        return E_UNEXPECTED;
     if (type == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE || type == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
         type == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
     {
-        return E_NOINTERFACE;
+        return CreateVideoCommandList(type, nullptr, riid, ppCommandList);
     }
-    if (ppCommandList == nullptr)
-        return E_UNEXPECTED;
 
     hr = RxCommandList::Create(*this, type, nullptr, nullptr, &List);
     if (FAILED(hr))

@@ -1005,21 +1005,35 @@ RxCommandList::Barrier(
     UINT32 NumBarrierGroups,
     _In_reads_(NumBarrierGroups) const D3D12_BARRIER_GROUP* pBarrierGroups)
 {
+    HRESULT hr;
+
+    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(TRUE))
+        return;
+
+    hr = RxRecordBarrierGroups(Device, Type, DriverList, DriverTable->pfnBarrier, NumBarrierGroups, pBarrierGroups);
+    if (FAILED(hr))
+        Fail(hr);
+}
+
+HRESULT
+RxRecordBarrierGroups(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE Type,
+    _In_ D3D12DDI_HCOMMANDLIST DriverList,
+    _In_opt_ PFND3D12DDI_BARRIER_0094 Enhanced,
+    _In_ UINT32 NumBarrierGroups,
+    _In_reads_(NumBarrierGroups) const D3D12_BARRIER_GROUP* pBarrierGroups)
+{
     D3D12DDIARG_BARRIER_0094 Stack[8];
     D3D12DDIARG_BARRIER_0094* Barriers = Stack;
+    BOOLEAN AllValid = TRUE;
     UINT Total = 0;
     UINT Written = 0;
     UINT Group;
     UINT Index;
 
-    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(TRUE))
-        return;
-
-    if (!Device.GetOptions().EnhancedBarriersSupported || DriverTable->pfnBarrier == nullptr)
-    {
-        Fail(E_INVALIDARG);
-        return;
-    }
+    if (!Device.GetOptions().EnhancedBarriersSupported || Enhanced == nullptr)
+        return E_INVALIDARG;
 
     /* Every barrier is checked; any bad one fails the list */
     for (Group = 0; Group < NumBarrierGroups; Group++)
@@ -1028,7 +1042,7 @@ RxCommandList::Barrier(
 
         if (Each.Type > D3D12_BARRIER_TYPE_BUFFER)
         {
-            Fail(E_INVALIDARG);
+            AllValid = FALSE;
             continue;
         }
 
@@ -1054,20 +1068,20 @@ RxCommandList::Barrier(
             }
 
             if (!Valid)
-                Fail(E_INVALIDARG);
+                AllValid = FALSE;
         }
 
         Total += Each.NumBarriers;
     }
 
-    if (!Records())
-        return;
+    if (!AllValid)
+        return E_INVALIDARG;
 
     if (Total > _countof(Stack))
     {
         Barriers = new (std::nothrow) D3D12DDIARG_BARRIER_0094[Total];
         if (Barriers == nullptr)
-            return;
+            return S_OK;
     }
 
     /* The groups reach the driver as one list */
@@ -1120,8 +1134,9 @@ RxCommandList::Barrier(
         }
     }
 
-    DriverTable->pfnBarrier(DriverList, Written, Barriers);
+    Enhanced(DriverList, Written, Barriers);
 
     if (Barriers != Stack)
         delete[] Barriers;
+    return S_OK;
 }

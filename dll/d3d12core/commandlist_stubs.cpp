@@ -8,39 +8,3 @@
  */
 
 #include "objects.hpp"
-
-VOID
-STDMETHODCALLTYPE
-RxCommandList::InitializeMetaCommand(
-    _In_ ID3D12MetaCommand* pMetaCommand,
-    _In_reads_bytes_opt_(InitializationParametersDataSizeInBytes) const void* pInitializationParametersData,
-    _In_ SIZE_T InitializationParametersDataSizeInBytes)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxCommandList::ExecuteMetaCommand(
-    _In_ ID3D12MetaCommand* pMetaCommand,
-    _In_reads_bytes_opt_(ExecutionParametersDataSizeInBytes) const void* pExecutionParametersData,
-    _In_ SIZE_T ExecutionParametersDataSizeInBytes)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxCommandList::SetProgram(
-    _In_ const D3D12_SET_PROGRAM_DESC* pDesc)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxCommandList::DispatchGraph(
-    _In_ const D3D12_DISPATCH_GRAPH_DESC* pDesc)
-{
-    RX_UNIMPLEMENTED();
-}

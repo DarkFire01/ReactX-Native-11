@@ -8,29 +8,3 @@
  */
 
 #include "objects.hpp"
-
-HRESULT
-STDMETHODCALLTYPE
-RxResource::WriteToSubresource(
-    UINT DstSubresource,
-    _In_opt_ const D3D12_BOX* pDstBox,
-    _In_ const void* pSrcData,
-    UINT SrcRowPitch,
-    UINT SrcDepthPitch)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
-RxResource::ReadFromSubresource(
-    _Out_ void* pDstData,
-    UINT DstRowPitch,
-    UINT DstDepthPitch,
-    UINT SrcSubresource,
-    _In_opt_ const D3D12_BOX* pSrcBox)
-{
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}

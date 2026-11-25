@@ -460,46 +460,43 @@ RxCommandList::SetPredication(
     _In_ UINT64 AlignedBufferOffset,
     _In_ D3D12_PREDICATION_OP Operation)
 {
-    RxResourceFacts Buffer;
-    D3D12DDI_HRESOURCE Handle = {};
+    D3D12DDI_HRESOURCE Handle;
 
     if (!Takes(RxListDoesCopy | RxListDoesCompute | RxListTopLevel) || !Records())
         return;
 
-    /* Every rule is looked at; any broken one fails the list and the call still reaches the driver's end */
-    if (pBuffer != nullptr)
-    {
-        if (!RxReadResource(pBuffer, &Buffer))
-        {
-            Fail(E_INVALIDARG);
-            return;
-        }
-
-        if (Buffer.Desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
-            Fail(E_INVALIDARG);
-        if (Buffer.HeapType == D3D12_HEAP_TYPE_READBACK)
-            Fail(E_INVALIDARG);
-        if ((AlignedBufferOffset & 7) != 0)
-            Fail(E_INVALIDARG);
-        if ((UINT)Operation > D3D12_PREDICATION_OP_NOT_EQUAL_ZERO)
-            Fail(E_INVALIDARG);
-        if (AlignedBufferOffset + sizeof(UINT64) < AlignedBufferOffset ||
-            AlignedBufferOffset + sizeof(UINT64) > Buffer.Desc->Width)
-        {
-            Fail(E_INVALIDARG);
-        }
-
-        Handle = Buffer.Resource->GetDriverHandle();
-    }
-    else if (AlignedBufferOffset != 0 || Operation != D3D12_PREDICATION_OP_EQUAL_ZERO)
+    if (!RxPredicationIsValid(pBuffer, AlignedBufferOffset, Operation, &Handle))
     {
         Fail(E_INVALIDARG);
+        return;
     }
 
-    if (!Records())
-        return;
-
     DriverTable->pfnSetPredication(DriverList, Handle, AlignedBufferOffset, (D3D12DDI_PREDICATION_OP)Operation);
+}
+
+BOOLEAN
+RxPredicationIsValid(
+    _In_opt_ ID3D12Resource* pBuffer,
+    _In_ UINT64 AlignedBufferOffset,
+    _In_ D3D12_PREDICATION_OP Operation,
+    _Out_ D3D12DDI_HRESOURCE* Handle)
+{
+    RxResourceFacts Buffer;
+
+    ZeroMemory(Handle, sizeof(*Handle));
+
+    /* No buffer turns predication off and takes nothing else */
+    if (pBuffer == nullptr)
+        return AlignedBufferOffset == 0 && Operation == D3D12_PREDICATION_OP_EQUAL_ZERO;
+
+    if (!RxReadResource(pBuffer, &Buffer))
+        return FALSE;
+
+    *Handle = Buffer.Resource->GetDriverHandle();
+    return Buffer.Desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && Buffer.HeapType != D3D12_HEAP_TYPE_READBACK &&
+           (AlignedBufferOffset & 7) == 0 && (UINT)Operation <= D3D12_PREDICATION_OP_NOT_EQUAL_ZERO &&
+           AlignedBufferOffset + sizeof(UINT64) >= AlignedBufferOffset &&
+           AlignedBufferOffset + sizeof(UINT64) <= Buffer.Desc->Width;
 }
 
 VOID

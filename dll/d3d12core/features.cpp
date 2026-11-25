@@ -7,6 +7,7 @@
 
 #include "objects.hpp"
 #include "formatsupport12.hpp"
+#include "shadercache.hpp"
 
 /* Formats stored as more than one plane */
 static
@@ -225,6 +226,14 @@ RxDevice12::ShaderCacheSupport() const
     static UINT LibrarySupport = 0;
     UINT Support = D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO | D3D12_SHADER_CACHE_SUPPORT_LIBRARY;
     BOOL Pending = FALSE;
+
+    /* The store behind the driver's shader cache callbacks is the automatic cache, on disk when it has a file */
+    if (DriverShaderCache != nullptr)
+    {
+        Support |= D3D12_SHADER_CACHE_SUPPORT_AUTOMATIC_INPROC_CACHE;
+        if (DriverShaderCache->GetMode() == D3D12_SHADER_CACHE_MODE_DISK)
+            Support |= D3D12_SHADER_CACHE_SUPPORT_AUTOMATIC_DISK_CACHE;
+    }
 
     if (Options.DriverManagedShaderCachePresent)
         Support |= D3D12_SHADER_CACHE_SUPPORT_DRIVER_MANAGED_CACHE;

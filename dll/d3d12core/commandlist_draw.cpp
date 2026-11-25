@@ -279,37 +279,38 @@ RxCommandList::DiscardResource(
         return;
     }
 
-    if (!RxReadResource(pResource, &Facts))
+    if (!RxReadResource(pResource, &Facts) || !RxDiscardIsValid(Facts, pRegion))
     {
         Fail(E_INVALIDARG);
         return;
     }
 
-    if (pRegion != nullptr)
-    {
-        /* Rectangles cover one mip at a time, and only buffers and 2D textures take them */
-        if (pRegion->NumRects != 0)
-        {
-            if ((pRegion->NumSubresources > 1 && Facts.Desc->MipLevels > 1) ||
-                (Facts.Desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
-                 Facts.Desc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D))
-            {
-                Fail(E_INVALIDARG);
-                return;
-            }
-        }
+    DriverTable->pfnDiscardResource(DriverList, Facts.Resource->GetDriverHandle(),
+                                    reinterpret_cast<const D3D12DDIARG_DISCARD_RESOURCE_0003*>(pRegion));
+}
 
-        if (pRegion->FirstSubresource > Facts.Subresources ||
-            pRegion->FirstSubresource + pRegion->NumSubresources < pRegion->FirstSubresource ||
-            pRegion->FirstSubresource + pRegion->NumSubresources > Facts.Subresources)
+BOOLEAN
+RxDiscardIsValid(
+    _In_ const RxResourceFacts& Facts,
+    _In_opt_ const D3D12_DISCARD_REGION* pRegion)
+{
+    if (pRegion == nullptr)
+        return TRUE;
+
+    /* Rectangles cover one mip at a time, and only buffers and 2D textures take them */
+    if (pRegion->NumRects != 0)
+    {
+        if ((pRegion->NumSubresources > 1 && Facts.Desc->MipLevels > 1) ||
+            (Facts.Desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
+             Facts.Desc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D))
         {
-            Fail(E_INVALIDARG);
-            return;
+            return FALSE;
         }
     }
 
-    DriverTable->pfnDiscardResource(DriverList, Facts.Resource->GetDriverHandle(),
-                                    reinterpret_cast<const D3D12DDIARG_DISCARD_RESOURCE_0003*>(pRegion));
+    return pRegion->FirstSubresource <= Facts.Subresources &&
+           pRegion->FirstSubresource + pRegion->NumSubresources >= pRegion->FirstSubresource &&
+           pRegion->FirstSubresource + pRegion->NumSubresources <= Facts.Subresources;
 }
 
 /* Resolves */
@@ -572,7 +573,6 @@ RxCommandList::ResolveSubresourceRegion(
 /* Queries */
 
 /* The query types a heap of this type holds */
-static
 VOID
 RxHeapQueryTypes(
     _In_ D3D12_QUERY_HEAP_TYPE HeapType,
@@ -606,7 +606,6 @@ RxHeapQueryTypes(
 }
 
 /* Heaps whose queries are begun and ended in pairs; timestamps and decode statistics are only ended */
-static
 INT
 RxHeapPairs(
     _In_ D3D12_QUERY_HEAP_TYPE HeapType)
@@ -642,7 +641,6 @@ RxListQueryTypes(
 }
 
 /* Query heap types a list type resolves, as bits by D3D12_QUERY_HEAP_TYPE */
-static
 UINT
 RxListQueryHeaps(
     _In_ RxDevice12& Device,
@@ -670,7 +668,6 @@ RxListQueryHeaps(
 }
 
 /* The checks Begin and End share; each broken one fails the list */
-static
 BOOLEAN
 RxQueryIsValid(
     _In_ RxDevice12& Device,
@@ -773,57 +770,68 @@ RxCommandList::ResolveQueryData(
 {
     RxQueryHeap* Heap = RxUnwrap12<RxQueryHeap>(pQueryHeap);
     RxResourceFacts Destination;
-    UINT64 Start;
-    INT First;
-    INT Last;
 
     if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(FALSE))
         return;
 
-    if (Heap == nullptr || !RxReadResource(pDestinationBuffer, &Destination))
+    if (Heap == nullptr || !RxReadResource(pDestinationBuffer, &Destination) ||
+        !RxResolveIsValid(Device, Type, *Heap, QueryType, StartIndex, NumQueries, Destination,
+                          AlignedDestinationBufferOffset))
     {
         Fail(E_INVALIDARG);
         return;
     }
-
-    if (Destination.Desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
-        Fail(E_INVALIDARG);
-    if (Destination.HeapType == D3D12_HEAP_TYPE_UPLOAD)
-        Fail(E_INVALIDARG);
-    if (StartIndex + NumQueries < NumQueries || StartIndex + NumQueries > Heap->GetCount())
-        Fail(E_INVALIDARG);
-
-    /* The results land whole inside the buffer, on 8 byte boundaries */
-    if (NumQueries != 0)
-    {
-        Start = (UINT64)Heap->GetResultSize() * (NumQueries - 1);
-        if (Start + AlignedDestinationBufferOffset < Start ||
-            Start + AlignedDestinationBufferOffset + Heap->GetResultSize() < Start + AlignedDestinationBufferOffset ||
-            Start + AlignedDestinationBufferOffset + Heap->GetResultSize() > Destination.Desc->Width)
-        {
-            Fail(E_INVALIDARG);
-        }
-    }
-    if ((AlignedDestinationBufferOffset & 7) != 0)
-        Fail(E_INVALIDARG);
-
-    RxHeapQueryTypes(Heap->GetType(), &First, &Last);
-    if ((INT)QueryType < First || (INT)QueryType > Last)
-        Fail(E_INVALIDARG);
-    if ((RxListQueryHeaps(Device, Type) & (1u << ((UINT)Heap->GetType() & 31))) == 0)
-        Fail(E_INVALIDARG);
-
-    if (!Records())
-        return;
 
     DriverTable->pfnResolveQueryData(DriverList, Heap->GetDriverHandle(), (D3D12DDI_QUERY_TYPE)QueryType, StartIndex,
                                      NumQueries, Destination.Resource->GetDriverHandle(), AlignedDestinationBufferOffset);
 }
 
+BOOLEAN
+RxResolveIsValid(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE ListType,
+    _In_ const RxQueryHeap& Heap,
+    _In_ D3D12_QUERY_TYPE QueryType,
+    _In_ UINT StartIndex,
+    _In_ UINT NumQueries,
+    _In_ const RxResourceFacts& Destination,
+    _In_ UINT64 Offset)
+{
+    BOOLEAN Valid = TRUE;
+    UINT64 Start;
+    INT First;
+    INT Last;
+
+    if (Destination.Desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER || Destination.HeapType == D3D12_HEAP_TYPE_UPLOAD)
+        Valid = FALSE;
+    if (StartIndex + NumQueries < NumQueries || StartIndex + NumQueries > Heap.GetCount())
+        Valid = FALSE;
+
+    /* The results land whole inside the buffer, on 8 byte boundaries */
+    if (NumQueries != 0)
+    {
+        Start = (UINT64)Heap.GetResultSize() * (NumQueries - 1);
+        if (Start + Offset < Start || Start + Offset + Heap.GetResultSize() < Start + Offset ||
+            Start + Offset + Heap.GetResultSize() > Destination.Desc->Width)
+        {
+            Valid = FALSE;
+        }
+    }
+    if ((Offset & 7) != 0)
+        Valid = FALSE;
+
+    RxHeapQueryTypes(Heap.GetType(), &First, &Last);
+    if ((INT)QueryType < First || (INT)QueryType > Last)
+        Valid = FALSE;
+    if ((RxListQueryHeaps(Device, ListType) & (1u << ((UINT)Heap.GetType() & 31))) == 0)
+        Valid = FALSE;
+
+    return Valid;
+}
+
 /* Immediate and atomic buffer writes */
 
 /* The engine flag a list type's work runs on */
-static
 UINT
 RxEngineOf(
     _In_ D3D12_COMMAND_LIST_TYPE Type)

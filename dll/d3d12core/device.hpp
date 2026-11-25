@@ -17,6 +17,9 @@ class RxSchedulingGroup;
 class RxRootSignature;
 class RxPipelineState;
 class RxPipelinePart;
+class RxShaderCacheStore12;
+class RxVideoState12;
+class RxCommandAllocator;
 struct RxFormatContext12;
 
 /* The one DDI revision this runtime drives: release 8, build 118 */
@@ -64,9 +67,16 @@ struct RxRuntimeResource12
 {
     D3DKMT_HANDLE KmResource;
 
-    /* Set while a swapchain buffer is created: its kernel resource is made shared with this record */
+    /* Set while a shared heap or resource is created: its kernel resource is made shared with this record */
     const VOID* SharedRecord;
     UINT SharedRecordSize;
+    BOOLEAN SwapChainBuffer;
+    BOOLEAN CrossAdapter;
+
+    /* An opened kernel resource, and the keyed mutex and its fence that were opened along with it */
+    BOOLEAN IsOpened;
+    D3DKMT_HANDLE KeyedMutex;
+    D3DKMT_HANDLE KeyedMutexSync;
 };
 
 /* What the driver gets as a runtime paging queue handle */
@@ -343,6 +353,21 @@ public:
         return *Adapter;
     }
 
+    /* The shader cache kinds ShaderCacheControl turned off */
+    UINT
+    GetDisabledShaderCaches() const
+    {
+        return DisabledShaderCaches;
+    }
+
+    /* The store the driver's shader cache callbacks use, if it could be opened */
+    _Ret_maybenull_
+    RxShaderCacheStore12*
+    GetDriverShaderCache() const
+    {
+        return DriverShaderCache;
+    }
+
     /* The error the driver raised during the last DDI call on this thread, cleared by reading it */
     static
     HRESULT
@@ -434,6 +459,31 @@ public:
     EnsureVideoEnabled(
         _In_ D3D12_COMMAND_LIST_TYPE Type);
 
+    /* Turns video on with its tables and cached caps the first time; FALSE when the device has no video */
+    BOOLEAN
+    EnsureVideoSupported(VOID);
+
+    /* Set once EnsureVideoSupported succeeded */
+    RxVideoState12*
+    GetVideo() const
+    {
+        return Video;
+    }
+
+    /* The video device interfaces, which turn video on when first asked for */
+    HRESULT
+    QueryVideoDevice(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject);
+
+    /* Video lists are their own objects, see videolist.cpp */
+    HRESULT
+    CreateVideoCommandList(
+        _In_ D3D12_COMMAND_LIST_TYPE Type,
+        _In_opt_ RxCommandAllocator* Allocator,
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppCommandList);
+
     BOOLEAN
     HasWarpExtension() const
     {
@@ -444,6 +494,12 @@ public:
     GetExecuteIndirectTier() const
     {
         return ExecuteIndirect.ExecuteIndirectTier;
+    }
+
+    D3D12DDI_WORK_GRAPHS_TIER
+    GetWorkGraphsTier() const
+    {
+        return WorkGraphs.WorkGraphsTier;
     }
 
     /* The highest released shader model the driver lists, in API form */
@@ -458,6 +514,13 @@ public:
     HasStandardSwizzle() const
     {
         return TextureLayout.Supports64KStandardSwizzle != FALSE;
+    }
+
+    /* The driver's layout and swizzle pattern counts */
+    const D3D12DDI_TEXTURE_LAYOUT_CAPS_0026&
+    GetTextureLayoutCaps() const
+    {
+        return TextureLayout;
     }
 
     BOOLEAN
@@ -608,6 +671,7 @@ public:
 
 private:
     friend class RxPipelinePart;
+    friend class RxVideoState12;
 
     RxDevice12() = default;
     ~RxDevice12();
@@ -696,6 +760,7 @@ private:
     UINT VideoVersion = 0;
     SRWLOCK VideoLock = SRWLOCK_INIT;
     HRESULT VideoEnableResult = S_FALSE;
+    RxVideoState12* Video = nullptr;
     UINT SessionVersion = 0;
     BOOLEAN TypedLoadMinimal = FALSE;
     UINT PreviewShaderModels = 0;
@@ -752,6 +817,7 @@ private:
     RxPipelineState* DefaultCompute = nullptr;
     RxPrivateDataStore PrivateData;
     UINT DisabledShaderCaches = 0;
+    RxShaderCacheStore12* DriverShaderCache = nullptr;
 };
 
 /* Lifetime, device link and private data shared by every device child */
@@ -1089,6 +1155,11 @@ RxGetCoreLayerCallbacks12(VOID);
 VOID
 RxSignalAfterBackgroundWork12(
     _In_ HANDLE Event);
+
+/* Frees the video side of a device going away */
+VOID
+RxDestroyVideoState12(
+    _In_opt_ RxVideoState12* State);
 
 /* D3D12_COMMAND_LIST_TYPE as the queue flags the driver wants, 0 for an unknown type */
 D3D12DDI_COMMAND_QUEUE_FLAGS

@@ -158,12 +158,10 @@ RxDevice12::CreateQueryHeap(
     switch (pDesc->Type)
     {
         case D3D12_QUERY_HEAP_TYPE_VIDEO_DECODE_STATISTICS:
-            if (!TakesListType(D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE))
-                return E_INVALIDARG;
-
             /* These need the driver's video support set up first */
-            RX_TRACE(L"video decode statistics query heaps not supported");
-            return E_NOTIMPL;
+            if (!TakesListType(D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE) || !EnsureVideoSupported())
+                return E_INVALIDARG;
+            break;
         case D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP:
             if (!Options.CopyQueueTimestampQueriesSupported)
                 return E_INVALIDARG;

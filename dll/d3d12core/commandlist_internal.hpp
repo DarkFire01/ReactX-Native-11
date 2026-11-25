@@ -108,6 +108,70 @@ RxCheckBufferBarrier(
     _In_ const D3D12_BUFFER_BARRIER& Barrier,
     _In_ BOOLEAN BufferResolves);
 
+/* Legacy barriers through whichever barrier entry the driver offers; video lists share this */
+VOID
+RxRecordResourceBarriers(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE Type,
+    _In_ D3D12DDI_HCOMMANDLIST DriverList,
+    _In_ PFND3D12DDI_RESOURCEBARRIER_0022 Legacy,
+    _In_opt_ PFND3D12DDI_BARRIER_0094 Enhanced,
+    _In_ UINT NumBarriers,
+    _In_reads_(NumBarriers) const D3D12_RESOURCE_BARRIER* pBarriers);
+
+/* Enhanced barriers, checked and recorded; a failure is what the list fails with */
+HRESULT
+RxRecordBarrierGroups(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE Type,
+    _In_ D3D12DDI_HCOMMANDLIST DriverList,
+    _In_opt_ PFND3D12DDI_BARRIER_0094 Enhanced,
+    _In_ UINT32 NumBarrierGroups,
+    _In_reads_(NumBarrierGroups) const D3D12_BARRIER_GROUP* pBarrierGroups);
+
+/* The checks Begin and End share */
+BOOLEAN
+RxQueryIsValid(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE ListType,
+    _In_ const RxQueryHeap& Heap,
+    _In_ D3D12_QUERY_TYPE QueryType,
+    _In_ UINT Index);
+
+/* Heaps whose queries are begun and ended in pairs */
+INT
+RxHeapPairs(
+    _In_ D3D12_QUERY_HEAP_TYPE HeapType);
+
+BOOLEAN
+RxResolveIsValid(
+    _In_ RxDevice12& Device,
+    _In_ D3D12_COMMAND_LIST_TYPE ListType,
+    _In_ const RxQueryHeap& Heap,
+    _In_ D3D12_QUERY_TYPE QueryType,
+    _In_ UINT StartIndex,
+    _In_ UINT NumQueries,
+    _In_ const RxResourceFacts& Destination,
+    _In_ UINT64 Offset);
+
+BOOLEAN
+RxDiscardIsValid(
+    _In_ const RxResourceFacts& Facts,
+    _In_opt_ const D3D12_DISCARD_REGION* pRegion);
+
+/* The predication buffer rules; the driver handle is set when a buffer is given */
+BOOLEAN
+RxPredicationIsValid(
+    _In_opt_ ID3D12Resource* pBuffer,
+    _In_ UINT64 AlignedBufferOffset,
+    _In_ D3D12_PREDICATION_OP Operation,
+    _Out_ D3D12DDI_HRESOURCE* Handle);
+
+/* The engine flag a list type's work runs on */
+UINT
+RxEngineOf(
+    _In_ D3D12_COMMAND_LIST_TYPE Type);
+
 /* The rules a resolve meets; DstX, DstY and the rect only count outside the sampler feedback modes */
 HRESULT
 RxCheckResolve(

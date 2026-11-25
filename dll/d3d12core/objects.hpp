@@ -514,7 +514,22 @@ struct RxRenderPass
     UINT ResolveCapacity;
 };
 
-class RxCommandList final : public RxDeviceChild12<ID3D12GraphicsCommandList10>
+/* What the driver's command list callbacks reach: the runtime handle of every list points here */
+class RxListCallbacks12
+{
+public:
+    virtual
+    VOID
+    OnDriverError(
+        _In_ HRESULT hr) = 0;
+
+    virtual
+    VOID
+    OnDriverTable(
+        _In_ D3D12DDI_HRTTABLE Table) = 0;
+};
+
+class RxCommandList final : public RxDeviceChild12<ID3D12GraphicsCommandList10>, public RxListCallbacks12
 {
 public:
     static constexpr GUID PrivateId = {0x7b41e5c3, 0x0d9f, 0x4a26, {0x93, 0x7c, 0x12, 0xe8, 0x5a, 0x06, 0xbf, 0x4d}};
@@ -577,6 +592,14 @@ public:
     SetCommandListDdiTableCb(
         _In_ D3D12DDI_HRTCOMMANDLIST hRTCommandList,
         _In_ D3D12DDI_HRTTABLE hRTTable);
+
+    VOID
+    OnDriverError(
+        _In_ HRESULT hr) override;
+
+    VOID
+    OnDriverTable(
+        _In_ D3D12DDI_HRTTABLE Table) override;
 
 private:
     enum class RxListState
@@ -684,6 +707,14 @@ public:
         _In_ D3D12_FENCE_FLAGS Flags,
         _Outptr_ RxFence** Fence);
 
+    /* A fence another device shared by NT handle */
+    static
+    HRESULT
+    Open(
+        _In_ RxDevice12& Device,
+        _In_ HANDLE SharedHandle,
+        _Outptr_ RxFence** Fence);
+
     HRESULT
     STDMETHODCALLTYPE
     QueryInterface(
@@ -706,6 +737,15 @@ private:
     Initialize(
         _In_ UINT64 InitialValue,
         _In_ D3D12_FENCE_FLAGS FenceFlags);
+
+    HRESULT
+    InitializeOpened(
+        _In_ HANDLE SharedHandle);
+
+    /* The driver fence over the monitored fence this object holds */
+    HRESULT
+    CreateDriverFence(
+        _In_ D3D12_GPU_VIRTUAL_ADDRESS FenceAddress);
 
     D3D12_FENCE_FLAGS Flags = D3D12_FENCE_FLAG_NONE;
     D3DKMT_HANDLE SyncObject = 0;
@@ -768,6 +808,60 @@ private:
     RxRtvEntry* RtvEntries = nullptr;
 };
 
+struct RxSharedRecord12;
+
+/* A kernel resource opened from a shared handle, with the descs its record gave */
+struct RxOpenedShare12
+{
+    D3DKMT_HANDLE KmResource;
+    D3DKMT_HANDLE KeyedMutex;
+    D3DKMT_HANDLE KeyedMutexSync;
+    UINT AllocationCount;
+    D3DDDI_OPENALLOCATIONINFO* Allocations;
+    VOID* ResourceData;
+    UINT ResourceDataSize;
+    D3D12_HEAP_DESC HeapDesc;
+    D3D12_RESOURCE_DESC1 ResourceDesc;
+};
+
+/* The runtime record a shared heap is made with; Resource names the committed resource at its start */
+VOID
+RxFillSharedRecord12(
+    _In_ const D3D12_HEAP_DESC& Heap,
+    _In_opt_ const D3D12_RESOURCE_DESC1* Resource,
+    _Out_ RxSharedRecord12& Record);
+
+/* Makes the driver heap and resource over an opened kernel resource */
+HRESULT
+RxOpenDriverHeap12(
+    _In_ RxDevice12& Device,
+    _In_ const RxOpenedShare12& Opened,
+    _Inout_ RxRuntimeResource12& Runtime,
+    _Inout_ RxDriverMemory12& HeapMemory,
+    _Inout_ RxDriverMemory12& ResourceMemory,
+    _Out_ D3D12DDI_HHEAP* DriverHeap,
+    _Out_ D3D12DDI_HRESOURCE* DriverResource);
+
+/* Opens a shared heap or committed resource by NT or global handle; the object comes back with one reference */
+HRESULT
+RxOpenSharedResource12(
+    _In_ RxDevice12& Device,
+    _In_ HANDLE Handle,
+    _Outptr_ IUnknown** Object);
+
+/* A kernel status as API methods return it: bad handles are E_HANDLE, a lost device is DXGI's error */
+HRESULT
+RxApiResult12(
+    _In_ RxDevice12& Device,
+    _In_ NTSTATUS Status,
+    _In_z_ PCSTR Call);
+
+/* Closes what an opened kernel resource still holds once the driver let go of it */
+VOID
+RxCloseOpenedShare12(
+    _In_ RxDevice12& Device,
+    _Inout_ RxRuntimeResource12& Runtime);
+
 /* An application heap; the driver backs it with a buffer that placed resources are made in */
 class RxHeap final : public RxDeviceChild12<ID3D12Heap1>
 {
@@ -779,6 +873,14 @@ public:
     Create(
         _In_ RxDevice12& Device,
         _In_ const D3D12_HEAP_DESC& Desc,
+        _Outptr_ RxHeap** Heap);
+
+    /* A heap over a kernel resource opened from a shared handle */
+    static
+    HRESULT
+    Open(
+        _In_ RxDevice12& Device,
+        _In_ const RxOpenedShare12& Opened,
         _Outptr_ RxHeap** Heap);
 
     HRESULT
@@ -829,6 +931,12 @@ public:
         return Runtime.KmResource;
     }
 
+    const RxRuntimeResource12&
+    GetRuntime() const
+    {
+        return Runtime;
+    }
+
     /* Maps the whole heap; every resource in it shares one mapping */
     HRESULT
     MapMemory(
@@ -844,6 +952,10 @@ private:
     HRESULT
     Initialize(
         _In_ const D3D12_HEAP_DESC& HeapDesc);
+
+    HRESULT
+    InitializeOpened(
+        _In_ const RxOpenedShare12& Opened);
 
     D3D12_HEAP_DESC Desc = {};
     RxRuntimeResource12 Runtime = {};
@@ -917,6 +1029,14 @@ public:
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
         _Outptr_ RxResource** Resource);
 
+    /* A committed resource over a kernel resource opened from a shared handle */
+    static
+    HRESULT
+    Open(
+        _In_ RxDevice12& Device,
+        _In_ const RxOpenedShare12& Opened,
+        _Outptr_ RxResource** Resource);
+
     HRESULT
     STDMETHODCALLTYPE
     QueryInterface(
@@ -963,9 +1083,32 @@ public:
         return IsReservedResource;
     }
 
+    /* Committed resources own their heap; only those can be shared */
+    BOOLEAN
+    IsCommitted() const
+    {
+        return Placement == nullptr && !IsReservedResource;
+    }
+
+    D3D12_HEAP_FLAGS
+    GetHeapFlags() const
+    {
+        return Flags;
+    }
+
+    const RxRuntimeResource12&
+    GetRuntime() const
+    {
+        return Runtime;
+    }
+
 private:
     using RxDeviceChild12::RxDeviceChild12;
     ~RxResource() override;
+
+    HRESULT
+    InitializeOpened(
+        _In_ const RxOpenedShare12& Opened);
 
     HRESULT
     Initialize(
@@ -992,6 +1135,24 @@ private:
     UINT
     SubresourceCount() const;
 
+    /* Maps the memory under the resource, counted together with Map */
+    HRESULT
+    MapMemory(
+        _Outptr_ BYTE** Base);
+
+    VOID
+    UnmapMemory();
+
+    /* WriteToSubresource and ReadFromSubresource, which differ only in direction */
+    HRESULT
+    CopySubresourceData(
+        _In_ UINT Subresource,
+        _In_opt_ const D3D12_BOX* Box,
+        _Inout_ BYTE* Linear,
+        _In_ UINT LinearPitch,
+        _In_ UINT LinearDepthPitch,
+        _In_ BOOLEAN Write);
+
     D3D12_RESOURCE_DESC1 Desc = {};
     RxHeap* Placement = nullptr;
     UINT64 PlacementOffset = 0;
@@ -1008,6 +1169,9 @@ private:
     SRWLOCK MapLock = SRWLOCK_INIT;
     UINT MapCount = 0;
     BYTE* MappedBase = nullptr;
+    /* The layout the driver picked at creation, which CPU copies of texels follow */
+    D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 CreationLayout = {};
+    BOOLEAN HasCreationLayout = FALSE;
 };
 
 /* Queries the driver keeps results of until they are resolved */
@@ -1391,7 +1555,8 @@ RxAllocationInfo(
     _In_ const D3D12DDIARG_CREATERESOURCE_0111& Ddi,
     _In_ BOOLEAN SizeQuery,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
-    _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout);
+    _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout,
+    _Out_opt_ D3D12DDI_RESOURCE_ALLOCATION_INFO_0022* DriverInfo = nullptr);
 
 /* GetResourceAllocationInfo1 for descs not yet filled in; castable format lists are optional */
 D3D12_RESOURCE_ALLOCATION_INFO

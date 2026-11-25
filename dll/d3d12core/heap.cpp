@@ -6,6 +6,7 @@
  */
 
 #include "objects.hpp"
+#include "sharedrecord12.hpp"
 
 /* Heap flags that only steer creation and are not kept in the heap's desc */
 constexpr UINT RxCreationOnlyHeapFlags = D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED;
@@ -53,6 +54,7 @@ RxHeap::Initialize(
     D3D12_RESOURCE_ALLOCATION_INFO Info;
     D3D12DDI_HRTRESOURCE RuntimeHandle;
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
+    RxSharedRecord12 Record;
     HRESULT hr;
 
     /* The driver sees a heap as one buffer as large as the heap */
@@ -89,9 +91,19 @@ RxHeap::Initialize(
     if (DriverHeap.pDrvPrivate == nullptr || DriverResource.pDrvPrivate == nullptr)
         return E_OUTOFMEMORY;
 
+    /* A shared heap's kernel resource carries the record openers rebuild it from */
     RuntimeHandle.handle = &Runtime;
+    if ((Desc.Flags & D3D12_HEAP_FLAG_SHARED) != 0)
+    {
+        RxFillSharedRecord12(Desc, nullptr, Record);
+        Runtime.SharedRecord = &Record;
+        Runtime.SharedRecordSize = sizeof(Record);
+        Runtime.CrossAdapter = (Desc.Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0;
+    }
     hr = Ddi.pfnCreateHeapAndResource(Device.Handle(), &DdiHeap, DriverHeap, RuntimeHandle, &DdiResource, nullptr,
                                       NoSession, DriverResource);
+    Runtime.SharedRecord = nullptr;
+    Runtime.SharedRecordSize = 0;
     if (FAILED(hr))
     {
         RX_TRACE(L"driver CreateHeapAndResource failed for a heap 0x%08lX", hr);
@@ -114,6 +126,8 @@ RxHeap::~RxHeap()
 
     if (IsDriverHeapCreated)
         Device.Ddi().pfnDestroyHeapAndResource(Device.Handle(), DriverHeap, DriverResource);
+
+    RxCloseOpenedShare12(Device, Runtime);
 }
 
 HRESULT
@@ -235,10 +249,10 @@ RxCreateHeapCommon(
     if (FAILED(hr))
         return hr;
 
-    /* Sharing and protected sessions need kernel support this runtime does not have yet */
-    if (pProtectedSession != nullptr || (pDesc->Flags & D3D12_HEAP_FLAG_SHARED) != 0)
+    /* Protected sessions need kernel support this runtime does not have yet */
+    if (pProtectedSession != nullptr)
     {
-        RX_TRACE(L"heap flags 0x%X or protected session not supported", pDesc->Flags);
+        RX_TRACE(L"heaps in protected sessions are not supported");
         return E_NOTIMPL;
     }
 

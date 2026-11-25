@@ -8,6 +8,7 @@
 #include "objects.hpp"
 #include "formats.hpp"
 #include "formatlayout12.hpp"
+#include "sharedrecord12.hpp"
 
 constexpr UINT64 RxDefaultPlacement = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
 constexpr UINT64 RxMsaaPlacement = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -253,7 +254,8 @@ RxAllocationInfo(
     _In_ const D3D12DDIARG_CREATERESOURCE_0111& Ddi,
     _In_ BOOLEAN SizeQuery,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
-    _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout)
+    _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout,
+    _Out_opt_ D3D12DDI_RESOURCE_ALLOCATION_INFO_0022* DriverInfo)
 {
     D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Info = {};
     D3D12_RESOURCE_ALLOCATION_INFO Result;
@@ -265,6 +267,8 @@ RxAllocationInfo(
                                                 (UINT32)Desc.Alignment, 1, &Info);
     if (DriverLayout != nullptr)
         *DriverLayout = Info.Layout;
+    if (DriverInfo != nullptr)
+        *DriverInfo = Info;
 
     Alignment = Desc.Alignment;
     if (Info.ResourceDataAlignment > Alignment)
@@ -419,6 +423,10 @@ RxToDdiHeap(
                           : Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE ? D3D12DDI_CPU_PAGE_PROPERTY_WRITE_COMBINE
                                                                                             : D3D12DDI_CPU_PAGE_PROPERTY_WRITE_BACK;
     Ddi.MemoryPool = Custom.MemoryPoolPreference == D3D12_MEMORY_POOL_L0 ? D3D12DDI_MEMORY_POOL_L0 : D3D12DDI_MEMORY_POOL_L1;
+
+    /* Other adapters reach a cross adapter heap through system memory */
+    if ((Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0)
+        Ddi.MemoryPool = D3D12DDI_MEMORY_POOL_L0;
     Ddi.CreationNodeMask = 1;
     Ddi.VisibleNodeMask = 1;
 
@@ -554,6 +562,8 @@ RxResource::Initialize(
     D3D12_RESOURCE_ALLOCATION_INFO Info;
     D3D12DDI_HRTRESOURCE RuntimeHandle;
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
+    RxSharedRecord12 Record;
+    D3D12_HEAP_DESC Shared = {};
     HRESULT hr;
 
     Desc = ResourceDesc;
@@ -566,7 +576,8 @@ RxResource::Initialize(
     RxFillRowMajorLayout(Desc, RowMajor, DdiResource);
 
     /* The size check sees no initial layout; creation then takes the layout the driver chose */
-    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
+    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout, &CreationLayout);
+    HasCreationLayout = TRUE;
     if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
         return E_OUTOFMEMORY;
     DdiResource.InitialBarrierLayout = Start.Layout;
@@ -587,8 +598,23 @@ RxResource::Initialize(
 
     /* The kernel resource is made with the first allocation, so the record is only needed during the call */
     RuntimeHandle.handle = &Runtime;
-    Runtime.SharedRecord = Start.SharedRecord;
-    Runtime.SharedRecordSize = Start.SharedRecordSize;
+    if (Start.SharedRecord != nullptr)
+    {
+        Runtime.SharedRecord = Start.SharedRecord;
+        Runtime.SharedRecordSize = Start.SharedRecordSize;
+        Runtime.SwapChainBuffer = TRUE;
+    }
+    else if ((Flags & D3D12_HEAP_FLAG_SHARED) != 0)
+    {
+        Shared.SizeInBytes = Info.SizeInBytes;
+        Shared.Properties = Properties;
+        Shared.Alignment = Info.Alignment;
+        Shared.Flags = Flags;
+        RxFillSharedRecord12(Shared, &Desc, Record);
+        Runtime.SharedRecord = &Record;
+        Runtime.SharedRecordSize = sizeof(Record);
+        Runtime.CrossAdapter = (Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) != 0;
+    }
     hr = Ddi.pfnCreateHeapAndResource(Device.Handle(), &DdiHeap, DriverHeap, RuntimeHandle, &DdiResource,
                                       ClearValue != nullptr ? &DdiClear : nullptr, NoSession, DriverResource);
     Runtime.SharedRecord = nullptr;
@@ -669,7 +695,8 @@ RxResource::InitializePlaced(
     RxToDdiResource(Desc, DdiResource);
     RxFillRowMajorLayout(Desc, RowMajor, DdiResource);
 
-    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
+    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout, &CreationLayout);
+    HasCreationLayout = TRUE;
     if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
         return E_OUTOFMEMORY;
     DdiResource.InitialBarrierLayout = Start.Layout;
@@ -805,6 +832,8 @@ RxResource::~RxResource()
     if (IsDriverResourceCreated)
         Device.Ddi().pfnDestroyHeapAndResource(Device.Handle(), Placement != nullptr ? NoHeap : DriverHeap, DriverResource);
 
+    RxCloseOpenedShare12(Device, Runtime);
+
     if (Placement != nullptr)
         Placement->ReleaseUse();
 }
@@ -857,6 +886,7 @@ RxResource::Map(
 {
     D3D12DDI_SUBRESOURCE_INFO Info = {};
     D3D12_HEAP_PROPERTIES Custom;
+    BYTE* Base;
     HRESULT hr;
 
     if (ppData != nullptr)
@@ -867,6 +897,34 @@ RxResource::Map(
     Custom = Properties.Type == D3D12_HEAP_TYPE_CUSTOM ? Properties : RxCustomProperties(Device, Properties.Type);
     if (Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE || Subresource >= SubresourceCount())
         return E_INVALIDARG;
+
+    hr = MapMemory(&Base);
+    if (FAILED(hr))
+        return hr;
+
+    if (ppData != nullptr)
+    {
+        Device.Ddi().pfnCheckSubresourceInfo(Device.Handle(), DriverResource, Subresource, &Info);
+        *ppData = Base + Info.Offset;
+    }
+
+    return S_OK;
+}
+
+VOID
+STDMETHODCALLTYPE
+RxResource::Unmap(
+    UINT Subresource,
+    _In_opt_ const D3D12_RANGE* pWrittenRange)
+{
+    UnmapMemory();
+}
+
+HRESULT
+RxResource::MapMemory(
+    _Outptr_ BYTE** Base)
+{
+    HRESULT hr = S_OK;
 
     AcquireSRWLockExclusive(&MapLock);
     if (MapCount == 0)
@@ -881,29 +939,16 @@ RxResource::Map(
         {
             hr = Device.Ddi().pfnMapHeap(Device.Handle(), DriverHeap, reinterpret_cast<void**>(&MappedBase));
         }
-        if (FAILED(hr))
-        {
-            ReleaseSRWLockExclusive(&MapLock);
-            return hr;
-        }
     }
-    MapCount++;
+    if (SUCCEEDED(hr))
+        MapCount++;
+    *Base = MappedBase;
     ReleaseSRWLockExclusive(&MapLock);
-
-    if (ppData != nullptr)
-    {
-        Device.Ddi().pfnCheckSubresourceInfo(Device.Handle(), DriverResource, Subresource, &Info);
-        *ppData = MappedBase + Info.Offset;
-    }
-
-    return S_OK;
+    return hr;
 }
 
 VOID
-STDMETHODCALLTYPE
-RxResource::Unmap(
-    UINT Subresource,
-    _In_opt_ const D3D12_RANGE* pWrittenRange)
+RxResource::UnmapMemory()
 {
     AcquireSRWLockExclusive(&MapLock);
     if (MapCount != 0)

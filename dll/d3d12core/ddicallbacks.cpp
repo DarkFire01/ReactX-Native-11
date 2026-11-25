@@ -191,14 +191,15 @@ RxAllocateCb0022(
             Create.hResource = Resource->KmResource;
     }
 
-    /* A swapchain buffer is shared by NT handle with the compositor, which reads its record */
+    /* Shared heaps and resources are shared by NT handle; openers rebuild them from the record */
     if (Resource != nullptr && Resource->SharedRecord != nullptr && Create.Flags.CreateResource)
     {
         Create.Flags.CreateShared = TRUE;
         Create.Flags.NtSecuritySharing = TRUE;
         Create.Flags.NonSecure = TRUE;
-        Create.Flags.RestrictSharedAccess = TRUE;
-        Create.Flags.SwapChainBackBuffer = TRUE;
+        Create.Flags.RestrictSharedAccess = Resource->SwapChainBuffer;
+        Create.Flags.SwapChainBackBuffer = Resource->SwapChainBuffer;
+        Create.Flags.CrossAdapter = Resource->CrossAdapter;
         Create.pPrivateRuntimeData = Resource->SharedRecord;
         Create.PrivateRuntimeDataSize = Resource->SharedRecordSize;
     }

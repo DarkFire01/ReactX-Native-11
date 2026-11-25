@@ -57,6 +57,38 @@ private:
     RxBlock* Head = nullptr;
 };
 
+/* An array that grows inside an arena; the old storage stays until the arena goes */
+template <typename Type>
+class RxGrowList
+{
+public:
+    HRESULT
+    Push(
+        _In_ RxArena& Arena,
+        _In_ const Type& Value)
+    {
+        if (Count == Capacity)
+        {
+            UINT Larger = Capacity != 0 ? Capacity * 2 : 8;
+            Type* Wider = Arena.AllocateArray<Type>(Larger);
+
+            if (Wider == nullptr)
+                return E_OUTOFMEMORY;
+            if (Count != 0)
+                CopyMemory(Wider, Items, sizeof(*Items) * Count);
+            Items = Wider;
+            Capacity = Larger;
+        }
+
+        Items[Count++] = Value;
+        return S_OK;
+    }
+
+    Type* Items = nullptr;
+    UINT Count = 0;
+    UINT Capacity = 0;
+};
+
 /* DXIL shader kinds as runtime data stores them */
 constexpr UINT RxDxilKindLibrary = 6;
 constexpr UINT RxDxilKindRayGeneration = 7;
@@ -65,6 +97,7 @@ constexpr UINT RxDxilKindAnyHit = 9;
 constexpr UINT RxDxilKindClosestHit = 10;
 constexpr UINT RxDxilKindMiss = 11;
 constexpr UINT RxDxilKindCallable = 12;
+constexpr UINT RxDxilKindNode = 15;
 
 /* Resource classes as runtime data stores them */
 constexpr UINT RxDxilClassSrv = 0;
@@ -91,6 +124,51 @@ struct RxDxilBinding
     UINT Upper;
 };
 
+/* A node input or output record as a node shader declares it */
+struct RxDxilNodeRecord
+{
+    /* Kind and flags in driver encoding */
+    UINT Kind;
+    UINT Flags;
+    UINT Size;
+    UINT Alignment;
+    /* Outputs: the node it targets, the array size and the record limits */
+    LPCWSTR Target;
+    UINT TargetIndex;
+    UINT ArraySize;
+    BOOLEAN AllowSparse;
+    BOOLEAN HasMaxRecords;
+    UINT MaxRecords;
+    BOOLEAN HasSharedWith;
+    UINT SharedWith;
+    BOOLEAN HasGrid;
+    D3D12DDI_RECORD_DISPATCH_GRID_0108 Grid;
+};
+
+/* What a node shader declares about itself */
+struct RxDxilNode
+{
+    /* Driver launch type: broadcasting, coalescing or thread */
+    UINT Launch;
+    BOOLEAN ProgramEntry;
+    LPCWSTR Name;
+    UINT Index;
+    UINT GroupShared;
+    UINT MaxRecursionDepth;
+    BOOLEAN HasLocalRootIndex;
+    UINT LocalRootIndex;
+    LPCWSTR ShareInputOf;
+    UINT ShareInputIndex;
+    BOOLEAN HasDispatchGrid;
+    UINT DispatchGrid[3];
+    BOOLEAN HasMaxDispatchGrid;
+    UINT MaxDispatchGrid[3];
+    BOOLEAN HasInput;
+    RxDxilNodeRecord Input;
+    UINT OutputCount;
+    RxDxilNodeRecord* Outputs;
+};
+
 /* A function in a library, with its names in driver form */
 struct RxDxilFunction
 {
@@ -101,6 +179,8 @@ struct RxDxilFunction
     const RxDxilBinding* Bindings;
     UINT DependencyCount;
     LPCWSTR* Dependencies;
+    /* Node shaders only */
+    const RxDxilNode* Node;
 };
 
 /* A subobject a library declares */
@@ -141,12 +221,18 @@ public:
         return Version;
     }
 
+    /* Whether the container carries the digest its contents hash to, as signed containers do */
+    BOOLEAN
+    IsSigned() const;
+
     UINT FunctionCount = 0;
     RxDxilFunction* Functions = nullptr;
     UINT SubobjectCount = 0;
     RxDxilSubobject* Subobjects = nullptr;
 
 private:
+    const BYTE* Copy = nullptr;
+    UINT CopySize = 0;
     const UINT* Program = nullptr;
     UINT Version = 0;
 };
@@ -233,7 +319,66 @@ constexpr UINT RxImportAnyHit = 0;
 constexpr UINT RxImportClosestHit = 1;
 constexpr UINT RxImportIntersection = 2;
 
-class RxStateObject final : public RxDeviceChild12<ID3D12StateObject>, public ID3D12StateObjectProperties1
+/* A node output after overrides */
+struct RxGraphOutput
+{
+    const RxDxilNodeRecord* Source;
+    LPCWSTR Target;
+    UINT TargetIndex;
+    /* As the driver counts it: single outputs are arrays of one */
+    UINT ArraySize;
+    BOOL AllowSparse;
+    BOOLEAN HasMaxRecords;
+    UINT MaxRecords;
+    BOOLEAN HasSharedWith;
+    UINT SharedWith;
+};
+
+/* A node of a work graph: a node shader with the identity and properties the graph gives it */
+struct RxGraphNode
+{
+    const RxFunctionExport* Function;
+    const RxDxilNode* Source;
+    LPCWSTR Name;
+    UINT Index;
+    BOOLEAN Explicit;
+    /* Declared, overridden or listed as an entry; Entry is the final answer */
+    BOOLEAN ProgramEntry;
+    BOOLEAN Entry;
+    BOOLEAN HasLocalRootIndex;
+    UINT LocalRootIndex;
+    LPCWSTR ShareInputOf;
+    UINT ShareInputIndex;
+    const UINT* DispatchGrid;
+    const UINT* MaxDispatchGrid;
+    UINT OutputCount;
+    RxGraphOutput* Outputs;
+    D3D12DDI_NODE_0108* Ddi;
+};
+
+/* A work graph program and its driver desc */
+struct RxWorkGraph
+{
+    LPCWSTR Name;
+    UINT NodeCount;
+    RxGraphNode* Nodes;
+    UINT EntryCount;
+    UINT* Entries;
+    D3D12DDI_WORK_GRAPH_DESC_0108* Ddi;
+};
+
+/* Builds and checks one work graph out of the node shaders among the functions */
+HRESULT
+RxBuildWorkGraph(
+    _In_ RxArena& Arena,
+    _In_ const D3D12_WORK_GRAPH_DESC& Desc,
+    _In_ UINT FunctionCount,
+    _In_reads_(FunctionCount) const RxFunctionExport* Functions,
+    _Out_ RxWorkGraph* Graph);
+
+class RxStateObject final : public RxDeviceChild12<ID3D12StateObject>,
+                            public ID3D12StateObjectProperties1,
+                            public ID3D12WorkGraphProperties
 {
 public:
     static constexpr GUID PrivateId = {0x6b3e91d4, 0x2a57, 0x4c08, {0x9f, 0x16, 0xd8, 0x40, 0x7c, 0xe3, 0x52, 0xa9}};
@@ -291,6 +436,84 @@ public:
     GetProgramIdentifier(
         LPCWSTR pProgramName) override;
 
+    UINT
+    STDMETHODCALLTYPE
+    GetNumWorkGraphs(VOID) override;
+
+    LPCWSTR
+    STDMETHODCALLTYPE
+    GetProgramName(
+        UINT WorkGraphIndex) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetWorkGraphIndex(
+        LPCWSTR pProgramName) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetNumNodes(
+        UINT WorkGraphIndex) override;
+
+    D3D12_NODE_ID
+    STDMETHODCALLTYPE
+    GetNodeID(
+        UINT WorkGraphIndex,
+        UINT NodeIndex) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetNodeIndex(
+        UINT WorkGraphIndex,
+        D3D12_NODE_ID NodeID) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetNodeLocalRootArgumentsTableIndex(
+        UINT WorkGraphIndex,
+        UINT NodeIndex) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetNumEntrypoints(
+        UINT WorkGraphIndex) override;
+
+    D3D12_NODE_ID
+    STDMETHODCALLTYPE
+    GetEntrypointID(
+        UINT WorkGraphIndex,
+        UINT EntrypointIndex) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetEntrypointIndex(
+        UINT WorkGraphIndex,
+        D3D12_NODE_ID NodeID) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetEntrypointRecordSizeInBytes(
+        UINT WorkGraphIndex,
+        UINT EntrypointIndex) override;
+
+    VOID
+    STDMETHODCALLTYPE
+    GetWorkGraphMemoryRequirements(
+        UINT WorkGraphIndex,
+        _Out_ D3D12_WORK_GRAPH_MEMORY_REQUIREMENTS* pWorkGraphMemoryRequirements) override;
+
+    UINT
+    STDMETHODCALLTYPE
+    GetEntrypointRecordAlignmentInBytes(
+        UINT WorkGraphIndex,
+        UINT EntrypointIndex) override;
+
+    /* The work graph of this name, or nullptr */
+    _Ret_maybenull_
+    const RxWorkGraph*
+    FindWorkGraph(
+        _In_z_ LPCWSTR Name) const;
+
     D3D12_STATE_OBJECT_TYPE
     GetType() const
     {
@@ -345,6 +568,8 @@ public:
     RxFunctionExport* Functions = nullptr;
     UINT HitGroupCount = 0;
     RxHitGroupExport* HitGroups = nullptr;
+    UINT WorkGraphCount = 0;
+    RxWorkGraph* WorkGraphs = nullptr;
 
     /* The summary the driver was given, which state objects using this one point into */
     UINT NodeCount = 0;

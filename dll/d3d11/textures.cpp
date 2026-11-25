@@ -6,6 +6,7 @@
  */
 
 #include "textures.hpp"
+#include "sharedrecord12.hpp"
 
 BOOLEAN
 RxDescribeResource(
@@ -175,6 +176,76 @@ RxMakeSharedRecord(
     return Record;
 }
 
+/* The D3D11 texture a Direct3D 12 committed texture opens as; only plain render targets in a few formats do */
+static
+BOOLEAN
+RxTextureFromRecord12(
+    _In_ const RxSharedRecord12& Record,
+    _Out_ D3D11_TEXTURE2D_DESC* Desc)
+{
+    static const DXGI_FORMAT Formats[] =
+    {
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT_R16_UNORM,
+        DXGI_FORMAT_R8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_B8G8R8X8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT_B8G8R8X8_UNORM_SRGB,
+    };
+    const D3D12_RESOURCE_DESC1& Source = Record.Resource.Desc;
+    BOOLEAN IsFormatShareable = FALSE;
+
+    ZeroMemory(Desc, sizeof(*Desc));
+    if (Record.Heap.Size == 0 || Record.Resource.Size == 0 || (Record.Resource.OpenAs & RxShareOpenAsHeap12) != 0)
+        return FALSE;
+    if (Source.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || Source.MipLevels != 1 ||
+        Source.SampleDesc.Count != 1 || Source.SampleDesc.Quality != 0)
+    {
+        return FALSE;
+    }
+
+    /* Unordered access needs both runtimes to be allowed to use the texture at once */
+    if ((Source.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
+        (Source.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0 ||
+        ((Source.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 &&
+         (Source.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0))
+    {
+        return FALSE;
+    }
+
+    for (DXGI_FORMAT Format : Formats)
+        IsFormatShareable = IsFormatShareable || Source.Format == Format;
+    if (!IsFormatShareable)
+        return FALSE;
+
+    Desc->Width = (UINT)Source.Width;
+    Desc->Height = Source.Height;
+    Desc->MipLevels = 1;
+    Desc->ArraySize = Source.DepthOrArraySize;
+    Desc->Format = Source.Format;
+    Desc->SampleDesc.Count = 1;
+    Desc->Usage = D3D11_USAGE_DEFAULT;
+    Desc->BindFlags = D3D11_BIND_RENDER_TARGET;
+    if ((Source.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0)
+        Desc->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+    if ((Source.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0)
+        Desc->BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+    Desc->MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+
+    /* A displayable texture only one runtime uses at a time has one writer */
+    if ((Record.Heap.Desc.Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY) != 0)
+    {
+        Desc->MiscFlags |= D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE;
+        if ((Source.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) == 0)
+            Desc->MiscFlags |= D3D11_RESOURCE_MISC_SHARED_EXCLUSIVE_WRITER;
+    }
+    return TRUE;
+}
+
 template <typename Traits>
 HRESULT
 RxTexture<Traits>::Create(
@@ -280,6 +351,8 @@ RxTexture<Traits>::Open(
     if constexpr (Traits::Dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
     {
         RxSharedTextureRecord Record;
+        RxSharedRecord12 Record12 = {};
+        D3D11_TEXTURE2D_DESC From12;
         RxTexture* NewTexture;
         HRESULT hr;
 
@@ -288,9 +361,17 @@ RxTexture<Traits>::Open(
             return E_OUTOFMEMORY;
 
         if (IsNtHandle)
-            hr = NewTexture->Resource.OpenSharedNt(SharedHandle, &Record);
+            hr = NewTexture->Resource.OpenSharedNt(SharedHandle, &Record, &Record12);
         else
             hr = NewTexture->Resource.OpenShared((D3DKMT_HANDLE)(ULONG_PTR)SharedHandle, &Record);
+
+        /* A Direct3D 12 record describes the texture in its own terms */
+        if (SUCCEEDED(hr) && Record.Version != RxSharedRecordVersion && RxTextureFromRecord12(Record12, &From12))
+        {
+            NewTexture->Description = From12;
+            *Texture = NewTexture;
+            return S_OK;
+        }
 
         /* Without a full record there is no description to give the texture */
         if (SUCCEEDED(hr) && (Record.Size < sizeof(Record) || Record.Version != RxSharedRecordVersion ||

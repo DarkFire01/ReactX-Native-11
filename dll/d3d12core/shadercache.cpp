@@ -1,107 +1,12 @@
 /*
  * PROJECT:     ReactX Direct3D 12 runtime
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     The shader cache the runtime keeps for drivers, held in memory for the process
+ * PURPOSE:     The shader cache the runtime keeps for drivers
  * COPYRIGHT:   Copyright 2026 Justin Miller <justinmiller100@gmail.com>
  */
 
 #include "device.hpp"
 #include "shadercache.hpp"
-
-/* What a driver stored under one key: compiled code and its compiler's metadata */
-struct RxCacheEntry
-{
-    RxCacheEntry* NextInBucket;
-    RxCacheEntry* NextStored;
-    LUID Adapter;
-    UINT Hash;
-    SIZE_T KeySize;
-    SIZE_T CodeSize;
-    SIZE_T MetadataSize;
-    /* The key, then the code, then the metadata */
-    BYTE* Data;
-};
-
-constexpr UINT RxCacheBucketCount = 512;
-
-/* Oldest values go first once the cache holds this much */
-constexpr SIZE_T RxCacheLimit = 512 * 1024 * 1024;
-
-static SRWLOCK RxCacheLock = SRWLOCK_INIT;
-static RxCacheEntry* RxCacheBuckets[RxCacheBucketCount];
-static RxCacheEntry* RxCacheOldest;
-static RxCacheEntry* RxCacheNewest;
-static SIZE_T RxCacheBytes;
-
-/* Values from one adapter's driver are never handed to another's */
-static
-UINT
-RxCacheHash(
-    _In_ const LUID& Adapter,
-    _In_reads_bytes_(KeySize) const BYTE* Key,
-    _In_ SIZE_T KeySize)
-{
-    UINT Hash = 2166136261u ^ Adapter.LowPart ^ ((UINT)Adapter.HighPart << 16);
-
-    for (SIZE_T Index = 0; Index < KeySize; Index++)
-        Hash = (Hash ^ Key[Index]) * 16777619u;
-    return Hash;
-}
-
-/* The lock is held */
-_Ret_maybenull_
-static
-RxCacheEntry*
-RxCacheFind(
-    _In_ const LUID& Adapter,
-    _In_ UINT Hash,
-    _In_reads_bytes_(KeySize) const BYTE* Key,
-    _In_ SIZE_T KeySize)
-{
-    for (RxCacheEntry* Entry = RxCacheBuckets[Hash % RxCacheBucketCount]; Entry != nullptr; Entry = Entry->NextInBucket)
-    {
-        if (Entry->Hash == Hash && Entry->KeySize == KeySize && Entry->Adapter.LowPart == Adapter.LowPart &&
-            Entry->Adapter.HighPart == Adapter.HighPart && memcmp(Entry->Data, Key, KeySize) == 0)
-        {
-            return Entry;
-        }
-    }
-    return nullptr;
-}
-
-/* Unlinks and frees one entry; the lock is held exclusively */
-static
-VOID
-RxCacheDrop(
-    _In_ RxCacheEntry* Entry)
-{
-    RxCacheEntry** Link;
-
-    for (Link = &RxCacheBuckets[Entry->Hash % RxCacheBucketCount]; *Link != Entry; Link = &(*Link)->NextInBucket)
-        ;
-    *Link = Entry->NextInBucket;
-
-    if (RxCacheOldest == Entry)
-    {
-        RxCacheOldest = Entry->NextStored;
-        if (RxCacheNewest == Entry)
-            RxCacheNewest = nullptr;
-    }
-    else
-    {
-        RxCacheEntry* Before = RxCacheOldest;
-
-        while (Before->NextStored != Entry)
-            Before = Before->NextStored;
-        Before->NextStored = Entry->NextStored;
-        if (RxCacheNewest == Entry)
-            RxCacheNewest = Before;
-    }
-
-    RxCacheBytes -= Entry->KeySize + Entry->CodeSize + Entry->MetadataSize;
-    free(Entry->Data);
-    free(Entry);
-}
 
 /* Hands one stored value out through the driver's allocator, its buffer, or as a size alone */
 static
@@ -156,36 +61,56 @@ RxShaderCacheGetValueCb(
     _In_opt_ PFND3D12DDI_SHADERCACHEALLOCATIONFUNC pCallbackFunc,
     _Inout_opt_ void* pContext)
 {
-    const LUID& Adapter = static_cast<RxDevice12*>(hRTDevice.handle)->GetAdapter().GetLuid();
-    const BYTE* Key = static_cast<const BYTE*>(pKey);
-    RxCacheEntry* Entry;
+    RxDevice12* Device = static_cast<RxDevice12*>(hRTDevice.handle);
+    RxShaderCacheStore12* Store = Device->GetDriverShaderCache();
+    BYTE* Stored;
+    UINT32 CodeSize = 0;
+    UINT Size = 0;
     HRESULT hr;
 
     UNREFERENCED_PARAMETER(hRTObject);
 
-    if (KeyLen > UINT_MAX || (pObjectCode != nullptr && pObjectCode->ValueSize > UINT_MAX) ||
+    if (KeyLen == 0 || KeyLen > UINT_MAX || (pObjectCode != nullptr && pObjectCode->ValueSize > UINT_MAX) ||
         (pCompilerMetadata != nullptr && pCompilerMetadata->ValueSize > UINT_MAX) ||
         ((UINT)Flags & ~(D3D12DDI_SHADER_CACHE_GET_VALUE_FLAG_STORED_VALUES_ONLY |
                          D3D12DDI_SHADER_CACHE_GET_VALUE_FLAG_0118_PSDB_MISS_EXPECTED)) != 0)
     {
         return E_INVALIDARG;
     }
+    if (Store == nullptr || (Device->GetDisabledShaderCaches() & RxCacheKindDriver12) != 0)
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
 
-    AcquireSRWLockShared(&RxCacheLock);
-    Entry = RxCacheFind(Adapter, RxCacheHash(Adapter, Key, KeyLen), Key, KeyLen);
-    if (Entry == nullptr)
+    /* With nowhere to put a value the driver only asks whether the key is there */
+    hr = Store->Find(pKey, (UINT)KeyLen, nullptr, &Size);
+    if (FAILED(hr) || (pObjectCode == nullptr && pCompilerMetadata == nullptr))
+        return hr;
+
+    Stored = static_cast<BYTE*>(malloc(Size));
+    if (Stored == nullptr)
+        return E_OUTOFMEMORY;
+    hr = Store->Find(pKey, (UINT)KeyLen, Stored, &Size);
+    if (FAILED(hr))
     {
-        ReleaseSRWLockShared(&RxCacheLock);
+        free(Stored);
+        return hr;
+    }
+
+    /* The code size comes first, then the code and the compiler's metadata */
+    if (Size >= sizeof(CodeSize))
+        CopyMemory(&CodeSize, Stored, sizeof(CodeSize));
+    if (Size < sizeof(CodeSize) || CodeSize > Size - sizeof(CodeSize))
+    {
+        free(Stored);
         return DXGI_ERROR_NOT_FOUND;
     }
 
-    hr = RxCacheCopyOut(pObjectCode, Entry->Data + Entry->KeySize, Entry->CodeSize, pCallbackFunc, pContext);
+    hr = RxCacheCopyOut(pObjectCode, Stored + sizeof(CodeSize), CodeSize, pCallbackFunc, pContext);
     if (SUCCEEDED(hr))
     {
-        hr = RxCacheCopyOut(pCompilerMetadata, Entry->Data + Entry->KeySize + Entry->CodeSize, Entry->MetadataSize,
+        hr = RxCacheCopyOut(pCompilerMetadata, Stored + sizeof(CodeSize) + CodeSize, Size - sizeof(CodeSize) - CodeSize,
                             pCallbackFunc, pContext);
     }
-    ReleaseSRWLockShared(&RxCacheLock);
+    free(Stored);
     return hr;
 }
 
@@ -200,69 +125,42 @@ RxShaderCacheStoreValueCb(
     _In_ CONST D3D12DDI_SHADER_CACHE_VALUE* pObjectCode,
     _In_ CONST D3D12DDI_SHADER_CACHE_VALUE* pCompilerMetadata)
 {
-    const LUID& Adapter = static_cast<RxDevice12*>(hRTDevice.handle)->GetAdapter().GetLuid();
-    const BYTE* Key = static_cast<const BYTE*>(pKey);
+    RxDevice12* Device = static_cast<RxDevice12*>(hRTDevice.handle);
+    RxShaderCacheStore12* Store = Device->GetDriverShaderCache();
     SIZE_T CodeSize = pObjectCode != nullptr ? pObjectCode->ValueSize : 0;
     SIZE_T MetadataSize = pCompilerMetadata != nullptr ? pCompilerMetadata->ValueSize : 0;
-    RxCacheEntry* Entry;
-    RxCacheEntry* Old;
-    UINT Hash;
+    BYTE* Value;
+    UINT32 Prefix;
+    HRESULT hr;
 
     UNREFERENCED_PARAMETER(hRTObject);
 
-    if (pKey == nullptr || KeyLen == 0 || KeyLen > UINT_MAX || CodeSize > UINT_MAX || MetadataSize > UINT_MAX ||
+    if (Store == nullptr)
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
+    if (pKey == nullptr || KeyLen == 0 || KeyLen > UINT_MAX || CodeSize > UINT_MAX - sizeof(Prefix) ||
+        MetadataSize > UINT_MAX || (pObjectCode == nullptr && pCompilerMetadata == nullptr) ||
         (CodeSize != 0 && pObjectCode->pValue == nullptr) || (MetadataSize != 0 && pCompilerMetadata->pValue == nullptr))
     {
         return E_INVALIDARG;
     }
+    if ((Device->GetDisabledShaderCaches() & RxCacheKindDriver12) != 0)
+        return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
 
-    Entry = static_cast<RxCacheEntry*>(malloc(sizeof(*Entry)));
-    if (Entry == nullptr)
+    Value = static_cast<BYTE*>(malloc(sizeof(Prefix) + CodeSize));
+    if (Value == nullptr)
         return E_OUTOFMEMORY;
-    Entry->Data = static_cast<BYTE*>(malloc(KeyLen + CodeSize + MetadataSize));
-    if (Entry->Data == nullptr)
-    {
-        free(Entry);
-        return E_OUTOFMEMORY;
-    }
-
-    Hash = RxCacheHash(Adapter, Key, KeyLen);
-    Entry->NextStored = nullptr;
-    Entry->Adapter = Adapter;
-    Entry->Hash = Hash;
-    Entry->KeySize = KeyLen;
-    Entry->CodeSize = CodeSize;
-    Entry->MetadataSize = MetadataSize;
-    CopyMemory(Entry->Data, Key, KeyLen);
+    Prefix = (UINT32)CodeSize;
+    CopyMemory(Value, &Prefix, sizeof(Prefix));
     if (CodeSize != 0)
-        CopyMemory(Entry->Data + KeyLen, pObjectCode->pValue, CodeSize);
-    if (MetadataSize != 0)
-        CopyMemory(Entry->Data + KeyLen + CodeSize, pCompilerMetadata->pValue, MetadataSize);
+        CopyMemory(Value + sizeof(Prefix), pObjectCode->pValue, CodeSize);
 
-    AcquireSRWLockExclusive(&RxCacheLock);
-
-    /* A newer value replaces the old one */
-    Old = RxCacheFind(Adapter, Hash, Key, KeyLen);
-    if (Old != nullptr)
-        RxCacheDrop(Old);
-
-    while (RxCacheOldest != nullptr && RxCacheBytes + KeyLen + CodeSize + MetadataSize > RxCacheLimit)
-        RxCacheDrop(RxCacheOldest);
-
-    Entry->NextInBucket = RxCacheBuckets[Hash % RxCacheBucketCount];
-    RxCacheBuckets[Hash % RxCacheBucketCount] = Entry;
-    if (RxCacheNewest != nullptr)
-        RxCacheNewest->NextStored = Entry;
-    else
-        RxCacheOldest = Entry;
-    RxCacheNewest = Entry;
-    RxCacheBytes += KeyLen + CodeSize + MetadataSize;
-
-    ReleaseSRWLockExclusive(&RxCacheLock);
-    return S_OK;
+    hr = Store->Store(pKey, (UINT)KeyLen, Value, (UINT)(sizeof(Prefix) + CodeSize),
+                      MetadataSize != 0 ? pCompilerMetadata->pValue : nullptr, (UINT)MetadataSize);
+    free(Value);
+    return hr;
 }
 
-/* Drivers say when a value no longer helps; memory goes the next time the cache is full */
+/* Drivers say when a value no longer helps; the store keeps it until it is cleared */
 static
 HRESULT
 APIENTRY

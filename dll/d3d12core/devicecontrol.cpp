@@ -7,6 +7,7 @@
 
 #include "objects.hpp"
 #include "metacommand.hpp"
+#include "shadercache.hpp"
 
 using PFN_RX_DEVELOPER_MODE = HRESULT (WINAPI*)(BOOL*);
 
@@ -396,7 +397,16 @@ RxDevice12::ShaderCacheControl(
     else if ((Control & D3D12_SHADER_CACHE_CONTROL_FLAG_ENABLE) != 0)
         DisabledShaderCaches &= ~Kinds;
 
-    /* The runtime keeps no implicit caches of its own to clear; the driver's is told directly */
+    /* Clearing empties the runtime's store for the driver and the stores of this device's sessions */
+    if ((Control & D3D12_SHADER_CACHE_CONTROL_FLAG_CLEAR) != 0)
+    {
+        if ((Kinds & RxCacheKindDriver12) != 0 && DriverShaderCache != nullptr)
+            DriverShaderCache->Clear();
+        if ((Kinds & RxCacheKindApplication12) != 0)
+            RxShaderCacheSession::ClearKinds(*this, Kinds);
+    }
+
+    /* The driver's own cache is told directly */
     if ((Kinds & D3D12_SHADER_CACHE_KIND_FLAG_IMPLICIT_DRIVER_MANAGED) != 0 &&
         Options.DriverManagedShaderCachePresent && CoreFunctions.pfnImplicitShaderCacheControl != nullptr)
     {

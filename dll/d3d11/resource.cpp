@@ -8,6 +8,7 @@
 #include <initguid.h>
 
 #include "resource.hpp"
+#include "sharedrecord12.hpp"
 
 #include <algorithm>
 #include <vector>
@@ -452,7 +453,8 @@ DdiResource::OpenShared(
 HRESULT
 DdiResource::OpenSharedNt(
     _In_ HANDLE NtHandle,
-    _Out_opt_ RxSharedTextureRecord* Record)
+    _Out_opt_ RxSharedTextureRecord* Record,
+    _Out_opt_ RxSharedRecord12* Record12)
 {
     const KmtThunks* Kmt = RxGetKmtThunks();
     D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE Query = {};
@@ -506,6 +508,8 @@ DdiResource::OpenSharedNt(
     Runtime->KeyedMutex = Open.hKeyedMutex;
     Runtime->SyncObject = Open.hSyncObject;
     RxCopySharedRecord(RuntimeData.data(), Query.PrivateRuntimeDataSize, Record);
+    if (Record12 != nullptr)
+        RxReadSharedRecord12(RuntimeData.data(), Query.PrivateRuntimeDataSize, Record12);
 
     /* Before WDDM 2.0 the UMD takes the older allocation list, whose fields lead the newer one */
     Args.NumAllocations = Open.NumAllocations;
