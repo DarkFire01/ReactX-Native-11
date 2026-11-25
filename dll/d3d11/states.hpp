@@ -16,6 +16,7 @@
 struct RxBlendTraits
 {
     using Interface = ID3D11BlendState1;
+    using MiddleInterface = ID3D11BlendState1;
     using BaseInterface = ID3D11BlendState;
     using ApiDesc = D3D11_BLEND_DESC1;
     using BaseDesc = D3D11_BLEND_DESC;
@@ -52,6 +53,7 @@ struct RxBlendTraits
 struct RxDepthStencilTraits
 {
     using Interface = ID3D11DepthStencilState;
+    using MiddleInterface = ID3D11DepthStencilState;
     using BaseInterface = ID3D11DepthStencilState;
     using ApiDesc = D3D11_DEPTH_STENCIL_DESC;
     using BaseDesc = D3D11_DEPTH_STENCIL_DESC;
@@ -94,9 +96,10 @@ static_assert(sizeof(RxRasterizerDdiDesc) == sizeof(D3DWDDM2_0DDI_RASTERIZER_DES
 
 struct RxRasterizerTraits
 {
-    using Interface = ID3D11RasterizerState1;
+    using Interface = ID3D11RasterizerState2;
+    using MiddleInterface = ID3D11RasterizerState1;
     using BaseInterface = ID3D11RasterizerState;
-    using ApiDesc = D3D11_RASTERIZER_DESC1;
+    using ApiDesc = D3D11_RASTERIZER_DESC2;
     using BaseDesc = D3D11_RASTERIZER_DESC;
     using DdiDesc = RxRasterizerDdiDesc;
     using Handle = D3D10DDI_HRASTERIZERSTATE;
@@ -131,6 +134,7 @@ struct RxRasterizerTraits
 struct RxSamplerTraits
 {
     using Interface = ID3D11SamplerState;
+    using MiddleInterface = ID3D11SamplerState;
     using BaseInterface = ID3D11SamplerState;
     using ApiDesc = D3D11_SAMPLER_DESC;
     using BaseDesc = D3D11_SAMPLER_DESC;
@@ -202,12 +206,12 @@ protected:
 };
 
 template <>
-class RxStateBase<RxRasterizerTraits> : public RxDeviceChild<ID3D11RasterizerState1>
+class RxStateBase<RxRasterizerTraits> : public RxDeviceChild<ID3D11RasterizerState2>
 {
 public:
     explicit RxStateBase(
         _In_ RxDevice& Device)
-        : RxDeviceChild<ID3D11RasterizerState1>(Device)
+        : RxDeviceChild<ID3D11RasterizerState2>(Device)
     {
     }
 
@@ -216,11 +220,21 @@ public:
     GetDesc1(
         _Out_ D3D11_RASTERIZER_DESC1* pDesc) override
     {
+        /* The newest desc only appends ConservativeRaster */
+        static_assert(offsetof(D3D11_RASTERIZER_DESC2, ConservativeRaster) == sizeof(D3D11_RASTERIZER_DESC1));
+        memcpy(pDesc, &Desc, sizeof(*pDesc));
+    }
+
+    VOID
+    STDMETHODCALLTYPE
+    GetDesc2(
+        _Out_ D3D11_RASTERIZER_DESC2* pDesc) override
+    {
         *pDesc = Desc;
     }
 
 protected:
-    D3D11_RASTERIZER_DESC1 Desc = {};
+    D3D11_RASTERIZER_DESC2 Desc = {};
 };
 
 template <typename Traits>

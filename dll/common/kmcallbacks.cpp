@@ -59,7 +59,9 @@ RxKernelResult(
     LONG Count;
     HRESULT hr;
 
-    if (Status != STATUS_SUCCESS && Reports != nullptr && RxIsTraceEnabled() && RxShouldReport(Reports, &Count))
+    /* Paging work still in flight comes back pending, which is not a failure */
+    if (Status != STATUS_SUCCESS && Status != STATUS_PENDING && Reports != nullptr && RxIsTraceEnabled() &&
+        RxShouldReport(Reports, &Count))
         RxTrace(L"%S returned 0x%08lX (%ld so far)", Call, Status, Count);
 
     if (!NT_SUCCESS(Status) && Device.IsKernelDeviceRemoved())

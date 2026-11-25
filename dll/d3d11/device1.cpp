@@ -103,14 +103,57 @@ RxDevice::CreateBlendState1(
     return S_OK;
 }
 
+/* Both newer rasterizer creates validate the same way and hand out the same object */
+static
+HRESULT
+RxCreateRasterizerState2(
+    _In_ RxDevice& Device,
+    _In_ const D3D11_RASTERIZER_DESC2& Desc,
+    _Outptr_opt_ RxRasterizerState** ppState)
+{
+    D3D11_FEATURE_DATA_D3D11_OPTIONS2 Options = {};
+    RxRasterizerState* State;
+    UINT Forced;
+    HRESULT hr;
+
+    /* A forced count is a power of two up to 16 */
+    Forced = Desc.ForcedSampleCount;
+    if (Forced != 0 && (Forced > 16 || (Forced & (Forced - 1)) != 0))
+        return E_INVALIDARG;
+
+    if (Desc.ConservativeRaster != D3D11_CONSERVATIVE_RASTERIZATION_MODE_OFF)
+    {
+        if (Desc.ConservativeRaster != D3D11_CONSERVATIVE_RASTERIZATION_MODE_ON)
+            return E_INVALIDARG;
+        if (FAILED(Device.CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &Options, sizeof(Options))) ||
+            Options.ConservativeRasterizationTier == D3D11_CONSERVATIVE_RASTERIZATION_NOT_SUPPORTED)
+        {
+            return E_INVALIDARG;
+        }
+    }
+
+    hr = RxRasterizerState::Create(Device, Desc, &State);
+    if (FAILED(hr))
+        return hr;
+
+    if (ppState == nullptr)
+    {
+        State->Release();
+        return S_FALSE;
+    }
+
+    *ppState = State;
+    return S_OK;
+}
+
 HRESULT
 STDMETHODCALLTYPE
 RxDevice::CreateRasterizerState1(
     _In_ const D3D11_RASTERIZER_DESC1* pRasterizerDesc,
     _COM_Outptr_opt_ ID3D11RasterizerState1** ppRasterizerState)
 {
-    RxRasterizerState* State;
-    UINT Forced;
+    D3D11_RASTERIZER_DESC2 Desc = {};
+    RxRasterizerState* State = nullptr;
     HRESULT hr;
 
     if (ppRasterizerState != nullptr)
@@ -118,23 +161,35 @@ RxDevice::CreateRasterizerState1(
     if (pRasterizerDesc == nullptr)
         return E_INVALIDARG;
 
-    /* A forced count is a power of two up to 16 */
-    Forced = pRasterizerDesc->ForcedSampleCount;
-    if (Forced != 0 && (Forced > 16 || (Forced & (Forced - 1)) != 0))
+    memcpy(&Desc, pRasterizerDesc, sizeof(*pRasterizerDesc));
+    Desc.ConservativeRaster = D3D11_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+    hr = RxCreateRasterizerState2(*this, Desc, ppRasterizerState != nullptr ? &State : nullptr);
+    if (hr == S_OK)
+        *ppRasterizerState = State;
+    return hr;
+}
+
+/* ID3D11Device3 */
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice::CreateRasterizerState2(
+    _In_ const D3D11_RASTERIZER_DESC2* pRasterizerDesc,
+    _COM_Outptr_opt_ ID3D11RasterizerState2** ppRasterizerState)
+{
+    RxRasterizerState* State = nullptr;
+    HRESULT hr;
+
+    if (ppRasterizerState != nullptr)
+        *ppRasterizerState = nullptr;
+    if (pRasterizerDesc == nullptr)
         return E_INVALIDARG;
 
-    hr = RxRasterizerState::Create(*this, *pRasterizerDesc, &State);
-    if (FAILED(hr))
-        return hr;
-
-    if (ppRasterizerState == nullptr)
-    {
-        State->Release();
-        return S_FALSE;
-    }
-
-    *ppRasterizerState = State;
-    return S_OK;
+    hr = RxCreateRasterizerState2(*this, *pRasterizerDesc, ppRasterizerState != nullptr ? &State : nullptr);
+    if (hr == S_OK)
+        *ppRasterizerState = State;
+    return hr;
 }
 
 /* ID3D11Device2 */

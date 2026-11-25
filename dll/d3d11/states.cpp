@@ -295,34 +295,35 @@ RxDepthStencilTraits::ToDdi(
 
 /* Rasterizer */
 
-D3D11_RASTERIZER_DESC1
+D3D11_RASTERIZER_DESC2
 RxRasterizerTraits::Promote(
     _In_ const D3D11_RASTERIZER_DESC& Desc)
 {
-    D3D11_RASTERIZER_DESC1 Wide = {};
+    D3D11_RASTERIZER_DESC2 Wide = {};
 
     memcpy(&Wide, &Desc, sizeof(Desc));
     Wide.ForcedSampleCount = 0;
+    Wide.ConservativeRaster = D3D11_CONSERVATIVE_RASTERIZATION_MODE_OFF;
     return Wide;
 }
 
 D3D11_RASTERIZER_DESC
 RxRasterizerTraits::Demote(
-    _In_ const D3D11_RASTERIZER_DESC1& Desc)
+    _In_ const D3D11_RASTERIZER_DESC2& Desc)
 {
     D3D11_RASTERIZER_DESC Narrow;
 
-    /* The newer desc only appends ForcedSampleCount */
+    /* The newer descs only append ForcedSampleCount and ConservativeRaster */
     static_assert(offsetof(D3D11_RASTERIZER_DESC1, ForcedSampleCount) == sizeof(D3D11_RASTERIZER_DESC));
     memcpy(&Narrow, &Desc, sizeof(Narrow));
     return Narrow;
 }
 
-D3D11_RASTERIZER_DESC1
+D3D11_RASTERIZER_DESC2
 RxRasterizerTraits::Normalize(
-    _In_ const D3D11_RASTERIZER_DESC1& Source)
+    _In_ const D3D11_RASTERIZER_DESC2& Source)
 {
-    D3D11_RASTERIZER_DESC1 Desc = Source;
+    D3D11_RASTERIZER_DESC2 Desc = Source;
 
     Desc.FrontCounterClockwise = Desc.FrontCounterClockwise ? TRUE : FALSE;
     Desc.DepthClipEnable = Desc.DepthClipEnable ? TRUE : FALSE;
@@ -334,7 +335,7 @@ RxRasterizerTraits::Normalize(
 
 RxRasterizerDdiDesc
 RxRasterizerTraits::ToDdi(
-    _In_ const D3D11_RASTERIZER_DESC1& Desc)
+    _In_ const D3D11_RASTERIZER_DESC2& Desc)
 {
     RxRasterizerDdiDesc Ddi = {};
 
@@ -349,6 +350,7 @@ RxRasterizerTraits::ToDdi(
     Ddi.MultisampleEnable = Desc.MultisampleEnable;
     Ddi.AntialiasedLineEnable = Desc.AntialiasedLineEnable;
     Ddi.ForcedSampleCount = Desc.ForcedSampleCount;
+    Ddi.ConservativeRasterizationMode = (D3DWDDM2_0DDI_CONSERVATIVE_RASTERIZATION_MODE)Desc.ConservativeRaster;
     return Ddi;
 }
 
@@ -488,7 +490,8 @@ RxStateObject<Traits>::QueryInterface(
     }
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11DeviceChild) ||
-        riid == __uuidof(typename Traits::BaseInterface) || riid == __uuidof(Interface))
+        riid == __uuidof(typename Traits::BaseInterface) || riid == __uuidof(typename Traits::MiddleInterface) ||
+        riid == __uuidof(Interface))
     {
         *ppvObject = static_cast<Interface*>(this);
         this->AddRef();

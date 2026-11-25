@@ -151,19 +151,6 @@ RxDevice::CreateTexture3D1(
 
 HRESULT
 STDMETHODCALLTYPE
-RxDevice::CreateRasterizerState2(
-    _In_ const D3D11_RASTERIZER_DESC2* pRasterizerDesc,
-    _COM_Outptr_opt_ ID3D11RasterizerState2** ppRasterizerState)
-{
-    if (ppRasterizerState != nullptr)
-        *ppRasterizerState = nullptr;
-
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
-}
-
-HRESULT
-STDMETHODCALLTYPE
 RxDevice::CreateShaderResourceView1(
     _In_ ID3D11Resource* pResource,
     _In_opt_ const D3D11_SHADER_RESOURCE_VIEW_DESC1* pDesc1,
