@@ -441,17 +441,21 @@ RxBuildShader(
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3D12DDIARG_CREATE_SHADER_0026 Args = {};
     D3D12DDIARG_STAGE_IO_SIGNATURES Io = {};
+    D3D12DDIARG_MESH_IO_SIGNATURES MeshIo = {};
     D3D12DDI_HSHADER Shader;
     const BYTE* Program;
     const BYTE* Inputs;
     const BYTE* Outputs;
+    const BYTE* Primitives = nullptr;
     UINT ProgramSize;
     UINT InputSize;
     UINT OutputSize;
+    UINT PrimitiveSize = 0;
     RxSignatureForm InputForm;
     RxSignatureForm OutputForm;
     UINT InputCount;
     UINT OutputCount;
+    UINT PrimitiveCount;
     SIZE_T DriverSize;
     HRESULT hr;
 
@@ -473,6 +477,10 @@ RxBuildShader(
 
         RxFindSignature(Own, FALSE, &Inputs, &InputSize, &InputForm);
         RxFindSignature(Own, TRUE, &Outputs, &OutputSize, &OutputForm);
+
+        /* Mesh shaders write primitives as well as vertices */
+        if (Build.Stage == RxStageMesh)
+            RxFindContainerPart(Part->Code, Own.BytecodeLength, RxFourCcOf('P', 'S', 'G', '1'), &Primitives, &PrimitiveSize);
     }
 
     /* Drivers of shader model 6 and up take DXIL only; the signatures and hash stay the original's */
@@ -492,13 +500,16 @@ RxBuildShader(
 
     InputCount = RxSignatureCount(Inputs, InputSize);
     OutputCount = RxSignatureCount(Outputs, OutputSize);
-    Part->Entries = new (std::nothrow) D3D12DDIARG_SIGNATURE_ENTRY_0012[InputCount + OutputCount + 1]();
+    PrimitiveCount = RxSignatureCount(Primitives, PrimitiveSize);
+    Part->Entries = new (std::nothrow) D3D12DDIARG_SIGNATURE_ENTRY_0012[InputCount + OutputCount + PrimitiveCount + 1]();
     if (Part->Entries == nullptr)
         return E_OUTOFMEMORY;
 
     hr = RxReadSignature(Inputs, InputSize, InputForm, Part->Entries);
     if (SUCCEEDED(hr))
         hr = RxReadSignature(Outputs, OutputSize, OutputForm, Part->Entries + InputCount);
+    if (SUCCEEDED(hr))
+        hr = RxReadSignature(Primitives, PrimitiveSize, RxSignatureForm::Precise, Part->Entries + InputCount + OutputCount);
     if (FAILED(hr))
         return hr;
 
@@ -506,14 +517,23 @@ RxBuildShader(
     Io.NumInputSignatureEntries = InputCount;
     Io.pOutputSignature = Part->Entries + InputCount;
     Io.NumOutputSignatureEntries = OutputCount;
+    MeshIo.pVertexOutputSignature = Part->Entries + InputCount;
+    MeshIo.NumVertexOutputSignatureEntries = OutputCount;
+    MeshIo.pPrimitiveOutputSignature = Part->Entries + InputCount + OutputCount;
+    MeshIo.NumPrimitiveOutputSignatureEntries = PrimitiveCount;
 
     Args.hRootSignature = Build.Root;
     Args.pShaderCode = reinterpret_cast<const UINT*>(Program);
-    Args.IOSignatures.Standard = &Io;
+    if (Build.Stage == RxStageMesh)
+        Args.IOSignatures.Mesh = &MeshIo;
+    else
+        Args.IOSignatures.Standard = &Io;
     CopyMemory(&Args.ShaderCodeHash, Part->Code + 4, sizeof(Args.ShaderCodeHash));
 
     if (Build.Stage == RxStageHull || Build.Stage == RxStageDomain)
         DriverSize = Ddi.pfnCalcPrivateTessellationShaderSize(Device.Handle(), &Args);
+    else if (Build.Stage == RxStageMesh)
+        DriverSize = Ddi.pfnCalcPrivateMeshShaderSize(Device.Handle(), &Args);
     else
         DriverSize = Ddi.pfnCalcPrivateShaderSize(Device.Handle(), &Args);
 
@@ -540,6 +560,12 @@ RxBuildShader(
             break;
         case RxStageCompute:
             Ddi.pfnCreateComputeShader(Device.Handle(), &Args, Shader);
+            break;
+        case RxStageAmplification:
+            Ddi.pfnCreateAmplificationShader(Device.Handle(), &Args, Shader);
+            break;
+        case RxStageMesh:
+            Ddi.pfnCreateMeshShader(Device.Handle(), &Args, Shader);
             break;
         default:
             return E_NOTIMPL;
@@ -1610,7 +1636,7 @@ RxPipelineState::Initialize(
     else
     {
         static const RxShaderStage Order[] = { RxStageVertex, RxStagePixel, RxStageHull, RxStageDomain,
-                                               RxStageGeometry };
+                                               RxStageGeometry, RxStageAmplification, RxStageMesh };
         D3D12DDI_BLEND_DESC_0010 Blend;
         D3D12DDI_DEPTH_STENCIL_DESC_0095 Depth;
         D3D12DDI_RASTERIZER_DESC_0102 Raster;
@@ -1667,6 +1693,10 @@ RxPipelineState::Initialize(
             Args.hHullShader.pDrvPrivate = Shaders[RxStageHull]->GetDriverHandle();
         if (Shaders[RxStageGeometry] != nullptr)
             Args.hGeometryShader.pDrvPrivate = Shaders[RxStageGeometry]->GetDriverHandle();
+        if (Shaders[RxStageAmplification] != nullptr)
+            Args.hAmplificationShader.pDrvPrivate = Shaders[RxStageAmplification]->GetDriverHandle();
+        if (Shaders[RxStageMesh] != nullptr)
+            Args.hMeshShader.pDrvPrivate = Shaders[RxStageMesh]->GetDriverHandle();
         Args.hBlendState.pDrvPrivate = BlendState->GetDriverHandle();
         Args.SampleMask = Desc.SampleMask;
         Args.hRasterizerState.pDrvPrivate = RasterizerState->GetDriverHandle();
@@ -1679,6 +1709,10 @@ RxPipelineState::Initialize(
         CopyMemory(Args.RTVFormats, Desc.Targets.RTFormats, sizeof(Args.RTVFormats));
         Args.DSVFormat = Desc.DepthFormat;
         Args.SampleDesc = Desc.Samples;
+        Args.ViewInstancingDesc.ViewInstanceCount = Desc.ViewInstancing.ViewInstanceCount;
+        Args.ViewInstancingDesc.pViewInstanceLocations =
+            reinterpret_cast<const D3D12DDI_VIEW_INSTANCE_LOCATION*>(Desc.ViewInstancing.pViewInstanceLocations);
+        Args.ViewInstancingDesc.Flags = (D3D12DDI_VIEW_INSTANCING_FLAGS)Desc.ViewInstancing.Flags;
     }
 
     Args.hRootSignature = Root->GetDriverHandle();

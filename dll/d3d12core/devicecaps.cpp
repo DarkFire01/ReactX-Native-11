@@ -7,6 +7,8 @@
 
 #include "objects.hpp"
 #include "formatsupport12.hpp"
+#include "session.hpp"
+#include "shadercache.hpp"
 
 #include <dxcore_interface.h>
 
@@ -345,8 +347,8 @@ RxCreateProtectedSessionCb(
     _In_ D3D12DDI_HRTPROTECTEDSESSION_0030 hRTProtectedSession,
     _In_ D3D12DDICB_CREATE_PROTECTED_SESSION_0030* pArgs)
 {
-    RX_UNIMPLEMENTED();
-    return E_NOTIMPL;
+    /* Protected resource sessions are the only sessions this runtime makes */
+    return RxCreateKernelSession12(*static_cast<RxKernelSession12*>(hRTProtectedSession.handle), *pArgs);
 }
 
 static const D3D12DDI_CONTENT_PROTECTION_CALLBACKS_0030 RxSessionCallbacks12 =
@@ -386,6 +388,14 @@ RxDevice12::EnableExtendedFeatures()
         UINT32* Versions;
         UINT VersionCount;
         UINT Chosen;
+
+        /* Drivers compile state objects through the runtime's shader cache; a driver that refuses it still works */
+        if (Feature == D3D12DDI_FEATURE_0021_SHADERCACHING)
+        {
+            if (FAILED(RxEnableShaderCache12(ExtendedFunctions, DriverDevice)))
+                RX_TRACE(L"driver shader cache could not be turned on");
+            continue;
+        }
 
         /* Video is turned on the first time a video object needs it; others the runtime does not drive yet */
         if (Feature != RxFeatureVideo12 && Feature != RxFeatureSessions12)

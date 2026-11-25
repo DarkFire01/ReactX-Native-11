@@ -274,6 +274,24 @@ private:
     volatile LONG IsHeld = 0;
 };
 
+/* What a list type can record; a command names the ones it needs */
+constexpr UINT RxListDoesCopy = 0x1;
+constexpr UINT RxListDoesCompute = 0x2;
+constexpr UINT RxListDoesGraphics = 0x4;
+constexpr UINT RxListTopLevel = 0x1000;
+
+/* A render pass as it began, kept for its end and for a later resume */
+struct RxRenderPass
+{
+    UINT TargetCount;
+    D3D12_RENDER_PASS_RENDER_TARGET_DESC Targets[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    BOOLEAN HasDepthStencil;
+    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC DepthStencil;
+    D3D12_RENDER_PASS_FLAGS Flags;
+    D3D12_RENDER_PASS_ENDING_ACCESS_RESOLVE_SUBRESOURCE_PARAMETERS* Resolves;
+    UINT ResolveCapacity;
+};
+
 class RxCommandList final : public RxDeviceChild12<ID3D12GraphicsCommandList10>
 {
 public:
@@ -369,6 +387,38 @@ private:
         return Handle;
     }
 
+    /* Open and not failed; anything else drops what is recorded */
+    BOOLEAN
+    Records() const
+    {
+        return State == RxListState::Recording && SUCCEEDED(Error);
+    }
+
+    /* The first failure is what Close returns; later commands are dropped */
+    VOID
+    Fail(
+        _In_ HRESULT hr);
+
+    /* Whether the list type records a command needing these abilities; the list fails when not */
+    BOOLEAN
+    Takes(
+        _In_ UINT Needed);
+
+    /* A direct list does no GPU work while a pass is suspended, and some commands none inside one */
+    BOOLEAN
+    PassAllows(
+        _In_ BOOLEAN InsidePass);
+
+    VOID
+    StartEmulatedPass(
+        _In_ UINT NumRenderTargets,
+        _In_reads_opt_(NumRenderTargets) const D3D12_RENDER_PASS_RENDER_TARGET_DESC* pRenderTargets,
+        _In_opt_ const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* pDepthStencil,
+        _In_ D3D12_RENDER_PASS_FLAGS Flags);
+
+    VOID
+    EndEmulatedPass();
+
     D3D12_COMMAND_LIST_TYPE Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     RxDriverMemory12 Memory;
     D3D12DDI_HCOMMANDLIST DriverList = {};
@@ -380,6 +430,14 @@ private:
     UINT64 ListId = UINT64_MAX;
     BOOLEAN TakesSessions = FALSE;
     HRESULT Error = S_OK;
+
+    /* Recording state the runtime checks commands against */
+    VOID* BoundHeaps[2] = {};
+    INT OpenQueries = 0;
+    BOOLEAN InPass = FALSE;
+    BOOLEAN PassSuspended = FALSE;
+    BOOLEAN PassResumedFresh = FALSE;
+    RxRenderPass Pass = {};
 };
 
 class RxFence final : public RxDeviceChild12<ID3D12Fence1>
@@ -527,6 +585,19 @@ public:
         return GpuAddress;
     }
 
+    /* What residency calls name for this heap */
+    D3D12DDI_HHEAP
+    GetDriverHeap() const
+    {
+        return DriverHeap;
+    }
+
+    D3DKMT_HANDLE
+    GetKernelResource() const
+    {
+        return Runtime.KmResource;
+    }
+
     /* Maps the whole heap; every resource in it shares one mapping */
     HRESULT
     MapMemory(
@@ -556,7 +627,23 @@ private:
     BYTE* MappedBase = nullptr;
 };
 
-/* A committed resource owns one driver heap with itself at its start; a placed one lives in an RxHeap */
+/* How a new resource starts out: its barrier layout and the formats its views may cast it to */
+struct RxResourceStart12
+{
+    D3D12DDI_BARRIER_LAYOUT Layout;
+    UINT32 NumCastableFormats;
+    const DXGI_FORMAT* CastableFormats;
+};
+
+/* The layout a resource made with an API state starts in */
+D3D12DDI_BARRIER_LAYOUT
+RxLayoutForState(
+    _In_ D3D12_RESOURCE_STATES State);
+
+/*
+ * A committed resource owns one driver heap with itself at its start; a placed one lives in an RxHeap;
+ * a reserved one has no memory until tiles are mapped to it.
+ */
 class RxResource final : public RxDeviceChild12<ID3D12Resource2>
 {
 public:
@@ -569,7 +656,7 @@ public:
         _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
         _In_ D3D12_HEAP_FLAGS HeapFlags,
         _In_ const D3D12_RESOURCE_DESC1& Desc,
-        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_ const RxResourceStart12& Start,
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
         _Outptr_ RxResource** Resource);
 
@@ -581,7 +668,17 @@ public:
         _In_ RxHeap& Heap,
         _In_ UINT64 HeapOffset,
         _In_ const D3D12_RESOURCE_DESC1& Desc,
-        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_ const RxResourceStart12& Start,
+        _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
+        _Outptr_ RxResource** Resource);
+
+    /* The desc is checked and has its defaults filled */
+    static
+    HRESULT
+    CreateReserved(
+        _In_ RxDevice12& Device,
+        _In_ const D3D12_RESOURCE_DESC1& Desc,
+        _In_ const RxResourceStart12& Start,
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
         _Outptr_ RxResource** Resource);
 
@@ -612,6 +709,25 @@ public:
         return PlacementOffset;
     }
 
+    /* The heap a committed resource owns; placed and reserved resources have none */
+    D3D12DDI_HHEAP
+    GetOwnHeap() const
+    {
+        return Placement == nullptr ? DriverHeap : D3D12DDI_HHEAP{};
+    }
+
+    D3DKMT_HANDLE
+    GetKernelResource() const
+    {
+        return Runtime.KmResource;
+    }
+
+    BOOLEAN
+    IsReserved() const
+    {
+        return IsReservedResource;
+    }
+
 private:
     using RxDeviceChild12::RxDeviceChild12;
     ~RxResource() override;
@@ -621,7 +737,7 @@ private:
         _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
         _In_ D3D12_HEAP_FLAGS HeapFlags,
         _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
-        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_ const RxResourceStart12& Start,
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue);
 
     HRESULT
@@ -629,7 +745,13 @@ private:
         _In_ RxHeap& Heap,
         _In_ UINT64 HeapOffset,
         _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
-        _In_ D3D12_RESOURCE_STATES InitialState,
+        _In_ const RxResourceStart12& Start,
+        _In_opt_ const D3D12_CLEAR_VALUE* ClearValue);
+
+    HRESULT
+    InitializeReserved(
+        _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
+        _In_ const RxResourceStart12& Start,
         _In_opt_ const D3D12_CLEAR_VALUE* ClearValue);
 
     UINT
@@ -646,6 +768,7 @@ private:
     D3D12DDI_HHEAP DriverHeap = {};
     D3D12DDI_HRESOURCE DriverResource = {};
     BOOLEAN IsDriverResourceCreated = FALSE;
+    BOOLEAN IsReservedResource = FALSE;
     D3D12_GPU_VIRTUAL_ADDRESS GpuAddress = 0;
     SRWLOCK MapLock = SRWLOCK_INIT;
     UINT MapCount = 0;
@@ -758,6 +881,19 @@ public:
         return CommandType;
     }
 
+    /* Bytes the arguments of one command take */
+    UINT
+    GetCommandSize() const
+    {
+        return CommandSize;
+    }
+
+    UINT
+    GetArgumentCount() const
+    {
+        return ArgumentCount;
+    }
+
 private:
     using RxDeviceChild12::RxDeviceChild12;
     ~RxCommandSignature() override;
@@ -769,6 +905,7 @@ private:
         _In_ UINT DriverNodeMask);
 
     UINT ByteStride = 0;
+    UINT CommandSize = 0;
     D3D12_INDIRECT_ARGUMENT_DESC* Arguments = nullptr;
     UINT ArgumentCount = 0;
     D3D12_INDIRECT_ARGUMENT_TYPE CommandType = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
@@ -896,6 +1033,16 @@ public:
         return Layout;
     }
 
+    /* What list entries take: a bypass header that leads the driver to its root signature */
+    D3D12DDI_API_HROOTSIGNATURE
+    Api()
+    {
+        D3D12DDI_API_HROOTSIGNATURE Handle;
+
+        Handle.pDrvPrivate = &Bypass;
+        return Handle;
+    }
+
     /* Link in the device's cache */
     RxRootSignature* NextCached = nullptr;
 
@@ -917,6 +1064,7 @@ private:
     D3D12_ROOT_SIGNATURE_DESC2 Layout = {};
     RxDriverMemory12 Memory;
     D3D12DDI_HROOTSIGNATURE DriverRoot = {};
+    D3D12DDI_RUNTIME_BYPASS_HEADER Bypass = {};
     BOOLEAN IsDriverRootCreated = FALSE;
 
     friend class RxDevice12;
@@ -971,6 +1119,12 @@ RxValidateInitialState(
     _In_ const D3D12_RESOURCE_DESC1& Desc,
     _In_ D3D12_HEAP_TYPE HeapType);
 
+/* The barrier layout a new resource may start in, for the creation methods that take one */
+HRESULT
+RxValidateInitialLayout(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ const RxResourceStart12& Start);
+
 /* The driver form of an API resource desc */
 VOID
 RxToDdiResource(
@@ -1004,13 +1158,15 @@ RxAllocationInfo(
     _In_ D3D12_HEAP_FLAGS HeapFlags,
     _Out_opt_ D3D12DDI_TEXTURE_LAYOUT* DriverLayout);
 
-/* GetResourceAllocationInfo1 for descs not yet filled in */
+/* GetResourceAllocationInfo1 for descs not yet filled in; castable format lists are optional */
 D3D12_RESOURCE_ALLOCATION_INFO
 RxAllocationInfoForDescs(
     _In_ RxDevice12& Device,
     _In_ UINT Count,
     _In_reads_(Count) const D3D12_RESOURCE_DESC1* Descs,
-    _Out_writes_opt_(Count) D3D12_RESOURCE_ALLOCATION_INFO1* Each);
+    _Out_writes_opt_(Count) D3D12_RESOURCE_ALLOCATION_INFO1* Each,
+    _In_opt_count_(Count) const UINT32* CastableCounts = nullptr,
+    _In_opt_count_(Count) const DXGI_FORMAT* const* Castables = nullptr);
 
 /* GetCopyableFootprints for one desc; FALSE when the desc or range is invalid */
 BOOLEAN

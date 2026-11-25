@@ -338,6 +338,9 @@ struct RxBackgroundWork
     VOID* Context;
 };
 
+/* Work items queued and not yet finished, so callers can wait for what is queued now */
+static volatile LONG RxBackgroundPending = 0;
+
 static
 VOID
 CALLBACK
@@ -349,6 +352,34 @@ RxRunBackgroundWork(
 
     Work->Callback(Work->Context);
     delete Work;
+
+    if (InterlockedDecrement(&RxBackgroundPending) == 0)
+        WakeByAddressAll((PVOID)&RxBackgroundPending);
+}
+
+static
+VOID
+CALLBACK
+RxSignalWhenIdle(
+    _Inout_ PTP_CALLBACK_INSTANCE Instance,
+    _In_ PVOID Context)
+{
+    LONG Pending = RxBackgroundPending;
+
+    while (Pending != 0)
+    {
+        WaitOnAddress(&RxBackgroundPending, &Pending, sizeof(Pending), INFINITE);
+        Pending = RxBackgroundPending;
+    }
+    SetEvent(static_cast<HANDLE>(Context));
+}
+
+VOID
+RxSignalAfterBackgroundWork12(
+    _In_ HANDLE Event)
+{
+    if (RxBackgroundPending == 0 || !TrySubmitThreadpoolCallback(RxSignalWhenIdle, Event, nullptr))
+        SetEvent(Event);
 }
 
 static
@@ -365,8 +396,10 @@ RxQueueBackgroundWorkCb12(
     if (Work == nullptr)
         return E_OUTOFMEMORY;
 
+    InterlockedIncrement(&RxBackgroundPending);
     if (!TrySubmitThreadpoolCallback(RxRunBackgroundWork, Work, nullptr))
     {
+        InterlockedDecrement(&RxBackgroundPending);
         delete Work;
         return HRESULT_FROM_WIN32(GetLastError());
     }

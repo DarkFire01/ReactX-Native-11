@@ -8,33 +8,3 @@
  */
 
 #include "objects.hpp"
-
-VOID
-STDMETHODCALLTYPE
-RxCommandQueue::UpdateTileMappings(
-    _In_ ID3D12Resource* pResource,
-    UINT NumResourceRegions,
-    _In_reads_opt_(NumResourceRegions) const D3D12_TILED_RESOURCE_COORDINATE* pResourceRegionStartCoordinates,
-    _In_reads_opt_(NumResourceRegions) const D3D12_TILE_REGION_SIZE* pResourceRegionSizes,
-    _In_opt_ ID3D12Heap* pHeap,
-    UINT NumRanges,
-    _In_reads_opt_(NumRanges) const D3D12_TILE_RANGE_FLAGS* pRangeFlags,
-    _In_reads_opt_(NumRanges) const UINT* pHeapRangeStartOffsets,
-    _In_reads_opt_(NumRanges) const UINT* pRangeTileCounts,
-    D3D12_TILE_MAPPING_FLAGS Flags)
-{
-    RX_UNIMPLEMENTED();
-}
-
-VOID
-STDMETHODCALLTYPE
-RxCommandQueue::CopyTileMappings(
-    _In_ ID3D12Resource* pDstResource,
-    _In_ const D3D12_TILED_RESOURCE_COORDINATE* pDstRegionStartCoordinate,
-    _In_ ID3D12Resource* pSrcResource,
-    _In_ const D3D12_TILED_RESOURCE_COORDINATE* pSrcRegionStartCoordinate,
-    _In_ const D3D12_TILE_REGION_SIZE* pRegionSize,
-    D3D12_TILE_MAPPING_FLAGS Flags)
-{
-    RX_UNIMPLEMENTED();
-}

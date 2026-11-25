@@ -111,6 +111,12 @@ struct KmtThunks
     /* Direct3D 12 queues */
     PFND3DKMT_QUERYCLOCKCALIBRATION QueryClockCalibration;
     PFND3DKMT_SETCONTEXTINPROCESSSCHEDULINGPRIORITY SetContextInProcessSchedulingPriority;
+    PFND3DKMT_SETSTABLEPOWERSTATE SetStablePowerState;
+
+    /* Protected sessions */
+    PFND3DKMT_CREATEPROTECTEDSESSION CreateProtectedSession;
+    PFND3DKMT_DESTROYPROTECTEDSESSION DestroyProtectedSession;
+    PFND3DKMT_QUERYPROTECTEDSESSIONSTATUS QueryProtectedSessionStatus;
 
     /* Kernel feature switches, absent before WDDM 3.2 */
     PFND3DKMT_ISFEATUREENABLED IsFeatureEnabled;

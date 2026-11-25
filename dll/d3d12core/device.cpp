@@ -606,6 +606,10 @@ RxDevice12::CreateCommandQueue1(
     if (ppCommandQueue == nullptr)
         return E_UNEXPECTED;
 
+    hr = EnsureVideoEnabled(pDesc->Type);
+    if (FAILED(hr))
+        return hr;
+
     hr = RxCommandQueue::Create(*this, *pDesc, CreatorID, &Queue);
     if (FAILED(hr))
         return hr;
@@ -628,6 +632,33 @@ RxDevice12::TakesListType(
 }
 
 HRESULT
+RxDevice12::EnsureVideoEnabled(
+    _In_ D3D12_COMMAND_LIST_TYPE Type)
+{
+    HRESULT hr;
+
+    if (Type != D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE && Type != D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS &&
+        Type != D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE)
+    {
+        return S_OK;
+    }
+
+    /* The driver sets up its video state here; queues made before it read state that is not there */
+    AcquireSRWLockExclusive(&VideoLock);
+    if (VideoEnableResult == S_FALSE)
+    {
+        hr = ExtendedFunctions.pfnEnableExtendedFeature(DriverDevice, D3D12DDI_FEATURE_0020_VIDEO, VideoVersion);
+        VideoEnableResult = FAILED(hr) ? hr : S_OK;
+        if (FAILED(hr))
+            RX_TRACE(L"driver refused to enable video version %u: 0x%08lX", VideoVersion, hr);
+    }
+    hr = VideoEnableResult;
+    ReleaseSRWLockExclusive(&VideoLock);
+
+    return hr;
+}
+
+HRESULT
 STDMETHODCALLTYPE
 RxDevice12::CreateCommandAllocator(
     _In_ D3D12_COMMAND_LIST_TYPE type,
@@ -643,6 +674,10 @@ RxDevice12::CreateCommandAllocator(
         return E_INVALIDARG;
     if (ppCommandAllocator == nullptr)
         return E_UNEXPECTED;
+
+    hr = EnsureVideoEnabled(type);
+    if (FAILED(hr))
+        return hr;
 
     hr = RxCommandAllocator::Create(*this, type, &Allocator);
     if (FAILED(hr))

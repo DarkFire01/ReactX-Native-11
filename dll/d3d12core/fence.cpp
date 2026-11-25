@@ -27,8 +27,8 @@ RxFence::Create(
     if ((Flags & D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER) != 0 && (Flags & D3D12_FENCE_FLAG_SHARED) == 0)
         return E_INVALIDARG;
 
-    /* Shared and non monitored fences need sharing support this runtime does not have yet */
-    if (Flags != D3D12_FENCE_FLAG_NONE)
+    /* Cross adapter and non monitored fences need support this runtime does not have yet */
+    if ((Flags & ~D3D12_FENCE_FLAG_SHARED) != 0)
     {
         RX_TRACE(L"fence flags 0x%X not supported", Flags);
         return E_NOTIMPL;
@@ -73,6 +73,13 @@ RxFence::Initialize(
     Create.Info.Type = D3DDDI_MONITORED_FENCE;
     Create.Info.Flags.NoGPUAccess = TRUE;
     Create.Info.MonitoredFence.InitialFenceValue = InitialValue;
+
+    /* A shared fence gets NT handles through D3DKMTShareObjects */
+    if ((FenceFlags & D3D12_FENCE_FLAG_SHARED) != 0)
+    {
+        Create.Info.Flags.Shared = TRUE;
+        Create.Info.Flags.NtSecuritySharing = TRUE;
+    }
     Status = RxGetKmtThunks()->CreateSynchronizationObject2(&Create);
     if (!NT_SUCCESS(Status))
     {

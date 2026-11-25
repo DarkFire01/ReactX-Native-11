@@ -353,6 +353,8 @@ RxRootSignature::Initialize(
         return hr;
     }
     IsDriverRootCreated = TRUE;
+    Bypass.pInterfaceVtable = *reinterpret_cast<void**>(static_cast<ID3D12RootSignature*>(this));
+    Bypass.pDriverObject = DriverRoot.pDrvPrivate;
     return S_OK;
 }
 

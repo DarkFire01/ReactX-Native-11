@@ -10,6 +10,9 @@
 /* What the runtime says when the adapter or its driver can not be used */
 constexpr HRESULT RxDriverInternalError = DXGI_ERROR_DRIVER_INTERNAL_ERROR;
 
+/* The answer for adapter queries about data the runtime does not hold */
+constexpr HRESULT RxNotAvailable = MAKE_HRESULT(SEVERITY_ERROR, 0x876, 2154);
+
 RxAdapter12::~RxAdapter12()
 {
     D3DKMT_CLOSEADAPTER Close;
@@ -239,7 +242,18 @@ RxAdapter12::QueryAdapterInfoCb2(
             return Self->QueryKernel(KMTQAITYPE_QUERYREGISTRY, Query->pPrivateDriverData,
                                      Query->PrivateDriverDataSize);
 
-        /* Drivers ask for the rest, such as per application profiles, and carry on without them */
+        /* Only tools hand a driver state blob to the runtime, so there is never one to give */
+        case D3DDDI_QUERYADAPTERTYPE_APPLICATIONSPECIFICDRIVERBLOB:
+            return RxNotAvailable;
+
+        /* The description comes from a shader cache application registration, which this runtime never has */
+        case D3DDDI_QUERYADAPTERTYPE_APPLICATIONDESC:
+            if (Query->PrivateDriverDataSize < sizeof(D3D12DDI_APPLICATION_DESC))
+                return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+            if (Query->pPrivateDriverData == nullptr)
+                return E_INVALIDARG;
+            return RxNotAvailable;
+
         default:
             RX_TRACE(L"QueryAdapterInfoCb2 type %d not handled", Query->QueryType);
             return E_INVALIDARG;

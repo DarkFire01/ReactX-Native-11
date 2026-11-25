@@ -368,6 +368,20 @@ public:
         _In_ VOID* DriverHandle,
         _In_ D3D12DDI_HANDLETYPE Type);
 
+    /* The paging queue every residency change of this device goes through */
+    RxPagingQueue12&
+    GetPagingQueue()
+    {
+        return PagingQueue;
+    }
+
+    /* The protected session table; empty when the driver has no content protection */
+    const D3D12DDI_DEVICE_FUNCS_CONTENT_PROTECTION_RESOURCES_0074&
+    SessionDdi() const
+    {
+        return SessionFunctions;
+    }
+
     UINT64
     NextCommandListId()
     {
@@ -410,6 +424,11 @@ public:
     BOOLEAN
     TakesListType(
         _In_ D3D12_COMMAND_LIST_TYPE Type) const;
+
+    /* The driver's video feature is turned on before its first video object, once */
+    HRESULT
+    EnsureVideoEnabled(
+        _In_ D3D12_COMMAND_LIST_TYPE Type);
 
     BOOLEAN
     HasWarpExtension() const
@@ -479,11 +498,11 @@ public:
         return Options.ResourceBindingTier < D3D12DDI_RESOURCE_BINDING_TIER_3 ? D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2 : 0;
     }
 
-    /* The checks before any child object is made */
+    /* The checks before any child object is made; only GetDeviceRemovedReason tells why */
     HRESULT
     CheckUsable() const
     {
-        return RemovedReason;
+        return FAILED(RemovedReason) ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
     }
 
     /* Queue flags the driver lets global realtime queues use */
@@ -671,6 +690,8 @@ private:
     D3D12DDI_EXTENDED_FEATURES_FUNCS_0096 ExtendedFunctions = {};
     D3D12DDI_DEVICE_FUNCS_CONTENT_PROTECTION_RESOURCES_0074 SessionFunctions = {};
     UINT VideoVersion = 0;
+    SRWLOCK VideoLock = SRWLOCK_INIT;
+    HRESULT VideoEnableResult = S_FALSE;
     UINT SessionVersion = 0;
     BOOLEAN TypedLoadMinimal = FALSE;
     UINT PreviewShaderModels = 0;
@@ -726,6 +747,7 @@ private:
     RxPipelineState* DefaultGraphics = nullptr;
     RxPipelineState* DefaultCompute = nullptr;
     RxPrivateDataStore PrivateData;
+    UINT DisabledShaderCaches = 0;
 };
 
 /* Lifetime, device link and private data shared by every device child */
@@ -1058,6 +1080,11 @@ RxGetKernelCallbacks12(VOID);
 
 const D3D12DDI_CORELAYER_DEVICECALLBACKS_0116*
 RxGetCoreLayerCallbacks12(VOID);
+
+/* Sets an event once the driver background work queued so far has run */
+VOID
+RxSignalAfterBackgroundWork12(
+    _In_ HANDLE Event);
 
 /* D3D12_COMMAND_LIST_TYPE as the queue flags the driver wants, 0 for an unknown type */
 D3D12DDI_COMMAND_QUEUE_FLAGS

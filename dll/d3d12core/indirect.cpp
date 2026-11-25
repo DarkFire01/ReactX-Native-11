@@ -478,6 +478,7 @@ RxCommandSignature::Initialize(
 {
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001 Args = {};
+    UINT Index;
     HRESULT hr;
 
     ByteStride = Desc.ByteStride;
@@ -487,6 +488,8 @@ RxCommandSignature::Initialize(
         return E_OUTOFMEMORY;
     memcpy(Arguments, Desc.pArgumentDescs, ArgumentCount * sizeof(*Arguments));
     CommandType = Arguments[ArgumentCount - 1].Type;
+    for (Index = 0; Index < ArgumentCount; Index++)
+        CommandSize += RxArgumentSize(Arguments[Index]);
 
     /* The signature keeps the root signature the application gave */
     Root = RootSignature;

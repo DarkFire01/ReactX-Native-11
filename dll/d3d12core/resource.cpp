@@ -107,9 +107,8 @@ RxFillResourceDefaults(
 }
 
 /* API resource states as the barrier layout the driver starts a resource in */
-static
 D3D12DDI_BARRIER_LAYOUT
-RxInitialLayout(
+RxLayoutForState(
     _In_ D3D12_RESOURCE_STATES State)
 {
     constexpr UINT ReadStates = D3D12_RESOURCE_STATE_GENERIC_READ | D3D12_RESOURCE_STATE_DEPTH_READ |
@@ -290,7 +289,9 @@ RxAllocationInfoForDescs(
     _In_ RxDevice12& Device,
     _In_ UINT Count,
     _In_reads_(Count) const D3D12_RESOURCE_DESC1* Descs,
-    _Out_writes_opt_(Count) D3D12_RESOURCE_ALLOCATION_INFO1* Each)
+    _Out_writes_opt_(Count) D3D12_RESOURCE_ALLOCATION_INFO1* Each,
+    _In_opt_count_(Count) const UINT32* CastableCounts,
+    _In_opt_count_(Count) const DXGI_FORMAT* const* Castables)
 {
     D3D12_RESOURCE_ALLOCATION_INFO Total = { 0, 0 };
     UINT Index;
@@ -315,6 +316,11 @@ RxAllocationInfoForDescs(
 
         RxFillResourceDefaults(Desc);
         RxToDdiResource(Desc, Ddi);
+        if (CastableCounts != nullptr && Castables != nullptr)
+        {
+            Ddi.NumCastableFormats = CastableCounts[Index];
+            Ddi.pCastableFormats = Castables[Index];
+        }
         Info = RxAllocationInfo(Device, Desc, Ddi, TRUE, D3D12_HEAP_FLAG_NONE, nullptr);
 
         Offset = RxAlignUp(Total.SizeInBytes, Info.Alignment);
@@ -500,7 +506,7 @@ RxResource::CreateCommitted(
     _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
-    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_ const RxResourceStart12& Start,
     _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
     _Outptr_ RxResource** Resource)
 {
@@ -519,7 +525,7 @@ RxResource::CreateCommitted(
     if (Created == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Created->Initialize(HeapProperties, HeapFlags, Normal, InitialState, ClearValue);
+    hr = Created->Initialize(HeapProperties, HeapFlags, Normal, Start, ClearValue);
     if (FAILED(hr))
     {
         Created->Release();
@@ -535,7 +541,7 @@ RxResource::Initialize(
     _In_ const D3D12_HEAP_PROPERTIES& HeapProperties,
     _In_ D3D12_HEAP_FLAGS HeapFlags,
     _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
-    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_ const RxResourceStart12& Start,
     _In_opt_ const D3D12_CLEAR_VALUE* ClearValue)
 {
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
@@ -563,7 +569,9 @@ RxResource::Initialize(
     Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
     if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
         return E_OUTOFMEMORY;
-    DdiResource.InitialBarrierLayout = RxInitialLayout(InitialState);
+    DdiResource.InitialBarrierLayout = Start.Layout;
+    DdiResource.NumCastableFormats = Start.NumCastableFormats;
+    DdiResource.pCastableFormats = Start.CastableFormats;
 
     RxToDdiHeap(Device, Properties, Flags, Info.SizeInBytes, Info.Alignment, TRUE, DdiHeap);
     if (ClearValue != nullptr)
@@ -601,7 +609,7 @@ RxResource::CreatePlaced(
     _In_ RxHeap& Heap,
     _In_ UINT64 HeapOffset,
     _In_ const D3D12_RESOURCE_DESC1& Desc,
-    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_ const RxResourceStart12& Start,
     _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
     _Outptr_ RxResource** Resource)
 {
@@ -614,7 +622,7 @@ RxResource::CreatePlaced(
     if (Created == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Created->InitializePlaced(Heap, HeapOffset, Desc, InitialState, ClearValue);
+    hr = Created->InitializePlaced(Heap, HeapOffset, Desc, Start, ClearValue);
     if (FAILED(hr))
     {
         Created->Release();
@@ -630,7 +638,7 @@ RxResource::InitializePlaced(
     _In_ RxHeap& Heap,
     _In_ UINT64 HeapOffset,
     _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
-    _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_ const RxResourceStart12& Start,
     _In_opt_ const D3D12_CLEAR_VALUE* ClearValue)
 {
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
@@ -659,7 +667,9 @@ RxResource::InitializePlaced(
     Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, Flags, &DdiResource.Layout);
     if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
         return E_OUTOFMEMORY;
-    DdiResource.InitialBarrierLayout = RxInitialLayout(InitialState);
+    DdiResource.InitialBarrierLayout = Start.Layout;
+    DdiResource.NumCastableFormats = Start.NumCastableFormats;
+    DdiResource.pCastableFormats = Start.CastableFormats;
     DdiResource.ReuseBufferGPUVA.BaseAddress.UMD.hResource = Heap.GetBackingResource();
     DdiResource.ReuseBufferGPUVA.BaseAddress.UMD.Offset = HeapOffset;
     if (ClearValue != nullptr)
@@ -686,6 +696,91 @@ RxResource::InitializePlaced(
         GpuAddress = Heap.GetGpuAddress() + HeapOffset;
         Ddi.pfnCheckExistingResourceAllocationInfo(Device.Handle(), DriverResource, &Existing);
     }
+
+    return S_OK;
+}
+
+HRESULT
+RxResource::CreateReserved(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ const RxResourceStart12& Start,
+    _In_opt_ const D3D12_CLEAR_VALUE* ClearValue,
+    _Outptr_ RxResource** Resource)
+{
+    RxResource* Created;
+    HRESULT hr;
+
+    *Resource = nullptr;
+
+    hr = Device.CheckUsable();
+    if (FAILED(hr))
+        return hr;
+
+    Created = new (std::nothrow) RxResource(Device);
+    if (Created == nullptr)
+        return E_OUTOFMEMORY;
+
+    hr = Created->InitializeReserved(Desc, Start, ClearValue);
+    if (FAILED(hr))
+    {
+        Created->Release();
+        return hr;
+    }
+
+    *Resource = Created;
+    return S_OK;
+}
+
+/* No heap and no placement: the driver makes only the virtual range */
+HRESULT
+RxResource::InitializeReserved(
+    _In_ const D3D12_RESOURCE_DESC1& ResourceDesc,
+    _In_ const RxResourceStart12& Start,
+    _In_opt_ const D3D12_CLEAR_VALUE* ClearValue)
+{
+    const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
+    D3D12DDIARG_CREATERESOURCE_0111 DdiResource;
+    D3D12DDI_CLEAR_VALUES DdiClear = {};
+    D3D12DDI_RESOURCE_ALLOCATION_INFO_0022 Existing = {};
+    D3D12DDI_HEAP_AND_RESOURCE_SIZES Sizes;
+    D3D12_RESOURCE_ALLOCATION_INFO Info;
+    D3D12DDI_HRTRESOURCE RuntimeHandle;
+    D3D12DDI_HHEAP NoHeap = {};
+    D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
+    HRESULT hr;
+
+    Desc = ResourceDesc;
+    IsReservedResource = TRUE;
+
+    RxToDdiResource(Desc, DdiResource);
+    Info = RxAllocationInfo(Device, Desc, DdiResource, FALSE, D3D12_HEAP_FLAG_NONE, &DdiResource.Layout);
+    if (Info.SizeInBytes >= 0xFFFFFFFFFFC00000ull)
+        return E_OUTOFMEMORY;
+    DdiResource.InitialBarrierLayout = Start.Layout;
+    DdiResource.NumCastableFormats = Start.NumCastableFormats;
+    DdiResource.pCastableFormats = Start.CastableFormats;
+    if (ClearValue != nullptr)
+        RxToDdiClear(Desc, *ClearValue, DdiClear);
+
+    Sizes = Ddi.pfnCalcPrivateHeapAndResourceSizes(Device.Handle(), nullptr, &DdiResource, NoSession);
+    DriverResource.pDrvPrivate = ResourceMemory.Allocate(Sizes.Resource);
+    if (DriverResource.pDrvPrivate == nullptr)
+        return E_OUTOFMEMORY;
+
+    RuntimeHandle.handle = &Runtime;
+    hr = Ddi.pfnCreateHeapAndResource(Device.Handle(), nullptr, NoHeap, RuntimeHandle, &DdiResource,
+                                      ClearValue != nullptr ? &DdiClear : nullptr, NoSession, DriverResource);
+    if (FAILED(hr))
+    {
+        RX_TRACE(L"driver CreateHeapAndResource failed for a reserved resource 0x%08lX", hr);
+        return hr;
+    }
+    IsDriverResourceCreated = TRUE;
+
+    Ddi.pfnCheckExistingResourceAllocationInfo(Device.Handle(), DriverResource, &Existing);
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+        GpuAddress = Ddi.pfnCheckResourceVirtualAddress(Device.Handle(), DriverResource);
 
     return S_OK;
 }
@@ -761,6 +856,8 @@ RxResource::Map(
 
     if (ppData != nullptr)
         *ppData = nullptr;
+    if (IsReservedResource)
+        return E_INVALIDARG;
 
     Custom = Properties.Type == D3D12_HEAP_TYPE_CUSTOM ? Properties : RxCustomProperties(Device, Properties.Type);
     if (Custom.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE || Subresource >= SubresourceCount())
@@ -858,6 +955,10 @@ RxResource::GetHeapProperties(
     _Out_opt_ D3D12_HEAP_PROPERTIES* pHeapProperties,
     _Out_opt_ D3D12_HEAP_FLAGS* pHeapFlags)
 {
+    /* A reserved resource has no heap of its own to describe */
+    if (IsReservedResource)
+        return E_INVALIDARG;
+
     if (pHeapProperties != nullptr)
         *pHeapProperties = Properties;
     if (pHeapFlags != nullptr)
@@ -982,6 +1083,22 @@ RxCopyableFootprints(
 
 /* Device methods */
 
+/* Buffers start with no layout, simultaneous access textures in the common one; castable formats need their list */
+HRESULT
+RxValidateInitialLayout(
+    _In_ const D3D12_RESOURCE_DESC1& Desc,
+    _In_ const RxResourceStart12& Start)
+{
+    if (Start.NumCastableFormats != 0 && Start.CastableFormats == nullptr)
+        return E_INVALIDARG;
+
+    if (Desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+        return (UINT)Start.Layout == (UINT)D3D12_BARRIER_LAYOUT_UNDEFINED ? S_OK : E_INVALIDARG;
+    if ((Desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS) != 0)
+        return (UINT)Start.Layout == (UINT)D3D12_BARRIER_LAYOUT_COMMON ? S_OK : E_INVALIDARG;
+    return S_OK;
+}
+
 static
 D3D12_RESOURCE_DESC1
 RxWidenDesc(
@@ -1010,11 +1127,13 @@ RxCreateCommittedCommon(
     _In_ D3D12_HEAP_FLAGS HeapFlags,
     _In_opt_ const D3D12_RESOURCE_DESC1* pDesc,
     _In_ D3D12_RESOURCE_STATES InitialResourceState,
+    _In_opt_ const RxResourceStart12* Layout,
     _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
     _In_opt_ ID3D12ProtectedResourceSession* pProtectedSession,
     _In_ REFIID riidResource,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    RxResourceStart12 Start = { RxLayoutForState(InitialResourceState), 0, nullptr };
     RxResource* Resource;
     HRESULT hr;
 
@@ -1033,7 +1152,15 @@ RxCreateCommittedCommon(
     hr = RxValidateHeapPlacement(Device, pHeapProperties->Type, HeapFlags, 0, 0, *pDesc, pOptimizedClearValue);
     if (FAILED(hr))
         return hr;
-    hr = RxValidateInitialState(Device, InitialResourceState, *pDesc, pHeapProperties->Type);
+    if (Layout != nullptr)
+    {
+        hr = RxValidateInitialLayout(*pDesc, *Layout);
+        Start = *Layout;
+    }
+    else
+    {
+        hr = RxValidateInitialState(Device, InitialResourceState, *pDesc, pHeapProperties->Type);
+    }
     if (FAILED(hr))
         return hr;
 
@@ -1054,8 +1181,8 @@ RxCreateCommittedCommon(
     if (pProtectedSession != nullptr)
         return E_NOTIMPL;
 
-    hr = RxResource::CreateCommitted(Device, *pHeapProperties, HeapFlags, *pDesc, InitialResourceState,
-                                     pOptimizedClearValue, &Resource);
+    hr = RxResource::CreateCommitted(Device, *pHeapProperties, HeapFlags, *pDesc, Start, pOptimizedClearValue,
+                                     &Resource);
     if (FAILED(hr))
         return hr;
 
@@ -1079,7 +1206,8 @@ RxDevice12::CreateCommittedResource(
         Wide = RxWidenDesc(*pDesc);
 
     return RxCreateCommittedCommon(*this, pHeapProperties, HeapFlags, pDesc != nullptr ? &Wide : nullptr,
-                                   InitialResourceState, pOptimizedClearValue, nullptr, riidResource, ppvResource);
+                                   InitialResourceState, nullptr, pOptimizedClearValue, nullptr, riidResource,
+                                   ppvResource);
 }
 
 HRESULT
@@ -1100,8 +1228,8 @@ RxDevice12::CreateCommittedResource1(
         Wide = RxWidenDesc(*pDesc);
 
     return RxCreateCommittedCommon(*this, pHeapProperties, HeapFlags, pDesc != nullptr ? &Wide : nullptr,
-                                   InitialResourceState, pOptimizedClearValue, pProtectedSession, riidResource,
-                                   ppvResource);
+                                   InitialResourceState, nullptr, pOptimizedClearValue, pProtectedSession,
+                                   riidResource, ppvResource);
 }
 
 HRESULT
@@ -1116,7 +1244,27 @@ RxDevice12::CreateCommittedResource2(
     REFIID riidResource,
     _COM_Outptr_opt_ void** ppvResource)
 {
-    return RxCreateCommittedCommon(*this, pHeapProperties, HeapFlags, pDesc, InitialResourceState,
+    return RxCreateCommittedCommon(*this, pHeapProperties, HeapFlags, pDesc, InitialResourceState, nullptr,
+                                   pOptimizedClearValue, pProtectedSession, riidResource, ppvResource);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice12::CreateCommittedResource3(
+    _In_ const D3D12_HEAP_PROPERTIES* pHeapProperties,
+    D3D12_HEAP_FLAGS HeapFlags,
+    _In_ const D3D12_RESOURCE_DESC1* pDesc,
+    D3D12_BARRIER_LAYOUT InitialLayout,
+    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
+    _In_opt_ ID3D12ProtectedResourceSession* pProtectedSession,
+    UINT32 NumCastableFormats,
+    _In_opt_count_(NumCastableFormats) const DXGI_FORMAT* pCastableFormats,
+    REFIID riidResource,
+    _COM_Outptr_opt_ void** ppvResource)
+{
+    RxResourceStart12 Start = { (D3D12DDI_BARRIER_LAYOUT)InitialLayout, NumCastableFormats, pCastableFormats };
+
+    return RxCreateCommittedCommon(*this, pHeapProperties, HeapFlags, pDesc, D3D12_RESOURCE_STATE_COMMON, &Start,
                                    pOptimizedClearValue, pProtectedSession, riidResource, ppvResource);
 }
 
@@ -1129,10 +1277,12 @@ RxCreatePlacedCommon(
     _In_ UINT64 HeapOffset,
     _In_opt_ const D3D12_RESOURCE_DESC1* pDesc,
     _In_ D3D12_RESOURCE_STATES InitialState,
+    _In_opt_ const RxResourceStart12* Layout,
     _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
     _In_ REFIID riidResource,
     _COM_Outptr_opt_ void** ppvResource)
 {
+    RxResourceStart12 Start = { RxLayoutForState(InitialState), 0, nullptr };
     D3D12_RESOURCE_DESC1 Normal;
     RxResource* Resource;
     RxHeap* Heap;
@@ -1154,7 +1304,15 @@ RxCreatePlacedCommon(
                                  *pDesc, pOptimizedClearValue);
     if (FAILED(hr))
         return hr;
-    hr = RxValidateInitialState(Device, InitialState, *pDesc, HeapDesc.Properties.Type);
+    if (Layout != nullptr)
+    {
+        hr = RxValidateInitialLayout(*pDesc, *Layout);
+        Start = *Layout;
+    }
+    else
+    {
+        hr = RxValidateInitialState(Device, InitialState, *pDesc, HeapDesc.Properties.Type);
+    }
     if (FAILED(hr))
         return hr;
 
@@ -1183,7 +1341,7 @@ RxCreatePlacedCommon(
     if (FAILED(hr))
         return hr;
 
-    hr = RxResource::CreatePlaced(Device, *Heap, HeapOffset, Normal, InitialState, pOptimizedClearValue, &Resource);
+    hr = RxResource::CreatePlaced(Device, *Heap, HeapOffset, Normal, Start, pOptimizedClearValue, &Resource);
     if (FAILED(hr))
         return hr;
 
@@ -1206,7 +1364,7 @@ RxDevice12::CreatePlacedResource(
     if (pDesc != nullptr)
         Wide = RxWidenDesc(*pDesc);
 
-    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc != nullptr ? &Wide : nullptr, InitialState,
+    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc != nullptr ? &Wide : nullptr, InitialState, nullptr,
                                 pOptimizedClearValue, riid, ppvResource);
 }
 
@@ -1221,8 +1379,27 @@ RxDevice12::CreatePlacedResource1(
     REFIID riid,
     _COM_Outptr_opt_ void** ppvResource)
 {
-    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid,
+    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc, InitialState, nullptr, pOptimizedClearValue, riid,
                                 ppvResource);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+RxDevice12::CreatePlacedResource2(
+    _In_ ID3D12Heap* pHeap,
+    UINT64 HeapOffset,
+    _In_ const D3D12_RESOURCE_DESC1* pDesc,
+    D3D12_BARRIER_LAYOUT InitialLayout,
+    _In_opt_ const D3D12_CLEAR_VALUE* pOptimizedClearValue,
+    UINT32 NumCastableFormats,
+    _In_opt_count_(NumCastableFormats) const DXGI_FORMAT* pCastableFormats,
+    REFIID riid,
+    _COM_Outptr_opt_ void** ppvResource)
+{
+    RxResourceStart12 Start = { (D3D12DDI_BARRIER_LAYOUT)InitialLayout, NumCastableFormats, pCastableFormats };
+
+    return RxCreatePlacedCommon(*this, pHeap, HeapOffset, pDesc, D3D12_RESOURCE_STATE_COMMON, &Start,
+                                pOptimizedClearValue, riid, ppvResource);
 }
 
 D3D12_RESOURCE_ALLOCATION_INFO
@@ -1280,6 +1457,23 @@ RxDevice12::GetResourceAllocationInfo2(
         return { 0, 0 };
 
     return RxAllocationInfoForDescs(*this, numResourceDescs, pResourceDescs, pResourceAllocationInfo1);
+}
+
+D3D12_RESOURCE_ALLOCATION_INFO
+STDMETHODCALLTYPE
+RxDevice12::GetResourceAllocationInfo3(
+    UINT visibleMask,
+    UINT numResourceDescs,
+    _In_reads_(numResourceDescs) const D3D12_RESOURCE_DESC1* pResourceDescs,
+    _In_opt_count_(numResourceDescs) const UINT32* pNumCastableFormats,
+    _In_opt_count_(numResourceDescs) const DXGI_FORMAT* const* ppCastableFormats,
+    _Out_writes_opt_(numResourceDescs) D3D12_RESOURCE_ALLOCATION_INFO1* pResourceAllocationInfo1)
+{
+    if (numResourceDescs == 0 || pResourceDescs == nullptr)
+        return { 0, 0 };
+
+    return RxAllocationInfoForDescs(*this, numResourceDescs, pResourceDescs, pResourceAllocationInfo1, pNumCastableFormats,
+                                    ppCastableFormats);
 }
 
 D3D12_HEAP_PROPERTIES

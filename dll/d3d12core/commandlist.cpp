@@ -172,6 +172,8 @@ RxCommandList::~RxCommandList()
 
     if (IsDriverListCreated)
         Device.Ddi().pfnDestroyCommandList(Device.Handle(), DriverList);
+
+    delete[] Pass.Resolves;
 }
 
 /* Starts recording into the claimed allocator, which the list holds until it closes */
@@ -190,6 +192,10 @@ RxCommandList::Begin(
 
     State = RxListState::Recording;
     Error = S_OK;
+    OpenQueries = 0;
+    InPass = FALSE;
+    PassSuspended = FALSE;
+    PassResumedFresh = FALSE;
     ResetState();
     return S_OK;
 }
@@ -220,6 +226,8 @@ RxCommandList::ResetState()
     D3D12DDI_CPU_DESCRIPTOR_HANDLE NoTargets[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
     D3D12DDI_HRESOURCE NoResource = {};
     D3D12DDI_HPROTECTEDRESOURCESESSION_0030 NoSession = {};
+
+    ZeroMemory(BoundHeaps, sizeof(BoundHeaps));
 
     if (Type != D3D12_COMMAND_LIST_TYPE_COPY)
     {
@@ -322,8 +330,22 @@ RxCommandList::SetCommandListErrorCb(
     RxCommandList* Self = static_cast<RxCommandList*>(hRTCommandList.handle);
 
     RX_TRACE(L"driver failed a command list with 0x%08lX", hr);
-    if (SUCCEEDED(Self->Error))
-        Self->Error = hr;
+
+    /* Running out of memory fails only the list; any other failure loses the device */
+    if (hr == D3DDDIERR_OUTOFVIDEOMEMORY)
+        hr = E_OUTOFMEMORY;
+    if (FAILED(hr) && hr != E_OUTOFMEMORY)
+    {
+        if (hr == D3DDDIERR_DEVICEREMOVED)
+            Self->Device.MarkRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        else if (hr == D3DDDIERR_APPLICATIONERROR)
+            Self->Device.MarkRemoved(DXGI_ERROR_INVALID_CALL);
+        else
+            Self->Device.MarkRemoved(DXGI_ERROR_DRIVER_INTERNAL_ERROR);
+        hr = DXGI_ERROR_DEVICE_REMOVED;
+    }
+
+    Self->Fail(hr);
 }
 
 VOID
@@ -335,6 +357,63 @@ RxCommandList::SetCommandListDdiTableCb(
     RxCommandList* Self = static_cast<RxCommandList*>(hRTCommandList.handle);
 
     Self->DriverTable = Self->Device.ListTable(hRTTable);
+}
+
+VOID
+RxCommandList::Fail(
+    _In_ HRESULT hr)
+{
+    RX_TRACE(L"command list failed with 0x%08lX", hr);
+    if (SUCCEEDED(Error))
+        Error = hr;
+}
+
+/* What each list type can record */
+static
+UINT
+RxListAbilities(
+    _In_ D3D12_COMMAND_LIST_TYPE Type)
+{
+    switch (Type)
+    {
+        case D3D12_COMMAND_LIST_TYPE_DIRECT:
+            return RxListDoesCopy | RxListDoesCompute | RxListDoesGraphics | RxListTopLevel;
+        case D3D12_COMMAND_LIST_TYPE_BUNDLE:
+            return RxListDoesCopy | RxListDoesCompute | RxListDoesGraphics;
+        case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+            return RxListDoesCopy | RxListDoesCompute | RxListTopLevel;
+        case D3D12_COMMAND_LIST_TYPE_COPY:
+            return RxListDoesCopy | RxListTopLevel;
+        default:
+            return 0;
+    }
+}
+
+BOOLEAN
+RxCommandList::Takes(
+    _In_ UINT Needed)
+{
+    if ((RxListAbilities(Type) & Needed) == Needed)
+        return TRUE;
+
+    Fail(E_FAIL);
+    return FALSE;
+}
+
+BOOLEAN
+RxCommandList::PassAllows(
+    _In_ BOOLEAN InsidePass)
+{
+    if (Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+        return TRUE;
+
+    if ((InPass && !InsidePass) || PassSuspended)
+    {
+        Fail(E_FAIL);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 /* ID3D12CommandList and recording */
@@ -354,6 +433,12 @@ RxCommandList::Close(VOID)
 
     if (State != RxListState::Recording)
         return E_FAIL;
+
+    /* A pass left open or a query begun and not ended fails the list */
+    if (Type == D3D12_COMMAND_LIST_TYPE_DIRECT && InPass)
+        Fail(E_FAIL);
+    if (OpenQueries != 0)
+        Fail(E_FAIL);
 
     DriverTable->pfnCloseCommandList(DriverList);
     State = RxListState::Closed;
@@ -403,6 +488,9 @@ RxCommandList::CopyBufferRegion(
 {
     D3D12DDIARG_BUFFER_PLACEMENT Destination = {};
     D3D12DDIARG_BUFFER_PLACEMENT Source = {};
+
+    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(FALSE))
+        return;
 
     Destination.BaseAddress.UMD.hResource = RxDriverResourceOf(pDstBuffer);
     Destination.BaseAddress.UMD.Offset = DstOffset;
@@ -596,6 +684,9 @@ RxCommandList::CopyTextureRegion(
     RxCopyLocation Source;
     D3D12DDI_BOX Box;
 
+    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(FALSE))
+        return;
+
     if (pDst == nullptr || pSrc == nullptr)
         return;
 
@@ -631,6 +722,9 @@ RxCommandList::CopyResource(
     _In_ ID3D12Resource* pDstResource,
     _In_ ID3D12Resource* pSrcResource)
 {
+    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(FALSE))
+        return;
+
     DriverTable->pfnResourceCopy(DriverList, RxDriverResourceOf(pDstResource), RxDriverResourceOf(pSrcResource));
 }
 
@@ -941,6 +1035,9 @@ RxCommandList::ResourceBarrier(
     UINT Count = 0;
     UINT Index;
 
+    if (!Takes(RxListDoesCopy | RxListTopLevel) || !Records() || !PassAllows(TRUE))
+        return;
+
     if (NumBarriers == 0 || pBarriers == nullptr)
         return;
 
@@ -1049,6 +1146,12 @@ RxCommandList::ClearRenderTargetView(
     FLOAT Color[4];
     UINT Index;
 
+    if (!Takes(RxListDoesCopy | RxListDoesCompute | RxListDoesGraphics | RxListTopLevel) || !Records() ||
+        !PassAllows(FALSE))
+    {
+        return;
+    }
+
     /* Rectangles that are all empty clear nothing */
     if (NumRects != 0 && pRects != nullptr)
     {
@@ -1079,11 +1182,17 @@ RxCommandList::OMSetRenderTargets(
     D3D12DDI_CPU_DESCRIPTOR_HANDLE DepthStencil;
     UINT Index;
 
-    if (NumRenderTargetDescriptors > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
-        (NumRenderTargetDescriptors != 0 && pRenderTargetDescriptors == nullptr))
+    if (!Takes(RxListDoesCopy | RxListDoesCompute | RxListDoesGraphics | RxListTopLevel) || !Records())
+        return;
+
+    /* Targets are bound by the pass while one is open */
+    if (InPass || NumRenderTargetDescriptors > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
     {
+        Fail(E_FAIL);
         return;
     }
+    if (NumRenderTargetDescriptors != 0 && pRenderTargetDescriptors == nullptr)
+        return;
 
     /* A single range is contiguous runtime slots, each holding its own driver descriptor */
     for (Index = 0; Index < NumRenderTargetDescriptors; Index++)
@@ -1110,21 +1219,38 @@ RxCommandList::SetDescriptorHeaps(
     _In_reads_(NumDescriptorHeaps) ID3D12DescriptorHeap* const* ppDescriptorHeaps)
 {
     D3D12DDI_HDESCRIPTORHEAP Heaps[2];
+    VOID* Bound[2] = {};
     UINT Index;
 
-    if (NumDescriptorHeaps > _countof(Heaps))
+    if (!Takes(RxListDoesCompute) || !Records())
         return;
 
+    /* One shader visible heap of each kind at most; a bad one drops the whole call */
     for (Index = 0; Index < NumDescriptorHeaps; Index++)
     {
         RxDescriptorHeap* Heap = RxUnwrap12<RxDescriptorHeap>(ppDescriptorHeaps[Index]);
+        D3D12_DESCRIPTOR_HEAP_DESC Desc;
 
         if (Heap == nullptr)
+        {
+            Fail(E_INVALIDARG);
             return;
+        }
+
+        Desc = Heap->GetDesc();
+        if ((UINT)Desc.Type >= _countof(Bound) || Bound[Desc.Type] != nullptr ||
+            (Desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == 0)
+        {
+            Fail(E_INVALIDARG);
+            return;
+        }
+
         Heaps[Index] = Heap->GetDriverHandle();
+        Bound[Desc.Type] = Heaps[Index].pDrvPrivate;
     }
 
     DriverTable->pfnSetDescriptorHeaps(DriverList, NumDescriptorHeaps, Heaps);
+    memcpy(BoundHeaps, Bound, sizeof(BoundHeaps));
 }
 
 /* Fixed function state */
@@ -1134,6 +1260,9 @@ STDMETHODCALLTYPE
 RxCommandList::IASetPrimitiveTopology(
     _In_ D3D12_PRIMITIVE_TOPOLOGY PrimitiveTopology)
 {
+    if (!Takes(RxListDoesGraphics) || !Records())
+        return;
+
     DriverTable->pfnIaSetTopology(Api(), (D3D12DDI_PRIMITIVE_TOPOLOGY)PrimitiveTopology);
 }
 
@@ -1143,6 +1272,9 @@ RxCommandList::RSSetViewports(
     _In_range_(0, D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) UINT NumViewports,
     _In_reads_(NumViewports) const D3D12_VIEWPORT* pViewports)
 {
+    if (!Takes(RxListDoesGraphics | RxListTopLevel) || !Records())
+        return;
+
     static_assert(sizeof(D3D12_VIEWPORT) == sizeof(D3D12DDI_VIEWPORT));
 
     if (NumViewports > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
@@ -1157,6 +1289,9 @@ RxCommandList::RSSetScissorRects(
     _In_range_(0, D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE) UINT NumRects,
     _In_reads_(NumRects) const D3D12_RECT* pRects)
 {
+    if (!Takes(RxListDoesGraphics | RxListTopLevel) || !Records())
+        return;
+
     if (NumRects > D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
         return;
 
@@ -1170,6 +1305,9 @@ RxCommandList::OMSetBlendFactor(
 {
     static const FLOAT Ones[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
+    if (!Takes(RxListDoesGraphics) || !Records())
+        return;
+
     DriverTable->pfnOmSetBlendFactor(Api(), BlendFactor != nullptr ? BlendFactor : Ones);
 }
 
@@ -1178,6 +1316,9 @@ STDMETHODCALLTYPE
 RxCommandList::OMSetStencilRef(
     _In_ UINT StencilRef)
 {
+    if (!Takes(RxListDoesGraphics) || !Records())
+        return;
+
     if (DriverTable->pfnOmSetFrontAndBackStencilRef != nullptr)
         DriverTable->pfnOmSetFrontAndBackStencilRef(Api(), StencilRef, StencilRef);
     else

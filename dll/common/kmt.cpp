@@ -137,6 +137,10 @@ RxLoadKmtThunks(
     RxResolve(Gdi32, "D3DKMTDestroyDCFromMemory", Kmt.DestroyDCFromMemory);
     RxResolve(Gdi32, "D3DKMTQueryClockCalibration", Kmt.QueryClockCalibration);
     RxResolve(Gdi32, "D3DKMTSetContextInProcessSchedulingPriority", Kmt.SetContextInProcessSchedulingPriority);
+    RxResolve(Gdi32, "D3DKMTSetStablePowerState", Kmt.SetStablePowerState);
+    RxResolve(Gdi32, "D3DKMTCreateProtectedSession", Kmt.CreateProtectedSession);
+    RxResolve(Gdi32, "D3DKMTDestroyProtectedSession", Kmt.DestroyProtectedSession);
+    RxResolve(Gdi32, "D3DKMTQueryProtectedSessionStatus", Kmt.QueryProtectedSessionStatus);
     RxResolve(Gdi32, "D3DKMTIsFeatureEnabled", Kmt.IsFeatureEnabled);
     RxResolve(Gdi32, "D3DKMTQueryStatistics", Kmt.QueryStatistics);
     RxResolve(Gdi32, "D3DKMTCreateOutputDupl", Kmt.CreateOutputDupl);
