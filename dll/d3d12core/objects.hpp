@@ -1314,17 +1314,36 @@ private:
     BOOLEAN IsDriverSignatureCreated = FALSE;
 };
 
+struct RxPipelineDesc;
+struct RxPipelineDigest;
+struct RxLibraryEntry;
+
+/* What ties a serialized library to one adapter, one driver and one build of this runtime */
+struct RxLibraryIdentity
+{
+    UINT VendorId;
+    UINT DeviceId;
+    UINT SubVendorId;
+    UINT SubSystemId;
+    UINT RevisionId;
+    UINT RuntimeBuild;
+    UINT64 DriverVersion;
+    UINT64 DdiVersion;
+};
+
 /* Named pipeline states an application keeps between runs */
 class RxPipelineLibrary final : public RxDeviceChild12<ID3D12PipelineLibrary1>
 {
 public:
     static constexpr GUID PrivateId = {0x3e8d5a17, 0xc640, 0x4f2b, {0x9d, 0x71, 0x08, 0xb3, 0x5e, 0xa6, 0xc4, 0x19}};
 
-    /* An empty library */
+    /* An empty library for an empty blob, else the library a serialized one holds */
     static
     HRESULT
     Create(
         _In_ RxDevice12& Device,
+        _In_reads_bytes_opt_(BlobLength) const BYTE* Blob,
+        _In_ SIZE_T BlobLength,
         _Outptr_ RxPipelineLibrary** Library);
 
     HRESULT
@@ -1378,12 +1397,68 @@ private:
     ~RxPipelineLibrary() override;
 
     HRESULT
-    Initialize();
+    Initialize(
+        _In_reads_bytes_opt_(BlobLength) const BYTE* Blob,
+        _In_ SIZE_T BlobLength);
+
+    VOID
+    ReadIdentity();
+
+    /* Fills the entries from a blob and says where its driver data is */
+    HRESULT
+    ReadBlob(
+        _In_reads_bytes_(BlobLength) const BYTE* Blob,
+        _In_ SIZE_T BlobLength,
+        _Out_ SIZE_T* DriverOffset,
+        _Out_ SIZE_T* DriverSize);
+
+    _Ret_maybenull_
+    RxLibraryEntry*
+    Find(
+        _In_reads_(Length) const WCHAR* Name,
+        _In_ SIZE_T Length,
+        _In_ UINT Hash) const;
+
+    /* The name may be unaligned; it is copied */
+    HRESULT
+    Insert(
+        _In_reads_bytes_(Length * sizeof(WCHAR)) const VOID* Name,
+        _In_ SIZE_T Length,
+        _In_ const RxPipelineDigest& Digest,
+        _In_ UINT DriverIndex,
+        _Outptr_ RxLibraryEntry** Entry);
+
+    HRESULT
+    Load(
+        _In_ LPCWSTR Name,
+        _In_ const RxPipelineDesc& Desc,
+        _In_ const RxPipelineDigest& Digest,
+        _In_ REFIID riid,
+        _Outptr_ void** ppPipelineState);
+
+    /* Bytes before the driver data, for the entries held now */
+    SIZE_T
+    DriverDataOffset() const;
 
     RxDriverMemory12 Memory;
     D3D12DDI_HPIPELINELIBRARY DriverLibrary = {};
     BOOLEAN IsDriverLibraryCreated = FALSE;
+    RxLibraryIdentity BlobIdentity = {};
+    BOOLEAN IsIdentityRead = FALSE;
+
+    /* The driver's part of the blob the library was made from, kept for as long as the driver library */
+    BYTE* DriverData = nullptr;
+
+    /* Lock guards the entries; DriverLock is shared by loads and taken alone to change the driver library */
     SRWLOCK Lock = SRWLOCK_INIT;
+    SRWLOCK DriverLock = SRWLOCK_INIT;
+    RxLibraryEntry** Entries = nullptr;
+    UINT EntryCount = 0;
+    UINT EntryCapacity = 0;
+    RxLibraryEntry** Buckets = nullptr;
+    UINT BucketCount = 0;
+    SIZE_T NameChars = 0;
+    UINT NextDriverIndex = 0;
     SIZE_T SerializedSize = 0;
 };
 
@@ -1414,6 +1489,15 @@ public:
     GetDriverHandle() const
     {
         return DriverRoot;
+    }
+
+    /* The RTS0 part it was made from */
+    const BYTE*
+    GetPart(
+        _Out_ UINT* Size) const
+    {
+        *Size = SerializedSize;
+        return Serialized;
     }
 
     BOOLEAN

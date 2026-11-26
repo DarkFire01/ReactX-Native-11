@@ -2837,6 +2837,112 @@ TrScenarioPipelines(
     Root.Reset();
 }
 
+/* A pipeline stored in a library, serialized, and loaded back from a library made from the blob */
+static
+VOID
+TrScenarioLibraries(
+    _In_ TrRun& Run)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12Device1> Device1;
+    ComPtr<ID3D12RootSignature> Root;
+    ComPtr<ID3D12PipelineState> State;
+    ComPtr<ID3D12PipelineState> Drawing;
+    ComPtr<ID3D12PipelineLibrary> Library;
+    ComPtr<ID3DBlob> Blob;
+    ComPtr<ID3DBlob> Errors;
+    ComPtr<ID3DBlob> Vertex;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    D3D12_COMPUTE_PIPELINE_STATE_DESC Compute = {};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Graphics = {};
+    std::vector<BYTE> Bytes;
+
+    if (FAILED(Run.CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&Device))) ||
+        FAILED(Device.As(&Device1)) || Run.SerializeVersioned == nullptr)
+    {
+        return;
+    }
+
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    RootDesc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    if (FAILED(Run.SerializeVersioned(&RootDesc, &Blob, &Errors)) ||
+        FAILED(Device->CreateRootSignature(0, Blob->GetBufferPointer(), Blob->GetBufferSize(), IID_PPV_ARGS(&Root))) ||
+        FAILED(D3DCompile(TrLayoutShader, strlen(TrLayoutShader), "layout", nullptr, nullptr, "main", "vs_5_0", 0, 0,
+                          &Vertex, &Errors)))
+    {
+        return;
+    }
+
+    Graphics.pRootSignature = Root.Get();
+    Graphics.VS = { Vertex->GetBufferPointer(), Vertex->GetBufferSize() };
+    Graphics.InputLayout = { TrLayout, _countof(TrLayout) };
+    for (D3D12_RENDER_TARGET_BLEND_DESC& Target : Graphics.BlendState.RenderTarget)
+    {
+        Target.SrcBlend = D3D12_BLEND_ONE;
+        Target.DestBlend = D3D12_BLEND_ZERO;
+        Target.BlendOp = D3D12_BLEND_OP_ADD;
+        Target.SrcBlendAlpha = D3D12_BLEND_ONE;
+        Target.DestBlendAlpha = D3D12_BLEND_ZERO;
+        Target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        Target.LogicOp = D3D12_LOGIC_OP_NOOP;
+        Target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    Graphics.SampleMask = UINT_MAX;
+    Graphics.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    Graphics.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
+    Graphics.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    Graphics.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+    Graphics.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    Graphics.NumRenderTargets = 1;
+    Graphics.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Graphics.SampleDesc.Count = 1;
+    TrPhase("CreateGraphicsPipelineState");
+    printf("result %08X\n", (UINT)Device->CreateGraphicsPipelineState(&Graphics, IID_PPV_ARGS(&Drawing)));
+    if (Drawing == nullptr)
+        return;
+
+    Compute.pRootSignature = Root.Get();
+    Compute.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
+    TrPhase("CreateComputePipelineState");
+    printf("result %08X\n", (UINT)Device->CreateComputePipelineState(&Compute, IID_PPV_ARGS(&State)));
+    if (State == nullptr)
+        return;
+
+    TrPhase("CreatePipelineLibrary empty");
+    printf("result %08X\n", (UINT)Device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&Library)));
+    if (Library == nullptr)
+        return;
+    TrPhase("StorePipeline");
+    printf("result %08X\n", (UINT)Library->StorePipeline(L"compute", State.Get()));
+    TrPhase("StorePipeline second name");
+    printf("result %08X\n", (UINT)Library->StorePipeline(L"again", State.Get()));
+    TrPhase("StorePipeline graphics");
+    printf("result %08X\n", (UINT)Library->StorePipeline(L"graphics", Drawing.Get()));
+    TrPhase("Serialize");
+    Bytes.resize(Library->GetSerializedSize());
+    printf("result %08X\n", (UINT)Library->Serialize(Bytes.data(), Bytes.size()));
+    TrPhase("Release library and pipelines");
+    Library.Reset();
+    State.Reset();
+    Drawing.Reset();
+
+    TrPhase("CreatePipelineLibrary from blob");
+    printf("result %08X\n", (UINT)Device1->CreatePipelineLibrary(Bytes.data(), Bytes.size(), IID_PPV_ARGS(&Library)));
+    if (Library == nullptr)
+        return;
+    TrPhase("LoadComputePipeline second name");
+    printf("result %08X\n", (UINT)Library->LoadComputePipeline(L"again", &Compute, IID_PPV_ARGS(&State)));
+    TrPhase("LoadGraphicsPipeline");
+    printf("result %08X\n", (UINT)Library->LoadGraphicsPipeline(L"graphics", &Graphics, IID_PPV_ARGS(&Drawing)));
+    TrPhase("Release pipelines");
+    State.Reset();
+    Drawing.Reset();
+    TrPhase("Release library");
+    Library.Reset();
+    TrPhase("Release");
+    Root.Reset();
+}
+
 static
 VOID
 TrScenarioHeaps(
@@ -3386,6 +3492,7 @@ static const TrScenario TrScenarios[] =
     { "features", TrScenarioFeatures },
     { "rootsigs", TrScenarioRootSignatures },
     { "pipelines", TrScenarioPipelines },
+    { "libraries", TrScenarioLibraries },
     { "heaps", TrScenarioHeaps },
     { "views", TrScenarioViews },
 };

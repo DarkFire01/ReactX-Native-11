@@ -4542,6 +4542,556 @@ TcCheckViews(
     });
 }
 
+/* One subobject of a pipeline stream, aligned the way streams require */
+#pragma warning(push)
+#pragma warning(disable : 4324)
+template <D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Kind, typename T>
+struct alignas(void*) TcSubobject
+{
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type = Kind;
+    T Value;
+};
+#pragma warning(pop)
+
+/* The stream form of the default graphics desc */
+struct TcGraphicsStream
+{
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, ID3D12RootSignature*> Root;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, D3D12_SHADER_BYTECODE> Vertex;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, D3D12_BLEND_DESC> Blend;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, UINT> SampleMask;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, D3D12_RASTERIZER_DESC> Rasterizer;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, D3D12_DEPTH_STENCIL_DESC> DepthStencil;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, D3D12_PRIMITIVE_TOPOLOGY_TYPE> Topology;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, DXGI_SAMPLE_DESC> Samples;
+};
+
+struct TcComputeStream
+{
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, ID3D12RootSignature*> Root;
+    TcSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS, D3D12_SHADER_BYTECODE> Compute;
+};
+
+/* A library's serialized form, empty when it cannot be had */
+static
+std::vector<BYTE>
+TcSerializeLibrary(
+    _In_ ID3D12PipelineLibrary* Library)
+{
+    std::vector<BYTE> Bytes(Library->GetSerializedSize());
+
+    if (Bytes.empty() || FAILED(Library->Serialize(Bytes.data(), Bytes.size())))
+        Bytes.clear();
+    return Bytes;
+}
+
+/* Where a value first shows up in a blob, or SIZE_MAX */
+static
+SIZE_T
+TcFindBytes(
+    _In_ const std::vector<BYTE>& Bytes,
+    _In_reads_bytes_(Size) const void* Value,
+    _In_ SIZE_T Size)
+{
+    for (SIZE_T Offset = 0; Offset + Size <= Bytes.size(); Offset++)
+    {
+        if (memcmp(&Bytes[Offset], Value, Size) == 0)
+            return Offset;
+    }
+    return SIZE_MAX;
+}
+
+static
+VOID
+TcReportLibraryBlob(
+    _In_ TwelveCheck& Check,
+    _In_ ID3D12Device1* Device,
+    _In_z_ PCSTR Key,
+    _In_ const std::vector<BYTE>& Bytes)
+{
+    ComPtr<ID3D12PipelineLibrary> Library;
+    HRESULT hr;
+
+    hr = Device->CreatePipelineLibrary(Bytes.empty() ? nullptr : Bytes.data(), Bytes.size(), IID_PPV_ARGS(&Library));
+    Check.Report(Key, "0x%08lX %s", hr, Library != nullptr ? "object" : "null");
+}
+
+/* The PCI ids and user mode driver version DXGI reports for the device's adapter */
+static
+BOOLEAN
+TcAdapterIdentity(
+    _In_ ID3D12Device* Device,
+    _Out_ DXGI_ADAPTER_DESC* Desc,
+    _Out_ LARGE_INTEGER* Version)
+{
+    decltype(&CreateDXGIFactory1) CreateFactory;
+    ComPtr<IDXGIFactory4> Factory;
+    ComPtr<IDXGIAdapter> Adapter;
+
+    ZeroMemory(Desc, sizeof(*Desc));
+    Version->QuadPart = 0;
+    CreateFactory = reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(LoadLibraryW(L"dxgi.dll"),
+                                                                                  "CreateDXGIFactory1"));
+    if (CreateFactory == nullptr || FAILED(CreateFactory(IID_PPV_ARGS(&Factory))) ||
+        FAILED(Factory->EnumAdapterByLuid(Device->GetAdapterLuid(), IID_PPV_ARGS(&Adapter))) ||
+        FAILED(Adapter->GetDesc(Desc)))
+    {
+        return FALSE;
+    }
+    return SUCCEEDED(Adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), Version));
+}
+
+/* One thread's load for the concurrent case */
+struct TcLibraryLoader
+{
+    ID3D12PipelineLibrary* Library = nullptr;
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC* Desc = nullptr;
+    ComPtr<ID3D12PipelineState> Loaded;
+    HRESULT Result = E_FAIL;
+};
+
+static
+DWORD
+WINAPI
+TcLoadOnThread(
+    _In_ LPVOID Parameter)
+{
+    TcLibraryLoader* Loader = static_cast<TcLibraryLoader*>(Parameter);
+
+    Loader->Result = Loader->Library->LoadGraphicsPipeline(L"graphics", Loader->Desc, IID_PPV_ARGS(&Loader->Loaded));
+    return 0;
+}
+
+/* Private data that says when the object holding it goes away */
+class TcSentinel final : public IUnknown
+{
+public:
+    HRESULT
+    STDMETHODCALLTYPE
+    QueryInterface(
+        _In_ REFIID riid,
+        _COM_Outptr_ void** ppvObject) override
+    {
+        *ppvObject = nullptr;
+        if (riid != __uuidof(IUnknown))
+            return E_NOINTERFACE;
+        *ppvObject = this;
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    AddRef(VOID) override
+    {
+        return ++Count;
+    }
+
+    ULONG
+    STDMETHODCALLTYPE
+    Release(VOID) override
+    {
+        Count -= 1;
+        return Count;
+    }
+
+    ULONG Count = 1;
+};
+
+static const GUID TcLibraryTag = { 0x2c7d41e9, 0x8a35, 0x4f60, { 0xb1, 0x2e, 0x6d, 0x93, 0x0a, 0x57, 0xc4, 0x18 } };
+
+/* libraries: storing pipelines by name, loading them back and reading serialized libraries */
+static
+VOID
+TcCheckLibraries(
+    _In_ TwelveCheck& Check)
+{
+    ComPtr<ID3D12Device> Device;
+    ComPtr<ID3D12Device1> Device1;
+    ComPtr<ID3D12Device2> Device2;
+    ComPtr<ID3D12RootSignature> Root;
+    ComPtr<ID3D12RootSignature> OtherRoot;
+    ComPtr<ID3D12PipelineState> Graphics;
+    ComPtr<ID3D12PipelineState> Compute;
+    ComPtr<ID3D12PipelineState> Loaded;
+    ComPtr<ID3D12PipelineState> Again;
+    ComPtr<ID3D12PipelineLibrary> Library;
+    ComPtr<ID3D12PipelineLibrary> Reloaded;
+    ComPtr<ID3D12PipelineLibrary1> Library1;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC RootDesc = {};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC GraphicsDesc;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC Changed;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC ComputeDesc = {};
+    D3D12_COMPUTE_PIPELINE_STATE_DESC ComputeChanged;
+    TcGraphicsStream GraphicsStream;
+    TcComputeStream ComputeStream;
+    D3D12_PIPELINE_STATE_STREAM_DESC Stream;
+    std::vector<BYTE> Bytes;
+    std::vector<BYTE> Patched;
+    std::vector<BYTE> Code;
+    TcRootBlob Blob;
+    DXGI_ADAPTER_DESC AdapterDesc;
+    LARGE_INTEGER Version;
+    LUID Luid;
+    UINT Ids[2];
+    UINT Mark;
+    UINT MarkSize;
+    SIZE_T EmptySize;
+    SIZE_T Offset;
+    ULONG Refs;
+    void* Raw;
+    HRESULT hr;
+
+    if (FAILED(Check.MakeDevice(&Device)) || FAILED(Device.As(&Device1)))
+    {
+        Check.Report("device", "none");
+        return;
+    }
+
+    RootDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    if (!TcSerializeRoot(Check, RootDesc, &Blob) ||
+        FAILED(Device->CreateRootSignature(0, Blob.Bytes.data(), Blob.Bytes.size(), IID_PPV_ARGS(&Root))))
+    {
+        Check.Report("root", "failed");
+        return;
+    }
+
+    TcDefaultGraphicsDesc(Root.Get(), &GraphicsDesc);
+    ComputeDesc.pRootSignature = Root.Get();
+    ComputeDesc.CS = { RxInternalComputeDxil, sizeof(RxInternalComputeDxil) };
+    if (FAILED(Device->CreateGraphicsPipelineState(&GraphicsDesc, IID_PPV_ARGS(&Graphics))) ||
+        FAILED(Device->CreateComputePipelineState(&ComputeDesc, IID_PPV_ARGS(&Compute))))
+    {
+        Check.Report("pipelines", "failed");
+        return;
+    }
+
+    /* An empty library and its serialized form */
+    hr = Device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&Library));
+    Check.Report("empty", "0x%08lX", hr);
+    if (FAILED(hr))
+        return;
+    Check.Report("empty_null_out", "0x%08lX", Device1->CreatePipelineLibrary(nullptr, 0, __uuidof(ID3D12PipelineLibrary),
+                                                                              nullptr));
+    Raw = reinterpret_cast<void*>(1);
+    hr = Device1->CreatePipelineLibrary(nullptr, 0, __uuidof(ID3D12Fence), &Raw);
+    Check.Report("empty_bad_riid", "0x%08lX %s", hr, Raw == nullptr ? "null" : "set");
+
+    EmptySize = Library->GetSerializedSize();
+    Check.Report("empty_size", "%u", EmptySize != 0);
+    Bytes.resize(EmptySize + 64);
+    Check.Report("serialize_small", "0x%08lX", Library->Serialize(Bytes.data(), EmptySize - 1));
+    Check.Report("serialize_large", "0x%08lX", Library->Serialize(Bytes.data(), EmptySize + 64));
+    Bytes = TcSerializeLibrary(Library.Get());
+    Check.Report("serialize_empty", "%u", Bytes.size() == EmptySize);
+    TcReportLibraryBlob(Check, Device1.Get(), "from_empty", Bytes);
+    if (SUCCEEDED(Device1->CreatePipelineLibrary(Bytes.data(), Bytes.size(), IID_PPV_ARGS(&Reloaded))))
+    {
+        Check.Report("from_empty_size", "%u", Reloaded->GetSerializedSize() == EmptySize);
+        Check.Report("from_empty_load", "0x%08lX", Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc,
+                                                                                 IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+        Reloaded.Reset();
+    }
+
+    /* Storing by name */
+    Refs = TcRefCount(Graphics.Get());
+    Check.Report("store", "0x%08lX", Library->StorePipeline(L"graphics", Graphics.Get()));
+    Check.Report("store_refs", "%ld", (LONG)TcRefCount(Graphics.Get()) - (LONG)Refs);
+    Check.Report("store_again", "0x%08lX", Library->StorePipeline(L"graphics", Graphics.Get()));
+    Check.Report("store_taken_other", "0x%08lX", Library->StorePipeline(L"graphics", Compute.Get()));
+    Check.Report("store_second_name", "0x%08lX", Library->StorePipeline(L"graphics2", Graphics.Get()));
+    Check.Report("store_null_name", "0x%08lX", Library->StorePipeline(nullptr, Compute.Get()));
+    Check.Report("store_null_name_again", "0x%08lX", Library->StorePipeline(nullptr, Compute.Get()));
+    Check.Report("store_empty_name", "0x%08lX", Library->StorePipeline(L"", Compute.Get()));
+    Check.Report("store_compute", "0x%08lX", Library->StorePipeline(L"compute", Compute.Get()));
+    Check.Report("size_grew", "%u", Library->GetSerializedSize() > EmptySize);
+
+    /* Loading by name, with the desc the pipeline was made from */
+    hr = Library->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Loaded));
+    Check.Report("load", "0x%08lX same %u", hr, Loaded.Get() == Graphics.Get());
+    hr = Library->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Again));
+    Check.Report("load_again", "0x%08lX same %u", hr, Loaded != nullptr && Loaded.Get() == Again.Get());
+    Again.Reset();
+    hr = Library->LoadGraphicsPipeline(L"graphics2", &GraphicsDesc, IID_PPV_ARGS(&Again));
+    Check.Report("load_second_name", "0x%08lX", hr);
+    Again.Reset();
+    if (Loaded != nullptr)
+        Check.Report("store_loaded", "0x%08lX", Library->StorePipeline(L"loaded", Loaded.Get()));
+    Loaded.Reset();
+
+    Check.Report("load_missing", "0x%08lX", Library->LoadGraphicsPipeline(L"none", &GraphicsDesc, IID_PPV_ARGS(&Loaded)));
+    Check.Report("load_case", "0x%08lX", Library->LoadGraphicsPipeline(L"GRAPHICS", &GraphicsDesc, IID_PPV_ARGS(&Loaded)));
+    Check.Report("load_empty_name", "0x%08lX", Library->LoadComputePipeline(L"", &ComputeDesc, IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Check.Report("load_as_compute", "0x%08lX", Library->LoadComputePipeline(L"graphics", &ComputeDesc,
+                                                                             IID_PPV_ARGS(&Loaded)));
+    Check.Report("load_as_graphics", "0x%08lX", Library->LoadGraphicsPipeline(L"compute", &GraphicsDesc,
+                                                                               IID_PPV_ARGS(&Loaded)));
+    hr = Library->LoadComputePipeline(L"compute", &ComputeDesc, IID_PPV_ARGS(&Loaded));
+    Check.Report("load_compute", "0x%08lX same %u", hr, Loaded.Get() == Compute.Get());
+    Loaded.Reset();
+    Check.Report("load_null_out", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &GraphicsDesc,
+                                                                            __uuidof(ID3D12PipelineState), nullptr));
+    Raw = reinterpret_cast<void*>(1);
+    hr = Library->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, __uuidof(ID3D12Fence), &Raw);
+    Check.Report("load_bad_riid", "0x%08lX %s", hr, Raw == nullptr ? "null" : "set");
+
+    /* What of the desc has to match */
+    Changed = GraphicsDesc;
+    Changed.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    Check.Report("load_changed_raster", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                  IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Changed = GraphicsDesc;
+    Changed.SampleMask = 1;
+    Check.Report("load_changed_mask", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Changed = GraphicsDesc;
+    Changed.NumRenderTargets = 1;
+    Changed.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Check.Report("load_changed_targets", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                   IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Changed = GraphicsDesc;
+    Changed.RTVFormats[3] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    Check.Report("load_unused_target", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                 IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Changed = GraphicsDesc;
+    Changed.VS = { RxInternalVertexDxbc, sizeof(RxInternalVertexDxbc) };
+    Check.Report("load_changed_code", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Code.assign(RxInternalVertexDxil, RxInternalVertexDxil + sizeof(RxInternalVertexDxil));
+    Changed = GraphicsDesc;
+    Changed.VS = { Code.data(), Code.size() };
+    Check.Report("load_copied_code", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                               IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Changed = GraphicsDesc;
+    Changed.NodeMask = 1;
+    Check.Report("load_node1", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed, IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    Changed = GraphicsDesc;
+    Changed.pRootSignature = nullptr;
+    Check.Report("load_no_root", "0x%08lX", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                           IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+    hr = Device->CreateRootSignature(0, Blob.Bytes.data(), Blob.Bytes.size(), IID_PPV_ARGS(&OtherRoot));
+    Changed = GraphicsDesc;
+    Changed.pRootSignature = OtherRoot.Get();
+    Check.Report("load_other_root", "0x%08lX same %u", Library->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                      IID_PPV_ARGS(&Loaded)),
+                 OtherRoot.Get() == Root.Get());
+    Loaded.Reset();
+    ComputeChanged = ComputeDesc;
+    ComputeChanged.CS = { RxInternalComputeDxbc, sizeof(RxInternalComputeDxbc) };
+    Check.Report("load_compute_changed", "0x%08lX", Library->LoadComputePipeline(L"compute", &ComputeChanged,
+                                                                                  IID_PPV_ARGS(&Loaded)));
+    Loaded.Reset();
+
+    /* The same descs as pipeline streams */
+    if (SUCCEEDED(Library.As(&Library1)))
+    {
+        GraphicsStream.Root.Value = Root.Get();
+        GraphicsStream.Vertex.Value = GraphicsDesc.VS;
+        GraphicsStream.Blend.Value = GraphicsDesc.BlendState;
+        GraphicsStream.SampleMask.Value = GraphicsDesc.SampleMask;
+        GraphicsStream.Rasterizer.Value = GraphicsDesc.RasterizerState;
+        GraphicsStream.DepthStencil.Value = GraphicsDesc.DepthStencilState;
+        GraphicsStream.Topology.Value = GraphicsDesc.PrimitiveTopologyType;
+        GraphicsStream.Samples.Value = GraphicsDesc.SampleDesc;
+        Stream = { sizeof(GraphicsStream), &GraphicsStream };
+        Check.Report("stream_graphics", "0x%08lX", Library1->LoadPipeline(L"graphics", &Stream, IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+        Check.Report("stream_missing", "0x%08lX", Library1->LoadPipeline(L"none", &Stream, IID_PPV_ARGS(&Loaded)));
+        GraphicsStream.Rasterizer.Value.CullMode = D3D12_CULL_MODE_FRONT;
+        Check.Report("stream_changed", "0x%08lX", Library1->LoadPipeline(L"graphics", &Stream, IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+        ComputeStream.Root.Value = Root.Get();
+        ComputeStream.Compute.Value = ComputeDesc.CS;
+        Stream = { sizeof(ComputeStream), &ComputeStream };
+        Check.Report("stream_compute", "0x%08lX", Library1->LoadPipeline(L"compute", &Stream, IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+        Check.Report("stream_compute_as_graphics", "0x%08lX", Library1->LoadPipeline(L"graphics", &Stream,
+                                                                                      IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+
+        /* A pipeline made from a stream, loaded back both ways */
+        if (SUCCEEDED(Device.As(&Device2)) && SUCCEEDED(Device2->CreatePipelineState(&Stream, IID_PPV_ARGS(&Again))))
+        {
+            Check.Report("stream_store", "0x%08lX", Library1->StorePipeline(L"stream", Again.Get()));
+            Check.Report("stream_load_stream", "0x%08lX", Library1->LoadPipeline(L"stream", &Stream,
+                                                                                  IID_PPV_ARGS(&Loaded)));
+            Loaded.Reset();
+            Check.Report("stream_load_compute", "0x%08lX", Library1->LoadComputePipeline(L"stream", &ComputeDesc,
+                                                                                          IID_PPV_ARGS(&Loaded)));
+            Loaded.Reset();
+            Again.Reset();
+        }
+        Library1.Reset();
+    }
+
+    /* Stored pipelines outlive the objects they were stored from */
+    Mark = 0x1234;
+    Graphics->SetPrivateData(TcLibraryTag, sizeof(Mark), &Mark);
+    Graphics.Reset();
+    Compute.Reset();
+    hr = Library->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Loaded));
+    MarkSize = sizeof(Mark);
+    Check.Report("load_released", "0x%08lX kept %u", hr,
+                 Loaded != nullptr && SUCCEEDED(Loaded->GetPrivateData(TcLibraryTag, &MarkSize, &Mark)));
+    Loaded.Reset();
+
+    /* A serialized library read back */
+    Bytes = TcSerializeLibrary(Library.Get());
+    Check.Report("serialize", "%u", !Bytes.empty());
+    Patched = TcSerializeLibrary(Library.Get());
+    Check.Report("serialize_stable", "%u", Patched == Bytes);
+    Check.Report("from_blob_null_out", "0x%08lX", Device1->CreatePipelineLibrary(Bytes.data(), Bytes.size(),
+                                                                                  __uuidof(ID3D12PipelineLibrary),
+                                                                                  nullptr));
+    hr = Device1->CreatePipelineLibrary(Bytes.data(), Bytes.size(), IID_PPV_ARGS(&Reloaded));
+    Check.Report("from_blob", "0x%08lX", hr);
+    if (SUCCEEDED(hr))
+    {
+        Check.Report("from_blob_size", "%u", Reloaded->GetSerializedSize() == Bytes.size());
+        hr = Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Loaded));
+        Check.Report("from_blob_load", "0x%08lX %s", hr, Loaded != nullptr ? "object" : "null");
+        hr = Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Again));
+        Check.Report("from_blob_again", "0x%08lX same %u", hr, Loaded != nullptr && Loaded.Get() == Again.Get());
+        Again.Reset();
+        Loaded.Reset();
+        Check.Report("from_blob_compute", "0x%08lX", Reloaded->LoadComputePipeline(L"compute", &ComputeDesc,
+                                                                                    IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+        Check.Report("from_blob_loaded", "0x%08lX", Reloaded->LoadGraphicsPipeline(L"loaded", &GraphicsDesc,
+                                                                                    IID_PPV_ARGS(&Loaded)));
+        Loaded.Reset();
+        Check.Report("from_blob_missing", "0x%08lX", Reloaded->LoadGraphicsPipeline(L"none", &GraphicsDesc,
+                                                                                     IID_PPV_ARGS(&Loaded)));
+        Changed = GraphicsDesc;
+        Changed.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        Check.Report("from_blob_changed", "0x%08lX", Reloaded->LoadGraphicsPipeline(L"graphics", &Changed,
+                                                                                     IID_PPV_ARGS(&Loaded)));
+        if (SUCCEEDED(Device->CreateGraphicsPipelineState(&GraphicsDesc, IID_PPV_ARGS(&Graphics))))
+        {
+            Check.Report("from_blob_store_taken", "0x%08lX", Reloaded->StorePipeline(L"graphics", Graphics.Get()));
+            Check.Report("from_blob_store_new", "0x%08lX", Reloaded->StorePipeline(L"new", Graphics.Get()));
+            Check.Report("from_blob_grew", "%u", Reloaded->GetSerializedSize() > Bytes.size());
+            Graphics.Reset();
+        }
+        Reloaded.Reset();
+    }
+
+    /* Threads racing to load one name all succeed; on Windows each may get its own pipeline */
+    if (SUCCEEDED(Device1->CreatePipelineLibrary(Bytes.data(), Bytes.size(), IID_PPV_ARGS(&Reloaded))))
+    {
+        TcLibraryLoader Loaders[8];
+        HANDLE Threads[_countof(Loaders)];
+        UINT Succeeded = 0;
+
+        for (UINT Index = 0; Index < _countof(Loaders); Index++)
+        {
+            Loaders[Index].Library = Reloaded.Get();
+            Loaders[Index].Desc = &GraphicsDesc;
+            Threads[Index] = CreateThread(nullptr, 0, TcLoadOnThread, &Loaders[Index], 0, nullptr);
+        }
+        WaitForMultipleObjects(_countof(Threads), Threads, TRUE, INFINITE);
+        for (UINT Index = 0; Index < _countof(Loaders); Index++)
+        {
+            CloseHandle(Threads[Index]);
+            Succeeded += SUCCEEDED(Loaders[Index].Result) && Loaders[Index].Loaded != nullptr;
+        }
+        Check.Report("threads", "%u of %u", Succeeded, (UINT)_countof(Loaders));
+        Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Loaded));
+        Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Again));
+        Check.Report("threads_after", "%u", Loaded != nullptr && Loaded.Get() == Again.Get());
+        Again.Reset();
+        Loaded.Reset();
+        Reloaded.Reset();
+    }
+
+    /* What keeps a library and the pipelines it hands out alive */
+    if (SUCCEEDED(Device1->CreatePipelineLibrary(Bytes.data(), Bytes.size(), IID_PPV_ARGS(&Reloaded))))
+    {
+        TcSentinel LibraryMark;
+        TcSentinel PipelineMark;
+
+        Reloaded->SetPrivateDataInterface(TcLibraryTag, &LibraryMark);
+        hr = Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Loaded));
+        if (SUCCEEDED(hr))
+        {
+            Loaded->SetPrivateDataInterface(TcLibraryTag, &PipelineMark);
+            Loaded.Reset();
+            Check.Report("held_pipeline_alive", "%u", PipelineMark.Count > 1);
+            hr = Reloaded->LoadGraphicsPipeline(L"graphics", &GraphicsDesc, IID_PPV_ARGS(&Loaded));
+            Reloaded.Reset();
+            Check.Report("held_library_alive", "%u", LibraryMark.Count > 1);
+            Loaded.Reset();
+            Check.Report("held_library_after", "%u", LibraryMark.Count > 1);
+            Check.Report("held_pipeline_after", "%u", PipelineMark.Count > 1);
+        }
+        Reloaded.Reset();
+    }
+
+    /* Damaged blobs */
+    if (Bytes.empty())
+        return;
+    Patched.assign(Bytes.begin(), Bytes.end() - 1);
+    TcReportLibraryBlob(Check, Device1.Get(), "blob_truncated", Patched);
+    Patched.assign(Bytes.begin(), Bytes.begin() + 16);
+    TcReportLibraryBlob(Check, Device1.Get(), "blob_short", Patched);
+    Patched = Bytes;
+    Patched.resize(Bytes.size() + 16);
+    TcReportLibraryBlob(Check, Device1.Get(), "blob_extended", Patched);
+    Patched = Bytes;
+    Patched[0] ^= 0xFF;
+    TcReportLibraryBlob(Check, Device1.Get(), "blob_magic", Patched);
+    Patched.assign(Bytes.size(), 0);
+    TcReportLibraryBlob(Check, Device1.Get(), "blob_zero", Patched);
+    Patched = Bytes;
+    Patched[0] ^= 0xFF;
+    Check.Report("blob_magic_null_out", "0x%08lX", Device1->CreatePipelineLibrary(Patched.data(), Patched.size(),
+                                                                                   __uuidof(ID3D12PipelineLibrary),
+                                                                                   nullptr));
+
+    /* A library from another adapter or another driver */
+    Luid = Device->GetAdapterLuid();
+    Offset = TcFindBytes(Bytes, &Luid, sizeof(Luid));
+    Check.Report("blob_has_luid", "%u", Offset != SIZE_MAX);
+    if (Offset != SIZE_MAX)
+    {
+        Patched = Bytes;
+        Patched[Offset] ^= 0x5A;
+        TcReportLibraryBlob(Check, Device1.Get(), "blob_other_adapter", Patched);
+    }
+    if (TcAdapterIdentity(Device.Get(), &AdapterDesc, &Version))
+    {
+        Ids[0] = AdapterDesc.VendorId;
+        Ids[1] = AdapterDesc.DeviceId;
+        Offset = TcFindBytes(Bytes, Ids, sizeof(Ids));
+        Check.Report("blob_has_device_ids", "%u", Offset != SIZE_MAX);
+        if (Offset != SIZE_MAX)
+        {
+            Patched = Bytes;
+            Patched[Offset + sizeof(UINT)] ^= 0x5A;
+            TcReportLibraryBlob(Check, Device1.Get(), "blob_other_device", Patched);
+        }
+
+        Offset = TcFindBytes(Bytes, &Version, sizeof(Version));
+        Check.Report("blob_has_driver_version", "%u", Offset != SIZE_MAX);
+        if (Offset != SIZE_MAX)
+        {
+            Patched = Bytes;
+            Patched[Offset] ^= 0x5A;
+            TcReportLibraryBlob(Check, Device1.Get(), "blob_other_driver", Patched);
+        }
+    }
+}
+
 struct CheckInfo
 {
     PCSTR Name;
@@ -4572,6 +5122,7 @@ static const CheckInfo Checks[] =
     { "placed", TcCheckPlaced },
     { "queries", TcCheckQueries },
     { "views", TcCheckViews },
+    { "libraries", TcCheckLibraries },
 };
 
 /* System32 for "system", the ReactX build next to this exe for "reactx", else a directory */

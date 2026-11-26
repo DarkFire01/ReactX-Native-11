@@ -495,12 +495,52 @@ RxCheckPipelineStream(
 }
 
 HRESULT
+RxGatherPipelineStream(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_PIPELINE_STATE_STREAM_DESC& Stream,
+    _Out_ RxPipelineDesc* Desc,
+    _Out_opt_ RxPipelineDigest* Digest)
+{
+    HRESULT hr;
+
+    hr = RxReadPipelineStream(Stream, Desc);
+    if (FAILED(hr))
+        return hr;
+    hr = RxCheckPipelineStream(Device, *Desc);
+    if (FAILED(hr))
+        return hr;
+
+    /* The digest keeps the graphics states a compute stream defaults, as libraries compare them */
+    if (Digest != nullptr)
+    {
+        hr = RxDigestPipelineDesc(*Desc, Digest);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    if (Desc->IsCompute)
+    {
+        RxPipelineDesc Compute = {};
+
+        Compute.RootSignature = Desc->RootSignature;
+        Compute.Shaders[RxStageCompute] = Desc->Shaders[RxStageCompute];
+        Compute.NodeMask = Desc->NodeMask;
+        Compute.Cached = Desc->Cached;
+        Compute.Flags = Desc->Flags;
+        Compute.IsCompute = TRUE;
+        *Desc = Compute;
+    }
+    return S_OK;
+}
+
+HRESULT
 STDMETHODCALLTYPE
 RxDevice12::CreatePipelineState(
     const D3D12_PIPELINE_STATE_STREAM_DESC* pDesc,
     REFIID riid,
     _COM_Outptr_ void** ppPipelineState)
 {
+    RxPipelineOrigin Origin = {};
     RxPipelineDesc Desc;
     RxPipelineState* State;
     HRESULT hr;
@@ -510,30 +550,14 @@ RxDevice12::CreatePipelineState(
     if (pDesc == nullptr)
         return E_INVALIDARG;
 
-    hr = RxReadPipelineStream(*pDesc, &Desc);
+    hr = RxGatherPipelineStream(*this, *pDesc, &Desc, ppPipelineState != nullptr ? &Origin.Digest : nullptr);
     if (FAILED(hr))
         return hr;
-    hr = RxCheckPipelineStream(*this, Desc);
-    if (FAILED(hr))
-        return hr;
-
-    if (Desc.IsCompute)
-    {
-        RxPipelineDesc Compute = {};
-
-        Compute.RootSignature = Desc.RootSignature;
-        Compute.Shaders[RxStageCompute] = Desc.Shaders[RxStageCompute];
-        Compute.NodeMask = Desc.NodeMask;
-        Compute.Cached = Desc.Cached;
-        Compute.Flags = Desc.Flags;
-        Compute.IsCompute = TRUE;
-        Desc = Compute;
-    }
 
     if (ppPipelineState == nullptr)
         return S_FALSE;
 
-    hr = RxPipelineState::Create(*this, Desc, FALSE, &State);
+    hr = RxPipelineState::Create(*this, Desc, FALSE, &Origin, &State);
     if (FAILED(hr))
         return hr;
     return RxHandOut12(State, riid, ppPipelineState);

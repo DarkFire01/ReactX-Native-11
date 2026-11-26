@@ -7,6 +7,7 @@
 
 #include "pipeline.hpp"
 #include "core.hpp"
+#include "dxbchash.hpp"
 #include "formatlayout12.hpp"
 #include "formatsupport12.hpp"
 #include "internalshaders.h"
@@ -101,6 +102,244 @@ RxGatherComputeDesc(
     Desc->Cached = From.CachedPSO;
     Desc->Flags = From.Flags;
     Desc->IsCompute = TRUE;
+}
+
+/* Digests */
+
+/* The bytes a pipeline digest is taken over; most descs fit the inline buffer */
+class RxDigestInput
+{
+public:
+    RxDigestInput() = default;
+
+    ~RxDigestInput()
+    {
+        if (Data != Inline)
+            delete[] Data;
+    }
+
+    RxDigestInput(const RxDigestInput&) = delete;
+    RxDigestInput& operator=(const RxDigestInput&) = delete;
+
+    VOID
+    Add(
+        _In_reads_bytes_(Size) const VOID* Bytes,
+        _In_ SIZE_T Size)
+    {
+        BYTE* Grown;
+        SIZE_T Wanted;
+
+        if (IsBroken)
+            return;
+
+        if (Size > Capacity - Used)
+        {
+            Wanted = Capacity * 2 > Used + Size ? Capacity * 2 : Used + Size;
+            if (Wanted > UINT_MAX)
+            {
+                IsBroken = TRUE;
+                return;
+            }
+            Grown = new (std::nothrow) BYTE[Wanted];
+            if (Grown == nullptr)
+            {
+                IsBroken = TRUE;
+                return;
+            }
+            CopyMemory(Grown, Data, Used);
+            if (Data != Inline)
+                delete[] Data;
+            Data = Grown;
+            Capacity = Wanted;
+        }
+
+        CopyMemory(Data + Used, Bytes, Size);
+        Used += Size;
+    }
+
+    VOID
+    AddUint(
+        _In_ UINT Value)
+    {
+        Add(&Value, sizeof(Value));
+    }
+
+    /* A string goes in with its length so neighbors cannot run together; NULL differs from empty */
+    VOID
+    AddString(
+        _In_opt_z_ LPCSTR Text)
+    {
+        SIZE_T Length;
+
+        if (Text == nullptr)
+        {
+            AddUint(UINT_MAX);
+            return;
+        }
+        Length = strlen(Text);
+        AddUint((UINT)Length);
+        Add(Text, Length);
+    }
+
+    /* Code and other long runs go in by their size and own digest */
+    VOID
+    AddDigestOf(
+        _In_reads_bytes_opt_(Size) const VOID* Bytes,
+        _In_ SIZE_T Size)
+    {
+        BYTE Digest[16] = {};
+        UINT64 Length;
+
+        if (Bytes == nullptr)
+            Size = 0;
+        if (Size > UINT_MAX)
+        {
+            IsBroken = TRUE;
+            return;
+        }
+        if (Size != 0)
+            RxDxbcHash(static_cast<const BYTE*>(Bytes), (UINT)Size, Digest);
+        Length = Size;
+        Add(&Length, sizeof(Length));
+        Add(Digest, sizeof(Digest));
+    }
+
+    HRESULT
+    Finish(
+        _Out_ RxPipelineDigest* Digest)
+    {
+        if (IsBroken)
+            return E_OUTOFMEMORY;
+        RxDxbcHash(Data, (UINT)Used, Digest->Bytes);
+        return S_OK;
+    }
+
+private:
+    BYTE Inline[1024];
+    BYTE* Data = Inline;
+    SIZE_T Used = 0;
+    SIZE_T Capacity = sizeof(Inline);
+    BOOLEAN IsBroken = FALSE;
+};
+
+/* Field by field, since the byte sized masks leave padding a copied desc may carry */
+static
+VOID
+RxDigestStencilFace(
+    _Inout_ RxDigestInput& Input,
+    _In_ const D3D12_DEPTH_STENCILOP_DESC1& Face)
+{
+    Input.AddUint(Face.StencilFailOp);
+    Input.AddUint(Face.StencilDepthFailOp);
+    Input.AddUint(Face.StencilPassOp);
+    Input.AddUint(Face.StencilFunc);
+    Input.AddUint(Face.StencilReadMask);
+    Input.AddUint(Face.StencilWriteMask);
+}
+
+HRESULT
+RxDigestPipelineDesc(
+    _In_ const RxPipelineDesc& Desc,
+    _Out_ RxPipelineDigest* Digest)
+{
+    RxRootSignature* Root = RxUnwrap12<RxRootSignature>(Desc.RootSignature);
+    const D3D12_STREAM_OUTPUT_DESC& Output = Desc.StreamOutput;
+    const D3D12_VIEW_INSTANCING_DESC& Views = Desc.ViewInstancing;
+    const BYTE* Part = nullptr;
+    UINT PartSize = 0;
+    UINT Index;
+    RxDigestInput Input;
+
+    ZeroMemory(Digest, sizeof(*Digest));
+
+    /* A root signature counts by what it holds, so equal ones made apart give the same pipeline */
+    if (Root != nullptr)
+        Part = Root->GetPart(&PartSize);
+    Input.AddDigestOf(Part, PartSize);
+    Input.AddUint(Desc.IsCompute);
+
+    for (const D3D12_SHADER_BYTECODE& Code : Desc.Shaders)
+        Input.AddDigestOf(Code.pShaderBytecode, Code.BytecodeLength);
+
+    Input.AddUint(Output.NumEntries);
+    for (Index = 0; Output.pSODeclaration != nullptr && Index < Output.NumEntries; Index++)
+    {
+        const D3D12_SO_DECLARATION_ENTRY& Entry = Output.pSODeclaration[Index];
+
+        Input.AddUint(Entry.Stream);
+        Input.AddString(Entry.SemanticName);
+        Input.AddUint(Entry.SemanticIndex);
+        Input.AddUint(Entry.StartComponent);
+        Input.AddUint(Entry.ComponentCount);
+        Input.AddUint(Entry.OutputSlot);
+    }
+    Input.AddUint(Output.NumStrides);
+    for (Index = 0; Output.pBufferStrides != nullptr && Index < Output.NumStrides; Index++)
+        Input.AddUint(Output.pBufferStrides[Index]);
+    Input.AddUint(Output.RasterizedStream);
+
+    Input.AddUint(Desc.Blend.AlphaToCoverageEnable);
+    Input.AddUint(Desc.Blend.IndependentBlendEnable);
+    for (const D3D12_RENDER_TARGET_BLEND_DESC& Target : Desc.Blend.RenderTarget)
+    {
+        Input.AddUint(Target.BlendEnable);
+        Input.AddUint(Target.LogicOpEnable);
+        Input.AddUint(Target.SrcBlend);
+        Input.AddUint(Target.DestBlend);
+        Input.AddUint(Target.BlendOp);
+        Input.AddUint(Target.SrcBlendAlpha);
+        Input.AddUint(Target.DestBlendAlpha);
+        Input.AddUint(Target.BlendOpAlpha);
+        Input.AddUint(Target.LogicOp);
+        Input.AddUint(Target.RenderTargetWriteMask);
+    }
+    Input.AddUint(Desc.SampleMask);
+
+    /* Every member of the widened rasterizer is four bytes wide, so it has no padding */
+    Input.Add(&Desc.Rasterizer, sizeof(Desc.Rasterizer));
+
+    Input.AddUint(Desc.DepthStencil.DepthEnable);
+    Input.AddUint(Desc.DepthStencil.DepthWriteMask);
+    Input.AddUint(Desc.DepthStencil.DepthFunc);
+    Input.AddUint(Desc.DepthStencil.StencilEnable);
+    RxDigestStencilFace(Input, Desc.DepthStencil.FrontFace);
+    RxDigestStencilFace(Input, Desc.DepthStencil.BackFace);
+    Input.AddUint(Desc.DepthStencil.DepthBoundsTestEnable);
+
+    Input.AddUint(Desc.InputLayout.NumElements);
+    for (Index = 0; Desc.InputLayout.pInputElementDescs != nullptr && Index < Desc.InputLayout.NumElements; Index++)
+    {
+        const D3D12_INPUT_ELEMENT_DESC& Element = Desc.InputLayout.pInputElementDescs[Index];
+
+        Input.AddString(Element.SemanticName);
+        Input.AddUint(Element.SemanticIndex);
+        Input.AddUint(Element.Format);
+        Input.AddUint(Element.InputSlot);
+        Input.AddUint(Element.AlignedByteOffset);
+        Input.AddUint(Element.InputSlotClass);
+        Input.AddUint(Element.InstanceDataStepRate);
+    }
+
+    Input.AddUint(Desc.StripCut);
+    Input.AddUint(Desc.Topology);
+    Input.Add(&Desc.Targets, sizeof(Desc.Targets));
+    Input.AddUint(Desc.DepthFormat);
+    Input.AddUint(Desc.Samples.Count);
+    Input.AddUint(Desc.Samples.Quality);
+
+    /* Mask 0 means the first node, the same as naming it */
+    Input.AddUint(Desc.NodeMask != 0 ? Desc.NodeMask : 1);
+    Input.AddUint(Desc.Flags);
+
+    Input.AddUint(Views.ViewInstanceCount);
+    for (Index = 0; Views.pViewInstanceLocations != nullptr && Index < Views.ViewInstanceCount; Index++)
+    {
+        Input.AddUint(Views.pViewInstanceLocations[Index].ViewportArrayIndex);
+        Input.AddUint(Views.pViewInstanceLocations[Index].RenderTargetArrayIndex);
+    }
+    Input.AddUint(Views.Flags);
+
+    return Input.Finish(Digest);
 }
 
 /* Shared parts */
@@ -428,6 +667,7 @@ struct RxShaderBuild
     RxShaderStage Stage;
     const D3D12_SHADER_BYTECODE* Code;
     D3D12DDI_HROOTSIGNATURE Root;
+    D3D12DDI_LIBRARY_REFERENCE_0010 Library;
 };
 
 static
@@ -523,6 +763,7 @@ RxBuildShader(
     MeshIo.NumPrimitiveOutputSignatureEntries = PrimitiveCount;
 
     Args.hRootSignature = Build.Root;
+    Args.LibraryReference = Build.Library;
     Args.pShaderCode = reinterpret_cast<const UINT*>(Program);
     if (Build.Stage == RxStageMesh)
         Args.IOSignatures.Mesh = &MeshIo;
@@ -956,6 +1197,7 @@ struct RxLayoutBuild
 {
     const D3D12DDIARG_INPUT_ELEMENT_DESC* Elements;
     UINT Count;
+    D3D12DDI_LIBRARY_REFERENCE_0010 Library;
 };
 
 /* A layout of no element the shader reads still makes an object, but no driver layout */
@@ -972,6 +1214,7 @@ RxBuildElementLayout(
 
     Args.pVertexElements = Build.Count != 0 ? Build.Elements : nullptr;
     Args.NumElements = Build.Count;
+    Args.LibraryReference = Build.Library;
     Layout.pDrvPrivate = Part->AllocateDriverMemory(Device.Ddi().pfnCalcPrivateElementLayoutSize(Device.Handle(), &Args));
     if (Layout.pDrvPrivate == nullptr)
         return E_OUTOFMEMORY;
@@ -1483,10 +1726,11 @@ RxPipelineState::Create(
     _In_ RxDevice12& Device,
     _In_ const RxPipelineDesc& Desc,
     _In_ BOOLEAN Internal,
+    _In_opt_ const RxPipelineOrigin* Origin,
     _Outptr_ RxPipelineState** State)
 {
     RxPipelineState* Created;
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
     *State = nullptr;
 
@@ -1494,7 +1738,14 @@ RxPipelineState::Create(
     if (Created == nullptr)
         return E_OUTOFMEMORY;
 
-    hr = Created->Initialize(Desc);
+    /* Only pipelines an application can store need a digest */
+    if (Origin != nullptr)
+        Created->Digest = Origin->Digest;
+    else if (!Internal)
+        hr = RxDigestPipelineDesc(Desc, &Created->Digest);
+
+    if (SUCCEEDED(hr))
+        hr = Created->Initialize(Desc, Origin != nullptr ? &Origin->Library : nullptr);
     if (FAILED(hr))
     {
         Created->Release();
@@ -1508,7 +1759,8 @@ RxPipelineState::Create(
 HRESULT
 RxPipelineState::AcquireShader(
     _In_ const RxPipelineDesc& Desc,
-    _In_ RxShaderStage Stage)
+    _In_ RxShaderStage Stage,
+    _In_ const D3D12DDI_LIBRARY_REFERENCE_0010& Library)
 {
     const D3D12_SHADER_BYTECODE& Code = Desc.Shaders[Stage];
     RxShaderBuild Build;
@@ -1538,6 +1790,7 @@ RxPipelineState::AcquireShader(
     Build.Stage = Stage;
     Build.Code = &Code;
     Build.Root = Root->GetDriverHandle();
+    Build.Library = Library;
     hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::Shader, Key, KeySize, RxBuildShader, &Build,
                                  &Shaders[Stage]);
     delete[] Key;
@@ -1582,7 +1835,8 @@ RxCheckLinkage(
 /* Equal translated layouts share one element layout */
 HRESULT
 RxPipelineState::AcquireElementLayout(
-    _In_ const RxPipelineDesc& Desc)
+    _In_ const RxPipelineDesc& Desc,
+    _In_ const D3D12DDI_LIBRARY_REFERENCE_0010& Library)
 {
     D3D12DDIARG_INPUT_ELEMENT_DESC Elements[D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT];
     RxLayoutBuild Build;
@@ -1606,18 +1860,25 @@ RxPipelineState::AcquireElementLayout(
         return hr;
 
     Build.Elements = Elements;
+    Build.Library = Library;
     return RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::ElementLayout, reinterpret_cast<const BYTE*>(Elements),
                                    Build.Count * sizeof(Elements[0]), RxBuildElementLayout, &Build, &ElementLayout);
 }
 
 HRESULT
 RxPipelineState::Initialize(
-    _In_ const RxPipelineDesc& Desc)
+    _In_ const RxPipelineDesc& Desc,
+    _In_opt_ const D3D12DDI_LIBRARY_REFERENCE_0010* Library)
 {
     const D3D12DDI_DEVICE_FUNCS_CORE_0116& Ddi = Device.Ddi();
     D3D12DDIARG_CREATE_PIPELINE_STATE_0099 Args = {};
     D3D12DDI_HRTPIPELINESTATE Runtime = { this };
+    D3D12DDI_LIBRARY_REFERENCE_0010 Reference = {};
     HRESULT hr;
+
+    /* Parts made for a library load name the entry too; parts found in the cache are shared as they are */
+    if (Library != nullptr)
+        Reference = *Library;
 
     IsCompute = Desc.IsCompute;
     Root = RxUnwrap12<RxRootSignature>(Desc.RootSignature);
@@ -1627,7 +1888,7 @@ RxPipelineState::Initialize(
 
     if (IsCompute)
     {
-        hr = AcquireShader(Desc, RxStageCompute);
+        hr = AcquireShader(Desc, RxStageCompute, Reference);
         if (FAILED(hr))
             return hr;
         Args.hComputeShader.pDrvPrivate = Shaders[RxStageCompute]->GetDriverHandle();
@@ -1638,26 +1899,32 @@ RxPipelineState::Initialize(
         static const RxShaderStage Order[] = { RxStageVertex, RxStagePixel, RxStageHull, RxStageDomain,
                                                RxStageGeometry, RxStageAmplification, RxStageMesh };
         D3D12DDI_BLEND_DESC_0010 Blend;
+        D3D12DDI_BLEND_DESC_0010 BlendMade;
         D3D12DDI_DEPTH_STENCIL_DESC_0095 Depth;
+        D3D12DDI_DEPTH_STENCIL_DESC_0095 DepthMade;
         D3D12DDI_RASTERIZER_DESC_0102 Raster;
+        D3D12DDI_RASTERIZER_DESC_0102 RasterMade;
 
-        hr = AcquireElementLayout(Desc);
+        hr = AcquireElementLayout(Desc, Reference);
         if (FAILED(hr))
             return hr;
 
         for (RxShaderStage Stage : Order)
         {
-            hr = AcquireShader(Desc, Stage);
+            hr = AcquireShader(Desc, Stage, Reference);
             if (FAILED(hr))
                 return hr;
         }
 
+        /* Each state is cached by its desc without the library entry, and made with it */
         hr = RxCheckBlend(Device, Desc.Blend);
         if (FAILED(hr))
             return hr;
         RxToDdiBlend(Desc.Blend, &Blend);
+        BlendMade = Blend;
+        BlendMade.LibraryReference = Reference;
         hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::Blend, reinterpret_cast<const BYTE*>(&Blend),
-                                     sizeof(Blend), RxBuildBlend, &Blend, &BlendState);
+                                     sizeof(Blend), RxBuildBlend, &BlendMade, &BlendState);
         if (FAILED(hr))
             return hr;
 
@@ -1665,8 +1932,10 @@ RxPipelineState::Initialize(
         if (FAILED(hr))
             return hr;
         RxToDdiDepthStencil(Desc.DepthStencil, &Depth);
+        DepthMade = Depth;
+        DepthMade.LibraryReference = Reference;
         hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::DepthStencil, reinterpret_cast<const BYTE*>(&Depth),
-                                     sizeof(Depth), RxBuildDepthStencil, &Depth, &DepthStencilState);
+                                     sizeof(Depth), RxBuildDepthStencil, &DepthMade, &DepthStencilState);
         if (FAILED(hr))
             return hr;
 
@@ -1674,8 +1943,10 @@ RxPipelineState::Initialize(
         if (FAILED(hr))
             return hr;
         RxToDdiRasterizer(Desc.Rasterizer, &Raster);
+        RasterMade = Raster;
+        RasterMade.LibraryReference = Reference;
         hr = RxPipelinePart::Acquire(Device, RxPipelinePart::Kind::Rasterizer, reinterpret_cast<const BYTE*>(&Raster),
-                                     sizeof(Raster), RxBuildRasterizer, &Raster, &RasterizerState);
+                                     sizeof(Raster), RxBuildRasterizer, &RasterMade, &RasterizerState);
         if (FAILED(hr))
             return hr;
 
@@ -1719,6 +1990,7 @@ RxPipelineState::Initialize(
     if (Args.SampleDesc.Count == 0)
         Args.SampleDesc = { 1, 0 };
     Args.Flags = (D3D12DDI_PIPELINE_STATE_FLAGS)Desc.Flags;
+    Args.LibraryReference = Reference;
     hr = Device.TranslateNodeMask(Desc.NodeMask, TRUE, &Args.NodeMask);
     if (FAILED(hr))
         return hr;
@@ -1831,7 +2103,7 @@ RxDevice12::CreateGraphicsPipelineState(
     if (ppPipelineState == nullptr)
         return S_FALSE;
 
-    hr = RxPipelineState::Create(*this, Desc, FALSE, &State);
+    hr = RxPipelineState::Create(*this, Desc, FALSE, nullptr, &State);
     if (FAILED(hr))
         return hr;
     return RxHandOut12(State, riid, ppPipelineState);
@@ -1857,7 +2129,7 @@ RxDevice12::CreateComputePipelineState(
     if (ppPipelineState == nullptr)
         return S_FALSE;
 
-    hr = RxPipelineState::Create(*this, Desc, FALSE, &State);
+    hr = RxPipelineState::Create(*this, Desc, FALSE, nullptr, &State);
     if (FAILED(hr))
         return hr;
     return RxHandOut12(State, riid, ppPipelineState);
@@ -1931,7 +2203,7 @@ RxDevice12::CreateDefaults()
         Desc.Topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
         Desc.NodeMask = GetAllNodesMask();
 
-        hr = RxPipelineState::Create(*this, Desc, TRUE, &DefaultGraphics);
+        hr = RxPipelineState::Create(*this, Desc, TRUE, nullptr, &DefaultGraphics);
         if (FAILED(hr))
             return hr;
     }
@@ -1945,5 +2217,5 @@ RxDevice12::CreateDefaults()
         Desc.Shaders[RxStageCompute] = { RxInternalComputeDxbc, sizeof(RxInternalComputeDxbc) };
     Desc.NodeMask = GetAllNodesMask();
     Desc.IsCompute = TRUE;
-    return RxPipelineState::Create(*this, Desc, TRUE, &DefaultCompute);
+    return RxPipelineState::Create(*this, Desc, TRUE, nullptr, &DefaultCompute);
 }

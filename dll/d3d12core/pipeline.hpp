@@ -46,6 +46,25 @@ struct RxPipelineDesc
     BOOLEAN IsCompute;
 };
 
+/* What a desc says about the pipeline it makes, boiled down for libraries to compare */
+struct RxPipelineDigest
+{
+    BYTE Bytes[16];
+};
+
+/* Where a pipeline comes from: the digest of its desc and the library entry the driver may build it from */
+struct RxPipelineOrigin
+{
+    RxPipelineDigest Digest;
+    D3D12DDI_LIBRARY_REFERENCE_0010 Library;
+};
+
+/* The cached blob is left out: it says how to make the pipeline faster, not what the pipeline is */
+HRESULT
+RxDigestPipelineDesc(
+    _In_ const RxPipelineDesc& Desc,
+    _Out_ RxPipelineDigest* Digest);
+
 /* Gathering from the two fixed descs; the older rasterizer and depth stencil forms widen on the way */
 VOID
 RxGatherGraphicsDesc(
@@ -56,6 +75,14 @@ VOID
 RxGatherComputeDesc(
     _In_ const D3D12_COMPUTE_PIPELINE_STATE_DESC& From,
     _Out_ RxPipelineDesc* Desc);
+
+/* A stream read and checked the way CreatePipelineState takes it; the digest is of the stream as read */
+HRESULT
+RxGatherPipelineStream(
+    _In_ RxDevice12& Device,
+    _In_ const D3D12_PIPELINE_STATE_STREAM_DESC& Stream,
+    _Out_ RxPipelineDesc* Desc,
+    _Out_opt_ RxPipelineDigest* Digest);
 
 /* A shader or fixed function state the driver holds; equal descs share one */
 class RxPipelinePart
@@ -175,12 +202,14 @@ class RxPipelineState final : public RxDeviceChild12<ID3D12PipelineState>
 public:
     static constexpr GUID PrivateId = {0x5d27e9b4, 0x1c83, 0x4a6f, {0xb5, 0x0d, 0x93, 0x4e, 0x7a, 0x21, 0xc6, 0x58}};
 
+    /* Without an origin the digest is taken from the desc */
     static
     HRESULT
     Create(
         _In_ RxDevice12& Device,
         _In_ const RxPipelineDesc& Desc,
         _In_ BOOLEAN Internal,
+        _In_opt_ const RxPipelineOrigin* Origin,
         _Outptr_ RxPipelineState** State);
 
     HRESULT
@@ -200,6 +229,12 @@ public:
         return DriverState;
     }
 
+    const RxPipelineDigest&
+    GetDigest() const
+    {
+        return Digest;
+    }
+
     /* What list entries take: a bypass header that leads the driver to its pipeline */
     D3D12DDI_API_HPIPELINESTATE
     Api()
@@ -216,18 +251,22 @@ private:
 
     HRESULT
     Initialize(
-        _In_ const RxPipelineDesc& Desc);
+        _In_ const RxPipelineDesc& Desc,
+        _In_opt_ const D3D12DDI_LIBRARY_REFERENCE_0010* Library);
 
     HRESULT
     AcquireShader(
         _In_ const RxPipelineDesc& Desc,
-        _In_ RxShaderStage Stage);
+        _In_ RxShaderStage Stage,
+        _In_ const D3D12DDI_LIBRARY_REFERENCE_0010& Library);
 
     HRESULT
     AcquireElementLayout(
-        _In_ const RxPipelineDesc& Desc);
+        _In_ const RxPipelineDesc& Desc,
+        _In_ const D3D12DDI_LIBRARY_REFERENCE_0010& Library);
 
     BOOLEAN IsCompute = FALSE;
+    RxPipelineDigest Digest = {};
     RxRootSignature* Root = nullptr;
     RxPipelinePart* Shaders[RxStageCount] = {};
     RxPipelinePart* BlendState = nullptr;
