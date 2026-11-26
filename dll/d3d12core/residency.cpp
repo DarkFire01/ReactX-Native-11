@@ -283,7 +283,7 @@ RxDevice12::Evict(
     return S_OK;
 }
 
-/* Only heaps and committed resources carry a priority; anything else loses the device */
+/* Only heaps and committed resources carry a priority; anything else keeps the one it has */
 HRESULT
 STDMETHODCALLTYPE
 RxDevice12::SetResidencyPriority(
@@ -317,9 +317,8 @@ RxDevice12::SetResidencyPriority(
 
         if (Priority.hResource == 0)
         {
-            RX_TRACE(L"residency priority given to an object without memory of its own");
-            MarkRemoved(DXGI_ERROR_INVALID_CALL);
-            return E_INVALIDARG;
+            RX_TRACE(L"residency priority given to an object without memory of its own, left as it is");
+            continue;
         }
 
         Value = pPriorities[Index];
